@@ -1,0 +1,29 @@
+# Local environment config — contains your Drive paths, never commit this
+config.py
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Temp / generated files
+*.mp4
+*.tmp
+temp-*
