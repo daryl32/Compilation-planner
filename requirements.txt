@@ -1,0 +1,26 @@
+# Compilation Planner — Python dependencies
+# Install with: pip install -r requirements.txt
+#
+# PyTorch (for backfill_motion_curve_gpu.py and backfill_motion_curve_local.py)
+# is NOT listed here because the right install command depends on your CUDA version.
+# Get the correct command for your setup from: https://pytorch.org/get-started/locally/
+# Example for CUDA 12.1:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# --- Streamlit app ---
+streamlit>=1.37.0        # 1.37+ required for st.fragment (used for performance)
+plotly>=5.18.0
+Pillow>=10.0.0
+
+# --- Video / image processing ---
+opencv-python>=4.8.0
+numpy>=1.26.0
+
+# --- Utilities ---
+tqdm>=4.66.0
+
+# --- Preview renderer ---
+# ffmpeg is also required by render_preview.py but is not a Python package.
+# Install it separately:
+#   Windows:  winget install ffmpeg
+#   macOS:    brew install ffmpeg
