@@ -518,6 +518,7 @@ def find_shape_candidates(
             "window_offset_sec": round(best_start_frame / fps, 3),
             "window_duration_sec": round(block_duration, 3),
             "score": round(best_score, 3),
+            "motion_norm": span["motion_norm"],
             "curve_slice": values[best_start_frame:best_start_frame + window_frames],
             "fps": fps,
             "tags": span["tags"],
@@ -990,9 +991,15 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                     (c["video_id"], c["scene_id"]) in chosen_keys
             st.rerun()
 
+    # Sort candidates alphabetically by video_id then scene_id for a stable
+    # grid layout — cards don't jump around when skipping ahead changes what's
+    # available. Shape score order is preserved separately (for View fit default
+    # and auto-fill), and shown on each card so ranking is still visible.
+    display_candidates = sorted(candidates, key=lambda c: (c["video_id"], c["scene_id"]))
+
     highlight_keys = []
-    cand_cols = st.columns(min(3, max(1, len(candidates))))
-    for i, c in enumerate(candidates):
+    cand_cols = st.columns(min(3, max(1, len(display_candidates))))
+    for i, c in enumerate(display_candidates):
         key_id = (c["video_id"], c["scene_id"])
         is_repeat = c["video_id"] in prev_block_videos
         stats = video_stats.get(c["video_id"], {})
@@ -1015,7 +1022,8 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                 elif c.get("thumbnail") and Path(c["thumbnail"]).exists():
                     st.image(c["thumbnail"], width=200, caption="whole scene (run the timeline-thumbnail "
                              "backfill for a preview of just this clip)")
-                st.caption(f"`{c['video_id']}` #{c['scene_id']}  ·  shape score {c['score']:.2f}")
+                _score_rank = next((r + 1 for r, sc in enumerate(candidates) if sc["video_id"] == c["video_id"] and sc["scene_id"] == c["scene_id"]), "?")
+                st.caption(f"`{c['video_id']}` #{c['scene_id']}  ·  rank #{_score_rank}  ·  shape {c['score']:.2f}  ·  motion {c['motion_norm']:.2f}")
                 st.caption(f"trimmed to {c['window_offset_sec']:.1f}s–"
                           f"{c['window_offset_sec'] + c['window_duration_sec']:.1f}s in the scene")
                 st.caption(f"used so far: {stats.get('used', 0.0):.0f}s  ·  remaining: {stats.get('remaining', 0.0):.0f}s")
@@ -1031,22 +1039,23 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                     # from the current block's skip list. Because queues are rebuilt from
                     # scratch on every rerun, simply removing the skip record is enough to
                     # make that footage reappear — no separate "restore" step needed.
-                    current_skips = st.session_state.get("adv_skips", {}).get(current_block, [])
-                    skip_back_possible = any(
-                        sk["video_id"] == c["video_id"] and sk["scene_id"] == c["scene_id"]
-                        for sk in current_skips
-                    )
+                    # After a skip ahead the scene_id changes (new footage appears), so check
+                    # by video_id only — the skip was against this video, not this specific scene.
+                    _live_skips = st.session_state.get("adv_skips", {}).get(current_block, [])
+                    skip_back_possible = any(sk["video_id"] == c["video_id"] for sk in _live_skips)
                     if st.button("⏮️ Skip back", key=f"adv_skipback_{current_block}_{c['video_id']}_{c['scene_id']}",
                                disabled=not skip_back_possible,
                                help="Undo the last Skip Ahead for this video, restoring its earlier footage "
                                     "as a candidate again."):
-                        block_skips = st.session_state["adv_skips"].get(current_block, [])
-                        # Remove the LAST matching skip (most recent) for this video/scene
-                        for idx in range(len(block_skips) - 1, -1, -1):
-                            if (block_skips[idx]["video_id"] == c["video_id"]
-                                    and block_skips[idx]["scene_id"] == c["scene_id"]):
-                                block_skips.pop(idx)
+                        _skips_dict = st.session_state.setdefault("adv_skips", {})
+                        _block_skips = _skips_dict.get(current_block, [])
+                        # Remove the LAST skip for this video (any scene_id)
+                        for idx in range(len(_block_skips) - 1, -1, -1):
+                            if _block_skips[idx]["video_id"] == c["video_id"]:
+                                _block_skips.pop(idx)
                                 break
+                        _skips_dict[current_block] = _block_skips
+                        st.session_state["adv_skips"] = _skips_dict
                         st.session_state["adv_viewing"] = None
                         rerun_full()
                 with btn_cols[2]:
@@ -1660,15 +1669,28 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
         st.warning("No videos have scenes matching the current tag filter.")
         return
 
-    st.subheader(f"Best-matching videos (top {RECOMMENDED_COUNT} by overall energy)")
+    _SORT_OPTIONS = {
+        "Shape distance (best match first)": lambda v: v["diff_from_track"],
+        "Matching scenes (most first)":      lambda v: -v["matching_scene_count"],
+        "Overall energy (highest first)":    lambda v: -v["avg_motion_norm"],
+        "Total video length (longest first)": lambda v: -get_video_duration(v["video_id"]),
+    }
+    sort_by = st.selectbox(
+        "Sort top videos by",
+        list(_SORT_OPTIONS.keys()),
+        index=0,
+        key="video_sort_by",
+        label_visibility="collapsed",
+    )
+    sorted_top_matches = sorted(info["top_matches"], key=_SORT_OPTIONS[sort_by])
+
+    st.subheader(f"Best-matching videos (top {RECOMMENDED_COUNT})")
     st.caption(f"Matched on energy shape (variance + hit density), not average level" +
                (f"  |  filtered to tags: {', '.join(tag_filter)}" if tag_filter else ""))
     st.caption(
-        "Sorted best match first, with each video's total length beside its name. ✅ marks a recommended "
-        "video. ☑ is your actual selection — nothing is selected until you tick it (or use Select all "
-        "recommended above), and it stays as you set it even if re-ranking moves the video. 🎚️ opens a range "
-        "picker to restrict a video to just a portion of its footage — scrub the player to find the part, then "
-        "set the exact range with the slider below it."
+        "✅ marks a recommended video. ☑ is your actual selection — nothing is selected until you tick it "
+        "(or use Select all recommended above), and it stays as you set it even if re-sorting moves the "
+        "video. 🎚️ opens a range picker to restrict a video to just a portion of its footage."
     )
 
     def render_video_row(video_id: str, recommended: bool, default_checked: bool):
@@ -1735,7 +1757,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
     # NOT a static True/False by row type, which would silently reset every tick the moment
     # the underlying select_video_* widget state gets discarded for having gone unrendered.
     _committed = st.session_state.get("committed_selected_videos", [])
-    for _v in info["top_matches"]:
+    for _v in sorted_top_matches:
         render_video_row(_v["video_id"], recommended=True,
                          default_checked=(_v["video_id"] in _committed))
 
@@ -4109,10 +4131,11 @@ else:
             for b in range(current_block, len(segments)):
                 seg_b = segments[b]
                 audio_curve_b = get_block_audio_curve(track, seg_b["start"], seg_b["end"])
+                _excl_b = st.session_state["segment_exclusions"].get(b, set())
+                _global_excl = st.session_state["global_excluded_scenes"]
                 cands_b, _ = find_shape_candidates(
-                    seg_b, queues, sequential_mode, st.session_state["segment_exclusions"].get(b, set()),
-                    st.session_state["global_excluded_scenes"], audio_curve_b, int(max_shape_matches),
-                    restrict_to_front=sequential_mode,
+                    seg_b, queues, sequential_mode, _excl_b, _global_excl, audio_curve_b,
+                    int(max_shape_matches), restrict_to_front=sequential_mode,
                     remaining_blocks=len(segments) - b, weight_spread=weight_spread,
                 )
                 # Auto-fill ALL is a fully automatic process (like Auto mode and
@@ -4126,6 +4149,49 @@ else:
                     role_matches_b = [c for c in cands_b if c.get("outro_candidate")]
                     if role_matches_b:
                         cands_b = role_matches_b
+
+                # --- Fallback chain: relax constraints progressively ---
+                # Level 1: shape search found nothing → drop role filter and retry
+                if not cands_b and (b in intro_blocks_0based or b in outro_blocks_0based):
+                    cands_b, _ = find_shape_candidates(
+                        seg_b, queues, sequential_mode, _excl_b, _global_excl, audio_curve_b,
+                        int(max_shape_matches), restrict_to_front=sequential_mode,
+                        remaining_blocks=len(segments) - b, weight_spread=weight_spread,
+                    )
+
+                # Level 2: still nothing in sequential mode → retry non-sequentially
+                # (footage may be available further along a video's queue)
+                if not cands_b and sequential_mode:
+                    cands_b, _ = find_shape_candidates(
+                        seg_b, queues, False, _excl_b, _global_excl, audio_curve_b,
+                        int(max_shape_matches),
+                    )
+
+                # Level 3: shape search still empty (no motion curve data, or all excluded)
+                # → take the best raw span by motion match, ignoring shape scoring entirely
+                if not cands_b:
+                    block_intensity_b = seg_b.get("intensity", seg_b.get("energy", 0.5))
+                    raw_spans = get_candidate_spans(queues, False, _global_excl, min_duration=0.0)
+                    raw_spans = [s for s in raw_spans if (s["video_id"], s["scene_id"]) not in _excl_b
+                                 and s["remaining_sec"] >= (seg_b["end"] - seg_b["start"]) - 1e-6]
+                    if raw_spans:
+                        best_span = min(raw_spans, key=lambda s: abs(s["motion_norm"] - block_intensity_b))
+                        cands_b = [{
+                            "video_id": best_span["video_id"],
+                            "scene_id": best_span["scene_id"],
+                            "scene_start_sec": best_span["scene_start_sec"],
+                            "window_offset_sec": round(best_span["offset_sec"], 3),
+                            "window_duration_sec": round(seg_b["end"] - seg_b["start"], 3),
+                            "score": 0.0,
+                            "motion_norm": best_span["motion_norm"],
+                            "curve_slice": np.array([]),
+                            "fps": 25.0,
+                            "tags": best_span["tags"],
+                            "thumbnail": best_span["thumbnail"],
+                            "intro_candidate": best_span.get("intro_candidate", False),
+                            "outro_candidate": best_span.get("outro_candidate", False),
+                        }]
+
                 rec_b = recommended_counts[b]
                 # Each block's "previous block" is whatever was JUST decided for b-1 in this same
                 # loop (or already-confirmed history if b == current_block) — cascades correctly,
