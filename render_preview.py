@@ -25,14 +25,22 @@ PREVIEW_HEIGHT = 360
 
 
 def colab_to_local(colab_path: str) -> str:
-    """Convert a Colab-side '/content/drive/MyDrive/...' path to the local
-    Drive-synced Windows equivalent."""
+    import os
+    
+    if colab_path.startswith("/root/data"):
+        return colab_path
+    
     marker = "MyDrive/"
     idx = colab_path.find(marker)
     if idx == -1:
         return colab_path
     rel = colab_path[idx + len(marker):]
-    return str(DRIVE_ROOT / rel.replace("/", "\\"))
+    
+    if os.name == "nt":
+        return str(DRIVE_ROOT / rel.replace("/", "\\"))
+    else:
+        clean_rel = rel.replace("\\", "/").replace("//", "/")
+        return str(Path("/root/data") / clean_rel)
 
 
 _video_source_cache = {}
@@ -47,9 +55,22 @@ def get_video_source(video_id: str) -> str:
 
 
 def get_track_source(track_id: str) -> str:
-    with open(AUDIO_DIR / f"{track_id}.json") as f:
-        track = json.load(f)
-    return colab_to_local(track["source_path"])
+    import unicodedata
+    # Try exact match first
+    exact = AUDIO_DIR / f"{track_id}.json"
+    if exact.exists():
+        with open(exact) as f:
+            track = json.load(f)
+        return colab_to_local(track["source_path"])
+    
+    # Try normalised match for special characters
+    for f in AUDIO_DIR.glob("*.json"):
+        if unicodedata.normalize("NFC", f.stem) == unicodedata.normalize("NFC", track_id):
+            with open(f) as fh:
+                track = json.load(fh)
+            return colab_to_local(track["source_path"])
+    
+    raise FileNotFoundError(f"No audio catalogue found for track_id: {track_id}")
 
 
 def check_ffmpeg():
@@ -62,10 +83,10 @@ def check_ffmpeg():
 def run(cmd: list):
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print("ffmpeg command failed:")
-        print(" ".join(cmd))
-        print(result.stderr[-2000:])
-        raise RuntimeError("ffmpeg failed")
+        error_msg = f"ffmpeg command failed:\n{' '.join(cmd)}\n{result.stderr[-2000:]}"
+        import sys
+        print(error_msg, file=sys.stderr, flush=True)
+        raise RuntimeError(f"ffmpeg failed: {result.stderr[-500:]}")
 
 
 # Cell layouts copied from the VSE add-on's _AUTO_LAYOUT, so the preview matches
@@ -186,7 +207,7 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None):
         print("Muxing audio...")
         run([
             "ffmpeg", "-y", "-i", str(combined_video), "-i", track_source,
-            "-map", "0:v", "-map", "1:a",
+            "-map", "0:v", "-map", "1:a:0",
             "-c:v", "copy", "-c:a", "aac", "-shortest",
             output_path,
         ])
