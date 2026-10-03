@@ -3259,6 +3259,9 @@ selected_videos = list(st.session_state.get("committed_selected_videos", []))
 
 # Segmentation + split-screen values are set in the Audio Settings section
 # and stored in session_state; read them here for the Matching computation.
+with st.expander("🔍 Debug: Audio key values at Matching section", expanded=False):
+    st.write({k: st.session_state.get(k, "MISSING") for k in AUDIO_SETTINGS_KEYS})
+    st.write("shadow:", st.session_state.get("audio_settings_shadow", {}))
 segmentation_method = st.session_state.get("segmentation_method", "Adaptive (energy-change + hits)")
 beats_per_bar = int(st.session_state.get("beats_per_bar", 4))
 
