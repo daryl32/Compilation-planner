@@ -2712,9 +2712,14 @@ WEIGHT_KEYS = [
 # Then restore any keys that Streamlit purged (widget gone = key absent) from the
 # now-current shadow. This two-step ensures the shadow is always the freshest
 # possible snapshot, not one interaction behind.
-_debug_pre = {"hyper_delta_thresh": st.session_state.get("hyper_delta_thresh", "MISSING"),
-              "fast_energy_thresh": st.session_state.get("fast_energy_thresh", "MISSING"),
-              "segmentation_method": st.session_state.get("segmentation_method", "MISSING")}
+_debug_pre = {
+    "hyper_delta_thresh": st.session_state.get("hyper_delta_thresh", "MISSING"),
+    "fast_energy_thresh": st.session_state.get("fast_energy_thresh", "MISSING"),
+    "_stable_hyper_delta_thresh": st.session_state.get("_stable_hyper_delta_thresh", "MISSING"),
+    "_stable_fast_energy_thresh": st.session_state.get("_stable_fast_energy_thresh", "MISSING"),
+    "shadow_hyper": st.session_state.get("audio_settings_shadow", {}).get("hyper_delta_thresh", "MISSING"),
+    "shadow_fast": st.session_state.get("audio_settings_shadow", {}).get("fast_energy_thresh", "MISSING"),
+}
 
 _audio_shadow = st.session_state.get("audio_settings_shadow", {})
 _audio_shadow.update({k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state})
