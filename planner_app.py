@@ -48,9 +48,9 @@ def rerun_full():
         st.rerun(scope="app")
     except TypeError:
         st.rerun()
-
+APP_VERSION = "1.0.1"
 st.set_page_config(page_title="Compilation Planner", layout="wide")
-st.title("Compilation Planner")
+st.title("Compilation Planner") st.caption(f"v{APP_VERSION}")
 
 from config import CATALOGUE_DIR, AUDIO_DIR, PLANS_DIR, PREVIEW_DIR, PROJECTS_DIR
 
