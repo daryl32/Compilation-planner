@@ -2679,13 +2679,24 @@ WEIGHT_KEYS = [
 # running it only AFTER the generic setdefault had already filled that same gap with the
 # static default would mean the key is no longer absent, so the shadow value would never be
 # reached — hence doing this restoration first.
+# Update the shadow FIRST with any keys still present in session_state right now
+# (i.e. the fragment ran this rerun and its widget keys are still alive) — this
+# captures the very last dial change even if the user switches section immediately
+# after, before the fragment's own end-of-call shadow save has a chance to run.
+# Then restore any keys that Streamlit purged (widget gone = key absent) from the
+# now-current shadow. This two-step ensures the shadow is always the freshest
+# possible snapshot, not one interaction behind.
 _audio_shadow = st.session_state.get("audio_settings_shadow", {})
+_audio_shadow.update({k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state})
+st.session_state["audio_settings_shadow"] = _audio_shadow
 for _k in AUDIO_SETTINGS_KEYS:
     if _k not in st.session_state and _k in _audio_shadow:
         st.session_state[_k] = _audio_shadow[_k]
 
-# Same pattern for weight keys — restore from their own shadow before setdefault runs.
+# Same pattern for weight keys.
 _weight_shadow = st.session_state.get("weight_settings_shadow", {})
+_weight_shadow.update({k: st.session_state[k] for k in WEIGHT_KEYS if k in st.session_state})
+st.session_state["weight_settings_shadow"] = _weight_shadow
 for _k in WEIGHT_KEYS:
     if _k not in st.session_state and _k in _weight_shadow:
         st.session_state[_k] = _weight_shadow[_k]
@@ -3043,6 +3054,37 @@ if st.session_state.get("track_id") not in tracks:
     st.session_state.pop("track_id", None)
     if st.session_state.get("_project_load_pending_modes"):
         st.sidebar.warning("The loaded project's track is no longer available — defaulted to the first track.")
+
+with st.sidebar.expander("☁️ Sync from Google Drive", expanded=False):
+    st.caption("Pull the latest catalogues, audio, thumbnails and sprites from Drive to the server. "
+               "Run this after processing new videos or audio in Colab.")
+    if st.button("🔄 Sync now", key="drive_sync_btn", use_container_width=True):
+        import subprocess
+        sync_tasks = [
+            ("Catalogues",      "gdrive:scene-labeling/catalogue",          str(CATALOGUE_DIR)),
+            ("Audio catalogues","gdrive:scene-labeling/audio_catalogue",    str(AUDIO_DIR)),
+            ("Thumbnails",      "gdrive:scene-labeling/catalogue/thumbnails", str(CATALOGUE_DIR / "thumbnails")),
+            ("Sprites",         "gdrive:scene-labeling/catalogue/timeline_sprites", str(CATALOGUE_DIR / "timeline_sprites")),
+        ]
+        sync_errors = []
+        sync_progress = st.progress(0.0, text="Starting sync…")
+        for idx, (label, src, dst) in enumerate(sync_tasks):
+            sync_progress.progress((idx) / len(sync_tasks), text=f"Syncing {label}…")
+            Path(dst).mkdir(parents=True, exist_ok=True)
+            result = subprocess.run(
+                ["rclone", "sync", src, dst, "--transfers=4"],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode != 0:
+                sync_errors.append(f"{label}: {result.stderr.strip()[:200]}")
+        sync_progress.progress(1.0, text="Done.")
+        if sync_errors:
+            for err in sync_errors:
+                st.error(err)
+            st.warning("Some syncs failed — check rclone auth if you see token errors.")
+        else:
+            st.success("All synced. Reload the page to pick up new tracks and videos.")
+            st.cache_data.clear()
 
 st.sidebar.header("Track")
 track_id = st.sidebar.selectbox("Track", tracks, key="track_id")
