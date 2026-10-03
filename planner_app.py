@@ -52,11 +52,7 @@ def rerun_full():
 st.set_page_config(page_title="Compilation Planner", layout="wide")
 st.title("Compilation Planner")
 
-CATALOGUE_DIR = Path(r"G:\My Drive\scene-labeling\catalogue")
-AUDIO_DIR = Path(r"G:\My Drive\scene-labeling\audio_catalogue")
-PLANS_DIR = Path(r"G:\My Drive\scene-labeling\compilation_plans")
-PREVIEW_DIR = Path(r"G:\My Drive\scene-labeling\previews")
-PROJECTS_DIR = Path(r"G:\My Drive\scene-labeling\projects")
+from config import CATALOGUE_DIR, AUDIO_DIR, PLANS_DIR, PREVIEW_DIR, PROJECTS_DIR
 
 
 def sanitize_filename(name: str) -> str:
