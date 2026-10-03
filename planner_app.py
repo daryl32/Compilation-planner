@@ -1440,6 +1440,17 @@ def render_audio_settings_section(track: dict) -> None:
     def _v(key):
         return st.session_state.get(key, _shadow.get(key, DIAL_DEFAULTS.get(key)))
 
+    def _save_audio():
+        """Write every audio settings widget value to both the shadow and a stable
+        plain key the moment any dial changes — so values are never lost if a rerun
+        fires before this widget group renders again."""
+        for _ak in AUDIO_SETTINGS_KEYS:
+            if _ak in st.session_state:
+                st.session_state[f"_stable_{_ak}"] = st.session_state[_ak]
+        st.session_state["audio_settings_shadow"] = {
+            k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state
+        }
+
     st.subheader("Segmentation method")
     _seg_options = ["Adaptive (energy-change + hits)", "Rhythm Engine (bar cutting styles)"]
     _seg_default = _v("segmentation_method")
@@ -1447,6 +1458,7 @@ def render_audio_settings_section(track: dict) -> None:
         "Method", _seg_options,
         index=_seg_options.index(_seg_default) if _seg_default in _seg_options else 0,
         key="segmentation_method",
+        on_change=_save_audio,
         help="Adaptive: detects individual cut points from energy changes and hits, ported from the VSE "
              "add-on's block detector. Rhythm Engine: assigns a named cutting STYLE to each bar based on its "
              "energy and momentum — CINEMATIC (slow, multi-bar), FAST (one segment per bar), or HYPER (one "
@@ -1454,6 +1466,7 @@ def render_audio_settings_section(track: dict) -> None:
     )
     beats_per_bar = st.number_input(
         "Beats per bar", min_value=2, max_value=12, value=int(_v("beats_per_bar")), key="beats_per_bar",
+        on_change=_save_audio,
         help="4 = common time (most pop/rock/EDM). Use 3 for a waltz, 6 for 6/8, etc.",
     )
 
@@ -1462,26 +1475,33 @@ def render_audio_settings_section(track: dict) -> None:
         with col1:
             st.slider("Energy-change window (s)", 0.5, 6.0, value=float(_v("change_window_secs")), step=0.1,
                       key="change_window_secs",
+                      on_change=_save_audio,
                       help="Compares average energy over this long just after each moment with just before it.")
             st.slider("Energy-change threshold", 0.02, 0.5, value=float(_v("change_threshold")), step=0.01,
                       key="change_threshold",
+                      on_change=_save_audio,
                       help="How big a jump in average energy counts as a structural change. Lower = more cuts.")
             st.slider("Min segment length (s)", 0.3, 8.0, value=float(_v("min_segment_sec")), step=0.1,
                       key="min_segment_sec",
+                      on_change=_save_audio,
                       help="No two cuts can be closer than this.")
             st.slider("Max segment length (s)", 0.0, 30.0, value=float(_v("max_segment_sec")), step=0.5,
                       key="max_segment_sec",
+                      on_change=_save_audio,
                       help="Segments longer than this are split at their strongest beat. 0 = no limit.")
         with col2:
             st.checkbox("Snap structural cuts to bar lines", value=bool(_v("use_bar_snapping")),
                         key="use_bar_snapping",
+                        on_change=_save_audio,
                         help="Structural cuts land on the nearest musical bar line instead of raw signal crossings.")
             react = st.checkbox("Cut on big hits", value=bool(_v("react_to_hits")), key="react_to_hits",
+                                on_change=_save_audio,
                                 help="Adds segment boundaries at the strongest onsets.")
             st.slider("Big-hit threshold", 0.5, 1.0, value=float(_v("hit_threshold")), step=0.01,
-                      key="hit_threshold", disabled=not react,
+                      key="hit_threshold", on_change=_save_audio, disabled=not react,
                       help="Onset strength (0-1) a hit needs to become a cut.")
             st.slider("Snap radius (s)", 0.0, 1.0, value=float(_v("snap_secs")), step=0.05, key="snap_secs",
+                      on_change=_save_audio,
                       help="Energy-change cuts move onto the strongest hit within this distance.")
         # local variables for the preview chart below
         _seg_method = "adaptive"
@@ -1494,25 +1514,31 @@ def render_audio_settings_section(track: dict) -> None:
         with col1:
             st.slider("Hyper delta threshold", 0.05, 1.0, value=float(_v("hyper_delta_thresh")), step=0.01,
                       key="hyper_delta_thresh",
+                      on_change=_save_audio,
                       help="How sharp a bar-to-bar energy jump triggers HYPER.")
             st.slider("Fast energy threshold", 0.1, 1.0, value=float(_v("fast_energy_thresh")), step=0.01,
                       key="fast_energy_thresh",
+                      on_change=_save_audio,
                       help="Bars above this (and no sharp jump) become FAST instead of CINEMATIC.")
             st.number_input("Hyper cooldown (bars)", min_value=1, max_value=8,
                             value=int(_v("hyper_cooldown_bars")), key="hyper_cooldown_bars",
+                            on_change=_save_audio,
                             help="HYPER is forced to exit after this many bars.")
         with col2:
             st.number_input("Phrase lock (bars)", min_value=1, max_value=8,
                             value=int(_v("phrase_lock_bars")), key="phrase_lock_bars",
+                            on_change=_save_audio,
                             help="FAST or CINEMATIC is held for this many bars before re-evaluating.")
             st.number_input("Cinematic segment length (bars)", min_value=1, max_value=8,
                             value=int(_v("cinematic_bars")), key="cinematic_bars",
+                            on_change=_save_audio,
                             help="How many bars a CINEMATIC segment spans.")
             dpo = st.checkbox("Dynamic Priority Override", value=bool(_v("dynamic_priority_override")),
                               key="dynamic_priority_override",
+                              on_change=_save_audio,
                               help="Adds extra cuts at instantaneous RMS jumps the bar-averaged state machine smooths away.")
             st.slider("Override sensitivity", 0.02, 1.0, value=float(_v("override_delta_thresh")), step=0.01,
-                      key="override_delta_thresh", disabled=not dpo,
+                      key="override_delta_thresh", on_change=_save_audio, disabled=not dpo,
                       help="How large a single-frame RMS jump triggers a forced cut.")
         _seg_method = "rhythm"
         _hyper_delta = st.session_state.get("hyper_delta_thresh", 0.35)
@@ -2690,16 +2716,28 @@ _audio_shadow = st.session_state.get("audio_settings_shadow", {})
 _audio_shadow.update({k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state})
 st.session_state["audio_settings_shadow"] = _audio_shadow
 for _k in AUDIO_SETTINGS_KEYS:
-    if _k not in st.session_state and _k in _audio_shadow:
-        st.session_state[_k] = _audio_shadow[_k]
+    if _k not in st.session_state:
+        # Prefer stable key (written by on_change, survives any rerun),
+        # fall back to shadow, then DIAL_DEFAULTS handled by setdefault below.
+        stable_val = st.session_state.get(f"_stable_{_k}")
+        if stable_val is not None:
+            st.session_state[_k] = stable_val
+        elif _k in _audio_shadow:
+            st.session_state[_k] = _audio_shadow[_k]
 
-# Same pattern for weight keys.
+# Same pattern for weight keys — also check stable keys written by on_change
+# callbacks, which survive any rerun regardless of whether the widget rendered.
 _weight_shadow = st.session_state.get("weight_settings_shadow", {})
 _weight_shadow.update({k: st.session_state[k] for k in WEIGHT_KEYS if k in st.session_state})
 st.session_state["weight_settings_shadow"] = _weight_shadow
 for _k in WEIGHT_KEYS:
-    if _k not in st.session_state and _k in _weight_shadow:
-        st.session_state[_k] = _weight_shadow[_k]
+    if _k not in st.session_state:
+        # Prefer the stable key (written by on_change), fall back to shadow, then default
+        stable_val = st.session_state.get(f"_stable_{_k}")
+        if stable_val is not None:
+            st.session_state[_k] = stable_val
+        elif _k in _weight_shadow:
+            st.session_state[_k] = _weight_shadow[_k]
 
 for _k, _v in DIAL_DEFAULTS.items():
     st.session_state.setdefault(_k, _v)
@@ -3289,23 +3327,35 @@ with st.expander("⚙️ Auto-fill weighting", expanded=False):
     else:
         st.caption("Controls Auto-fill's automatic picks only — the candidate grid always stays sorted by "
                    "raw shape score for manual browsing, and these weights never restrict what you can pick yourself.")
+    # on_change: write the widget value to a stable plain key immediately on
+    # every change — so the value is never lost if a rerun (e.g. Confirm & Next)
+    # fires before the widget has had a chance to render again and restore itself.
+    def _save_weights():
+        for _wk in WEIGHT_KEYS:
+            if _wk in st.session_state:
+                st.session_state[f"_stable_{_wk}"] = st.session_state[_wk]
+
     _wt_cols = st.columns(3)
     with _wt_cols[0]:
         st.slider("A — Shape match", 0.0, 5.0, step=0.1, key="weight_shape",
+                  on_change=_save_weights,
                   disabled=(_autofill_disabled or _no_shape_score_mode),
                   help="How much the clip's frame-by-frame shape-match score drives the pick. Has no "
                        "effect in Auto or Choreography mode — neither computes a per-frame curve "
                        "comparison for this weight to act on." if _no_shape_score_mode else
                        "How much the clip's frame-by-frame shape-match score drives the pick.")
         st.slider("B — Randomness", 0.0, 5.0, step=0.1, key="weight_random",
+                  on_change=_save_weights,
                   disabled=_autofill_disabled,
                   help="Adds variety. Reproducible — same seed always gives same picks.")
     with _wt_cols[1]:
         st.slider("C — Avoid repeating previous block", 0.0, 5.0, step=0.1,
-                  key="weight_repeat_penalty", disabled=_autofill_disabled,
+                  key="weight_repeat_penalty", on_change=_save_weights,
+                  disabled=_autofill_disabled,
                   help="Penalizes reusing a video from the immediately preceding block. "
                        "Also your control for 'too many rapid changes' — raise to settle.")
         st.slider("D — Spread usage across videos", 0.0, 5.0, step=0.1, key="weight_spread",
+                  on_change=_save_weights,
                   disabled=_autofill_disabled,
                   help="Favors under-used videos and those with more footage remaining. In "
                        "sequential mode, also controls how far an automatic pick may roam past "
@@ -3314,11 +3364,13 @@ with st.expander("⚙️ Auto-fill weighting", expanded=False):
                        "many blocks are left (never enough to risk running out later).")
     with _wt_cols[2]:
         st.slider("E — Motion intensity match", 0.0, 5.0, step=0.1, key="weight_motion",
+                  on_change=_save_weights,
                   disabled=_autofill_disabled,
                   help="Prefers clips whose overall motion level matches this block's intensity. "
                        "Complementary to A (shape pattern) — A rewards the same rises/falls; "
                        "E rewards the right activity level.")
         st.number_input("Random seed", 0, 99999, key="autofill_seed",
+                        on_change=_save_weights,
                         disabled=_autofill_disabled,
                         help="Change to reroll randomness (B) without touching anything else.")
 
