@@ -3261,9 +3261,12 @@ if _captured:
     _appscope.update(_captured)
     st.session_state["_audio_appscope"] = _appscope
 
-# Restore any missing keys from the app-scope snapshot
+# Restore any missing keys from the app-scope snapshot.
+# Also overwrite keys that exist but hold stale values — on a full rerun after
+# a fragment run, Streamlit may have reset plain keys to defaults before this
+# point, so we unconditionally restore from appscope whenever it has a value.
 for _k in AUDIO_SETTINGS_KEYS:
-    if _k not in st.session_state and _k in _appscope:
+    if _k in _appscope:
         st.session_state[_k] = _appscope[_k]
 
 # ---------------------------------------------------------------------------
