@@ -1337,10 +1337,14 @@ def get_nearest_thumbnail(catalogues: dict, video_id: str, clip_start_sec: float
     meta = catalogues.get(video_id, {}).get("timeline_thumbnails")
     if not meta:
         return None
-    sprite_path = colab_to_local(meta["sprite_path"])
+    # Derived from the LOCAL CATALOGUE_DIR, never from meta["sprite_path"] — that field
+    # was written by whichever environment ran the timeline-thumbnail backfill (Colab,
+    # the Windows laptop, or the Hetzner server), so it can point somewhere that doesn't
+    # exist, or worse, somewhere unrelated, on whichever environment reads it back.
+    sprite_path = CATALOGUE_DIR / "timeline_sprites" / f"{video_id}.jpg"
     if not Path(sprite_path).exists():
         return None
-    sprite = load_timeline_sprite(sprite_path)
+    sprite = load_timeline_sprite(str(sprite_path))
 
     tile_w, tile_h, columns, count, interval = (
         meta["tile_width"], meta["tile_height"], meta["columns"], meta["count"], meta["interval_sec"]
@@ -1440,17 +1444,6 @@ def render_audio_settings_section(track: dict) -> None:
     def _v(key):
         return st.session_state.get(key, _shadow.get(key, DIAL_DEFAULTS.get(key)))
 
-    def _save_audio():
-        """Write every audio settings widget value to both the shadow and a stable
-        plain key the moment any dial changes — so values are never lost if a rerun
-        fires before this widget group renders again."""
-        for _ak in AUDIO_SETTINGS_KEYS:
-            if _ak in st.session_state:
-                st.session_state[f"_stable_{_ak}"] = st.session_state[_ak]
-        st.session_state["audio_settings_shadow"] = {
-            k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state
-        }
-
     st.subheader("Segmentation method")
     _seg_options = ["Adaptive (energy-change + hits)", "Rhythm Engine (bar cutting styles)"]
     _seg_default = _v("segmentation_method")
@@ -1458,7 +1451,6 @@ def render_audio_settings_section(track: dict) -> None:
         "Method", _seg_options,
         index=_seg_options.index(_seg_default) if _seg_default in _seg_options else 0,
         key="segmentation_method",
-        on_change=_save_audio,
         help="Adaptive: detects individual cut points from energy changes and hits, ported from the VSE "
              "add-on's block detector. Rhythm Engine: assigns a named cutting STYLE to each bar based on its "
              "energy and momentum — CINEMATIC (slow, multi-bar), FAST (one segment per bar), or HYPER (one "
@@ -1466,7 +1458,6 @@ def render_audio_settings_section(track: dict) -> None:
     )
     beats_per_bar = st.number_input(
         "Beats per bar", min_value=2, max_value=12, value=int(_v("beats_per_bar")), key="beats_per_bar",
-        on_change=_save_audio,
         help="4 = common time (most pop/rock/EDM). Use 3 for a waltz, 6 for 6/8, etc.",
     )
 
@@ -1475,33 +1466,26 @@ def render_audio_settings_section(track: dict) -> None:
         with col1:
             st.slider("Energy-change window (s)", 0.5, 6.0, value=float(_v("change_window_secs")), step=0.1,
                       key="change_window_secs",
-                      on_change=_save_audio,
                       help="Compares average energy over this long just after each moment with just before it.")
             st.slider("Energy-change threshold", 0.02, 0.5, value=float(_v("change_threshold")), step=0.01,
                       key="change_threshold",
-                      on_change=_save_audio,
                       help="How big a jump in average energy counts as a structural change. Lower = more cuts.")
             st.slider("Min segment length (s)", 0.3, 8.0, value=float(_v("min_segment_sec")), step=0.1,
                       key="min_segment_sec",
-                      on_change=_save_audio,
                       help="No two cuts can be closer than this.")
             st.slider("Max segment length (s)", 0.0, 30.0, value=float(_v("max_segment_sec")), step=0.5,
                       key="max_segment_sec",
-                      on_change=_save_audio,
                       help="Segments longer than this are split at their strongest beat. 0 = no limit.")
         with col2:
             st.checkbox("Snap structural cuts to bar lines", value=bool(_v("use_bar_snapping")),
                         key="use_bar_snapping",
-                        on_change=_save_audio,
                         help="Structural cuts land on the nearest musical bar line instead of raw signal crossings.")
             react = st.checkbox("Cut on big hits", value=bool(_v("react_to_hits")), key="react_to_hits",
-                                on_change=_save_audio,
                                 help="Adds segment boundaries at the strongest onsets.")
             st.slider("Big-hit threshold", 0.5, 1.0, value=float(_v("hit_threshold")), step=0.01,
-                      key="hit_threshold", on_change=_save_audio, disabled=not react,
+                      key="hit_threshold", disabled=not react,
                       help="Onset strength (0-1) a hit needs to become a cut.")
             st.slider("Snap radius (s)", 0.0, 1.0, value=float(_v("snap_secs")), step=0.05, key="snap_secs",
-                      on_change=_save_audio,
                       help="Energy-change cuts move onto the strongest hit within this distance.")
         # local variables for the preview chart below
         _seg_method = "adaptive"
@@ -1514,31 +1498,25 @@ def render_audio_settings_section(track: dict) -> None:
         with col1:
             st.slider("Hyper delta threshold", 0.05, 1.0, value=float(_v("hyper_delta_thresh")), step=0.01,
                       key="hyper_delta_thresh",
-                      on_change=_save_audio,
                       help="How sharp a bar-to-bar energy jump triggers HYPER.")
             st.slider("Fast energy threshold", 0.1, 1.0, value=float(_v("fast_energy_thresh")), step=0.01,
                       key="fast_energy_thresh",
-                      on_change=_save_audio,
                       help="Bars above this (and no sharp jump) become FAST instead of CINEMATIC.")
             st.number_input("Hyper cooldown (bars)", min_value=1, max_value=8,
                             value=int(_v("hyper_cooldown_bars")), key="hyper_cooldown_bars",
-                            on_change=_save_audio,
                             help="HYPER is forced to exit after this many bars.")
         with col2:
             st.number_input("Phrase lock (bars)", min_value=1, max_value=8,
                             value=int(_v("phrase_lock_bars")), key="phrase_lock_bars",
-                            on_change=_save_audio,
                             help="FAST or CINEMATIC is held for this many bars before re-evaluating.")
             st.number_input("Cinematic segment length (bars)", min_value=1, max_value=8,
                             value=int(_v("cinematic_bars")), key="cinematic_bars",
-                            on_change=_save_audio,
                             help="How many bars a CINEMATIC segment spans.")
             dpo = st.checkbox("Dynamic Priority Override", value=bool(_v("dynamic_priority_override")),
                               key="dynamic_priority_override",
-                              on_change=_save_audio,
                               help="Adds extra cuts at instantaneous RMS jumps the bar-averaged state machine smooths away.")
             st.slider("Override sensitivity", 0.02, 1.0, value=float(_v("override_delta_thresh")), step=0.01,
-                      key="override_delta_thresh", on_change=_save_audio, disabled=not dpo,
+                      key="override_delta_thresh", disabled=not dpo,
                       help="How large a single-frame RMS jump triggers a forced cut.")
         _seg_method = "rhythm"
         _hyper_delta = st.session_state.get("hyper_delta_thresh", 0.35)
@@ -2705,39 +2683,16 @@ WEIGHT_KEYS = [
 # running it only AFTER the generic setdefault had already filled that same gap with the
 # static default would mean the key is no longer absent, so the shadow value would never be
 # reached — hence doing this restoration first.
-# Update the shadow FIRST with any keys still present in session_state right now
-# (i.e. the fragment ran this rerun and its widget keys are still alive) — this
-# captures the very last dial change even if the user switches section immediately
-# after, before the fragment's own end-of-call shadow save has a chance to run.
-# Then restore any keys that Streamlit purged (widget gone = key absent) from the
-# now-current shadow. This two-step ensures the shadow is always the freshest
-# possible snapshot, not one interaction behind.
 _audio_shadow = st.session_state.get("audio_settings_shadow", {})
-_audio_shadow.update({k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state})
-st.session_state["audio_settings_shadow"] = _audio_shadow
 for _k in AUDIO_SETTINGS_KEYS:
-    if _k not in st.session_state:
-        # Prefer stable key (written by on_change, survives any rerun),
-        # fall back to shadow, then DIAL_DEFAULTS handled by setdefault below.
-        stable_val = st.session_state.get(f"_stable_{_k}")
-        if stable_val is not None:
-            st.session_state[_k] = stable_val
-        elif _k in _audio_shadow:
-            st.session_state[_k] = _audio_shadow[_k]
+    if _k not in st.session_state and _k in _audio_shadow:
+        st.session_state[_k] = _audio_shadow[_k]
 
-# Same pattern for weight keys — also check stable keys written by on_change
-# callbacks, which survive any rerun regardless of whether the widget rendered.
+# Same pattern for weight keys — restore from their own shadow before setdefault runs.
 _weight_shadow = st.session_state.get("weight_settings_shadow", {})
-_weight_shadow.update({k: st.session_state[k] for k in WEIGHT_KEYS if k in st.session_state})
-st.session_state["weight_settings_shadow"] = _weight_shadow
 for _k in WEIGHT_KEYS:
-    if _k not in st.session_state:
-        # Prefer the stable key (written by on_change), fall back to shadow, then default
-        stable_val = st.session_state.get(f"_stable_{_k}")
-        if stable_val is not None:
-            st.session_state[_k] = stable_val
-        elif _k in _weight_shadow:
-            st.session_state[_k] = _weight_shadow[_k]
+    if _k not in st.session_state and _k in _weight_shadow:
+        st.session_state[_k] = _weight_shadow[_k]
 
 for _k, _v in DIAL_DEFAULTS.items():
     st.session_state.setdefault(_k, _v)
@@ -3093,37 +3048,6 @@ if st.session_state.get("track_id") not in tracks:
     if st.session_state.get("_project_load_pending_modes"):
         st.sidebar.warning("The loaded project's track is no longer available — defaulted to the first track.")
 
-with st.sidebar.expander("☁️ Sync from Google Drive", expanded=False):
-    st.caption("Pull the latest catalogues, audio, thumbnails and sprites from Drive to the server. "
-               "Run this after processing new videos or audio in Colab.")
-    if st.button("🔄 Sync now", key="drive_sync_btn", use_container_width=True):
-        import subprocess
-        sync_tasks = [
-            ("Catalogues",      "gdrive:scene-labeling/catalogue",          str(CATALOGUE_DIR)),
-            ("Audio catalogues","gdrive:scene-labeling/audio_catalogue",    str(AUDIO_DIR)),
-            ("Thumbnails",      "gdrive:scene-labeling/catalogue/thumbnails", str(CATALOGUE_DIR / "thumbnails")),
-            ("Sprites",         "gdrive:scene-labeling/catalogue/timeline_sprites", str(CATALOGUE_DIR / "timeline_sprites")),
-        ]
-        sync_errors = []
-        sync_progress = st.progress(0.0, text="Starting sync…")
-        for idx, (label, src, dst) in enumerate(sync_tasks):
-            sync_progress.progress((idx) / len(sync_tasks), text=f"Syncing {label}…")
-            Path(dst).mkdir(parents=True, exist_ok=True)
-            result = subprocess.run(
-                ["rclone", "sync", src, dst, "--transfers=4"],
-                capture_output=True, text=True, timeout=300,
-            )
-            if result.returncode != 0:
-                sync_errors.append(f"{label}: {result.stderr.strip()[:200]}")
-        sync_progress.progress(1.0, text="Done.")
-        if sync_errors:
-            for err in sync_errors:
-                st.error(err)
-            st.warning("Some syncs failed — check rclone auth if you see token errors.")
-        else:
-            st.success("All synced. Reload the page to pick up new tracks and videos.")
-            st.cache_data.clear()
-
 st.sidebar.header("Track")
 track_id = st.sidebar.selectbox("Track", tracks, key="track_id")
 
@@ -3232,37 +3156,6 @@ track = load_track(track_id)
 st.sidebar.caption(f"🎵 Track length: {format_mmss(track['duration_sec'])}")
 
 # ---------------------------------------------------------------------------
-# App-scope audio settings preservation
-# ---------------------------------------------------------------------------
-# The audio settings widgets live inside render_audio_settings_section, which
-# is a @fragment. Streamlit fragments have their own scoped session state —
-# keys written inside a fragment during a fragment rerun are NOT guaranteed to
-# survive into the next full app rerun. This means the shadow dict and plain
-# keys we've been relying on can all be wiped between reruns.
-#
-# The ONLY guaranteed app-scope writes are those that happen here — in the
-# main script body, outside any fragment. So we write a dedicated
-# "_audio_appscope" dict here on every full rerun: if audio keys are present
-# (they are on the rerun immediately after the fragment ran), we capture them.
-# If they're absent (they were wiped), we restore from the last captured
-# app-scope snapshot. This dict is never touched by any fragment.
-_appscope = st.session_state.get("_audio_appscope", {})
-
-# Capture any keys currently present (set by fragment on previous run)
-_captured = {k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state}
-if _captured:
-    _appscope.update(_captured)
-    st.session_state["_audio_appscope"] = _appscope
-
-# Restore any missing keys from the app-scope snapshot.
-# Also overwrite keys that exist but hold stale values — on a full rerun after
-# a fragment run, Streamlit may have reset plain keys to defaults before this
-# point, so we unconditionally restore from appscope whenever it has a value.
-for _k in AUDIO_SETTINGS_KEYS:
-    if _k in _appscope:
-        st.session_state[_k] = _appscope[_k]
-
-# ---------------------------------------------------------------------------
 # Three free-navigation sections (not a locked wizard — jump between them
 # anytime). Each section body only runs when selected — using a plain radio
 # selector plus explicit st.stop() calls rather than st.tabs(), which
@@ -3358,35 +3251,23 @@ with st.expander("⚙️ Auto-fill weighting", expanded=False):
     else:
         st.caption("Controls Auto-fill's automatic picks only — the candidate grid always stays sorted by "
                    "raw shape score for manual browsing, and these weights never restrict what you can pick yourself.")
-    # on_change: write the widget value to a stable plain key immediately on
-    # every change — so the value is never lost if a rerun (e.g. Confirm & Next)
-    # fires before the widget has had a chance to render again and restore itself.
-    def _save_weights():
-        for _wk in WEIGHT_KEYS:
-            if _wk in st.session_state:
-                st.session_state[f"_stable_{_wk}"] = st.session_state[_wk]
-
     _wt_cols = st.columns(3)
     with _wt_cols[0]:
         st.slider("A — Shape match", 0.0, 5.0, step=0.1, key="weight_shape",
-                  on_change=_save_weights,
                   disabled=(_autofill_disabled or _no_shape_score_mode),
                   help="How much the clip's frame-by-frame shape-match score drives the pick. Has no "
                        "effect in Auto or Choreography mode — neither computes a per-frame curve "
                        "comparison for this weight to act on." if _no_shape_score_mode else
                        "How much the clip's frame-by-frame shape-match score drives the pick.")
         st.slider("B — Randomness", 0.0, 5.0, step=0.1, key="weight_random",
-                  on_change=_save_weights,
                   disabled=_autofill_disabled,
                   help="Adds variety. Reproducible — same seed always gives same picks.")
     with _wt_cols[1]:
         st.slider("C — Avoid repeating previous block", 0.0, 5.0, step=0.1,
-                  key="weight_repeat_penalty", on_change=_save_weights,
-                  disabled=_autofill_disabled,
+                  key="weight_repeat_penalty", disabled=_autofill_disabled,
                   help="Penalizes reusing a video from the immediately preceding block. "
                        "Also your control for 'too many rapid changes' — raise to settle.")
         st.slider("D — Spread usage across videos", 0.0, 5.0, step=0.1, key="weight_spread",
-                  on_change=_save_weights,
                   disabled=_autofill_disabled,
                   help="Favors under-used videos and those with more footage remaining. In "
                        "sequential mode, also controls how far an automatic pick may roam past "
@@ -3395,13 +3276,11 @@ with st.expander("⚙️ Auto-fill weighting", expanded=False):
                        "many blocks are left (never enough to risk running out later).")
     with _wt_cols[2]:
         st.slider("E — Motion intensity match", 0.0, 5.0, step=0.1, key="weight_motion",
-                  on_change=_save_weights,
                   disabled=_autofill_disabled,
                   help="Prefers clips whose overall motion level matches this block's intensity. "
                        "Complementary to A (shape pattern) — A rewards the same rises/falls; "
                        "E rewards the right activity level.")
         st.number_input("Random seed", 0, 99999, key="autofill_seed",
-                        on_change=_save_weights,
                         disabled=_autofill_disabled,
                         help="Change to reroll randomness (B) without touching anything else.")
 
