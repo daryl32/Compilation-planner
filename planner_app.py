@@ -2715,10 +2715,8 @@ WEIGHT_KEYS = [
 _debug_pre = {
     "hyper_delta_thresh": st.session_state.get("hyper_delta_thresh", "MISSING"),
     "fast_energy_thresh": st.session_state.get("fast_energy_thresh", "MISSING"),
-    "_stable_hyper_delta_thresh": st.session_state.get("_stable_hyper_delta_thresh", "MISSING"),
-    "_stable_fast_energy_thresh": st.session_state.get("_stable_fast_energy_thresh", "MISSING"),
-    "shadow_hyper": st.session_state.get("audio_settings_shadow", {}).get("hyper_delta_thresh", "MISSING"),
-    "shadow_fast": st.session_state.get("audio_settings_shadow", {}).get("fast_energy_thresh", "MISSING"),
+    "appscope_hyper": st.session_state.get("_audio_appscope", {}).get("hyper_delta_thresh", "MISSING"),
+    "appscope_fast": st.session_state.get("_audio_appscope", {}).get("fast_energy_thresh", "MISSING"),
 }
 
 _audio_shadow = st.session_state.get("audio_settings_shadow", {})
@@ -3239,6 +3237,34 @@ st.sidebar.slider(
 
 track = load_track(track_id)
 st.sidebar.caption(f"🎵 Track length: {format_mmss(track['duration_sec'])}")
+
+# ---------------------------------------------------------------------------
+# App-scope audio settings preservation
+# ---------------------------------------------------------------------------
+# The audio settings widgets live inside render_audio_settings_section, which
+# is a @fragment. Streamlit fragments have their own scoped session state —
+# keys written inside a fragment during a fragment rerun are NOT guaranteed to
+# survive into the next full app rerun. This means the shadow dict and plain
+# keys we've been relying on can all be wiped between reruns.
+#
+# The ONLY guaranteed app-scope writes are those that happen here — in the
+# main script body, outside any fragment. So we write a dedicated
+# "_audio_appscope" dict here on every full rerun: if audio keys are present
+# (they are on the rerun immediately after the fragment ran), we capture them.
+# If they're absent (they were wiped), we restore from the last captured
+# app-scope snapshot. This dict is never touched by any fragment.
+_appscope = st.session_state.get("_audio_appscope", {})
+
+# Capture any keys currently present (set by fragment on previous run)
+_captured = {k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state}
+if _captured:
+    _appscope.update(_captured)
+    st.session_state["_audio_appscope"] = _appscope
+
+# Restore any missing keys from the app-scope snapshot
+for _k in AUDIO_SETTINGS_KEYS:
+    if _k not in st.session_state and _k in _appscope:
+        st.session_state[_k] = _appscope[_k]
 
 # ---------------------------------------------------------------------------
 # Three free-navigation sections (not a locked wizard — jump between them
