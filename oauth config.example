@@ -1,0 +1,9 @@
+"""
+Google OAuth credentials for Drive access — NOT committed to git.
+Copy this file to oauth_config.py and fill in your values from
+Google Cloud Console → APIs & Services → Credentials → your Web app client.
+"""
+
+CLIENT_ID     = "your-client-id.apps.googleusercontent.com"
+CLIENT_SECRET = "your-client-secret"
+REDIRECT_URI  = "https://your-domain.co.uk/"
