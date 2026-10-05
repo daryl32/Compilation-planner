@@ -48,9 +48,23 @@ def rerun_full():
         st.rerun(scope="app")
     except TypeError:
         st.rerun()
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 st.set_page_config(page_title="Compilation Planner", layout="wide")
-st.title("Compilation Planner") 
+
+# ---------------------------------------------------------------------------
+# Google OAuth callback handler — must run before any other UI
+# Catches the ?code= redirect from Google after the user approves access
+# ---------------------------------------------------------------------------
+if _OAUTH_AVAILABLE:
+    _qp = st.query_params
+    if "code" in _qp and _OAUTH_SESSION_KEY not in st.session_state:
+        _token = exchange_code_for_token(_qp["code"])
+        if _token:
+            st.session_state[_OAUTH_SESSION_KEY] = _token
+        st.query_params.clear()
+        st.rerun()
+
+st.title("Compilation Planner")
 st.caption(f"v{APP_VERSION}")
 
 from config import CATALOGUE_DIR, AUDIO_DIR, PLANS_DIR, PREVIEW_DIR, PROJECTS_DIR
@@ -61,6 +75,16 @@ try:
     _DRIVE_SYNC_AVAILABLE = credentials_available()
 except ImportError:
     _DRIVE_SYNC_AVAILABLE = False
+
+# Google Drive OAuth — for writing plans/projects/previews to personal Drive
+try:
+    from drive_oauth import (
+        get_auth_url, exchange_code_for_token,
+        push_file_with_oauth, is_authenticated, SESSION_KEY as _OAUTH_SESSION_KEY,
+    )
+    _OAUTH_AVAILABLE = True
+except ImportError:
+    _OAUTH_AVAILABLE = False
 
 
 def sanitize_filename(name: str) -> str:
@@ -2881,14 +2905,16 @@ def _apply_project_load_dict(data: dict) -> list:
 
 def save_project(name: str) -> tuple[Path, str | None]:
     """Writes the current session's full settings + progress to
-    PROJECTS_DIR/<sanitized name>.json and uploads to Drive.
+    PROJECTS_DIR/<sanitized name>.json and uploads to Drive if authenticated.
     Returns (path, drive_error_or_None)."""
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = PROJECTS_DIR / f"{sanitize_filename(name)}.json"
     out_path.write_text(json.dumps(_build_project_save_dict(), indent=2))
     drive_err = None
-    if _DRIVE_SYNC_AVAILABLE:
-        drive_err = push_file_to_drive(out_path, "projects")
+    if _OAUTH_AVAILABLE and is_authenticated(st.session_state):
+        drive_err = push_file_with_oauth(
+            st.session_state[_OAUTH_SESSION_KEY], out_path, "scene-labeling/projects"
+        )
     return out_path, drive_err
 
 
@@ -3062,6 +3088,19 @@ if st.session_state.get("track_id") not in tracks:
     st.session_state.pop("track_id", None)
     if st.session_state.get("_project_load_pending_modes"):
         st.sidebar.warning("The loaded project's track is no longer available — defaulted to the first track.")
+
+if _OAUTH_AVAILABLE:
+    with st.sidebar.expander("🔐 Google Drive (saves)", expanded=False):
+        if is_authenticated(st.session_state):
+            st.success("Connected — plans, projects and previews will upload to Drive.")
+            if st.button("Disconnect", key="drive_disconnect"):
+                st.session_state.pop(_OAUTH_SESSION_KEY, None)
+                st.rerun()
+        else:
+            st.caption("Connect your Google account to save plans, projects and render previews to Drive.")
+            _auth_url = get_auth_url()
+            st.markdown(f"[🔗 Connect Google Drive]({_auth_url})", unsafe_allow_html=False)
+            st.caption("Tap the link above, sign in with Google, and you'll be redirected back here automatically.")
 
 if _DRIVE_SYNC_AVAILABLE:
     with st.sidebar.expander("☁️ Sync from Google Drive", expanded=False):
@@ -4467,14 +4506,18 @@ if st.button("💾 Save plan"):
     PLANS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = PLANS_DIR / f"{track_id}_plan.json"
     out_path.write_text(json.dumps(export_plan, indent=2))
-    if _DRIVE_SYNC_AVAILABLE:
-        _err = push_file_to_drive(out_path, "compilation_plans")
+    if _OAUTH_AVAILABLE and is_authenticated(st.session_state):
+        _err = push_file_with_oauth(
+            st.session_state[_OAUTH_SESSION_KEY], out_path, "scene-labeling/compilation_plans"
+        )
         if _err:
             st.warning(f"Saved locally but Drive upload failed: {_err}")
         else:
             st.success(f"Saved and uploaded to Drive: {out_path.name}")
     else:
-        st.success(f"Saved locally: {out_path}")
+        st.success(f"Saved locally: {out_path.name}")
+        if _OAUTH_AVAILABLE:
+            st.caption("Connect Google Drive in the sidebar to also save to Drive.")
 
 st.download_button(
     "Download plan as JSON",
@@ -4520,9 +4563,11 @@ if st.button("🎬 Render Preview", type="primary"):
     try:
         render_plan_dict(export_plan, str(out_path), progress_callback=_progress)
         progress_bar.progress(1.0, text="Done.")
-        if _DRIVE_SYNC_AVAILABLE:
+        if _OAUTH_AVAILABLE and is_authenticated(st.session_state):
             progress_bar.progress(1.0, text="Uploading to Drive…")
-            _err = push_file_to_drive(out_path, "previews")
+            _err = push_file_with_oauth(
+                st.session_state[_OAUTH_SESSION_KEY], out_path, "scene-labeling/previews"
+            )
             if _err:
                 st.warning(f"Rendered but Drive upload failed: {_err}")
             else:
