@@ -28,3 +28,7 @@ desktop.ini
 *.tmp
 temp-*
 config.py
+
+# oauth creds
+oauth_config.py
+
