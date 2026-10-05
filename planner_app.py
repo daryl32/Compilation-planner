@@ -48,7 +48,7 @@ def rerun_full():
         st.rerun(scope="app")
     except TypeError:
         st.rerun()
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 from config import CATALOGUE_DIR, AUDIO_DIR, PLANS_DIR, PREVIEW_DIR, PROJECTS_DIR
 
@@ -3118,6 +3118,18 @@ if _DRIVE_SYNC_AVAILABLE:
 else:
     with st.sidebar.expander("☁️ Drive sync unavailable", expanded=False):
         st.caption("Service account credentials not found at /root/drive-credentials.json")
+
+if _OAUTH_AVAILABLE:
+    with st.sidebar.expander("📤 Save to Google Drive", expanded=False):
+        if st.session_state.get(_OAUTH_SESSION_KEY):
+            st.success("Connected — saves will upload to Drive.")
+            if st.button("Disconnect Drive", key="drive_disconnect"):
+                st.session_state.pop(_OAUTH_SESSION_KEY, None)
+                st.rerun()
+        else:
+            st.caption("Connect to save plans, projects and previews to your Google Drive.")
+            _auth_url = get_auth_url()
+            st.link_button("🔗 Connect Google Drive", _auth_url)
 
 st.sidebar.header("Track")
 track_id = st.sidebar.selectbox("Track", tracks, key="track_id")
