@@ -48,7 +48,7 @@ def rerun_full():
         st.rerun(scope="app")
     except TypeError:
         st.rerun()
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 from config import CATALOGUE_DIR, AUDIO_DIR, PLANS_DIR, PREVIEW_DIR, PROJECTS_DIR
 
@@ -81,6 +81,22 @@ if not st.user.is_logged_in:
     st.subheader("Please sign in to continue")
     st.button("🔐 Sign in with Google", on_click=st.login, type="primary")
     st.stop()
+
+# ---------------------------------------------------------------------------
+# Drive OAuth callback — catches ?code= redirect from Google Drive connect
+# Must run after Streamlit auth gate (so we know the user is logged in)
+# and before any other UI so the token gets stored immediately.
+# Uses root path redirect URI (https://domain/) not /oauth2callback which
+# Streamlit reserves for its own auth.
+# ---------------------------------------------------------------------------
+if _OAUTH_AVAILABLE and _OAUTH_SESSION_KEY not in st.session_state:
+    _qp = st.query_params.to_dict()
+    if "code" in _qp:
+        _token = exchange_code_for_token(_qp["code"])
+        if _token:
+            st.session_state[_OAUTH_SESSION_KEY] = _token
+        st.query_params.clear()
+        st.rerun()
 
 st.title("Compilation Planner")
 st.caption(f"v{APP_VERSION}  ·  {st.user.name}")
