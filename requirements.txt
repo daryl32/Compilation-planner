@@ -19,6 +19,15 @@ numpy>=1.26.0
 # --- Utilities ---
 tqdm>=4.66.0
 
+# --- Google Drive integration (drive_sync.py and drive_oauth.py) ---
+google-api-python-client>=2.100.0
+google-auth>=2.23.0
+google-auth-oauthlib>=1.1.0
+
+# --- Streamlit auth (native Google login) ---
+# Install with: pip install "streamlit[auth]"
+# The [auth] extra is required for st.login() / st.logout() / st.user
+
 # --- Preview renderer ---
 # ffmpeg is also required by render_preview.py but is not a Python package.
 # Install it separately:
