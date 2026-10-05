@@ -49,23 +49,6 @@ def rerun_full():
     except TypeError:
         st.rerun()
 APP_VERSION = "1.2.0"
-st.set_page_config(page_title="Compilation Planner", layout="wide")
-
-# ---------------------------------------------------------------------------
-# Google OAuth callback handler — must run before any other UI
-# Catches the ?code= redirect from Google after the user approves access
-# ---------------------------------------------------------------------------
-if _OAUTH_AVAILABLE:
-    _qp = st.query_params
-    if "code" in _qp and _OAUTH_SESSION_KEY not in st.session_state:
-        _token = exchange_code_for_token(_qp["code"])
-        if _token:
-            st.session_state[_OAUTH_SESSION_KEY] = _token
-        st.query_params.clear()
-        st.rerun()
-
-st.title("Compilation Planner")
-st.caption(f"v{APP_VERSION}")
 
 from config import CATALOGUE_DIR, AUDIO_DIR, PLANS_DIR, PREVIEW_DIR, PROJECTS_DIR
 
@@ -85,6 +68,24 @@ try:
     _OAUTH_AVAILABLE = True
 except ImportError:
     _OAUTH_AVAILABLE = False
+
+st.set_page_config(page_title="Compilation Planner", layout="wide")
+
+# ---------------------------------------------------------------------------
+# Google OAuth callback handler — must run before any other UI
+# Catches the ?code= redirect from Google after the user approves access
+# ---------------------------------------------------------------------------
+if _OAUTH_AVAILABLE:
+    _qp = st.query_params
+    if "code" in _qp and _OAUTH_SESSION_KEY not in st.session_state:
+        _token = exchange_code_for_token(_qp["code"])
+        if _token:
+            st.session_state[_OAUTH_SESSION_KEY] = _token
+        st.query_params.clear()
+        st.rerun()
+
+st.title("Compilation Planner")
+st.caption(f"v{APP_VERSION}")
 
 
 def sanitize_filename(name: str) -> str:
