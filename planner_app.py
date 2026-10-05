@@ -48,12 +48,19 @@ def rerun_full():
         st.rerun(scope="app")
     except TypeError:
         st.rerun()
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.1.0"
 st.set_page_config(page_title="Compilation Planner", layout="wide")
 st.title("Compilation Planner") 
 st.caption(f"v{APP_VERSION}")
 
 from config import CATALOGUE_DIR, AUDIO_DIR, PLANS_DIR, PREVIEW_DIR, PROJECTS_DIR
+
+# Google Drive sync — graceful fallback if credentials not present
+try:
+    from drive_sync import sync_pull, push_file_to_drive, push_directory_to_drive, credentials_available
+    _DRIVE_SYNC_AVAILABLE = credentials_available()
+except ImportError:
+    _DRIVE_SYNC_AVAILABLE = False
 
 
 def sanitize_filename(name: str) -> str:
@@ -2683,16 +2690,15 @@ WEIGHT_KEYS = [
 # running it only AFTER the generic setdefault had already filled that same gap with the
 # static default would mean the key is no longer absent, so the shadow value would never be
 # reached — hence doing this restoration first.
+# Audio settings shadow — kept for backward compatibility with saved sessions
 _audio_shadow = st.session_state.get("audio_settings_shadow", {})
-for _k in AUDIO_SETTINGS_KEYS:
-    if _k not in st.session_state and _k in _audio_shadow:
-        st.session_state[_k] = _audio_shadow[_k]
+_audio_shadow.update({k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state})
+st.session_state["audio_settings_shadow"] = _audio_shadow
 
-# Same pattern for weight keys — restore from their own shadow before setdefault runs.
+# Weight shadow
 _weight_shadow = st.session_state.get("weight_settings_shadow", {})
-for _k in WEIGHT_KEYS:
-    if _k not in st.session_state and _k in _weight_shadow:
-        st.session_state[_k] = _weight_shadow[_k]
+_weight_shadow.update({k: st.session_state[k] for k in WEIGHT_KEYS if k in st.session_state})
+st.session_state["weight_settings_shadow"] = _weight_shadow
 
 for _k, _v in DIAL_DEFAULTS.items():
     st.session_state.setdefault(_k, _v)
@@ -2873,13 +2879,17 @@ def _apply_project_load_dict(data: dict) -> list:
     return warnings
 
 
-def save_project(name: str) -> Path:
+def save_project(name: str) -> tuple[Path, str | None]:
     """Writes the current session's full settings + progress to
-    PROJECTS_DIR/<sanitized name>.json. Returns the path written."""
+    PROJECTS_DIR/<sanitized name>.json and uploads to Drive.
+    Returns (path, drive_error_or_None)."""
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = PROJECTS_DIR / f"{sanitize_filename(name)}.json"
     out_path.write_text(json.dumps(_build_project_save_dict(), indent=2))
-    return out_path
+    drive_err = None
+    if _DRIVE_SYNC_AVAILABLE:
+        drive_err = push_file_to_drive(out_path, "projects")
+    return out_path, drive_err
 
 
 def load_project(path: Path) -> list:
@@ -3024,8 +3034,13 @@ with st.sidebar.expander("💾 Save / 📂 Load", expanded=False):
                "Choreography all at once) so you can close this and pick up again later.")
     _save_name = st.text_input("Project name", key="project_save_name", placeholder="my-compilation")
     if st.button("💾 Save Project", disabled=not _save_name.strip(), use_container_width=True):
-        _out_path = save_project(_save_name.strip())
-        st.success(f"Saved as {_out_path.name}")
+        _out_path, _drive_err = save_project(_save_name.strip())
+        if _drive_err:
+            st.warning(f"Saved locally but Drive upload failed: {_drive_err}")
+        elif _DRIVE_SYNC_AVAILABLE:
+            st.success(f"Saved and uploaded to Drive: {_out_path.name}")
+        else:
+            st.success(f"Saved as {_out_path.name}")
 
     st.divider()
     _existing_projects = list_saved_projects()
@@ -3047,6 +3062,34 @@ if st.session_state.get("track_id") not in tracks:
     st.session_state.pop("track_id", None)
     if st.session_state.get("_project_load_pending_modes"):
         st.sidebar.warning("The loaded project's track is no longer available — defaulted to the first track.")
+
+if _DRIVE_SYNC_AVAILABLE:
+    with st.sidebar.expander("☁️ Sync from Google Drive", expanded=False):
+        st.caption("Pull latest catalogues, audio, thumbnails and sprites from Drive to the server. "
+                   "Run after processing new videos or audio in Colab.")
+        if st.button("🔄 Sync now", key="drive_sync_btn", use_container_width=True):
+            sync_progress = st.progress(0.0, text="Starting sync…")
+            sync_errors = []
+
+            def _sync_progress(idx, total, name):
+                sync_progress.progress(
+                    min(0.99, idx / max(total, 1)),
+                    text=f"Syncing {name}…"
+                )
+
+            result = sync_pull(CATALOGUE_DIR, AUDIO_DIR, _sync_progress)
+            sync_progress.progress(1.0, text="Done.")
+            if result["errors"]:
+                for err in result["errors"][:5]:
+                    st.error(err)
+                st.warning("Some files failed — check Drive sharing if errors persist.")
+            else:
+                st.success(f"Synced {result['synced']} file(s), "
+                           f"skipped {result['skipped']} unchanged.")
+                st.cache_data.clear()
+else:
+    with st.sidebar.expander("☁️ Drive sync unavailable", expanded=False):
+        st.caption("Service account credentials not found at /root/drive-credentials.json")
 
 st.sidebar.header("Track")
 track_id = st.sidebar.selectbox("Track", tracks, key="track_id")
@@ -3154,6 +3197,28 @@ st.sidebar.slider(
 
 track = load_track(track_id)
 st.sidebar.caption(f"🎵 Track length: {format_mmss(track['duration_sec'])}")
+
+# ---------------------------------------------------------------------------
+# App-scope audio settings preservation
+# ---------------------------------------------------------------------------
+# Streamlit @fragment has its own scoped session state — keys written inside
+# a fragment during a fragment rerun are NOT guaranteed to survive into the
+# next full app rerun. This means shadow dicts and plain keys set inside
+# render_audio_settings_section (a @fragment) can be wiped between reruns.
+#
+# _audio_appscope is written here — in the main script body, outside any
+# fragment — on every full rerun. If audio keys are currently present
+# (fragment ran this rerun), capture them. If absent (wiped by Streamlit),
+# restore from the last captured snapshot. This dict is never touched by
+# any fragment and survives all rerun types.
+_appscope = st.session_state.get("_audio_appscope", {})
+_captured = {k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state}
+if _captured:
+    _appscope.update(_captured)
+    st.session_state["_audio_appscope"] = _appscope
+for _k in AUDIO_SETTINGS_KEYS:
+    if _k in _appscope:
+        st.session_state[_k] = _appscope[_k]
 
 # ---------------------------------------------------------------------------
 # Three free-navigation sections (not a locked wizard — jump between them
@@ -4398,11 +4463,18 @@ export_plan = {
     "timeline": timeline,
 }
 
-if st.button("Save plan to Drive"):
+if st.button("💾 Save plan"):
     PLANS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = PLANS_DIR / f"{track_id}_plan.json"
     out_path.write_text(json.dumps(export_plan, indent=2))
-    st.success(f"Saved to {out_path}")
+    if _DRIVE_SYNC_AVAILABLE:
+        _err = push_file_to_drive(out_path, "compilation_plans")
+        if _err:
+            st.warning(f"Saved locally but Drive upload failed: {_err}")
+        else:
+            st.success(f"Saved and uploaded to Drive: {out_path.name}")
+    else:
+        st.success(f"Saved locally: {out_path}")
 
 st.download_button(
     "Download plan as JSON",
@@ -4448,7 +4520,15 @@ if st.button("🎬 Render Preview", type="primary"):
     try:
         render_plan_dict(export_plan, str(out_path), progress_callback=_progress)
         progress_bar.progress(1.0, text="Done.")
-        st.success(f"Rendered {out_path.name}")
+        if _DRIVE_SYNC_AVAILABLE:
+            progress_bar.progress(1.0, text="Uploading to Drive…")
+            _err = push_file_to_drive(out_path, "previews")
+            if _err:
+                st.warning(f"Rendered but Drive upload failed: {_err}")
+            else:
+                st.success(f"Rendered and uploaded to Drive: {out_path.name}")
+        else:
+            st.success(f"Rendered {out_path.name}")
         st.rerun()
     except Exception as e:
         st.error(f"Render failed: {e}")
