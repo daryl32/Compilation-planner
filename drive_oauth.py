@@ -80,8 +80,18 @@ def _get_service(token_dict: dict):
     return build("drive", "v3", credentials=creds)
 
 
+# Hardcoded ID of the existing scene-labeling folder — prevents the OAuth
+# flow from creating a duplicate if the folder name search returns no results
+# (e.g. when the folder is owned by a different account than the OAuth user).
+SCENE_LABELING_FOLDER_ID = "18q5Ib4g5vgwmjEU96tUboXyV8JLrPDkP"
+
+
 def _find_or_create_folder(service, name: str, parent_id: str = None) -> str:
     """Get or create a Drive folder, return its ID."""
+    # Use hardcoded ID for the root scene-labeling folder
+    if name == "scene-labeling" and parent_id is None:
+        return SCENE_LABELING_FOLDER_ID
+
     q = f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
     if parent_id:
         q += f" and '{parent_id}' in parents"
