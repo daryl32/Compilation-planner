@@ -48,7 +48,7 @@ def rerun_full():
         st.rerun(scope="app")
     except TypeError:
         st.rerun()
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 from config import CATALOGUE_DIR, AUDIO_DIR, PLANS_DIR, PREVIEW_DIR, PROJECTS_DIR
 
@@ -72,20 +72,20 @@ except ImportError:
 st.set_page_config(page_title="Compilation Planner", layout="wide")
 
 # ---------------------------------------------------------------------------
-# Google OAuth callback handler — must run before any other UI
-# Catches the ?code= redirect from Google after the user approves access
+# Authentication — Streamlit native Google login
 # ---------------------------------------------------------------------------
-if _OAUTH_AVAILABLE:
-    _qp = st.query_params
-    if "code" in _qp and _OAUTH_SESSION_KEY not in st.session_state:
-        _token = exchange_code_for_token(_qp["code"])
-        if _token:
-            st.session_state[_OAUTH_SESSION_KEY] = _token
-        st.query_params.clear()
-        st.rerun()
+if not st.user.is_logged_in:
+    st.title("Compilation Planner")
+    st.caption(f"v{APP_VERSION}")
+    st.divider()
+    st.subheader("Please sign in to continue")
+    st.button("🔐 Sign in with Google", on_click=st.login, type="primary")
+    st.stop()
 
 st.title("Compilation Planner")
-st.caption(f"v{APP_VERSION}")
+st.caption(f"v{APP_VERSION}  ·  {st.user.name}")
+if st.sidebar.button("Sign out", key="signout_btn"):
+    st.logout()
 
 
 def sanitize_filename(name: str) -> str:
@@ -2912,7 +2912,7 @@ def save_project(name: str) -> tuple[Path, str | None]:
     out_path = PROJECTS_DIR / f"{sanitize_filename(name)}.json"
     out_path.write_text(json.dumps(_build_project_save_dict(), indent=2))
     drive_err = None
-    if _OAUTH_AVAILABLE and is_authenticated(st.session_state):
+    if _OAUTH_AVAILABLE and st.session_state.get(_OAUTH_SESSION_KEY):
         drive_err = push_file_with_oauth(
             st.session_state[_OAUTH_SESSION_KEY], out_path, "scene-labeling/projects"
         )
@@ -3090,18 +3090,6 @@ if st.session_state.get("track_id") not in tracks:
     if st.session_state.get("_project_load_pending_modes"):
         st.sidebar.warning("The loaded project's track is no longer available — defaulted to the first track.")
 
-if _OAUTH_AVAILABLE:
-    with st.sidebar.expander("🔐 Google Drive (saves)", expanded=False):
-        if is_authenticated(st.session_state):
-            st.success("Connected — plans, projects and previews will upload to Drive.")
-            if st.button("Disconnect", key="drive_disconnect"):
-                st.session_state.pop(_OAUTH_SESSION_KEY, None)
-                st.rerun()
-        else:
-            st.caption("Connect your Google account to save plans, projects and render previews to Drive.")
-            _auth_url = get_auth_url()
-            st.markdown(f"[🔗 Connect Google Drive]({_auth_url})", unsafe_allow_html=False)
-            st.caption("Tap the link above, sign in with Google, and you'll be redirected back here automatically.")
 
 if _DRIVE_SYNC_AVAILABLE:
     with st.sidebar.expander("☁️ Sync from Google Drive", expanded=False):
@@ -4507,7 +4495,7 @@ if st.button("💾 Save plan"):
     PLANS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = PLANS_DIR / f"{track_id}_plan.json"
     out_path.write_text(json.dumps(export_plan, indent=2))
-    if _OAUTH_AVAILABLE and is_authenticated(st.session_state):
+    if _OAUTH_AVAILABLE and st.session_state.get(_OAUTH_SESSION_KEY):
         _err = push_file_with_oauth(
             st.session_state[_OAUTH_SESSION_KEY], out_path, "scene-labeling/compilation_plans"
         )
@@ -4517,8 +4505,6 @@ if st.button("💾 Save plan"):
             st.success(f"Saved and uploaded to Drive: {out_path.name}")
     else:
         st.success(f"Saved locally: {out_path.name}")
-        if _OAUTH_AVAILABLE:
-            st.caption("Connect Google Drive in the sidebar to also save to Drive.")
 
 st.download_button(
     "Download plan as JSON",
@@ -4564,7 +4550,7 @@ if st.button("🎬 Render Preview", type="primary"):
     try:
         render_plan_dict(export_plan, str(out_path), progress_callback=_progress)
         progress_bar.progress(1.0, text="Done.")
-        if _OAUTH_AVAILABLE and is_authenticated(st.session_state):
+        if _OAUTH_AVAILABLE and st.session_state.get(_OAUTH_SESSION_KEY):
             progress_bar.progress(1.0, text="Uploading to Drive…")
             _err = push_file_with_oauth(
                 st.session_state[_OAUTH_SESSION_KEY], out_path, "scene-labeling/previews"
