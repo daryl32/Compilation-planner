@@ -51,7 +51,8 @@ from config import CATALOGUE_DIR, AUDIO_DIR, PLANS_DIR, PREVIEW_DIR, PROJECTS_DI
 
 # Google Drive sync — graceful fallback if credentials not present
 try:
-    from drive_sync import sync_pull, push_file_to_drive, push_directory_to_drive, credentials_available
+    from drive_sync import (sync_pull, push_file_to_drive, push_directory_to_drive,
+                            credentials_available, download_source_video)
     _DRIVE_SYNC_AVAILABLE = credentials_available()
 except ImportError:
     _DRIVE_SYNC_AVAILABLE = False
@@ -1752,6 +1753,19 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                     st.video(source_path)
                 else:
                     st.warning(f"Source video not found locally: {source_path}")
+                    _raw_src = catalogues[video_id]["source_path"]
+                    if _DRIVE_SYNC_AVAILABLE and "MyDrive/" in _raw_src:
+                        if st.button("⬇️ Download this video from Google Drive",
+                                     key=f"dl_src_{video_id}"):
+                            _bar = st.progress(0.0, text="Downloading from Google Drive...")
+                            _err = download_source_video(
+                                _raw_src.split("MyDrive/", 1)[1], Path(source_path),
+                                progress_callback=lambda p: _bar.progress(min(p, 1.0)),
+                            )
+                            if _err:
+                                st.error(f"Download failed: {_err}")
+                            else:
+                                st.rerun()
 
                 slider_key = f"range_slider_{video_id}"
                 if st.button("🎯 Auto Range (match audio length, highest motion)", key=f"auto_range_{video_id}"):

@@ -183,6 +183,61 @@ def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None) -> d
     return {"synced": synced, "skipped": skipped, "errors": errors}
 
 
+def download_source_video(drive_rel_path: str, dest: Path, progress_callback=None) -> str | None:
+    """
+    Download one source video from Drive to `dest`.
+
+    `drive_rel_path` is the path below "My Drive", e.g. "Videos-PH/clip.mp4"
+    (i.e. the part of a catalogue's source_path after "MyDrive/"). The first
+    folder must be shared with the service account. Skips the download if
+    `dest` already exists with the same size.
+    Returns None on success, an error string on failure.
+    """
+    try:
+        from googleapiclient.http import MediaIoBaseDownload
+        parts = [p for p in drive_rel_path.replace("\\", "/").split("/") if p]
+        if len(parts) < 2:
+            return f"Unexpected Drive path: {drive_rel_path}"
+        service = _get_service()
+
+        parent_id = None
+        for folder_name in parts[:-1]:
+            parent_id = _find_folder(service, folder_name, parent_id)
+            if not parent_id:
+                return (f"Folder '{folder_name}' not found in Drive — is it shared with "
+                        f"the service account?")
+
+        file_name = parts[-1]
+        safe = file_name.replace("'", "\\'")
+        resp = service.files().list(
+            q=f"name='{safe}' and '{parent_id}' in parents and trashed=false",
+            fields="files(id, name, size)",
+        ).execute()
+        files = resp.get("files", [])
+        if not files:
+            return f"'{file_name}' not found in Drive folder '{parts[-2]}'"
+        drive_file = files[0]
+        size = int(drive_file.get("size", 0))
+
+        if dest.exists() and size and dest.stat().st_size == size:
+            return None
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        request = service.files().get_media(fileId=drive_file["id"])
+        with open(tmp, "wb") as f:
+            downloader = MediaIoBaseDownload(f, request, chunksize=32 * 1024 * 1024)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+                if progress_callback and status:
+                    progress_callback(status.progress())
+        tmp.replace(dest)
+        return None
+    except Exception as e:
+        return str(e)
+
+
 def push_file_to_drive(local_path: Path, drive_subfolder: str) -> str | None:
     """
     Upload a single file to scene-labeling/<drive_subfolder>/ in Drive.
