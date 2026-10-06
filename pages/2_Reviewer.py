@@ -83,15 +83,14 @@ if st.sidebar.button("Add label") and new_label:
         tmp = Path("/tmp/labels.json")
         tmp.write_text(labels_json)
         error = push_file_with_oauth(
-    st.session_state[_OAUTH_SESSION_KEY],
-    tmp,
-    "scene-labeling/catalogue/labels.json",
-)
-if error:
-    st.sidebar.error(f"Drive upload failed: {error}")
-else:
-    st.sidebar.success(f'Added "{new_label}" — reload to see it.')
-        st.sidebar.success(f'Added "{new_label}" — reload to see it.')
+            st.session_state[_OAUTH_SESSION_KEY],
+            tmp,
+            "scene-labeling/catalogue/labels.json",
+        )
+        if error:
+            st.sidebar.error(f"Drive upload failed: {error}")
+        else:
+            st.sidebar.success(f'Added "{new_label}" — reload to see it.')
 
 # ---------------------------------------------------------------------------
 # Export training data
