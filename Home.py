@@ -54,7 +54,7 @@ if _OAUTH_AVAILABLE and _OAUTH_SESSION_KEY not in st.session_state:
         _token = exchange_code_for_token(_qp["code"])
         if _token:
             st.session_state[_OAUTH_SESSION_KEY] = _token
-        _return_page = st.session_state.pop("_oauth_return_page", None)
+        _return_page = _qp.get("state", None)
         st.query_params.clear()
         if _return_page:
             st.switch_page(_return_page)
