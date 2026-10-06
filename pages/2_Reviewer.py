@@ -65,7 +65,7 @@ if _OAUTH_AVAILABLE:
             st.caption("Connect to save labels to your Google Drive.")
             _auth_url = get_auth_url()
             st.session_state["_oauth_return_page"] = "pages/2_Reviewer.py"
-            st.link_button("🔗 Connect Google Drive", _auth_url)
+            st.markdown(f'<a href="{_auth_url}" target="_self">🔗 Connect Google Drive</a>', unsafe_allow_html=True)
 
 st.sidebar.divider()
 
