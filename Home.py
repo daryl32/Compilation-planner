@@ -38,6 +38,22 @@ if st.user.email not in WHITELISTED_EMAILS:
     st.stop()
 
 # ---------------------------------------------------------------------------
+# Drive OAuth callback — catches ?code= redirect from Google Drive connect
+# ---------------------------------------------------------------------------
+if _OAUTH_AVAILABLE and _OAUTH_SESSION_KEY not in st.session_state:
+    _qp = st.query_params.to_dict()
+    if "code" in _qp:
+        _token = exchange_code_for_token(_qp["code"])
+        if _token:
+            st.session_state[_OAUTH_SESSION_KEY] = _token
+        _return_page = st.session_state.pop("_oauth_return_page", None)
+        st.query_params.clear()
+        if _return_page:
+            st.switch_page(_return_page)
+        else:
+            st.rerun()
+
+# ---------------------------------------------------------------------------
 # Navigation page
 # ---------------------------------------------------------------------------
 st.title("Media Planner")
