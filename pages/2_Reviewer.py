@@ -3,10 +3,13 @@ Reviewer — browse and correct auto-generated scene tags.
 """
  
 import json
+import sys
 from pathlib import Path
- 
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import streamlit as st
- 
+
 from pipeline import run_pipeline, OUTPUT_DIR, CANDIDATE_LABELS
  
 st.set_page_config(page_title="Reviewer", layout="wide")
