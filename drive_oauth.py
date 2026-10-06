@@ -41,16 +41,18 @@ TOKEN_URL  = "https://oauth2.googleapis.com/token"
 SESSION_KEY = "_drive_oauth_token"
 
 
-def get_auth_url() -> str:
+def get_auth_url(state: str = "") -> str:
     """Generate the Google OAuth authorisation URL."""
     params = {
         "client_id":     CLIENT_ID,
         "redirect_uri":  REDIRECT_URI,
         "response_type": "code",
         "scope":         " ".join(SCOPES),
-        "access_type":   "online",   # no refresh token — session only
+        "access_type":   "online",
         "prompt":        "consent",
     }
+    if state:
+        params["state"] = state
     return AUTH_URL + "?" + urllib.parse.urlencode(params)
 
 
