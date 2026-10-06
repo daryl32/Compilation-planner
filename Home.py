@@ -10,6 +10,14 @@ Run with:
 
 import streamlit as st
 from config import WHITELISTED_EMAILS
+try:
+    from drive_oauth import (
+        get_auth_url, exchange_code_for_token,
+        push_file_with_oauth, is_authenticated, SESSION_KEY as _OAUTH_SESSION_KEY,
+    )
+    _OAUTH_AVAILABLE = True
+except ImportError:
+    _OAUTH_AVAILABLE = False
 
 APP_VERSION = "1.6.0"
 
