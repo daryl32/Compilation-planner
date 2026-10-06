@@ -84,6 +84,7 @@ def _get_service(token_dict: dict):
 # flow from creating a duplicate if the folder name search returns no results
 # (e.g. when the folder is owned by a different account than the OAuth user).
 SCENE_LABELING_FOLDER_ID = "18q5Ib4g5vgwmjEU96tUboXyV8JLrPDkP"
+CATALOGUE_FOLDER_ID = "1r83HvfcmNm0bmzoUefoXdPwSbhvLRoOr"
 
 
 def _find_or_create_folder(service, name: str, parent_id: str = None) -> str:
