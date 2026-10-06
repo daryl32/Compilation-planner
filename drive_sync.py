@@ -20,6 +20,7 @@ Push (server → Drive):
 import os
 import io
 import json
+from datetime import datetime
 from pathlib import Path
 
 CREDENTIALS_PATH = "/root/drive-credentials.json"
@@ -120,6 +121,18 @@ def _ensure_drive_folder(service, name: str, parent_id: str) -> str:
     return folder["id"]
 
 
+def _local_is_newer(local_path: Path, drive_file: dict) -> bool:
+    """True if local_path was modified after the Drive copy was last modified."""
+    try:
+        mt = drive_file.get("modifiedTime")
+        if not mt:
+            return False
+        drive_ts = datetime.fromisoformat(mt.replace("Z", "+00:00")).timestamp()
+        return local_path.stat().st_mtime > drive_ts
+    except Exception:
+        return False
+
+
 def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None) -> dict:
     """
     Pull catalogue JSONs, audio JSONs, thumbnails and sprites from Drive to server.
@@ -173,6 +186,11 @@ def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None) -> d
         try:
             # Skip if local file exists and is same size (quick check)
             if local_path.exists() and local_path.stat().st_size == int(drive_file.get("size", 0)):
+                skipped += 1
+                continue
+            # Never overwrite a local file that is newer than the Drive copy — e.g. a
+            # Reviewer edit (excluded / intro / outro / corrected tags) not yet pushed to Drive.
+            if local_path.exists() and _local_is_newer(local_path, drive_file):
                 skipped += 1
                 continue
             _download_file(service, drive_file["id"], local_path)
