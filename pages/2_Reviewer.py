@@ -1,17 +1,18 @@
 """
 Reviewer — browse and correct auto-generated scene tags.
 """
- 
+
 import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import streamlit as st
 
-from pipeline import run_pipeline, OUTPUT_DIR, CANDIDATE_LABELS
- 
+from config import CATALOGUE_DIR
+from labels import CANDIDATE_LABELS
+
+OUTPUT_DIR = CATALOGUE_DIR
+
 st.set_page_config(page_title="Reviewer", layout="wide")
 st.title("Reviewer")
  
@@ -28,15 +29,7 @@ def resolve_thumbnail(stored_path: str, video_id: str) -> Path:
 # ---------------------------------------------------------------------------
  
 st.sidebar.header("Process a video")
-video_path = st.sidebar.text_input("Path to video file", placeholder="C:\\videos\\clip1.mp4")
- 
-if st.sidebar.button("Run pipeline") and video_path:
-    if not Path(video_path).exists():
-        st.sidebar.error("File not found.")
-    else:
-        with st.spinner("Processing... this can take a while for the first run (model downloads)."):
-            run_pipeline(video_path)
-        st.sidebar.success("Done.")
+st.sidebar.link_button("▶️ Open Google Colab", "https://colab.research.google.com", use_container_width=True)
  
 st.sidebar.divider()
 review_mode = st.sidebar.checkbox("Review / correction mode", value=False)
