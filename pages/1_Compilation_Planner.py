@@ -127,7 +127,7 @@ def load_all_catalogues() -> dict:
     and only for the videos it's actually searching."""
     catalogues = {}
     for cat_file in CATALOGUE_DIR.glob("*.json"):
-        if cat_file.name in ("training_data.jsonl", "video_index.json"):
+        if cat_file.name in ("training_data.jsonl", "video_index.json", "labels.json"):
             continue
         with open(cat_file) as f:
             cat = json.load(f)
