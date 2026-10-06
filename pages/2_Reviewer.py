@@ -88,18 +88,17 @@ if st.sidebar.button("Add label") and new_label:
             tmp,
             "scene-labeling/catalogue",
         )
-if error:
-    st.sidebar.error(f"Drive upload failed: {error}")
-else:
-    # Sync updated labels.json back down to server
-    try:
-        from drive_sync import sync_pull
-        from config import CATALOGUE_DIR, AUDIO_DIR
-        sync_pull(CATALOGUE_DIR, AUDIO_DIR)
-        CANDIDATE_LABELS.append(new_label)
-        st.sidebar.success(f'Added "{new_label}" — label is now available.')
-    except Exception as e:
-        st.sidebar.warning(f'Label saved to Drive but sync failed: {e}. Restart the app to see it.')
+        if error:
+            st.sidebar.error(f"Drive upload failed: {error}")
+        else:
+            try:
+                from drive_sync import sync_pull
+                from config import CATALOGUE_DIR, AUDIO_DIR
+                sync_pull(CATALOGUE_DIR, AUDIO_DIR)
+                CANDIDATE_LABELS.append(new_label)
+                st.sidebar.success(f'Added "{new_label}" — label is now available.')
+            except Exception as e:
+                st.sidebar.warning(f'Label saved to Drive but sync failed: {e}. Restart the app to see it.')
 
 # ---------------------------------------------------------------------------
 # Export training data
