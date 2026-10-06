@@ -8,7 +8,13 @@ from pathlib import Path
 import streamlit as st
 
 from config import CATALOGUE_DIR
-from labels import CANDIDATE_LABELS
+def load_labels() -> list:
+    labels_path = CATALOGUE_DIR / "labels.json"
+    if labels_path.exists():
+        return json.loads(labels_path.read_text())
+    return []
+
+CANDIDATE_LABELS = load_labels()
 
 # Google Drive OAuth — for writing labels to Drive
 try:
