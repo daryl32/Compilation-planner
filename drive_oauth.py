@@ -92,6 +92,8 @@ def _find_or_create_folder(service, name: str, parent_id: str = None) -> str:
     # Use hardcoded ID for the root scene-labeling folder
     if name == "scene-labeling" and parent_id is None:
         return SCENE_LABELING_FOLDER_ID
+    if name == "catalogue":
+        return CATALOGUE_FOLDER_ID
 
     q = f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
     if parent_id:
