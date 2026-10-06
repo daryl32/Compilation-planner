@@ -32,6 +32,19 @@ else:
     fragment = lambda f: f
 
 
+def rerun_fragment():
+    """Rerun only the fragment this is called from. A bare st.rerun() defaults to
+    scope="app" — a FULL page rerun even when called inside a fragment — which is
+    what made every range-picker click reload the whole page. Falls back to a plain
+    rerun on a Streamlit too old for scope=, or when not actually inside a fragment
+    (fragment is a no-op decorator on old versions)."""
+    from streamlit.errors import StreamlitAPIException
+    try:
+        st.rerun(scope="fragment")
+    except (TypeError, StreamlitAPIException):
+        st.rerun()
+
+
 def rerun_full():
     """A rerun called from INSIDE a fragment normally only reruns that
     fragment, not the whole page — right for View Fit / checkboxes, which
@@ -201,11 +214,19 @@ def find_best_motion_window(video_id: str, window_len: float) -> tuple:
     return best_start, min(best_start + window_len, duration)
 
 
+@st.cache_data
+def _all_video_durations() -> dict:
+    """video_id -> duration in seconds. Small, so cheap for st.cache_data to copy on
+    every call — unlike load_all_catalogues(), which deep-copies the whole library each
+    time and used to be called once per video row (and again per row in the sort)."""
+    out = {}
+    for vid, cat in load_all_catalogues().items():
+        out[vid] = _tc_to_seconds(cat["scenes"][-1]["end_tc"]) if cat.get("scenes") else 0.0
+    return out
+
+
 def get_video_duration(video_id: str) -> float:
-    cat = load_all_catalogues().get(video_id)
-    if not cat or not cat["scenes"]:
-        return 0.0
-    return _tc_to_seconds(cat["scenes"][-1]["end_tc"])
+    return _all_video_durations().get(video_id, 0.0)
 
 
 def _overlap_with_range(scene_start: float, scene_end: float, time_range) -> tuple:
@@ -1743,8 +1764,11 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                 st.write(f"{title} — no scenes match the current tag filter / time range{range_tag}")
         with row_cols[2]:
             if st.button("🎚️", key=f"range_toggle_{video_id}", help="Set a time range for this video"):
-                st.session_state["show_range_picker"][video_id] = not st.session_state["show_range_picker"].get(video_id, False)
-                st.rerun()
+                # One picker open at a time: each open picker embeds a full video player,
+                # which is the heaviest thing on this page to re-render.
+                _was_open = st.session_state["show_range_picker"].get(video_id, False)
+                st.session_state["show_range_picker"] = {video_id: not _was_open}
+                rerun_fragment()
 
         if st.session_state["show_range_picker"].get(video_id):
             with st.container(border=True):
@@ -1765,13 +1789,13 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                             if _err:
                                 st.error(f"Download failed: {_err}")
                             else:
-                                st.rerun()
+                                rerun_fragment()
 
                 slider_key = f"range_slider_{video_id}"
                 if st.button("🎯 Auto Range (match audio length, highest motion)", key=f"auto_range_{video_id}"):
                     best_start, best_end = find_best_motion_window(video_id, track["duration_sec"])
                     st.session_state[slider_key] = (seconds_to_time(best_start), seconds_to_time(best_end))
-                    st.rerun()
+                    rerun_fragment()
 
                 default_range = current_range or (0.0, duration)
                 new_range_t = st.slider(
@@ -1788,11 +1812,11 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                         st.session_state["video_time_ranges"][video_id] = (
                             time_to_seconds(new_range_t[0]), time_to_seconds(new_range_t[1])
                         )
-                        st.rerun()
+                        rerun_fragment()
                 with btn_cols[1]:
                     if st.button("Clear (use full video)", key=f"clear_range_{video_id}"):
                         st.session_state["video_time_ranges"].pop(video_id, None)
-                        st.rerun()
+                        rerun_fragment()
 
     # committed_selected_videos is what actually survives a round trip to another section
     # (plain session_state, not a widget), so it's what default_checked restores from —
