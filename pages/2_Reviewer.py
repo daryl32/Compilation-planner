@@ -86,7 +86,7 @@ if st.sidebar.button("Add label") and new_label:
         error = push_file_with_oauth(
             st.session_state[_OAUTH_SESSION_KEY],
             tmp,
-            "scene-labeling/catalogue/labels.json",
+            "scene-labeling/catalogue",
         )
         if error:
             st.sidebar.error(f"Drive upload failed: {error}")
