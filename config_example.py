@@ -28,3 +28,10 @@ AUDIO_DIR     = _BASE / "audio_catalogue"
 PLANS_DIR     = _BASE / "compilation_plans"
 PREVIEW_DIR   = _BASE / "previews"
 PROJECTS_DIR  = _BASE / "projects"
+
+# ---------------------------------------------------------------------------
+# Access control
+# ---------------------------------------------------------------------------
+WHITELISTED_EMAILS = [
+    "your@email.com",
+]
