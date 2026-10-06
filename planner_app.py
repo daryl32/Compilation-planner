@@ -50,7 +50,7 @@ def rerun_full():
         st.rerun()
 APP_VERSION = "1.5.0"
 
-from config import CATALOGUE_DIR, AUDIO_DIR, PLANS_DIR, PREVIEW_DIR, PROJECTS_DIR
+from config import CATALOGUE_DIR, AUDIO_DIR, PLANS_DIR, PREVIEW_DIR, PROJECTS_DIR, WHITELISTED_EMAILS
 
 # Google Drive sync — graceful fallback if credentials not present
 try:
@@ -80,6 +80,15 @@ if not st.user.is_logged_in:
     st.divider()
     st.subheader("Please sign in to continue")
     st.button("🔐 Sign in with Google", on_click=st.login, type="primary")
+    st.stop()
+
+# --- Whitelist gate ---
+if st.user.email not in WHITELISTED_EMAILS:
+    st.title("Access Denied")
+    st.error(f"**{st.user.email}** is not authorised to use this app.")
+    st.caption("Contact the administrator to request access.")
+    if st.button("Sign out"):
+        st.logout()
     st.stop()
 
 # ---------------------------------------------------------------------------
