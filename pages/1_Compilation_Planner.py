@@ -1299,6 +1299,41 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
         st.plotly_chart(vfig, use_container_width=True)
 
 
+def limit_queue_before(queues: dict, video_id: str, abs_end_sec: float) -> None:
+    """Drop every bit of video_id's queued footage at or after abs_end_sec
+    (absolute time in the video), trimming a span that crosses it. Used when
+    editing a block in sequential mode: a video's clip for the edited block
+    has to come before that video's clip in any LATER committed block."""
+    kept = []
+    for span in queues.get(video_id, []):
+        start = span["scene_start_sec"] + span["offset_sec"]
+        end = start + span["remaining_sec"]
+        if start >= abs_end_sec - 1e-6:
+            continue
+        if end > abs_end_sec:
+            span = {**span, "remaining_sec": abs_end_sec - start}
+            if span["remaining_sec"] < MIN_LEFTOVER_SEC:
+                continue
+        kept.append(span)
+    queues[video_id] = kept
+
+
+def split_span_at(queues: dict, video_id: str, scene_id: int, offset_sec: float) -> None:
+    """Split the span of scene_id that contains offset_sec into two at that
+    point, so the window grid (get_available_clips_for_video) has a window
+    starting exactly there — used so a block being edited can offer its own
+    currently-committed clip as an exact dropdown choice."""
+    spans = queues.get(video_id, [])
+    for i, span in enumerate(spans):
+        if span["scene_id"] != scene_id:
+            continue
+        start, end = span["offset_sec"], span["offset_sec"] + span["remaining_sec"]
+        if start + 1e-6 < offset_sec < end - 1e-6:
+            spans[i:i + 1] = [{**span, "remaining_sec": offset_sec - start},
+                              {**span, "offset_sec": offset_sec, "remaining_sec": end - offset_sec}]
+            return
+
+
 def skip_span(queues: dict, video_id: str, scene_id: int, sequential: bool = False) -> None:
     """Manual escape hatch for sequential mode: discard a video's current
     front span ENTIRELY without using any of it, so the search can reach
@@ -3781,9 +3816,50 @@ elif matching_mode == "Choreography":
     chor_block = min(st.session_state["chor_current_block"], len(segments))
     chor_confirmed = st.session_state["chor_confirmed"]
 
-    # Replay confirmed blocks to keep queues accurate for the current block
+    # Editing one already-committed block (✏️ Edit): every OTHER committed block
+    # stays committed, and the edited block may only use footage none of them use —
+    # in sequential mode, also only footage between that video's clips in the
+    # nearest earlier and later committed blocks.
+    chor_editing = st.session_state.get("chor_editing_block")
+    if chor_editing is not None and not (0 <= chor_editing < chor_block):
+        st.session_state.pop("chor_editing_block", None)
+        chor_editing = None
+
     chor_invalidated = []
-    for i in range(chor_block):
+    if chor_editing is not None:
+        # Earlier blocks in order (sequential discarding applies as usual)...
+        for i in range(chor_editing):
+            for pick in chor_confirmed.get(i, []):
+                try:
+                    carve_span(queues, pick["video_id"], pick["scene_id"],
+                               pick["offset_into_scene_sec"], pick["clip_duration_sec"], sequential_mode)
+                except ValueError:
+                    chor_invalidated.append((i, pick["video_id"], pick["scene_id"]))
+        # ...later blocks only remove their exact clips (they stay committed), and in
+        # sequential mode cap each video before its earliest later clip.
+        earliest_later = {}
+        for i in range(chor_editing + 1, chor_block):
+            for pick in chor_confirmed.get(i, []):
+                try:
+                    carve_span(queues, pick["video_id"], pick["scene_id"],
+                               pick["offset_into_scene_sec"], pick["clip_duration_sec"], False)
+                except ValueError:
+                    chor_invalidated.append((i, pick["video_id"], pick["scene_id"]))
+                earliest_later[pick["video_id"]] = min(
+                    earliest_later.get(pick["video_id"], float("inf")), pick["clip_start_sec"])
+        if sequential_mode:
+            for vid, t in earliest_later.items():
+                limit_queue_before(queues, vid, t)
+        # The edited block's own current clips are free again — make each one an exact
+        # dropdown choice.
+        for pick in chor_confirmed.get(chor_editing, []):
+            split_span_at(queues, pick["video_id"], pick["scene_id"], pick["offset_into_scene_sec"])
+        if chor_invalidated:
+            st.warning(f"{len(chor_invalidated)} confirmed clip(s) in other blocks no longer match the "
+                       f"available footage (a setting changed) — check those blocks after this edit.")
+
+    # Replay confirmed blocks to keep queues accurate for the current block
+    for i in (range(chor_block) if chor_editing is None else ()):
         still_valid = []
         for pick in chor_confirmed.get(i, []):
             try:
@@ -3793,7 +3869,7 @@ elif matching_mode == "Choreography":
             except ValueError:
                 chor_invalidated.append((i, pick["video_id"], pick["scene_id"]))
         chor_confirmed[i] = still_valid
-    if chor_invalidated:
+    if chor_invalidated and chor_editing is None:
         st.warning(f"{len(chor_invalidated)} previously confirmed clip(s) are no longer available "
                    f"(a setting changed) and were removed — revisit those blocks.")
 
@@ -4084,9 +4160,26 @@ elif matching_mode == "Choreography":
     # Choreography mode: block-by-block grid, one column per source video
     # -----------------------------------------------------------------------
 
+    def _chor_start_edit(k: int) -> None:
+        """Open committed block k for editing, pre-filled with its current clips."""
+        st.session_state["chor_editing_block"] = k
+        picks_k = chor_confirmed.get(k, [])
+        overrides_k = st.session_state.setdefault("chor_overrides", {}).setdefault(k, {})
+        overrides_k.clear()
+        for vid in selected_videos:
+            st.session_state[f"chor_pick_{k}_{vid}"] = False
+            st.session_state.pop(f"chor_sel_{k}_{vid}", None)
+        for p in picks_k:
+            st.session_state[f"chor_pick_{k}_{p['video_id']}"] = True
+            overrides_k[p["video_id"]] = (p["scene_id"], p["offset_into_scene_sec"])
+
+    chor_frontier = chor_block
+    if chor_editing is not None:
+        chor_block = chor_editing  # the section below renders and saves THIS block
+
     if chor_block >= len(segments):
         st.success(f"✅ All {len(segments)} blocks confirmed. Review below — click ✏️ Edit on any block "
-                   f"to jump straight to it, or use Restart to redo.")
+                   f"to change just that block (the others stay as they are), or use Restart to redo.")
 
         chor_rev_cols = st.columns([2, 2, 3])
         with chor_rev_cols[0]:
@@ -4100,8 +4193,9 @@ elif matching_mode == "Choreography":
                 "Jump to block", min_value=1, max_value=len(segments), value=1,
                 key="chor_review_jump_input", label_visibility="collapsed",
             )
-            if st.button("↩ Go to block", key="chor_review_jump_go"):
-                st.session_state["chor_current_block"] = int(chor_rev_jump) - 1
+            if st.button("✏️ Edit block", key="chor_review_jump_go",
+                         help="Re-pick this block's clips. Every other block stays as it is."):
+                _chor_start_edit(int(chor_rev_jump) - 1)
                 st.rerun()
 
         st.subheader("Confirmed timeline")
@@ -4117,8 +4211,8 @@ elif matching_mode == "Choreography":
                             f"intensity {entry['segment_intensity']:.2f}{chor_review_role_tag}")
             with hdr_cols[1]:
                 if st.button("✏️ Edit", key=f"chor_edit_{seg_idx}",
-                             help=f"Jump to block {seg_idx + 1} to re-pick its clips."):
-                    st.session_state["chor_current_block"] = seg_idx
+                             help=f"Re-pick block {seg_idx + 1}'s clips. Every other block stays as it is."):
+                    _chor_start_edit(seg_idx)
                     st.rerun()
             if not entry["scenes"]:
                 st.caption("No clip selected for this block.")
@@ -4147,8 +4241,14 @@ elif matching_mode == "Choreography":
             chor_role_filter = "outro_candidate"
         chor_role_tag = ("  🎬 INTRO BLOCK" if chor_role_filter == "intro_candidate"
                         else "  🎬 OUTRO BLOCK" if chor_role_filter == "outro_candidate" else "")
-        st.subheader(f"Block {chor_block + 1} of {len(segments)}  "
+        st.subheader(f"{'✏️ Editing block' if chor_editing is not None else 'Block'} "
+                     f"{chor_block + 1} of {len(segments)}  "
                      f"({seg['start']:.1f}s – {seg['end']:.1f}s, intensity {seg['intensity']:.2f}){chor_role_tag}")
+        if chor_editing is not None:
+            st.info("Every other block stays committed. The dropdowns only offer footage no other block uses"
+                    + (" — and, with sequential order on, only footage between each video's clips in the "
+                       "blocks before and after this one." if sequential_mode else ".")
+                    + " This block's current clips are pre-selected.")
         st.caption("Each column is one source video. The dropdown shows every available block-length window "
                    "across that video's whole remaining footage (past clips are already gone from the list). "
                    "Pick any, or leave on Auto. Tick 'Use this clip' on the columns you want, then confirm.")
@@ -4165,7 +4265,7 @@ elif matching_mode == "Choreography":
         # confirming earlier blocks leaves their picks unrecorded, so forward-only narrowing
         # won't have taken effect yet for those blocks. Surface that plainly so it isn't
         # mistaken for sequential mode not working.
-        if sequential_mode:
+        if sequential_mode and chor_editing is None:
             unconfirmed_earlier = [i for i in range(chor_block) if not chor_confirmed.get(i)]
             if unconfirmed_earlier:
                 nums = ", ".join(str(i + 1) for i in unconfirmed_earlier)
@@ -4177,7 +4277,7 @@ elif matching_mode == "Choreography":
                     f"confirm those blocks first."
                 )
 
-        if st.button(f"⚡⚡ Auto-fill ALL remaining blocks ({len(segments) - chor_block} left)",
+        if chor_editing is None and st.button(f"⚡⚡ Auto-fill ALL remaining blocks ({len(segments) - chor_block} left)",
                      key="chor_autofill_all",
                      help="Automatically fills every block from here to the end using each block's own "
                           "recommended clip count, picking the best motion-matching window per chosen "
@@ -4273,19 +4373,33 @@ elif matching_mode == "Choreography":
         # Navigation + block jump
         chor_nav_cols = st.columns([2, 2, 3])
         with chor_nav_cols[0]:
-            if st.button("◀ Previous", disabled=(chor_block == 0), key="chor_prev"):
-                st.session_state["chor_current_block"] = chor_block - 1
+            if chor_editing is not None:
+                if st.button("✖ Cancel edit", key="chor_cancel_edit",
+                             help="Leave this block exactly as it was committed."):
+                    st.session_state.pop("chor_editing_block", None)
+                    st.rerun()
+            elif st.button("◀ Previous", disabled=(chor_block == 0), key="chor_prev",
+                           help="Edit the previous block — every other block stays committed."):
+                _chor_start_edit(chor_block - 1)
                 st.rerun()
         with chor_nav_cols[2]:
             chor_jump = st.number_input(
                 "Jump to block", min_value=1, max_value=len(segments),
                 value=chor_block + 1, key="chor_jump_input", label_visibility="collapsed",
+                disabled=chor_editing is not None,
             )
-            if st.button("↩ Go to block", key="chor_jump_go"):
-                st.session_state["chor_current_block"] = int(chor_jump) - 1
+            if st.button("↩ Go to block", key="chor_jump_go", disabled=chor_editing is not None,
+                         help="A block before your progress opens it for editing (the others stay "
+                              "committed); a later one moves ahead to it."):
+                _target = int(chor_jump) - 1
+                if _target < chor_frontier and chor_confirmed.get(_target):
+                    _chor_start_edit(_target)
+                else:
+                    st.session_state["chor_current_block"] = _target
                 st.rerun()
         with chor_nav_cols[1]:
-            if st.button("Confirm & Next ▶", type="primary", key="chor_next"):
+            if st.button("💾 Save block" if chor_editing is not None else "Confirm & Next ▶",
+                         type="primary", key="chor_next"):
                 new_picks = []
                 overrides = st.session_state.get("chor_overrides", {}).get(chor_block, {})
                 eligible_videos = [vid for vid in selected_videos
@@ -4348,7 +4462,10 @@ elif matching_mode == "Choreography":
                         st.warning(f"Couldn't confirm clip for {video_id}: {e}")
 
                 chor_confirmed[chor_block] = new_picks
-                st.session_state["chor_current_block"] = chor_block + 1
+                if chor_editing is not None:
+                    st.session_state.pop("chor_editing_block", None)  # back to where you were
+                else:
+                    st.session_state["chor_current_block"] = chor_block + 1
                 st.rerun()
 
         # Used-so-far / remaining footage per video, same computation Manual step-through
