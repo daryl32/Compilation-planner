@@ -1063,6 +1063,51 @@ def render_choreography_block(
         css = "\n".join(f'div[class*="st-key-{k}"] {{ border: 3px solid #1c6fea !important; }}' for k in highlight_keys)
         st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
+    _no_keyboard_on_clip_dropdowns()
+
+
+# Choreography's clip dropdowns are plain pick-from-a-list menus, but
+# Streamlit's selectbox is built on a searchable text input — on an iPad /
+# phone, tapping it focuses that input and pops up the on-screen keyboard.
+# This marks those inputs read-only on touch devices (no keyboard; tapping
+# still opens the list), leaving desktop type-to-search untouched. It's
+# installed once into the page itself and watches for new dropdowns, since
+# the grid is re-rendered on every interaction.
+_NO_KEYBOARD_JS = """
+<script>
+(function () {
+  const doc = window.parent.document;
+  if (doc.getElementById("chor-no-keyboard")) return;
+  const s = doc.createElement("script");
+  s.id = "chor-no-keyboard";
+  s.textContent = `
+    (function () {
+      const touch = ("ontouchstart" in window) || (navigator.maxTouchPoints > 0);
+      if (!touch) return;
+      const SEL = '[class*="st-key-chor_sel_"] input, '
+                + '[class*="st-key-chor_box_"] [data-baseweb="select"] input';
+      function fix() {
+        document.querySelectorAll(SEL).forEach(function (el) {
+          if (!el.readOnly) { el.readOnly = true; el.setAttribute("inputmode", "none"); }
+        });
+      }
+      fix();
+      new MutationObserver(fix).observe(document.body, { childList: true, subtree: true });
+    })();
+  `;
+  doc.head.appendChild(s);
+})();
+</script>
+"""
+
+
+def _no_keyboard_on_clip_dropdowns() -> None:
+    try:
+        import streamlit.components.v1 as components
+        components.html(_NO_KEYBOARD_JS, height=0)
+    except Exception:
+        pass  # cosmetic only — never break the page over it
+
 
 # Streamlit has no simple "coloured border" parameter, so getting an actual
 # blue box (not just a text label) relies on a version-dependent technique:
