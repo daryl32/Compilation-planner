@@ -4585,7 +4585,42 @@ def next_preview_path() -> Path:
     return PREVIEW_DIR / f"temp-Video-preview-{safe_track_id}.{next_num:03d}.mp4"
 
 
+def ensure_render_sources_local() -> list:
+    """Make sure the track's audio and every video the plan uses exist on this machine,
+    downloading any that are missing from Google Drive (sync_pull only brings over the
+    catalogue/audio JSONs, never the media itself). Returns a list of error strings."""
+    needed = {track["source_path"]}
+    for _e in timeline:
+        for _slot in _e["scenes"]:
+            for _lnk in _slot["chain"]:
+                needed.add(catalogues[_lnk["video_id"]]["source_path"])
+    missing = [(raw, Path(colab_to_local(raw))) for raw in sorted(needed)
+               if not Path(colab_to_local(raw)).exists()]
+    errors = []
+    if not missing:
+        return errors
+    for n, (raw, local) in enumerate(missing, 1):
+        if not (_DRIVE_SYNC_AVAILABLE and "MyDrive/" in raw):
+            errors.append(f"{local.name}: not found at {local} and Drive download isn't available")
+            continue
+        _bar = st.progress(0.0, text=f"Downloading {local.name} from Google Drive ({n}/{len(missing)})...")
+        _err = download_source_video(
+            raw.split("MyDrive/", 1)[1], local,
+            progress_callback=lambda p, _b=_bar, _n=local.name, _i=n: _b.progress(
+                min(p, 1.0), text=f"Downloading {_n} from Google Drive ({_i}/{len(missing)})..."),
+        )
+        _bar.empty()
+        if _err:
+            errors.append(f"{local.name}: {_err}")
+    return errors
+
+
 if st.button("🎬 Render Preview", type="primary"):
+    _src_errors = ensure_render_sources_local()
+    if _src_errors:
+        st.error("Can't render — some source files are missing and couldn't be downloaded:\n\n"
+                 + "\n".join(f"- {e}" for e in _src_errors))
+        st.stop()
     out_path = next_preview_path()
     progress_bar = st.progress(0.0, text="Rendering...")
 
