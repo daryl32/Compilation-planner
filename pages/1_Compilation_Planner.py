@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 from PIL import Image
 
 from render_preview import render_plan_dict, colab_to_local
-from library_common import scene_tags, render_range_picker
+from library_common import scene_tags, render_range_picker, library_ranges
 
 # st.fragment (Streamlit 1.37+; was st.experimental_fragment in 1.33-1.36) lets
 # part of the page rerun on its own instead of the whole script re-executing on
@@ -232,6 +232,16 @@ def _all_video_durations() -> dict:
 
 def get_video_duration(video_id: str) -> float:
     return _all_video_durations().get(video_id, 0.0)
+
+
+def effective_time_ranges() -> dict:
+    """{video_id: (start, end)} each video actually uses: this project's override
+    (🎚️, session_state["video_time_ranges"]) if there is one, otherwise its Media
+    Library range (📚), otherwise the full video (not listed). An override of None
+    means "full video" even when the library has a range."""
+    merged = dict(library_ranges())
+    merged.update(st.session_state.get("video_time_ranges", {}))
+    return {vid: tuple(rng) for vid, rng in merged.items() if rng}
 
 
 def _overlap_with_range(scene_start: float, scene_end: float, time_range) -> tuple:
@@ -1431,7 +1441,7 @@ def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list)
     if cache and cache["key"] == cache_key:
         ranking = cache["ranking"]
     else:
-        video_matches = compute_video_energy_matches(track, tag_filter, st.session_state["video_time_ranges"])
+        video_matches = compute_video_energy_matches(track, tag_filter, effective_time_ranges())
         top_matches = video_matches[:RECOMMENDED_COUNT]
         top_ids = [v["video_id"] for v in top_matches]
         match_by_id = {v["video_id"]: v for v in video_matches}
@@ -1745,14 +1755,26 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
     st.caption(
         "✅ marks a recommended video. ☑ is your actual selection — nothing is selected until you tick it "
         "(or use Select all recommended above), and it stays as you set it even if re-sorting moves the "
-        "video. 🎚️ opens a range picker to restrict a video to just a portion of its footage."
+        "video. 🎚️ opens a range picker to restrict a video to just a portion of its footage. "
+        "📚 is the video's Media Library range (used by default); 🎚️ next to a time is a range "
+        "set here, which overrides the library range for this project only."
     )
+    _lib_ranges = library_ranges()
 
     def render_video_row(video_id: str, recommended: bool, default_checked: bool):
         match = info["match_by_id"].get(video_id)
         duration = get_video_duration(video_id)
-        current_range = st.session_state["video_time_ranges"].get(video_id)
-        range_tag = f"  🎚️ {seconds_to_time(current_range[0]):%M:%S}–{seconds_to_time(current_range[1]):%M:%S}" if current_range else ""
+        _overrides = st.session_state["video_time_ranges"]
+        lib_range = _lib_ranges.get(video_id)
+        has_override = video_id in _overrides
+        current_range = _overrides[video_id] if has_override else lib_range
+        if current_range:
+            range_tag = (f"  {'🎚️' if has_override else '📚'} "
+                         f"{seconds_to_time(current_range[0]):%M:%S}–{seconds_to_time(current_range[1]):%M:%S}")
+        elif has_override and lib_range:
+            range_tag = "  🎚️ full video (library range off for this project)"
+        else:
+            range_tag = ""
 
         row_cols = st.columns([1, 7, 1])
         with row_cols[0]:
@@ -1787,9 +1809,19 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                     _kind, _rng = _action
                     if _kind == "apply":
                         st.session_state["video_time_ranges"][video_id] = _rng
+                    elif lib_range:
+                        # Explicit "full video" override, so the library range isn't used either.
+                        st.session_state["video_time_ranges"][video_id] = None
                     else:
                         st.session_state["video_time_ranges"].pop(video_id, None)
+                    st.session_state.pop(f"range_slider_{video_id}", None)
                     rerun_fragment()
+                if has_override and lib_range:
+                    if st.button(f"📚 Reset to library range ({format_mmss(lib_range[0])}–{format_mmss(lib_range[1])})",
+                                 key=f"range_reset_lib_{video_id}"):
+                        st.session_state["video_time_ranges"].pop(video_id, None)
+                        st.session_state.pop(f"range_slider_{video_id}", None)
+                        rerun_fragment()
 
     # committed_selected_videos is what actually survives a round trip to another section
     # (plain session_state, not a widget), so it's what default_checked restores from —
@@ -2771,8 +2803,11 @@ def _build_project_save_dict() -> dict:
         data["ramp_range"] = list(st.session_state["ramp_range"])
 
     # {video_id: (start, end)} -> {video_id: [start, end]}
+    # {video_id: (start, end) | None} -> {video_id: [start, end] | None}
+    # Overrides only — library ranges live in library_meta.json. None = "full video".
     data["video_time_ranges"] = {
-        vid: list(rng) for vid, rng in st.session_state.get("video_time_ranges", {}).items()
+        vid: (list(rng) if rng else None)
+        for vid, rng in st.session_state.get("video_time_ranges", {}).items()
     }
 
     # {int: [pick dict, ...]} -> {str(int): [...]} (pick dicts are already JSON-safe)
@@ -2833,7 +2868,7 @@ def _apply_project_load_dict(data: dict) -> list:
 
     try:
         st.session_state["video_time_ranges"] = {
-            vid: tuple(rng) for vid, rng in data.get("video_time_ranges", {}).items()
+            vid: (tuple(rng) if rng else None) for vid, rng in data.get("video_time_ranges", {}).items()
         }
     except (TypeError, ValueError):
         warnings.append("Couldn't restore video time ranges — left at their current values.")
@@ -3187,9 +3222,12 @@ sequential_mode = st.sidebar.checkbox(
          "interleave freely around them.",
 )
 
+_n_lib_ranges = len(library_ranges())
+if _n_lib_ranges:
+    st.sidebar.caption(f"📚 {_n_lib_ranges} video(s) have a Media Library range.")
 if st.session_state["video_time_ranges"]:
-    st.sidebar.caption(f"{len(st.session_state['video_time_ranges'])} video(s) restricted to a custom time range.")
-    if st.sidebar.button("Reset all video ranges"):
+    st.sidebar.caption(f"🎚️ {len(st.session_state['video_time_ranges'])} video(s) have a range set for this project.")
+    if st.sidebar.button("Reset project ranges (back to library ranges)"):
         st.session_state["video_time_ranges"] = {}
         st.rerun()
 
@@ -3435,7 +3473,7 @@ if st.sidebar.button("Reset manual clip overrides"):
 if st.session_state["global_excluded_scenes"]:
     st.sidebar.caption(f"{len(st.session_state['global_excluded_scenes'])} clip(s) permanently rejected from this plan.")
 
-queues = build_footage_queues(tuple(selected_videos), tuple(tag_filter), st.session_state["video_time_ranges"])
+queues = build_footage_queues(tuple(selected_videos), tuple(tag_filter), effective_time_ranges())
 if not queues:
     st.warning("No candidate scenes available for the selected videos/tags.")
     st.stop()
@@ -4493,7 +4531,7 @@ export_plan = {
     },
     "sequential_video_order": sequential_mode,
     "globally_rejected_clips": [list(k) for k in st.session_state["global_excluded_scenes"]],
-    "video_time_ranges": {k: list(v) for k, v in st.session_state["video_time_ranges"].items()},
+    "video_time_ranges": {k: list(v) for k, v in effective_time_ranges().items()},
     "tag_filter": tag_filter,
     "selected_videos": selected_videos,
     "split_screen_enabled": split_screen_enabled,

@@ -8,7 +8,8 @@ from pathlib import Path
 import streamlit as st
 
 from config import CATALOGUE_DIR
-from library_common import scene_tags, read_pending, mark_pending, push_pending
+from library_common import (scene_tags, read_pending, mark_pending, push_pending,
+                            library_ranges, tc_to_seconds, format_mmss, overlap_with_range)
 
 
 def load_labels() -> list:
@@ -67,6 +68,11 @@ st.sidebar.header("Process a video")
 st.sidebar.link_button("▶️ Open Google Colab", "https://colab.research.google.com", use_container_width=True)
 st.sidebar.divider()
 review_mode = st.sidebar.checkbox("Review / correction mode", value=False)
+use_library_range = st.sidebar.toggle(
+    "Use library range", value=True,
+    help="Only show scenes inside the video's Media Library time range. "
+         "Turn off to see every scene in the original video.",
+)
 st.sidebar.divider()
 
 # Drive connect
@@ -175,6 +181,17 @@ else:
     reviewed_count = sum(1 for s in data["scenes"] if s.get("reviewed"))
     st.caption(f"Source: {data['source_path']}  |  {len(data['scenes'])} scenes  |  {reviewed_count} reviewed")
 
+    lib_range = library_ranges().get(data["video_id"]) if use_library_range else None
+    if lib_range:
+        _outside = sum(
+            1 for s in data["scenes"]
+            if overlap_with_range(tc_to_seconds(s["start_tc"]), tc_to_seconds(s["end_tc"]), lib_range)[0] is None
+        )
+        st.info(f"📚 Showing the library range {format_mmss(lib_range[0])}–{format_mmss(lib_range[1])}"
+                + (f" — {_outside} scene(s) outside it are hidden." if _outside else "."))
+    elif use_library_range:
+        st.caption("No library range set for this video — showing every scene.")
+
     tag_filter = st.text_input("Filter by tag (optional)")
     filter_cols = st.columns(2)
     with filter_cols[0]:
@@ -184,6 +201,14 @@ else:
 
     for scene in data["scenes"]:
         current_tags = scene_tags(scene)
+        trimmed_to = None
+        if lib_range:
+            _s, _e = tc_to_seconds(scene["start_tc"]), tc_to_seconds(scene["end_tc"])
+            _eff_s, _eff_e = overlap_with_range(_s, _e, lib_range)
+            if _eff_s is None:
+                continue
+            if (_eff_s, _eff_e) != (_s, _e):
+                trimmed_to = (_eff_s, _eff_e)
         if tag_filter and tag_filter.lower() not in [t.lower() for t in current_tags]:
             continue
         if show_only_excluded and not scene.get("excluded"):
@@ -199,6 +224,8 @@ else:
                     st.image(str(thumb_path), width=280)
                 else:
                     st.warning(f"Thumbnail not found: {thumb_path}")
+            if trimmed_to:
+                st.warning(f"✂️ Trimmed by library range — uses {format_mmss(trimmed_to[0])}–{format_mmss(trimmed_to[1])}")
             if scene.get("reviewed"):
                 st.success("✓ Reviewed")
             if scene.get("excluded"):
