@@ -108,6 +108,8 @@ def build_sprite(video_path: str, sprite_path: Path) -> dict:
 for cat_file in tqdm(catalogue_files, desc="Videos"):
     with open(cat_file) as f:
         catalogue = json.load(f)
+    if not (isinstance(catalogue, dict) and "video_id" in catalogue and "scenes" in catalogue):
+        continue  # not a video catalogue (labels.json, library_meta.json, ...)
 
     video_id = catalogue["video_id"]
     sprite_path = SPRITE_DIR / f"{video_id}.jpg"

@@ -161,6 +161,8 @@ def load_all_catalogues() -> dict:
             continue
         with open(cat_file) as f:
             cat = json.load(f)
+        if not (isinstance(cat, dict) and "video_id" in cat and "scenes" in cat):
+            continue  # not a video catalogue (labels.json, library_meta.json, ...)
         for scene in cat["scenes"]:
             scene.pop("motion_curve", None)
         catalogues[cat["video_id"]] = cat

@@ -8,7 +8,7 @@ from pathlib import Path
 import streamlit as st
 
 from config import CATALOGUE_DIR
-from library_common import scene_tags
+from library_common import scene_tags, read_pending, mark_pending, push_pending
 
 
 def load_labels() -> list:
@@ -31,11 +31,6 @@ except ImportError:
 
 OUTPUT_DIR = CATALOGUE_DIR
 
-# Catalogues edited here but not yet uploaded to Drive (persisted so a page reload
-# or restart doesn't lose track of them).
-PENDING_FILE = OUTPUT_DIR / ".pending_push.txt"
-
-
 def list_catalogue_files():
     """Only real video catalogues (dicts with video_id + scenes); skips labels.json etc."""
     files = []
@@ -48,19 +43,6 @@ def list_catalogue_files():
             files.append(f)
     return files
 
-
-def read_pending() -> set:
-    try:
-        return {l.strip() for l in PENDING_FILE.read_text().splitlines() if l.strip()}
-    except Exception:
-        return set()
-
-
-def write_pending(ids: set) -> None:
-    if ids:
-        PENDING_FILE.write_text("\n".join(sorted(ids)))
-    elif PENDING_FILE.exists():
-        PENDING_FILE.unlink()
 
 st.set_page_config(page_title="Reviewer", layout="wide")
 
@@ -138,20 +120,11 @@ if st.sidebar.button("Add label") and new_label:
 # ---------------------------------------------------------------------------
 _pending = read_pending()
 if _pending:
-    st.sidebar.warning(f"{len(_pending)} catalogue(s) have edits not yet saved to Google Drive.")
+    st.sidebar.warning(f"{len(_pending)} file(s) have edits not yet saved to Google Drive.")
     if not _OAUTH_AVAILABLE or not st.session_state.get(_OAUTH_SESSION_KEY):
         st.sidebar.caption("Connect Google Drive (above) to save them.")
     elif st.sidebar.button("☁️ Save edits to Drive"):
-        _failed = {}
-        for _vid in sorted(_pending):
-            _err = push_file_with_oauth(
-                st.session_state[_OAUTH_SESSION_KEY],
-                OUTPUT_DIR / f"{_vid}.json",
-                "scene-labeling/catalogue",
-            )
-            if _err:
-                _failed[_vid] = _err
-        write_pending(set(_failed))
+        _failed = push_pending(st.session_state[_OAUTH_SESSION_KEY])
         if _failed:
             for _vid, _err in _failed.items():
                 st.sidebar.error(f"{_vid}: {_err}")
@@ -282,7 +255,7 @@ else:
                     scene["intro_candidate"] = intro_candidate
                     scene["outro_candidate"] = outro_candidate
                     cat_path.write_text(json.dumps(data, indent=2))
-                    write_pending(read_pending() | {cat_path.stem})
+                    mark_pending(cat_path.stem)
                     st.cache_data.clear()  # so the Compilation Planner sees the change straight away
                     st.success("Saved.")
                     st.rerun()

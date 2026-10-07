@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 from PIL import Image
 
 from render_preview import render_plan_dict, colab_to_local
-from library_common import scene_tags
+from library_common import scene_tags, render_range_picker
 
 # st.fragment (Streamlit 1.37+; was st.experimental_fragment in 1.33-1.36) lets
 # part of the page rerun on its own instead of the whole script re-executing on
@@ -1777,51 +1777,19 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
 
         if st.session_state["show_range_picker"].get(video_id):
             with st.container(border=True):
-                source_path = colab_to_local(catalogues[video_id]["source_path"])
-                if Path(source_path).exists():
-                    st.video(source_path)
-                else:
-                    st.warning(f"Source video not found locally: {source_path}")
-                    _raw_src = catalogues[video_id]["source_path"]
-                    if _DRIVE_SYNC_AVAILABLE and "MyDrive/" in _raw_src:
-                        if st.button("⬇️ Download this video from Google Drive",
-                                     key=f"dl_src_{video_id}"):
-                            _bar = st.progress(0.0, text="Downloading from Google Drive...")
-                            _err = download_source_video(
-                                _raw_src.split("MyDrive/", 1)[1], Path(source_path),
-                                progress_callback=lambda p: _bar.progress(min(p, 1.0)),
-                            )
-                            if _err:
-                                st.error(f"Download failed: {_err}")
-                            else:
-                                rerun_fragment()
-
-                slider_key = f"range_slider_{video_id}"
-                if st.button("🎯 Auto Range (match audio length, highest motion)", key=f"auto_range_{video_id}"):
-                    best_start, best_end = find_best_motion_window(video_id, track["duration_sec"])
-                    st.session_state[slider_key] = (seconds_to_time(best_start), seconds_to_time(best_end))
-                    rerun_fragment()
-
-                default_range = current_range or (0.0, duration)
-                new_range_t = st.slider(
-                    f"Usable range for {video_id}",
-                    min_value=seconds_to_time(0), max_value=seconds_to_time(max(duration, 1.0)),
-                    value=(seconds_to_time(default_range[0]), seconds_to_time(default_range[1])),
-                    step=datetime.timedelta(seconds=1), format="mm:ss",
-                    key=slider_key,
+                _action = render_range_picker(
+                    video_id, catalogues[video_id]["source_path"], duration, current_range,
+                    key="range", rerun=rerun_fragment,
+                    suggestions=[("🎯 Auto Range (match audio length, highest motion)",
+                                  lambda: find_best_motion_window(video_id, track["duration_sec"]))],
                 )
-
-                btn_cols = st.columns(2)
-                with btn_cols[0]:
-                    if st.button("Apply range", key=f"apply_range_{video_id}"):
-                        st.session_state["video_time_ranges"][video_id] = (
-                            time_to_seconds(new_range_t[0]), time_to_seconds(new_range_t[1])
-                        )
-                        rerun_fragment()
-                with btn_cols[1]:
-                    if st.button("Clear (use full video)", key=f"clear_range_{video_id}"):
+                if _action:
+                    _kind, _rng = _action
+                    if _kind == "apply":
+                        st.session_state["video_time_ranges"][video_id] = _rng
+                    else:
                         st.session_state["video_time_ranges"].pop(video_id, None)
-                        rerun_fragment()
+                    rerun_fragment()
 
     # committed_selected_videos is what actually survives a round trip to another section
     # (plain session_state, not a widget), so it's what default_checked restores from —

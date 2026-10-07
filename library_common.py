@@ -1,7 +1,33 @@
 """
-Helpers shared by the Media Library, Reviewer and Compilation Planner pages.
+Helpers shared by the Media Library, Reviewer and Compilation Planner pages:
+scene tags, time formatting, the library's per-video time ranges
+(library_meta.json), the "edits not yet saved to Drive" list, and the
+range-picker widget.
 """
 
+import datetime
+import json
+import os
+from pathlib import Path
+
+import streamlit as st
+
+from config import CATALOGUE_DIR
+
+# Lives next to the video catalogues so it syncs with them (drive_sync.sync_pull
+# pulls everything in scene-labeling/catalogue, and never overwrites a local copy
+# that's newer than Drive's). Shape: {video_id: {"range": [start_sec, end_sec]}}
+LIBRARY_META_FILE = CATALOGUE_DIR / "library_meta.json"
+LIBRARY_META_STEM = LIBRARY_META_FILE.stem
+
+# Files in CATALOGUE_DIR edited here but not yet uploaded to Drive, by stem
+# (persisted so a page reload or restart doesn't lose track of them).
+PENDING_FILE = CATALOGUE_DIR / ".pending_push.txt"
+
+
+# ---------------------------------------------------------------------------
+# Tags and time
+# ---------------------------------------------------------------------------
 
 def scene_tags(scene: dict) -> list:
     """The tags to use for a scene: the Reviewer's corrected_tags when the scene
@@ -10,3 +36,202 @@ def scene_tags(scene: dict) -> list:
     if "corrected_tags" in scene and scene["corrected_tags"] is not None:
         return list(scene["corrected_tags"])
     return list(scene.get("tags", []))
+
+
+def tc_to_seconds(tc: str) -> float:
+    h, m, s = tc.split(":")
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+
+def seconds_to_time(sec: float) -> datetime.time:
+    sec = max(0, int(round(sec)))
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    return datetime.time(hour=min(h, 23), minute=m, second=s)
+
+
+def time_to_seconds(t: datetime.time) -> float:
+    return t.hour * 3600 + t.minute * 60 + t.second
+
+
+def format_mmss(sec: float) -> str:
+    sec = max(0, int(round(sec)))
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def overlap_with_range(scene_start: float, scene_end: float, time_range) -> tuple:
+    """Intersect a scene's [start, end] with an optional (start, end) restriction.
+    Returns (effective_start, effective_end) or (None, None) if no overlap."""
+    if not time_range:
+        return scene_start, scene_end
+    r_start, r_end = time_range
+    eff_start, eff_end = max(scene_start, r_start), min(scene_end, r_end)
+    if eff_end <= eff_start:
+        return None, None
+    return eff_start, eff_end
+
+
+# ---------------------------------------------------------------------------
+# Library metadata (library_meta.json)
+# ---------------------------------------------------------------------------
+
+def load_library_meta() -> dict:
+    """Small file, read fresh each time so every page sees the latest edits."""
+    try:
+        data = json.loads(LIBRARY_META_FILE.read_text())
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, ValueError, OSError):
+        return {}
+
+
+def save_library_meta(meta: dict) -> None:
+    """Write atomically and remember it still needs pushing to Drive."""
+    LIBRARY_META_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = LIBRARY_META_FILE.with_name(LIBRARY_META_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(meta, indent=2, sort_keys=True))
+    os.replace(tmp, LIBRARY_META_FILE)
+    mark_pending(LIBRARY_META_STEM)
+
+
+def library_ranges() -> dict:
+    """{video_id: (start_sec, end_sec)} for every video with a library range."""
+    out = {}
+    for vid, entry in load_library_meta().items():
+        rng = entry.get("range") if isinstance(entry, dict) else None
+        try:
+            if rng and len(rng) == 2 and float(rng[1]) > float(rng[0]):
+                out[vid] = (float(rng[0]), float(rng[1]))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def set_library_range(video_id: str, time_range) -> None:
+    """Set (start, end) as this video's library range, or None to remove it."""
+    meta = load_library_meta()
+    entry = meta.get(video_id) if isinstance(meta.get(video_id), dict) else {}
+    if time_range is None:
+        entry.pop("range", None)
+    else:
+        entry["range"] = [round(float(time_range[0]), 3), round(float(time_range[1]), 3)]
+    if entry:
+        meta[video_id] = entry
+    else:
+        meta.pop(video_id, None)
+    save_library_meta(meta)
+
+
+# ---------------------------------------------------------------------------
+# Edits not yet pushed to Drive
+# ---------------------------------------------------------------------------
+
+def read_pending() -> set:
+    try:
+        return {l.strip() for l in PENDING_FILE.read_text().splitlines() if l.strip()}
+    except Exception:
+        return set()
+
+
+def write_pending(stems: set) -> None:
+    if stems:
+        PENDING_FILE.write_text("\n".join(sorted(stems)))
+    elif PENDING_FILE.exists():
+        PENDING_FILE.unlink()
+
+
+def mark_pending(stem: str) -> None:
+    write_pending(read_pending() | {stem})
+
+
+def push_pending(token: dict) -> dict:
+    """Upload every pending file in CATALOGUE_DIR to scene-labeling/catalogue.
+    Returns {stem: error} for any that failed (those stay pending)."""
+    from drive_oauth import push_file_with_oauth
+    failed = {}
+    for stem in sorted(read_pending()):
+        path = CATALOGUE_DIR / f"{stem}.json"
+        if not path.exists():
+            continue  # nothing to push any more
+        err = push_file_with_oauth(token, path, "scene-labeling/catalogue")
+        if err:
+            failed[stem] = err
+    write_pending(set(failed))
+    return failed
+
+
+# ---------------------------------------------------------------------------
+# Range picker widget
+# ---------------------------------------------------------------------------
+
+def _drive_sync_available() -> bool:
+    try:
+        from drive_sync import credentials_available
+        return credentials_available()
+    except ImportError:
+        return False
+
+
+def render_range_picker(video_id: str, source_path: str, duration: float, current_range,
+                        *, key: str, suggestions=(), rerun=None,
+                        apply_label: str = "Apply range",
+                        clear_label: str = "Clear (use full video)",
+                        slider_label: str = None):
+    """Video player + range slider + Apply/Clear. Used by the Media Library and
+    the Compilation Planner so both work the same way.
+
+    source_path: the catalogue's raw source_path (converted to a local path here).
+    current_range: (start, end) the slider starts from, or None for the full video.
+    key: prefix for widget keys, so two pickers for the same video never clash.
+    suggestions: [(button_label, fn)] — fn() returns (start, end) to put on the slider.
+    rerun: called after a suggestion or download (st.rerun by default; the planner
+        passes its fragment-scoped rerun).
+
+    Returns ("apply", (start, end)), ("clear", None) or None when nothing was clicked.
+    """
+    from render_preview import colab_to_local
+    rerun = rerun or st.rerun
+
+    local_path = colab_to_local(source_path)
+    if Path(local_path).exists():
+        st.video(local_path)
+    else:
+        st.warning(f"Source video not found locally: {local_path}")
+        if _drive_sync_available() and "MyDrive/" in source_path:
+            if st.button("⬇️ Download this video from Google Drive", key=f"{key}_dl_{video_id}"):
+                from drive_sync import download_source_video
+                bar = st.progress(0.0, text="Downloading from Google Drive...")
+                err = download_source_video(
+                    source_path.split("MyDrive/", 1)[1], Path(local_path),
+                    progress_callback=lambda p: bar.progress(min(p, 1.0)),
+                )
+                if err:
+                    st.error(f"Download failed: {err}")
+                else:
+                    rerun()
+
+    slider_key = f"{key}_slider_{video_id}"
+    for i, (label, fn) in enumerate(suggestions):
+        if st.button(label, key=f"{key}_suggest{i}_{video_id}"):
+            s, e = fn()
+            st.session_state[slider_key] = (seconds_to_time(s), seconds_to_time(e))
+            rerun()
+
+    default_range = current_range or (0.0, duration)
+    new_range_t = st.slider(
+        slider_label or f"Usable range for {video_id}",
+        min_value=seconds_to_time(0), max_value=seconds_to_time(max(duration, 1.0)),
+        value=(seconds_to_time(default_range[0]), seconds_to_time(default_range[1])),
+        step=datetime.timedelta(seconds=1), format="mm:ss",
+        key=slider_key,
+    )
+
+    btn_cols = st.columns(2)
+    with btn_cols[0]:
+        if st.button(apply_label, key=f"{key}_apply_{video_id}", type="primary"):
+            return "apply", (time_to_seconds(new_range_t[0]), time_to_seconds(new_range_t[1]))
+    with btn_cols[1]:
+        if st.button(clear_label, key=f"{key}_clear_{video_id}"):
+            return "clear", None
+    return None
