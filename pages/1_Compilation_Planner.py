@@ -17,7 +17,8 @@ import plotly.graph_objects as go
 from PIL import Image
 
 from render_preview import render_plan_dict, colab_to_local
-from library_common import scene_tags, render_range_picker, library_ranges
+from library_common import (scene_tags, render_range_picker, library_ranges,
+                            render_sync_status, refresh_caches_after_sync)
 
 # st.fragment (Streamlit 1.37+; was st.experimental_fragment in 1.33-1.36) lets
 # part of the page rerun on its own instead of the whole script re-executing on
@@ -94,6 +95,9 @@ if st.user.email not in WHITELISTED_EMAILS:
 
 st.title("Compilation Planner")
 st.caption(f"v{APP_VERSION}  ·  {st.user.name}")
+# The background Drive sync timer may have pulled new catalogues/audio since
+# the caches were filled — reload them once if so.
+refresh_caches_after_sync()
 if st.sidebar.button("Sign out", key="signout_btn"):
     st.logout()
 
@@ -3133,9 +3137,10 @@ if st.session_state.get("track_id") not in tracks:
 
 
 if _DRIVE_SYNC_AVAILABLE:
+    render_sync_status()
     with st.sidebar.expander("☁️ Sync from Google Drive", expanded=False):
-        st.caption("Pull latest catalogues, audio, thumbnails and sprites from Drive to the server. "
-                   "Run after processing new videos or audio in Colab.")
+        st.caption("Catalogues, audio, thumbnails and sprites sync from Drive automatically every "
+                   "few minutes. Use this to pull straight away after processing in Colab.")
         if st.button("🔄 Sync now", key="drive_sync_btn", use_container_width=True):
             sync_progress = st.progress(0.0, text="Starting sync…")
             sync_errors = []
@@ -3146,9 +3151,12 @@ if _DRIVE_SYNC_AVAILABLE:
                     text=f"Syncing {name}…"
                 )
 
-            result = sync_pull(CATALOGUE_DIR, AUDIO_DIR, _sync_progress)
+            from auto_sync import run_sync
+            result = run_sync(_sync_progress)
             sync_progress.progress(1.0, text="Done.")
-            if result["errors"]:
+            if result.get("busy"):
+                st.info("A background sync is running right now — try again in a minute.")
+            elif result["errors"]:
                 for err in result["errors"][:5]:
                     st.error(err)
                 st.warning("Some files failed — check Drive sharing if errors persist.")

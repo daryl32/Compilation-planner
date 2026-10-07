@@ -8,7 +8,7 @@ from pathlib import Path
 import streamlit as st
 
 from config import CATALOGUE_DIR
-from library_common import (scene_tags, read_pending, mark_pending, push_pending,
+from library_common import (render_sync_status, scene_tags, read_pending, mark_pending, push_pending,
                             library_ranges, tc_to_seconds, format_mmss, overlap_with_range)
 
 
@@ -64,6 +64,10 @@ st.title("Reviewer")
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
+try:
+    render_sync_status()
+except Exception:
+    pass  # status is informational only
 st.sidebar.header("Process a video")
 st.sidebar.link_button("▶️ Open Google Colab", "https://colab.research.google.com", use_container_width=True)
 st.sidebar.divider()

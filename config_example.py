@@ -35,3 +35,9 @@ PROJECTS_DIR  = _BASE / "projects"
 WHITELISTED_EMAILS = [
     "your@email.com",
 ]
+
+# ---------------------------------------------------------------------------
+# Optional: where fast 480p preview copies of source videos are kept
+# (default: a "proxies" folder next to CATALOGUE_DIR)
+# ---------------------------------------------------------------------------
+# PROXY_DIR = _BASE / "proxies"

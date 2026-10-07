@@ -8,11 +8,20 @@ range-picker widget.
 import datetime
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import streamlit as st
 
+import config
 from config import CATALOGUE_DIR
+
+# Small 480p copies of the source videos, used by the range picker so scrubbing
+# is fast and the server doesn't load multi-GB originals into memory. Same
+# timeline as the source (nothing trimmed), so range times match exactly.
+# Set PROXY_DIR in config.py to put them elsewhere.
+PROXY_DIR = getattr(config, "PROXY_DIR", CATALOGUE_DIR.parent / "proxies")
+PROXY_HEIGHT = 480
 
 # Lives next to the video catalogues so it syncs with them (drive_sync.sync_pull
 # pulls everything in scene-labeling/catalogue, and never overwrites a local copy
@@ -162,6 +171,103 @@ def push_pending(token: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Fast preview copies (proxies)
+# ---------------------------------------------------------------------------
+
+def proxy_path(video_id: str) -> Path:
+    return PROXY_DIR / f"{video_id}.mp4"
+
+
+def make_proxy(source: Path, dest: Path, height: int = PROXY_HEIGHT) -> str | None:
+    """Encode a small H.264 copy of source at dest (never upscales).
+    Returns None on success, an error string on failure."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.stem + ".part.mp4")
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(source),
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf", f"scale=-2:'min({height},ih)'",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "96k", "-ac", "2",
+        "-movflags", "+faststart",
+        str(tmp),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        return "ffmpeg not found on PATH"
+    if proc.returncode != 0:
+        tmp.unlink(missing_ok=True)
+        return (proc.stderr or "ffmpeg failed").strip()[-500:]
+    os.replace(tmp, dest)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Drive sync status
+# ---------------------------------------------------------------------------
+
+def _ago(iso: str) -> tuple:
+    """('3 min ago', age_in_minutes) for an ISO timestamp."""
+    then = datetime.datetime.fromisoformat(iso)
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=datetime.timezone.utc)
+    mins = (datetime.datetime.now(datetime.timezone.utc) - then).total_seconds() / 60
+    if mins < 1:
+        text = "just now"
+    elif mins < 60:
+        text = f"{int(mins)} min ago"
+    elif mins < 48 * 60:
+        text = f"{mins / 60:.0f} h ago"
+    else:
+        text = f"{mins / 1440:.0f} days ago"
+    return text, mins
+
+
+def render_sync_status() -> None:
+    """One sidebar line: when Drive was last synced, and whether it had errors."""
+    from auto_sync import read_sync_status
+    status = read_sync_status()
+    if not status.get("finished_at"):
+        return
+    try:
+        text, mins = _ago(status["finished_at"])
+    except ValueError:
+        return
+    errors = status.get("errors") or []
+    if errors:
+        st.sidebar.warning(f"☁️ Drive sync {text} had {len(errors)} error(s): {errors[0]}")
+    elif mins > 30:
+        st.sidebar.warning(f"☁️ Drive last synced {text} — is the sync timer running?")
+    else:
+        st.sidebar.caption(f"☁️ Drive synced {text}")
+
+
+@st.cache_resource
+def _sync_seen() -> dict:
+    """Process-wide (shared by every session): the last sync change already
+    reflected in the caches."""
+    return {"changed_at": None}
+
+
+def refresh_caches_after_sync(*cached_functions) -> None:
+    """Clear these st.cache_data functions (all of st.cache_data if none are given)
+    once after each sync that actually downloaded something, so the background
+    timer's changes show up without anyone pressing a button."""
+    from auto_sync import read_sync_status
+    changed = read_sync_status().get("changed_at")
+    seen = _sync_seen()
+    if changed and changed != seen["changed_at"]:
+        if cached_functions:
+            for fn in cached_functions:
+                fn.clear()
+        else:
+            st.cache_data.clear()
+        seen["changed_at"] = changed
+
+
+# ---------------------------------------------------------------------------
 # Range picker widget
 # ---------------------------------------------------------------------------
 
@@ -194,8 +300,21 @@ def render_range_picker(video_id: str, source_path: str, duration: float, curren
     rerun = rerun or st.rerun
 
     local_path = colab_to_local(source_path)
-    if Path(local_path).exists():
+    proxy = proxy_path(video_id)
+    if proxy.exists():
+        st.video(str(proxy))
+        st.caption("⚡ Fast preview copy")
+    elif Path(local_path).exists():
         st.video(local_path)
+        if st.button("⚡ Make a fast preview copy", key=f"{key}_proxy_{video_id}",
+                     help="Encodes a small 480p copy so this player loads and scrubs quickly. "
+                          "Takes a few minutes for a long video."):
+            with st.spinner("Encoding preview copy…"):
+                err = make_proxy(Path(local_path), proxy)
+            if err:
+                st.error(f"Couldn't make the preview copy: {err}")
+            else:
+                rerun()
     else:
         st.warning(f"Source video not found locally: {local_path}")
         if _drive_sync_available() and "MyDrive/" in source_path:

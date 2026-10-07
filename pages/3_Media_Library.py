@@ -13,6 +13,7 @@ import streamlit as st
 
 from config import CATALOGUE_DIR, AUDIO_DIR, WHITELISTED_EMAILS
 from library_common import (
+    render_sync_status,
     scene_tags, tc_to_seconds, format_mmss, overlap_with_range,
     library_ranges, set_library_range, read_pending, push_pending,
     render_range_picker,
@@ -168,6 +169,10 @@ if _OAUTH_AVAILABLE:
             st.markdown(f'<a href="{_auth_url}" target="_self">🔗 Connect Google Drive</a>',
                         unsafe_allow_html=True)
 
+try:
+    render_sync_status()
+except Exception:
+    pass  # status is informational only
 _pending = read_pending()
 if _pending:
     st.sidebar.warning(f"{len(_pending)} file(s) have edits not yet saved to Google Drive.")
