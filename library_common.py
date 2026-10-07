@@ -20,7 +20,7 @@ from config import CATALOGUE_DIR
 # is fast and the server doesn't load multi-GB originals into memory. Same
 # timeline as the source (nothing trimmed), so range times match exactly.
 # Set PROXY_DIR in config.py to put them elsewhere.
-PROXY_DIR = getattr(config, "PROXY_DIR", CATALOGUE_DIR.parent / "proxies")
+from auto_sync import PROXY_DIR  # noqa: E402  (one definition, shared with the sync)
 PROXY_HEIGHT = 480
 
 # Lives next to the video catalogues so it syncs with them (drive_sync.sync_pull

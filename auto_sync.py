@@ -13,7 +13,13 @@ import os
 import sys
 from pathlib import Path
 
+import config
 from config import CATALOGUE_DIR, AUDIO_DIR
+
+# Fast 480p preview copies of the source videos. Made in Colab
+# ("backfill proxies.py") into scene-labeling/proxies on Drive and pulled here
+# by the sync. Set PROXY_DIR in config.py to put them elsewhere.
+PROXY_DIR = getattr(config, "PROXY_DIR", CATALOGUE_DIR.parent / "proxies")
 
 # Dot-files, so the catalogue globs ("*.json") never pick them up.
 STATUS_FILE = CATALOGUE_DIR / ".last_sync.json"
@@ -60,7 +66,7 @@ def run_sync(progress_callback=None) -> dict:
 
         previous = read_sync_status()
         try:
-            result = sync_pull(CATALOGUE_DIR, AUDIO_DIR, progress_callback)
+            result = sync_pull(CATALOGUE_DIR, AUDIO_DIR, progress_callback, proxy_dir=PROXY_DIR)
         except Exception as e:  # network down, credentials missing, ...
             result = {"synced": 0, "skipped": 0, "errors": [str(e)]}
 

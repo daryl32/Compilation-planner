@@ -133,9 +133,11 @@ def _local_is_newer(local_path: Path, drive_file: dict) -> bool:
         return False
 
 
-def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None) -> dict:
+def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None,
+              proxy_dir: Path = None) -> dict:
     """
-    Pull catalogue JSONs, audio JSONs, thumbnails and sprites from Drive to server.
+    Pull catalogue JSONs, audio JSONs, thumbnails and sprites from Drive to server,
+    plus preview copies (scene-labeling/proxies) into proxy_dir if given.
     Only downloads files that are newer on Drive or missing locally.
     Returns {"synced": N, "skipped": N, "errors": [str]}
     """
@@ -169,6 +171,14 @@ def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None) -> d
         if sprite_id:
             for f in _list_files(service, sprite_id):
                 tasks.append((f, catalogue_dir / "timeline_sprites" / f["name"]))
+
+    # preview copies made in Colab (backfill proxies.py)
+    if proxy_dir is not None:
+        proxies_id = _find_folder(service, "proxies", scene_id)
+        if proxies_id:
+            for f in _list_files(service, proxies_id):
+                if f["name"].endswith(".mp4") and ".part" not in f["name"]:
+                    tasks.append((f, proxy_dir / f["name"]))
 
     # audio_catalogue JSONs
     audio_folder_id = _find_folder(service, "audio_catalogue", scene_id)

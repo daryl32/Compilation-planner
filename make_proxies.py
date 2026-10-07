@@ -2,8 +2,11 @@
 Make fast 480p preview copies (proxies) of the library's source videos, used
 by the range picker in the Media Library and Compilation Planner.
 
-Skips videos whose proxy is already up to date. Run nightly by the
-mediaplanner-proxies systemd timer (see deploy/), or by hand:
+New videos normally get their proxy in Colab ("backfill proxies.py"), which
+the Drive sync then pulls down — this server-side script is the fallback for
+videos whose original is already on the server. Skips videos whose proxy is
+already up to date. Run nightly by the mediaplanner-proxies systemd timer
+(see deploy/), or by hand:
 
     python make_proxies.py                   # every video whose source is on this machine
     python make_proxies.py --download        # also download missing sources from Drive first
