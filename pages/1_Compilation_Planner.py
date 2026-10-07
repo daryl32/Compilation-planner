@@ -453,7 +453,7 @@ def _make_interp_matrix(src_len: int, n_points: int) -> np.ndarray:
 
 
 def find_best_shape_window(values: np.ndarray, window_frames: int, audio_curve: np.ndarray,
-                           n_points: int = SHAPE_MATCH_POINTS) -> tuple:
+                           n_points: int = SHAPE_MATCH_POINTS, bias=None) -> tuple:
     """Vectorized replacement for sliding shape_score() across every
     candidate start position one at a time: resamples EVERY window in a
     single matrix multiply and scores them all in one batched correlation,
@@ -482,7 +482,13 @@ def find_best_shape_window(values: np.ndarray, window_frames: int, audio_curve: 
         scores = np.where((row_std > 1e-9) & (audio_std > 1e-9),
                           numerator / (n_points * row_std * audio_std), 0.0)
 
-    best_idx = int(np.argmax(scores))
+    # bias (optional, one value per start position): added only when CHOOSING the
+    # position — e.g. weight F's pull toward a target part of the video — while
+    # the returned score stays the plain shape score.
+    if bias is not None and len(bias) == len(scores):
+        best_idx = int(np.argmax(scores + bias))
+    else:
+        best_idx = int(np.argmax(scores))
     return float(scores[best_idx]), best_idx
 
 
@@ -504,7 +510,8 @@ def get_block_audio_curve(track: dict, start_sec: float, end_sec: float) -> np.n
 def find_shape_candidates(
     segment: dict, queues: dict, sequential: bool, excluded_here: set, global_excluded: set,
     audio_curve: np.ndarray, max_matches: int, restrict_to_front: bool = False,
-    remaining_blocks: int = 1, weight_spread: float = 0.0,
+    remaining_blocks: int = 1, weight_position: float = 0.0,
+    position_targets: dict = None, weight_shape: float = 1.0,
 ) -> list[dict]:
     """For every currently-available span at least as long as this block,
     slide a window of the block's exact duration across EVERY frame position
@@ -525,10 +532,15 @@ def find_shape_candidates(
     automatically across every remaining block can silently leave later
     blocks with no footage left to pick from.
 
-    remaining_blocks / weight_spread: feed compute_skip_budget (see there) to
+    remaining_blocks / weight_position: feed compute_skip_budget (see there) to
     size that range — how many more block-length windows past the front this
     span's own surplus footage (relative to blocks still left overall) can
-    safely spare, scaled by weight D. 0 (the defaults) collapses to exactly
+    safely spare, scaled by weight F.
+
+    position_targets (from compute_position_targets) / weight_shape: when given
+    with weight_position > 0, the window chosen WITHIN that budgeted range is
+    pulled toward the video's target part (weight F) as well as by shape —
+    F and A traded off in the same proportion the ranking itself uses. 0 (the defaults) collapses to exactly
     the front window, same as a hard restriction. The live candidate grid
     (manual review) always calls this with restrict_to_front's default
     False — skipping ahead there is a deliberate, informed choice, not
@@ -563,16 +575,26 @@ def find_shape_candidates(
             # the actual best-matching position WITHIN that budgeted range
             # properly (needed for weight A / reporting).
             available_windows = max(1, int(span["remaining_sec"] // block_duration))
-            skip_budget = compute_skip_budget(available_windows, remaining_blocks, weight_spread)
+            skip_budget = compute_skip_budget(available_windows, remaining_blocks, weight_position)
             search_end_frame = min(span_end_frame, span_start_frame + (skip_budget + 1) * window_frames)
         else:
             search_end_frame = span_end_frame
+
+        bias = None
+        target = (position_targets or {}).get(span["video_id"])
+        if restrict_to_front and sequential and weight_position > 0 and target:
+            n_pos = (search_end_frame - span_start_frame) - window_frames + 1
+            if n_pos > 1:
+                mids = (span["scene_start_sec"]
+                        + (span_start_frame + np.arange(n_pos)) / fps + block_duration / 2)
+                closeness = np.clip(1.0 - np.abs(mids - target[0]) / (2 * target[1]), 0.0, 1.0)
+                bias = (weight_position / max(weight_shape, 0.1)) * closeness
 
         # Vectorized: scores every frame position in the search range at once (see
         # find_best_shape_window), not just every SHAPE_SEARCH_STEP_SEC —
         # faster AND exhaustive rather than a speed/precision compromise.
         best_score, best_offset = find_best_shape_window(
-            values[span_start_frame:search_end_frame], window_frames, audio_curve
+            values[span_start_frame:search_end_frame], window_frames, audio_curve, bias=bias
         )
         best_start_frame = span_start_frame + best_offset
 
@@ -596,7 +618,7 @@ def find_shape_candidates(
     return results[:max_matches], missing_curve_videos
 
 
-def compute_skip_budget(available_windows: int, remaining_blocks: int, weight_spread: float) -> int:
+def compute_skip_budget(available_windows: int, remaining_blocks: int, weight_position: float) -> int:
     """How many windows past the frontmost an automatic sequential-mode pick
     is allowed to consider, instead of always being pinned to the very front.
 
@@ -608,20 +630,73 @@ def compute_skip_budget(available_windows: int, remaining_blocks: int, weight_sp
     what's left gets a surplus of 0, so it's pinned to the front exactly like
     before this existed.
 
-    weight D (spread) controls how much of that surplus is actually used —
-    0 means never skip ahead (the original, fully conservative behaviour);
-    the slider's own max means use the entire safety margin. This reuses D
-    rather than introducing a new weight because "how freely to roam across
-    a video's own footage" is the same underlying idea as "spread usage
-    across videos" — both are about not over-committing to the first option
-    directly in front of you.
+    weight F (spread through each video) controls how much of that surplus
+    is actually used — 0 means never skip ahead (the original, fully
+    conservative behaviour); the slider's own max means use the entire safety
+    margin. (This used to be part of weight D's job; F now owns everything
+    about WHERE within a video a pick comes from.)
 
     Returns the number of EXTRA windows beyond the frontmost that may be
     considered — 0 means restricted to just the front window, same as
     before; slice candidates with [: this + 1]."""
     surplus = max(0, available_windows - max(1, remaining_blocks))
-    power = max(0.0, min(1.0, weight_spread / 5.0))  # D's slider range is 0..5
+    power = max(0.0, min(1.0, weight_position / 5.0))  # F's slider range is 0..5
     return int(surplus * power)
+
+
+def compute_position_targets(current_block: int, n_blocks: int, confirmed: dict, queues: dict,
+                             videos_per_block: float = None) -> dict:
+    """Weight F (sequential mode): where in each video its NEXT use should
+    come from, so a video's uses spread beginning → middle → end across the
+    plan instead of bunching at its front.
+
+    Each video's usable footage (its effective time range — project override,
+    else Media Library range, else the whole video) is split into as many
+    equal parts as the video is expected to be used; use #k aims at the
+    centre of part k. Expected uses = clips per block (from blocks confirmed
+    so far, or videos_per_block before any are) × blocks ÷ videos in play,
+    never fewer than the uses already made + 1, so it self-corrects as the
+    plan fills in. A use = a block the video appears in (chain links within
+    one block count once).
+
+    Returns {video_id: (target_abs_sec, part_len_sec)}."""
+    used_blocks = {}
+    video_block_count = 0
+    for i in range(current_block):
+        vids_i = {p["video_id"] for p in confirmed.get(i, [])}
+        video_block_count += len(vids_i)
+        for v in vids_i:
+            used_blocks[v] = used_blocks.get(v, 0) + 1
+    if current_block > 0 and video_block_count:
+        per_block = video_block_count / current_block
+    else:
+        per_block = max(1.0, float(videos_per_block or 1))
+    n_videos = max(1, len(queues))
+    expected_uses = per_block * n_blocks / n_videos
+
+    ranges = effective_time_ranges()
+    targets = {}
+    for vid in queues:
+        r0, r1 = ranges.get(vid) or (0.0, get_video_duration(vid))
+        length = max(r1 - r0, 1e-6)
+        used = used_blocks.get(vid, 0)
+        n_parts = max(used + 1, int(round(expected_uses)), 1)
+        part_len = length / n_parts
+        targets[vid] = (r0 + (used + 0.5) * part_len, part_len)
+    return targets
+
+
+def position_closeness(c: dict, targets: dict, default_duration: float) -> float:
+    """Weight F's score for one candidate: 1.0 when the clip's midpoint is at
+    its video's target, falling to 0 two parts away (see
+    compute_position_targets). 0 when the video has no target."""
+    target = targets.get(c["video_id"])
+    if not target:
+        return 0.0
+    start = c.get("scene_start_sec", 0.0) + c.get("window_offset_sec", c.get("offset_sec", 0.0))
+    duration = c.get("window_duration_sec") or default_duration
+    mid = start + duration / 2
+    return max(0.0, 1.0 - abs(mid - target[0]) / (2 * target[1]))
 
 
 def _stable_random_unit(seed: int, *parts) -> float:
@@ -638,6 +713,7 @@ def rank_candidates_weighted(
     candidates: list, current_block: int, segments: list, confirmed: dict, queues: dict,
     prev_block_videos: set, weight_shape: float, weight_random: float,
     weight_repeat_penalty: float, weight_spread: float, weight_motion: float, random_seed: int,
+    weight_position: float = 0.0, sequential: bool = False, videos_per_block: float = None,
 ) -> list:
     """Re-ranks candidates by a blended score. Used by Manual step-through's
     Auto-fill button (candidates already found by the shape-score search; the
@@ -667,6 +743,9 @@ def rank_candidates_weighted(
        matches this block's intensity. 1.0 = perfect match, 0.0 = opposite
        end of the scale. Complementary to A (shape): A rewards the same
        PATTERN of rises/falls; E rewards the right overall LEVEL of activity.
+    F: sequential mode only — how close the clip sits to where this video's
+       next use should come from (see compute_position_targets), so each
+       video gets a beginning, middle and end. 0 outside sequential mode.
 
     Returns candidates sorted by combined score, descending. Does not
     mutate or reorder the input list itself."""
@@ -689,6 +768,10 @@ def rank_candidates_weighted(
     remaining_by_video = {vid: sum(span["remaining_sec"] for span in queues.get(vid, [])) for vid in video_ids}
     max_used = max(used_by_video.values(), default=0.0) or 1.0
     max_remaining = max(remaining_by_video.values(), default=0.0) or 1.0
+    position_targets = (
+        compute_position_targets(current_block, len(segments), confirmed, queues, videos_per_block)
+        if sequential and weight_position > 0 else {}
+    )
 
     scored = []
     for c in candidates:
@@ -708,8 +791,10 @@ def rank_candidates_weighted(
         # E: 1 - |clip motion_norm - block intensity|, clamped [0, 1]
         E = max(0.0, 1.0 - abs(c.get("motion_norm", 0.5) - block_intensity))
 
+        F = position_closeness(c, position_targets, curr_duration) if position_targets else 0.0
+
         combined = (weight_shape * A + weight_random * B + weight_repeat_penalty * C
-                    + weight_spread * D + weight_motion * E)
+                    + weight_spread * D + weight_motion * E + weight_position * F)
         scored.append((combined, c))
 
     scored.sort(key=lambda t: -t[0])
@@ -904,12 +989,13 @@ def render_choreography_block(
                     # the front of this video's remaining footage — fine for a deliberate
                     # manual pick via the dropdown, but automatic selection shouldn't
                     # freely roam the whole thing: carving a non-front window discards
-                    # everything before it. compute_skip_budget (weight D-controlled)
+                    # everything before it. compute_skip_budget (weight F-controlled)
                     # allows a FEW windows ahead when this video has spare footage
                     # relative to how many blocks are left, 0 extra when it doesn't.
                     if sequential_mode and weighting:
                         _remaining_blocks = len(weighting["segments"]) - seg_idx
-                        _skip = compute_skip_budget(len(clips), _remaining_blocks, weighting["weight_spread"])
+                        _skip = compute_skip_budget(len(clips), _remaining_blocks,
+                                                    weighting.get("weight_position", 0.0))
                         auto_candidates = clips[:_skip + 1]
                     elif sequential_mode:
                         auto_candidates = clips[:1]
@@ -921,6 +1007,8 @@ def render_choreography_block(
                             prev_block_videos, weighting["weight_shape"], weighting["weight_random"],
                             weighting["weight_repeat_penalty"], weighting["weight_spread"],
                             weighting["weight_motion"], weighting["seed"],
+                            weight_position=weighting.get("weight_position", 0.0),
+                            sequential=sequential_mode, videos_per_block=rec_count,
                         )
                         display_clip = ranked[0]
                     else:
@@ -1049,6 +1137,9 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                 autofill_weights["weight_random"], autofill_weights["weight_repeat_penalty"],
                 autofill_weights["weight_spread"], autofill_weights["weight_motion"],
                 autofill_weights["seed"],
+                weight_position=autofill_weights.get("weight_position", 0.0),
+                sequential=autofill_weights.get("sequential", False),
+                videos_per_block=recommended_count,
             )
             chosen_keys = {(c["video_id"], c["scene_id"]) for c in ranked[:recommended_count]}
             for c in candidates:
@@ -2505,16 +2596,35 @@ def fill_slot(seg_energy: float, needed_sec: float, queues: dict, sequential: bo
         candidates = preferred or [s for s in pool if (s["video_id"], s["scene_id"]) != last_used] or pool
 
         if weighting and not role_filter:
+            weight_position = weighting.get("weight_position", 0.0)
+            ranked_pool = candidates
+            if sequential and weight_position > 0:
+                # Weight F: also offer windows further into each video, as far as
+                # the same skip budget allows (compute_skip_budget) — picking one
+                # discards the footage before it, like any sequential skip.
+                remaining_blocks = len(weighting["segments"]) - weighting["seg_idx"]
+                ranked_pool = list(candidates)
+                for vid in {c["video_id"] for c in candidates}:
+                    windows = get_available_clips_for_video(queues, vid, remaining, sequential, global_excluded)
+                    skip = compute_skip_budget(len(windows), remaining_blocks, weight_position)
+                    for w in windows[1:skip + 1]:
+                        ranked_pool.append({**w, "_skip_window": True})
             ranked = rank_candidates_weighted(
-                candidates, weighting["seg_idx"], weighting["segments"], weighting["confirmed"],
+                ranked_pool, weighting["seg_idx"], weighting["segments"], weighting["confirmed"],
                 queues, weighting["prev_block_videos"], weighting["weight_shape"],
                 weighting["weight_random"], weighting["weight_repeat_penalty"],
                 weighting["weight_spread"], weighting["weight_motion"], weighting["seed"],
+                weight_position=weight_position, sequential=sequential,
+                videos_per_block=weighting.get("videos_per_block"),
             )
             best_span = ranked[0]
         else:
             best_span = min(candidates, key=lambda s: abs(s["motion_norm"] - seg_energy))
-        pick = consume_span(best_span, remaining)
+        if best_span.get("_skip_window"):
+            pick = carve_span(queues, best_span["video_id"], best_span["scene_id"],
+                              best_span["offset_sec"], remaining, sequential=True)
+        else:
+            pick = consume_span(best_span, remaining)
         chain.append(pick)
         remaining -= pick["clip_duration_sec"]
         last_used = (pick["video_id"], pick["scene_id"])
@@ -2562,6 +2672,7 @@ def match_scenes_to_track(
     weight_spread: float = 0.0,
     weight_motion: float = 0.0,
     autofill_seed: int = 42,
+    weight_position: float = 0.0,
 ) -> tuple:
     """Each slot in a segment is filled to its FULL duration with a chain of
     one or more clips (see fill_slot) — footage running out mid-slot never
@@ -2613,6 +2724,7 @@ def match_scenes_to_track(
             "weight_shape": weight_shape, "weight_random": weight_random,
             "weight_repeat_penalty": weight_repeat_penalty, "weight_spread": weight_spread,
             "weight_motion": weight_motion, "seed": autofill_seed,
+            "weight_position": weight_position, "videos_per_block": n_picks,
         }
 
         slots = []
@@ -2735,6 +2847,7 @@ DIAL_DEFAULTS = {
     "weight_repeat_penalty": 1.5,
     "weight_spread": 1.0,
     "weight_motion": 1.0,
+    "weight_position": 0.0,
     "autofill_seed": 42,
 }
 
@@ -2745,7 +2858,7 @@ DIAL_DEFAULTS = {
 # sections and come back at the user's last-set values rather than defaults.
 WEIGHT_KEYS = [
     "weight_shape", "weight_random", "weight_repeat_penalty",
-    "weight_spread", "weight_motion", "autofill_seed",
+    "weight_spread", "weight_motion", "weight_position", "autofill_seed",
 ]
 
 # Restore audio-settings keys from their shadow copy BEFORE the generic setdefault below
@@ -2786,7 +2899,8 @@ PROJECT_SIMPLE_KEYS = [
     *AUDIO_SETTINGS_KEYS,
     "split_screen_enabled", "min_clips", "max_clips", "density_contrast",
     "vary_count", "count_seed", "min_clip_len_sec",
-    "weight_shape", "weight_random", "weight_repeat_penalty", "weight_spread", "weight_motion", "autofill_seed",
+    "weight_shape", "weight_random", "weight_repeat_penalty", "weight_spread", "weight_motion",
+    "weight_position", "autofill_seed",
     "committed_selected_videos", "committed_tag_filter", "known_extra_videos", "extra_videos",
     "adv_current_block", "chor_current_block",
     "intro_block_indices", "outro_block_indices",
@@ -3424,19 +3538,25 @@ with st.expander("⚙️ Auto-fill weighting", expanded=False):
                   key="weight_repeat_penalty", disabled=_autofill_disabled,
                   help="Penalizes reusing a video from the immediately preceding block. "
                        "Also your control for 'too many rapid changes' — raise to settle.")
-        st.slider("D — Spread usage across videos", 0.0, 5.0, step=0.1, key="weight_spread",
+        st.slider("D — Balance use between videos", 0.0, 5.0, step=0.1, key="weight_spread",
                   disabled=_autofill_disabled,
-                  help="Favors under-used videos and those with more footage remaining. In "
-                       "sequential mode, also controls how far an automatic pick may roam past "
-                       "a video's frontmost available clip — 0 stays pinned to the front, higher "
-                       "allows skipping ahead when that video has spare footage relative to how "
-                       "many blocks are left (never enough to risk running out later).")
+                  help="Favors videos used least so far and those with the most footage left, "
+                       "so no single video dominates the plan.")
     with _wt_cols[2]:
         st.slider("E — Motion intensity match", 0.0, 5.0, step=0.1, key="weight_motion",
                   disabled=_autofill_disabled,
                   help="Prefers clips whose overall motion level matches this block's intensity. "
                        "Complementary to A (shape pattern) — A rewards the same rises/falls; "
                        "E rewards the right activity level.")
+        if sequential_mode:
+            st.slider("F — Spread through each video", 0.0, 5.0, step=0.1, key="weight_position",
+                      disabled=_autofill_disabled,
+                      help="Sequential mode: gives each video a beginning, middle and end. Each video's "
+                           "usable range is split into as many parts as it's expected to be used, and "
+                           "each use prefers its own part — higher = stronger pull (other weights still "
+                           "count). Also sets how far a pick may skip ahead within a video: 0 stays at "
+                           "the front, higher skips further, never so far that the video could run "
+                           "short before the plan ends.")
         st.number_input("Random seed", 0, 99999, key="autofill_seed",
                         disabled=_autofill_disabled,
                         help="Change to reroll randomness (B) without touching anything else.")
@@ -3454,6 +3574,8 @@ weight_repeat_penalty = st.session_state.get("weight_repeat_penalty", 1.5)
 weight_spread = st.session_state.get("weight_spread", 1.0)
 weight_motion = st.session_state.get("weight_motion", 1.0)
 autofill_seed = st.session_state.get("autofill_seed", 42)
+# F only exists in sequential mode — outside it, it has no effect at all.
+weight_position = st.session_state.get("weight_position", 0.0) if sequential_mode else 0.0
 
 # ---------------------------------------------------------------------------
 # Per-scene matching against the beat timeline
@@ -3565,6 +3687,7 @@ if matching_mode == "Auto":
         vary_count, int(count_seed), min_clip_len_sec,
         intro_blocks_0based, outro_blocks_0based,
         weight_shape, weight_random, weight_repeat_penalty, weight_spread, weight_motion, autofill_seed,
+        weight_position=weight_position,
     )
 
     split_count = sum(1 for e in timeline if e["split_screen"])
@@ -4047,14 +4170,14 @@ elif matching_mode == "Choreography":
                         st.session_state["global_excluded_scenes"], role_filter=role_filter_b)
                     if not clips_b:
                         continue
-                    # Sequential mode: skip budget (weight D-controlled) rather than a hard
+                    # Sequential mode: skip budget (weight F-controlled) rather than a hard
                     # frontmost-only restriction — see compute_skip_budget. Picking a window
                     # past the budget discards everything before it, so the budget caps how
                     # far ahead this video's own spare footage safely allows roaming, given
                     # how many blocks are still left overall.
                     if sequential_mode:
                         _remaining_blocks_b = len(segments) - b
-                        _skip_b = compute_skip_budget(len(clips_b), _remaining_blocks_b, weight_spread)
+                        _skip_b = compute_skip_budget(len(clips_b), _remaining_blocks_b, weight_position)
                         auto_candidates_b = clips_b[:_skip_b + 1]
                     else:
                         auto_candidates_b = clips_b
@@ -4062,6 +4185,8 @@ elif matching_mode == "Choreography":
                         auto_candidates_b, b, segments, chor_confirmed, queues, prev_block_videos_b,
                         weight_shape, weight_random, weight_repeat_penalty, weight_spread,
                         weight_motion, autofill_seed,
+                        weight_position=weight_position, sequential=sequential_mode,
+                        videos_per_block=rec_b,
                     )
                     best_b = ranked_b[0]
                     is_tagged_b = bool(role_filter_b and best_b.get(role_filter_b))
@@ -4150,12 +4275,12 @@ elif matching_mode == "Choreography":
                     else:
                         # Auto: weighted pick, same Auto-fill weighting used everywhere else
                         # (A has no effect here — Choreography has no shape score). Sequential
-                        # mode: skip budget (weight D-controlled) instead of a hard frontmost-
+                        # mode: skip budget (weight F-controlled) instead of a hard frontmost-
                         # only restriction — see compute_skip_budget and the matching comment
                         # in render_choreography_block's preview above.
                         if sequential_mode:
                             _remaining_blocks = len(segments) - chor_block
-                            _skip = compute_skip_budget(len(clips), _remaining_blocks, weight_spread)
+                            _skip = compute_skip_budget(len(clips), _remaining_blocks, weight_position)
                             auto_candidates = clips[:_skip + 1]
                         else:
                             auto_candidates = clips
@@ -4163,6 +4288,8 @@ elif matching_mode == "Choreography":
                             auto_candidates, chor_block, segments, chor_confirmed, queues,
                             chor_prev_block_videos, weight_shape, weight_random,
                             weight_repeat_penalty, weight_spread, weight_motion, autofill_seed,
+                            weight_position=weight_position, sequential=sequential_mode,
+                            videos_per_block=max(1, len(chosen_videos)),
                         )
                         best = ranked[0]
                         use_scene_id = best["scene_id"]
@@ -4193,6 +4320,7 @@ elif matching_mode == "Choreography":
             "weight_shape": weight_shape, "weight_random": weight_random,
             "weight_repeat_penalty": weight_repeat_penalty, "weight_spread": weight_spread,
             "weight_motion": weight_motion, "seed": autofill_seed,
+            "weight_position": weight_position,
         }
 
         # The choreography grid fragment — dropdowns update live without a full rerun
@@ -4291,10 +4419,15 @@ else:
                 audio_curve_b = get_block_audio_curve(track, seg_b["start"], seg_b["end"])
                 _excl_b = st.session_state["segment_exclusions"].get(b, set())
                 _global_excl = st.session_state["global_excluded_scenes"]
+                _pos_targets_b = (
+                    compute_position_targets(b, len(segments), confirmed, queues, recommended_counts[b])
+                    if sequential_mode and weight_position > 0 else None
+                )
                 cands_b, _ = find_shape_candidates(
                     seg_b, queues, sequential_mode, _excl_b, _global_excl, audio_curve_b,
                     int(max_shape_matches), restrict_to_front=sequential_mode,
-                    remaining_blocks=len(segments) - b, weight_spread=weight_spread,
+                    remaining_blocks=len(segments) - b, weight_position=weight_position,
+                    position_targets=_pos_targets_b, weight_shape=weight_shape,
                 )
                 # Auto-fill ALL is a fully automatic process (like Auto mode and
                 # Choreography's own Auto-fill ALL), so marked blocks opportunistically
@@ -4314,7 +4447,8 @@ else:
                     cands_b, _ = find_shape_candidates(
                         seg_b, queues, sequential_mode, _excl_b, _global_excl, audio_curve_b,
                         int(max_shape_matches), restrict_to_front=sequential_mode,
-                        remaining_blocks=len(segments) - b, weight_spread=weight_spread,
+                        remaining_blocks=len(segments) - b, weight_position=weight_position,
+                        position_targets=_pos_targets_b, weight_shape=weight_shape,
                     )
 
                 # Level 2: still nothing in sequential mode → retry non-sequentially
@@ -4359,6 +4493,7 @@ else:
                     cands_b, b, segments, confirmed, queues, prev_videos_b,
                     weight_shape, weight_random, weight_repeat_penalty, weight_spread,
                     weight_motion, autofill_seed,
+                    weight_position=weight_position, sequential=sequential_mode, videos_per_block=rec_b,
                 )
                 chosen_keys_b = {(c["video_id"], c["scene_id"]) for c in ranked_b[:rec_b]}
                 new_picks = []
@@ -4486,6 +4621,7 @@ else:
             "weight_shape": weight_shape, "weight_random": weight_random,
             "weight_repeat_penalty": weight_repeat_penalty, "weight_spread": weight_spread,
             "weight_motion": weight_motion, "seed": autofill_seed,
+            "weight_position": weight_position, "sequential": sequential_mode,
         }
         render_candidate_grid(candidates, current_block, already_keys, seg, block_audio_curve,
                               prev_block_videos, video_stats, recommended_counts[current_block],
