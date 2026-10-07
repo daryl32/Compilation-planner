@@ -127,4 +127,5 @@ if __name__ == "__main__":
             print(f"⚠️  {video_id}: {status}")
 
     print(f"\nMade {made}, already done {skipped}, problems {problems}.")
-    print("The server picks new proxies up on its next Drive sync (within 5 minutes).")
+    print("The server picks new proxies up on its next Drive sync (every 12 hours), "
+          "or straight away with 'Sync now' in the Compilation Planner sidebar.")

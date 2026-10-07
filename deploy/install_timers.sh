@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs two systemd timers on the server (run once, as root):
-#   mediaplanner-sync     — Drive → server sync every 5 minutes (auto_sync.py)
+#   mediaplanner-sync     — Drive → server sync every 12 hours (auto_sync.py)
 #   mediaplanner-proxies  — nightly fast-preview copies at 03:30 (make_proxies.py)
 #
 #   sudo bash /root/Compilation-planner/deploy/install_timers.sh
@@ -38,11 +38,11 @@ UNIT
 
 cat > /etc/systemd/system/mediaplanner-sync.timer <<UNIT
 [Unit]
-Description=Media Planner: Drive sync every 5 minutes
+Description=Media Planner: Drive sync every 12 hours
 
 [Timer]
 OnBootSec=2min
-OnUnitInactiveSec=5min
+OnUnitInactiveSec=12h
 Persistent=true
 
 [Install]

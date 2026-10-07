@@ -238,7 +238,7 @@ def render_sync_status() -> None:
     errors = status.get("errors") or []
     if errors:
         st.sidebar.warning(f"☁️ Drive sync {text} had {len(errors)} error(s): {errors[0]}")
-    elif mins > 30:
+    elif mins > 13 * 60:  # timer runs every 12 h
         st.sidebar.warning(f"☁️ Drive last synced {text} — is the sync timer running?")
     else:
         st.sidebar.caption(f"☁️ Drive synced {text}")

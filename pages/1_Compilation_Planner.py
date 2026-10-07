@@ -3139,8 +3139,8 @@ if st.session_state.get("track_id") not in tracks:
 if _DRIVE_SYNC_AVAILABLE:
     render_sync_status()
     with st.sidebar.expander("☁️ Sync from Google Drive", expanded=False):
-        st.caption("Catalogues, audio, thumbnails and sprites sync from Drive automatically every "
-                   "few minutes. Use this to pull straight away after processing in Colab.")
+        st.caption("Catalogues, audio, thumbnails, sprites and preview copies sync from Drive "
+                   "automatically every 12 hours. Use this to pull straight away after processing in Colab.")
         if st.button("🔄 Sync now", key="drive_sync_btn", use_container_width=True):
             sync_progress = st.progress(0.0, text="Starting sync…")
             sync_errors = []
