@@ -8,6 +8,9 @@ from pathlib import Path
 import streamlit as st
 
 from config import CATALOGUE_DIR
+from library_common import scene_tags
+
+
 def load_labels() -> list:
     labels_path = CATALOGUE_DIR / "labels.json"
     if labels_path.exists():
@@ -207,7 +210,7 @@ else:
         show_only_intro_outro = st.checkbox("Show only intro/outro candidates", value=False)
 
     for scene in data["scenes"]:
-        current_tags = scene.get("tags", [])
+        current_tags = scene_tags(scene)
         if tag_filter and tag_filter.lower() not in [t.lower() for t in current_tags]:
             continue
         if show_only_excluded and not scene.get("excluded"):
@@ -238,7 +241,7 @@ else:
             if not review_mode:
                 st.markdown("Tags: " + ", ".join(f"`{t}`" for t in current_tags))
             else:
-                tags_default = scene.get("corrected_tags") or current_tags
+                tags_default = current_tags
                 tag_options = sorted(set(CANDIDATE_LABELS) | set(tags_default))
 
                 new_tags = st.multiselect(

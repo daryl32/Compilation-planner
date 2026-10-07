@@ -17,6 +17,7 @@ import plotly.graph_objects as go
 from PIL import Image
 
 from render_preview import render_plan_dict, colab_to_local
+from library_common import scene_tags
 
 # st.fragment (Streamlit 1.37+; was st.experimental_fragment in 1.33-1.36) lets
 # part of the page rerun on its own instead of the whole script re-executing on
@@ -145,8 +146,12 @@ def load_all_catalogues() -> dict:
             continue
         with open(cat_file) as f:
             cat = json.load(f)
+        if not (isinstance(cat, dict) and "video_id" in cat and "scenes" in cat):
+            continue  # not a video catalogue (e.g. library_meta.json)
         for scene in cat["scenes"]:
             scene.pop("motion_curve", None)
+            # Reviewer corrections win over the auto-generated tags everywhere below.
+            scene["tags"] = scene_tags(scene)
         catalogues[cat["video_id"]] = cat
     return catalogues
 
