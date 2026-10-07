@@ -59,7 +59,7 @@ if _OAUTH_AVAILABLE and _OAUTH_SESSION_KEY not in st.session_state:
         st.query_params.clear()
         st.rerun()
 
-st.title("Reviewer")
+st.title("Reviewer", anchor="reviewer-top")
 
 # ---------------------------------------------------------------------------
 # Sidebar
@@ -179,6 +179,9 @@ if not catalogue_files:
 else:
     names = [f.stem for f in catalogue_files]
     selected = st.selectbox("Catalogue", names)
+    _saved_msg = st.session_state.pop("rev_saved_msg", None)
+    if _saved_msg:
+        st.success(_saved_msg)
     cat_path = OUTPUT_DIR / f"{selected}.json"
     data = json.loads(cat_path.read_text())
 
@@ -203,6 +206,8 @@ else:
     with filter_cols[1]:
         show_only_intro_outro = st.checkbox("Show only intro/outro candidates", value=False)
 
+    # Which scenes to show (filters and the library range).
+    shown = []
     for scene in data["scenes"]:
         current_tags = scene_tags(scene)
         trimmed_to = None
@@ -219,76 +224,143 @@ else:
             continue
         if show_only_intro_outro and not (scene.get("intro_candidate") or scene.get("outro_candidate")):
             continue
+        shown.append((scene, current_tags, trimmed_to))
 
-        cols = st.columns([1, 2])
-        with cols[0]:
-            if scene["thumbnail_paths"]:
-                thumb_path = OUTPUT_DIR / "thumbnails" / data["video_id"] / Path(scene["thumbnail_paths"][0]).name
-                if thumb_path.exists():
-                    st.image(str(thumb_path), width=280)
-                else:
-                    st.warning(f"Thumbnail not found: {thumb_path}")
-            if trimmed_to:
-                st.warning(f"✂️ Trimmed by library range — uses {format_mmss(trimmed_to[0])}–{format_mmss(trimmed_to[1])}")
-            if scene.get("reviewed"):
-                st.success("✓ Reviewed")
-            if scene.get("excluded"):
-                st.error("🚫 Excluded from planner")
-            if scene.get("intro_candidate"):
-                st.info("🎬 Intro candidate")
-            if scene.get("outro_candidate"):
-                st.info("🎬 Outro candidate")
-
-        with cols[1]:
-            st.markdown(f"**Scene {scene['scene_id']}**  ·  {scene['start_tc']} → {scene['end_tc']}")
-
-            if not review_mode:
-                st.markdown("Tags: " + ", ".join(f"`{t}`" for t in current_tags))
+    def scene_header(scene, trimmed_to):
+        """Thumbnail and status badges (left column)."""
+        if scene["thumbnail_paths"]:
+            thumb_path = OUTPUT_DIR / "thumbnails" / data["video_id"] / Path(scene["thumbnail_paths"][0]).name
+            if thumb_path.exists():
+                st.image(str(thumb_path), width=280)
             else:
-                tags_default = current_tags
-                tag_options = sorted(set(CANDIDATE_LABELS) | set(tags_default))
+                st.warning(f"Thumbnail not found: {thumb_path}")
+        if trimmed_to:
+            st.warning(f"✂️ Trimmed by library range — uses {format_mmss(trimmed_to[0])}–{format_mmss(trimmed_to[1])}")
+        if scene.get("reviewed"):
+            st.success("✓ Reviewed")
+        if scene.get("excluded"):
+            st.error("🚫 Excluded from planner")
+        if scene.get("intro_candidate"):
+            st.info("🎬 Intro candidate")
+        if scene.get("outro_candidate"):
+            st.info("🎬 Outro candidate")
 
-                new_tags = st.multiselect(
-                    "Tags", options=tag_options, default=tags_default, key=f"tags_{selected}_{scene['scene_id']}",
-                )
-                excluded = st.checkbox(
-                    "Exclude from planner (e.g. intro/outro clip)",
-                    value=scene.get("excluded", False),
-                    key=f"excluded_{selected}_{scene['scene_id']}",
-                )
+    BACK_TO_TOP = (
+        '<a href="#reviewer-top" target="_self" style="display:inline-block;padding:0.4rem 0.9rem;'
+        'border:1px solid rgba(128,128,128,0.4);border-radius:0.5rem;text-decoration:none;">'
+        '⬆️ Back to top</a>'
+    )
 
-                role_cols = st.columns(2)
-                with role_cols[0]:
-                    intro_candidate = st.checkbox(
-                        "Intro candidate",
-                        value=scene.get("intro_candidate", False),
-                        key=f"intro_{selected}_{scene['scene_id']}",
-                        help="Available to the Compilation Planner's first block when its "
-                             "'Prefer Intro/Outro-tagged clips' toggle is on. Independent of "
-                             "Exclude — this scene can still show up normally elsewhere too, "
-                             "unless you also exclude it above.",
+    if not shown:
+        st.info("No scenes match these filters.")
+    elif not review_mode:
+        for scene, current_tags, trimmed_to in shown:
+            cols = st.columns([1, 2])
+            with cols[0]:
+                scene_header(scene, trimmed_to)
+            with cols[1]:
+                st.markdown(f"**Scene {scene['scene_id']}**  ·  {scene['start_tc']} → {scene['end_tc']}")
+                st.markdown("Tags: " + ", ".join(f"`{t}`" for t in current_tags))
+            st.divider()
+        st.markdown(BACK_TO_TOP, unsafe_allow_html=True)
+    else:
+        # Everything below is one form: ticking boxes and editing tags doesn't
+        # rerun the page — nothing is sent to the server until a Save button.
+        with st.form(f"review_form_{selected}", border=False):
+            def save_row(where: str):
+                c = st.columns([3, 2, 2])
+                with c[0]:
+                    st.caption(f"{len(shown)} scene(s) shown. Edits are kept on this page until you save — "
+                               "changing the video or a filter first discards them.")
+                with c[1]:
+                    st.checkbox("Also mark unchanged scenes reviewed", key=f"rev_mark_all_{where}",
+                                help="Off: only scenes you changed are marked ✓ Reviewed. "
+                                     "On: every scene shown is marked reviewed (you've checked them all).")
+                with c[2]:
+                    # Labels differ top/bottom so the two buttons get distinct widget ids.
+                    label = "💾 Save all changes for this video" if where == "top" else "💾 Save all changes"
+                    return st.form_submit_button(label, type="primary", use_container_width=True)
+
+            save_top = save_row("top")
+            st.divider()
+
+            for scene, current_tags, trimmed_to in shown:
+                sid = scene["scene_id"]
+                cols = st.columns([1, 2])
+                with cols[0]:
+                    scene_header(scene, trimmed_to)
+                with cols[1]:
+                    st.markdown(f"**Scene {sid}**  ·  {scene['start_tc']} → {scene['end_tc']}")
+                    st.multiselect(
+                        "Tags", options=sorted(set(CANDIDATE_LABELS) | set(current_tags)),
+                        default=current_tags, key=f"tags_{selected}_{sid}",
                     )
-                with role_cols[1]:
-                    outro_candidate = st.checkbox(
-                        "Outro candidate",
-                        value=scene.get("outro_candidate", False),
-                        key=f"outro_{selected}_{scene['scene_id']}",
-                        help="Available to the Compilation Planner's last block when its "
-                             "'Prefer Intro/Outro-tagged clips' toggle is on. Independent of "
-                             "Exclude — this scene can still show up normally elsewhere too, "
-                             "unless you also exclude it above.",
-                    )
+                    st.checkbox("Exclude from planner (e.g. intro/outro clip)",
+                                value=scene.get("excluded", False), key=f"excluded_{selected}_{sid}")
+                    role_cols = st.columns(2)
+                    with role_cols[0]:
+                        st.checkbox(
+                            "Intro candidate", value=scene.get("intro_candidate", False),
+                            key=f"intro_{selected}_{sid}",
+                            help="Available to the Compilation Planner's first block when its "
+                                 "'Prefer Intro/Outro-tagged clips' toggle is on. Independent of "
+                                 "Exclude — this scene can still show up normally elsewhere too, "
+                                 "unless you also exclude it above.",
+                        )
+                    with role_cols[1]:
+                        st.checkbox(
+                            "Outro candidate", value=scene.get("outro_candidate", False),
+                            key=f"outro_{selected}_{sid}",
+                            help="Available to the Compilation Planner's last block when its "
+                                 "'Prefer Intro/Outro-tagged clips' toggle is on. Independent of "
+                                 "Exclude — this scene can still show up normally elsewhere too, "
+                                 "unless you also exclude it above.",
+                        )
+                st.divider()
 
-                if st.button("Save correction", key=f"save_{selected}_{scene['scene_id']}"):
-                    scene["corrected_tags"] = new_tags
+            save_bottom = save_row("bottom")
+            st.markdown(BACK_TO_TOP, unsafe_allow_html=True)
+
+        if save_top or save_bottom:
+            mark_all = st.session_state.get("rev_mark_all_top") or st.session_state.get("rev_mark_all_bottom")
+            changed = 0
+            for scene, current_tags, _ in shown:
+                sid = scene["scene_id"]
+                new = {
+                    "tags": list(st.session_state.get(f"tags_{selected}_{sid}", current_tags)),
+                    "excluded": bool(st.session_state.get(f"excluded_{selected}_{sid}", scene.get("excluded", False))),
+                    "intro_candidate": bool(st.session_state.get(f"intro_{selected}_{sid}", scene.get("intro_candidate", False))),
+                    "outro_candidate": bool(st.session_state.get(f"outro_{selected}_{sid}", scene.get("outro_candidate", False))),
+                }
+                is_changed = (
+                    new["tags"] != current_tags
+                    or new["excluded"] != bool(scene.get("excluded", False))
+                    or new["intro_candidate"] != bool(scene.get("intro_candidate", False))
+                    or new["outro_candidate"] != bool(scene.get("outro_candidate", False))
+                )
+                if is_changed:
+                    changed += 1
+                    scene["corrected_tags"] = new["tags"]
+                    scene["excluded"] = new["excluded"]
+                    scene["intro_candidate"] = new["intro_candidate"]
+                    scene["outro_candidate"] = new["outro_candidate"]
+                if is_changed or mark_all:
+                    if mark_all and "corrected_tags" not in scene:
+                        scene["corrected_tags"] = current_tags  # confirmed as correct
                     scene["reviewed"] = True
-                    scene["excluded"] = excluded
-                    scene["intro_candidate"] = intro_candidate
-                    scene["outro_candidate"] = outro_candidate
-                    cat_path.write_text(json.dumps(data, indent=2))
-                    mark_pending(cat_path.stem)
-                    st.cache_data.clear()  # so the Compilation Planner sees the change straight away
-                    st.success("Saved.")
-                    st.rerun()
 
-        st.divider()
+            if changed or mark_all:
+                cat_path.write_text(json.dumps(data, indent=2))
+                mark_pending(cat_path.stem)
+                st.cache_data.clear()  # so the Compilation Planner sees the change straight away
+                st.session_state["rev_saved_msg"] = (
+                    f"Saved {changed} changed scene(s)"
+                    + (f"; all {len(shown)} shown scenes marked reviewed." if mark_all else ".")
+                )
+            else:
+                st.session_state["rev_saved_msg"] = "Nothing had changed — nothing to save."
+            # Fresh widgets next run, so they show what was just saved.
+            for scene, _, _ in shown:
+                for prefix in ("tags", "excluded", "intro", "outro"):
+                    st.session_state.pop(f"{prefix}_{selected}_{scene['scene_id']}", None)
+            st.rerun()
