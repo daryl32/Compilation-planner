@@ -1,77 +1,18 @@
 """
 Home — entry point for the Media Planner webapp.
 
-Handles Google authentication, email whitelist gate, and navigation
-to the three apps.
+Navigation to the three apps. Sign-in, the whitelist gate and Google Drive
+connect are handled by page_setup (page_setup.py), shared by every page.
 
 Run with:
     streamlit run Home.py
 """
 
 import streamlit as st
-from config import WHITELISTED_EMAILS
-try:
-    from drive_oauth import (
-        get_auth_url, exchange_code_for_token,
-        push_file_with_oauth, is_authenticated, SESSION_KEY as _OAUTH_SESSION_KEY,
-    )
-    _OAUTH_AVAILABLE = True
-except ImportError:
-    _OAUTH_AVAILABLE = False
 
-APP_VERSION = "1.6.0"
+from page_setup import page_setup
 
-from library_common import page_title, env_banner
-
-st.set_page_config(page_title=page_title("Media Planner"), layout="wide")
-env_banner()
-
-# ---------------------------------------------------------------------------
-# Authentication — Streamlit native Google login
-# ---------------------------------------------------------------------------
-if not st.user.is_logged_in:
-    st.title("Media Planner")
-    st.caption(f"v{APP_VERSION}")
-    st.divider()
-    st.subheader("Please sign in to continue")
-    st.button("🔐 Sign in with Google", on_click=st.login, type="primary")
-    st.stop()
-
-# ---------------------------------------------------------------------------
-# Whitelist gate
-# ---------------------------------------------------------------------------
-if st.user.email not in WHITELISTED_EMAILS:
-    st.title("Access Denied")
-    st.error(f"**{st.user.email}** is not authorised to use this app.")
-    st.caption("Contact the administrator to request access.")
-    if st.button("Sign out"):
-        st.logout()
-    st.stop()
-
-# ---------------------------------------------------------------------------
-# Drive OAuth callback — catches ?code= redirect from Google Drive connect
-# ---------------------------------------------------------------------------
-if _OAUTH_AVAILABLE and _OAUTH_SESSION_KEY not in st.session_state:
-    _qp = st.query_params.to_dict()
-    if "code" in _qp:
-        _token = exchange_code_for_token(_qp["code"])
-        if _token:
-            st.session_state[_OAUTH_SESSION_KEY] = _token
-        _return_page = _qp.get("state", None)
-        st.query_params.clear()
-        if _return_page:
-            st.switch_page(_return_page)
-        else:
-            st.rerun()
-
-# ---------------------------------------------------------------------------
-# Navigation page
-# ---------------------------------------------------------------------------
-st.title("Media Planner")
-st.caption(f"v{APP_VERSION}  ·  {st.user.name}")
-
-if st.sidebar.button("Sign out", key="signout_btn"):
-    st.logout()
+page_setup("Media Planner", "Home.py")
 
 st.divider()
 

@@ -8,7 +8,7 @@ from pathlib import Path
 import streamlit as st
 
 from config import CATALOGUE_DIR
-from library_common import (render_sync_status, scene_tags, read_pending, mark_pending, push_pending,
+from library_common import (scene_tags, mark_pending,
                             library_ranges, tc_to_seconds, format_mmss, overlap_with_range)
 
 
@@ -20,15 +20,9 @@ def load_labels() -> list:
 
 CANDIDATE_LABELS = load_labels()
 
-# Google Drive OAuth — for writing labels to Drive
-try:
-    from drive_oauth import (
-        get_auth_url, exchange_code_for_token,
-        push_file_with_oauth, is_authenticated, SESSION_KEY as _OAUTH_SESSION_KEY,
-    )
-    _OAUTH_AVAILABLE = True
-except ImportError:
-    _OAUTH_AVAILABLE = False
+# Sign-in, whitelist, Drive connect, title and the shared sidebar — see page_setup.py
+from page_setup import (page_setup, push_file_with_oauth,
+                        OAUTH_AVAILABLE as _OAUTH_AVAILABLE, DRIVE_SESSION_KEY as _OAUTH_SESSION_KEY)
 
 OUTPUT_DIR = CATALOGUE_DIR
 
@@ -45,31 +39,11 @@ def list_catalogue_files():
     return files
 
 
-from library_common import page_title, env_banner
-st.set_page_config(page_title=page_title("Reviewer"), layout="wide")
-env_banner()
-
-# ---------------------------------------------------------------------------
-# Drive OAuth callback
-# ---------------------------------------------------------------------------
-if _OAUTH_AVAILABLE and _OAUTH_SESSION_KEY not in st.session_state:
-    _qp = st.query_params.to_dict()
-    if "code" in _qp:
-        _token = exchange_code_for_token(_qp["code"])
-        if _token:
-            st.session_state[_OAUTH_SESSION_KEY] = _token
-        st.query_params.clear()
-        st.rerun()
-
-st.title("Reviewer", anchor="reviewer-top")
+page_setup("Reviewer", "pages/2_Reviewer.py", anchor="reviewer-top")
 
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
-try:
-    render_sync_status()
-except Exception:
-    pass  # status is informational only
 st.sidebar.header("Process a video")
 st.sidebar.link_button("▶️ Open Google Colab", "https://colab.research.google.com", use_container_width=True)
 st.sidebar.divider()
@@ -79,21 +53,6 @@ use_library_range = st.sidebar.toggle(
     help="Only show scenes inside the video's Media Library time range. "
          "Turn off to see every scene in the original video.",
 )
-st.sidebar.divider()
-
-# Drive connect
-if _OAUTH_AVAILABLE:
-    with st.sidebar.expander("☁️ Google Drive", expanded=False):
-        if st.session_state.get(_OAUTH_SESSION_KEY):
-            st.success("Connected")
-            if st.button("Disconnect Drive", key="drive_disconnect"):
-                st.session_state.pop(_OAUTH_SESSION_KEY, None)
-                st.rerun()
-        else:
-            st.caption("Connect to save labels to your Google Drive.")
-            _auth_url = get_auth_url(state="pages/2_Reviewer.py")
-            st.markdown(f'<a href="{_auth_url}" target="_self">🔗 Connect Google Drive</a>', unsafe_allow_html=True)
-
 st.sidebar.divider()
 
 # Add new label
@@ -126,23 +85,6 @@ if st.sidebar.button("Add label") and new_label:
                 st.sidebar.success(f'Added "{new_label}" — label is now available.')
             except Exception as e:
                 st.sidebar.warning(f'Label saved to Drive but sync failed: {e}. Restart the app to see it.')
-
-# ---------------------------------------------------------------------------
-# Push edited catalogues to Google Drive
-# ---------------------------------------------------------------------------
-_pending = read_pending()
-if _pending:
-    st.sidebar.warning(f"{len(_pending)} file(s) have edits not yet saved to Google Drive.")
-    if not _OAUTH_AVAILABLE or not st.session_state.get(_OAUTH_SESSION_KEY):
-        st.sidebar.caption("Connect Google Drive (above) to save them.")
-    elif st.sidebar.button("☁️ Save edits to Drive"):
-        _failed = push_pending(st.session_state[_OAUTH_SESSION_KEY])
-        if _failed:
-            for _vid, _err in _failed.items():
-                st.sidebar.error(f"{_vid}: {_err}")
-        else:
-            st.sidebar.success("Saved to Google Drive.")
-            st.rerun()
 
 # ---------------------------------------------------------------------------
 # Export training data

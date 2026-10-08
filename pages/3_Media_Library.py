@@ -11,45 +11,18 @@ from pathlib import Path
 
 import streamlit as st
 
-from config import CATALOGUE_DIR, AUDIO_DIR, WHITELISTED_EMAILS
+from config import CATALOGUE_DIR, AUDIO_DIR
 from library_common import (
-    render_sync_status,
     scene_tags, tc_to_seconds, format_mmss, overlap_with_range,
-    library_ranges, set_library_range, read_pending, push_pending,
+    library_ranges, set_library_range,
     render_range_picker,
 )
 
-try:
-    from drive_oauth import get_auth_url, exchange_code_for_token, SESSION_KEY as _OAUTH_SESSION_KEY
-    _OAUTH_AVAILABLE = True
-except ImportError:
-    _OAUTH_AVAILABLE = False
+from page_setup import page_setup
 
 PAGE_SIZE = 20
 
-from library_common import page_title, env_banner
-st.set_page_config(page_title=page_title("Media Library"), layout="wide")
-env_banner()
-
-# --- Whitelist gate ---
-if st.user.email not in WHITELISTED_EMAILS:
-    st.title("Access Denied")
-    st.error(f"**{st.user.email}** is not authorised to use this app.")
-    if st.button("Sign out"):
-        st.logout()
-    st.stop()
-
-# --- Drive OAuth callback ---
-if _OAUTH_AVAILABLE and _OAUTH_SESSION_KEY not in st.session_state:
-    _qp = st.query_params.to_dict()
-    if "code" in _qp:
-        _token = exchange_code_for_token(_qp["code"])
-        if _token:
-            st.session_state[_OAUTH_SESSION_KEY] = _token
-        st.query_params.clear()
-        st.rerun()
-
-st.title("📁 Media Library")
+page_setup("Media Library", "pages/3_Media_Library.py", title="📁 Media Library")
 library_kind = st.radio("Library", ["🎬 Videos", "🎵 Audio"], horizontal=True,
                         key="lib_kind", label_visibility="collapsed")
 
@@ -158,38 +131,6 @@ def video_stats(video: dict, time_range, wanted: set, match_all: bool) -> dict:
 # ---------------------------------------------------------------------------
 # Sidebar: Drive (shared by both libraries)
 # ---------------------------------------------------------------------------
-if _OAUTH_AVAILABLE:
-    with st.sidebar.expander("☁️ Google Drive", expanded=False):
-        if st.session_state.get(_OAUTH_SESSION_KEY):
-            st.success("Connected")
-            if st.button("Disconnect Drive", key="drive_disconnect"):
-                st.session_state.pop(_OAUTH_SESSION_KEY, None)
-                st.rerun()
-        else:
-            st.caption("Connect to save library ranges to your Google Drive.")
-            _auth_url = get_auth_url(state="pages/3_Media_Library.py")
-            st.markdown(f'<a href="{_auth_url}" target="_self">🔗 Connect Google Drive</a>',
-                        unsafe_allow_html=True)
-
-try:
-    render_sync_status()
-except Exception:
-    pass  # status is informational only
-_pending = read_pending()
-if _pending:
-    st.sidebar.warning(f"{len(_pending)} file(s) have edits not yet saved to Google Drive.")
-    if not _OAUTH_AVAILABLE or not st.session_state.get(_OAUTH_SESSION_KEY):
-        st.sidebar.caption("Connect Google Drive (above) to save them.")
-    elif st.sidebar.button("☁️ Save edits to Drive"):
-        _failed = push_pending(st.session_state[_OAUTH_SESSION_KEY])
-        if _failed:
-            for _name, _err in _failed.items():
-                st.sidebar.error(f"{_name}: {_err}")
-        else:
-            st.sidebar.success("Saved to Google Drive.")
-            st.rerun()
-
-
 # ---------------------------------------------------------------------------
 # Videos
 # ---------------------------------------------------------------------------

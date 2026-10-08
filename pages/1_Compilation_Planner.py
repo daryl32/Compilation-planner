@@ -18,7 +18,7 @@ from PIL import Image
 
 from render_preview import render_plan_dict, colab_to_local
 from library_common import (scene_tags, render_range_picker, library_ranges,
-                            render_sync_status, refresh_caches_after_sync)
+                            refresh_caches_after_sync)
 
 # st.fragment (Streamlit 1.37+; was st.experimental_fragment in 1.33-1.36) lets
 # part of the page rerun on its own instead of the whole script re-executing on
@@ -60,9 +60,8 @@ def rerun_full():
         st.rerun(scope="app")
     except TypeError:
         st.rerun()
-APP_VERSION = "1.6.0"
 
-from config import CATALOGUE_DIR, AUDIO_DIR, PLANS_DIR, PREVIEW_DIR, PROJECTS_DIR, WHITELISTED_EMAILS
+from config import CATALOGUE_DIR, AUDIO_DIR, PLANS_DIR, PREVIEW_DIR, PROJECTS_DIR
 
 # Google Drive sync — graceful fallback if credentials not present
 try:
@@ -72,36 +71,13 @@ try:
 except ImportError:
     _DRIVE_SYNC_AVAILABLE = False
 
-# Google Drive OAuth — for writing plans/projects/previews to personal Drive
-try:
-    from drive_oauth import (
-        get_auth_url, exchange_code_for_token,
-        push_file_with_oauth, is_authenticated, SESSION_KEY as _OAUTH_SESSION_KEY,
-    )
-    _OAUTH_AVAILABLE = True
-except ImportError:
-    _OAUTH_AVAILABLE = False
-
-from library_common import page_title, env_banner
-st.set_page_config(page_title=page_title("Compilation Planner"), layout="wide")
-env_banner()
-
-# --- Whitelist gate ---
-if st.user.email not in WHITELISTED_EMAILS:
-    st.title("Access Denied")
-    st.error(f"**{st.user.email}** is not authorised to use this app.")
-    st.caption("Contact the administrator to request access.")
-    if st.button("Sign out"):
-        st.logout()
-    st.stop()
-
-st.title("Compilation Planner")
-st.caption(f"v{APP_VERSION}  ·  {st.user.name}")
+# Sign-in, whitelist, Drive connect, title and the shared sidebar — see page_setup.py
+from page_setup import (page_setup, push_file_with_oauth,
+                        OAUTH_AVAILABLE as _OAUTH_AVAILABLE, DRIVE_SESSION_KEY as _OAUTH_SESSION_KEY)
+page_setup("Compilation Planner", "pages/1_Compilation_Planner.py")
 # The background Drive sync timer may have pulled new catalogues/audio since
 # the caches were filled — reload them once if so.
 refresh_caches_after_sync()
-if st.sidebar.button("Sign out", key="signout_btn"):
-    st.logout()
 
 
 def sanitize_filename(name: str) -> str:
@@ -3361,7 +3337,6 @@ if st.session_state.get("track_id") not in tracks:
 
 
 if _DRIVE_SYNC_AVAILABLE:
-    render_sync_status()
     with st.sidebar.expander("☁️ Sync from Google Drive", expanded=False):
         st.caption("Catalogues, audio, thumbnails, sprites and preview copies sync from Drive "
                    "automatically every 12 hours. Use this to pull straight away after processing in Colab.")
@@ -3391,18 +3366,6 @@ if _DRIVE_SYNC_AVAILABLE:
 else:
     with st.sidebar.expander("☁️ Drive sync unavailable", expanded=False):
         st.caption("Service account credentials not found at /root/drive-credentials.json")
-
-if _OAUTH_AVAILABLE:
-    with st.sidebar.expander("📤 Save to Google Drive", expanded=False):
-        if st.session_state.get(_OAUTH_SESSION_KEY):
-            st.success("Connected — saves will upload to Drive.")
-            if st.button("Disconnect Drive", key="drive_disconnect"):
-                st.session_state.pop(_OAUTH_SESSION_KEY, None)
-                st.rerun()
-        else:
-            st.caption("Connect to save plans, projects and previews to your Google Drive.")
-            _auth_url = get_auth_url(state="pages/1_Compilation_Planner.py")
-            st.markdown(f'<a href="{_auth_url}" target="_self">🔗 Connect Google Drive</a>', unsafe_allow_html=True)
 
 st.sidebar.header("Track")
 track_id = st.sidebar.selectbox("Track", tracks, key="track_id")
