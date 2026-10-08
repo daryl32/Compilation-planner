@@ -134,35 +134,27 @@ else:
     st.caption(f"Source: {data['source_path']}  |  {len(data['scenes'])} scenes  |  {reviewed_count} reviewed")
 
     # ⭐ Master thumbnail — the picture used for this video in the Media Library
-    # and the planner's video list. Saved straight away (library_meta.json).
+    # and the planner's video list. Chosen from the scenes below; saved at once.
     video_id = data["video_id"]
     master_sid = master_thumbnail_scenes().get(video_id)
-    _thumb_choices = [None] + [s["scene_id"] for s in data["scenes"] if s.get("thumbnail_paths")]
     _scene_by_id = {s["scene_id"]: s for s in data["scenes"]}
     with st.container(border=True):
         mt_cols = st.columns([1, 3])
+        _mp = scene_thumbnail_path(video_id, _scene_by_id[master_sid]) if master_sid in _scene_by_id else None
         with mt_cols[0]:
-            _mp = scene_thumbnail_path(video_id, _scene_by_id[master_sid]) if master_sid in _scene_by_id else None
             if _mp:
                 st.image(str(_mp), width=160)
-            else:
-                st.caption("No master thumbnail chosen — pages pick one automatically.")
         with mt_cols[1]:
-            _picked = st.selectbox(
-                "⭐ Video thumbnail", _thumb_choices,
-                index=_thumb_choices.index(master_sid) if master_sid in _thumb_choices else 0,
-                format_func=lambda sid: "Automatic" if sid is None
-                    else f"Scene {sid}  ·  {_scene_by_id[sid]['start_tc']}",
-                key=f"master_thumb_{selected}",
-                help="Used for this video in the Media Library and the Compilation Planner's video list. "
-                     "You can also pick it from a scene below.",
-            )
-            if _picked != master_sid:
-                set_master_thumbnail(video_id, _picked)
-                st.session_state["rev_saved_msg"] = (
-                    "Video thumbnail set to automatic." if _picked is None
-                    else f"Video thumbnail set to scene {_picked}.")
-                st.rerun()
+            if _mp:
+                st.markdown(f"**⭐ Video thumbnail:** scene {master_sid}")
+                if st.button("Use automatic instead", key=f"master_thumb_clear_{selected}"):
+                    set_master_thumbnail(video_id, None)
+                    st.session_state["rev_saved_msg"] = "Video thumbnail set to automatic."
+                    st.rerun()
+            else:
+                st.markdown("**⭐ Video thumbnail:** automatic")
+            st.caption("Pick one with ⭐ on any scene below. It's used for this video in the Media "
+                       "Library and the Compilation Planner's video list.")
 
     lib_range = library_ranges().get(data["video_id"]) if use_library_range else None
     if lib_range:
@@ -216,7 +208,6 @@ else:
         elif star_button and scene["thumbnail_paths"]:
             if st.button("⭐ Use as video thumbnail", key=f"star_{selected}_{scene['scene_id']}"):
                 set_master_thumbnail(video_id, scene["scene_id"])
-                st.session_state.pop(f"master_thumb_{selected}", None)
                 st.session_state["rev_saved_msg"] = f"Video thumbnail set to scene {scene['scene_id']}."
                 st.rerun()
         if trimmed_to:
@@ -353,7 +344,6 @@ else:
             thumb_msg = ""
             if _new_master != master_sid:
                 set_master_thumbnail(video_id, _new_master)
-                st.session_state.pop(f"master_thumb_{selected}", None)
                 thumb_msg = (" Video thumbnail set to automatic." if _new_master is None
                              else f" Video thumbnail set to scene {_new_master}.")
 
