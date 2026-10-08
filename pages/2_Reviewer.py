@@ -45,7 +45,9 @@ def list_catalogue_files():
     return files
 
 
-st.set_page_config(page_title="Reviewer", layout="wide")
+from library_common import page_title, env_banner
+st.set_page_config(page_title=page_title("Reviewer"), layout="wide")
+env_banner()
 
 # ---------------------------------------------------------------------------
 # Drive OAuth callback

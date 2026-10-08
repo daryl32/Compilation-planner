@@ -21,7 +21,10 @@ except ImportError:
 
 APP_VERSION = "1.6.0"
 
-st.set_page_config(page_title="Media Planner", layout="wide")
+from library_common import page_title, env_banner
+
+st.set_page_config(page_title=page_title("Media Planner"), layout="wide")
+env_banner()
 
 # ---------------------------------------------------------------------------
 # Authentication — Streamlit native Google login

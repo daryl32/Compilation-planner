@@ -121,6 +121,10 @@ def push_file_with_oauth(
     drive_path is a slash-separated folder path from Drive root.
     Returns None on success, error string on failure.
     """
+    from drive_sync import drive_writes_blocked
+    blocked = drive_writes_blocked()
+    if blocked:
+        return blocked
     try:
         service = _get_service(token_dict)
         import mimetypes

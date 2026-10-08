@@ -266,11 +266,26 @@ def download_source_video(drive_rel_path: str, dest: Path, progress_callback=Non
         return str(e)
 
 
+def drive_writes_blocked() -> str | None:
+    """The test copy (config.DRIVE_WRITES = False) never writes to Google Drive.
+    Returns the message to show instead, or None when writes are allowed."""
+    try:
+        import config
+        if not getattr(config, "DRIVE_WRITES", True):
+            return "Saving to Google Drive is switched off in the test copy."
+    except ImportError:
+        pass
+    return None
+
+
 def push_file_to_drive(local_path: Path, drive_subfolder: str) -> str | None:
     """
     Upload a single file to scene-labeling/<drive_subfolder>/ in Drive.
     Returns None on success, error string on failure.
     """
+    blocked = drive_writes_blocked()
+    if blocked:
+        return blocked
     try:
         service = _get_service()
         scene_id = _find_folder(service, DRIVE_SCENE_LABELING)
@@ -289,6 +304,9 @@ def push_directory_to_drive(local_dir: Path, drive_subfolder: str,
     Upload all files in local_dir to scene-labeling/<drive_subfolder>/ in Drive.
     Returns {"pushed": N, "errors": [str]}
     """
+    blocked = drive_writes_blocked()
+    if blocked:
+        return {"pushed": 0, "errors": [blocked]}
     try:
         service = _get_service()
         scene_id = _find_folder(service, DRIVE_SCENE_LABELING)

@@ -27,7 +27,9 @@ except ImportError:
 
 PAGE_SIZE = 20
 
-st.set_page_config(page_title="Media Library", layout="wide")
+from library_common import page_title, env_banner
+st.set_page_config(page_title=page_title("Media Library"), layout="wide")
+env_banner()
 
 # --- Whitelist gate ---
 if st.user.email not in WHITELISTED_EMAILS:

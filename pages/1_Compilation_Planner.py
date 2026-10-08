@@ -82,7 +82,9 @@ try:
 except ImportError:
     _OAUTH_AVAILABLE = False
 
-st.set_page_config(page_title="Compilation Planner", layout="wide")
+from library_common import page_title, env_banner
+st.set_page_config(page_title=page_title("Compilation Planner"), layout="wide")
+env_banner()
 
 # --- Whitelist gate ---
 if st.user.email not in WHITELISTED_EMAILS:

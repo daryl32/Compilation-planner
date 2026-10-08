@@ -35,6 +35,30 @@ PENDING_FILE = CATALOGUE_DIR / ".pending_push.txt"
 
 
 # ---------------------------------------------------------------------------
+# Production vs test copy (set APP_ENV = "test" in the test copy's config.py)
+# ---------------------------------------------------------------------------
+
+IS_TEST = str(getattr(config, "APP_ENV", "production")).lower() == "test"
+
+
+def page_title(name: str) -> str:
+    """Browser-tab title, marked in the test copy so the two are easy to tell apart."""
+    return f"🧪 TEST · {name}" if IS_TEST else name
+
+
+def env_banner() -> None:
+    """A bright strip at the top of every page of the test copy. Call right
+    after st.set_page_config. Does nothing in production."""
+    if IS_TEST:
+        st.markdown(
+            '<div style="background:#f59e0b;color:#111;padding:6px 12px;border-radius:6px;'
+            'font-weight:600;margin-bottom:8px;">🧪 TEST COPY — separate data; saving to '
+            'Google Drive is switched off. Production is unaffected.</div>',
+            unsafe_allow_html=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Tags and time
 # ---------------------------------------------------------------------------
 
