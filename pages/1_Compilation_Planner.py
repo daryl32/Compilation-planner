@@ -4251,6 +4251,17 @@ elif matching_mode == "Manual step-through":
     confirmed = st.session_state["adv_confirmed"]
     skips = st.session_state["adv_skips"]
 
+    # ✏️ Editing one already-confirmed block: every OTHER confirmed block stays
+    # confirmed (same model as Choreography). adv_frontier is how far you've got;
+    # current_block becomes the block being edited, so the grid below shows it.
+    adv_frontier = current_block
+    adv_editing = st.session_state.get("adv_editing_block")
+    if adv_editing is not None and not (0 <= adv_editing < adv_frontier):
+        st.session_state.pop("adv_editing_block", None)
+        adv_editing = None
+    if adv_editing is not None:
+        current_block = adv_editing
+
     # Replay every already-confirmed block's skips-then-picks against the fresh
     # queues, in order, so the candidate search for the CURRENT block sees
     # accurate remaining availability. Skips are replayed before picks within
@@ -4278,6 +4289,29 @@ elif matching_mode == "Manual step-through":
             except ValueError:
                 invalidated.append((i, pick["video_id"], pick["scene_id"]))
         confirmed[i] = still_valid
+
+    # Editing: the blocks AFTER the edited one stay confirmed — take their exact
+    # clips out of the pool, and in sequential mode cut each video off before
+    # its clip in the next later block, so the order still holds.
+    _edit_fp = None
+    if adv_editing is not None:
+        earliest_later = {}
+        for i in range(adv_editing + 1, adv_frontier):
+            for pick in confirmed.get(i, []):
+                try:
+                    carve_span(queues, pick["video_id"], pick["scene_id"],
+                               pick["offset_into_scene_sec"], pick["clip_duration_sec"], False)
+                except ValueError:
+                    invalidated.append((i, pick["video_id"], pick["scene_id"]))
+                earliest_later[pick["video_id"]] = min(earliest_later.get(pick["video_id"], float("inf")),
+                                                       pick["clip_start_sec"])
+        if sequential_mode:
+            for vid, t in earliest_later.items():
+                limit_queue_before(queues, vid, t)
+        _edit_fp = tuple(sorted(
+            (i, p["video_id"], p["scene_id"], p["offset_into_scene_sec"])
+            for i in range(adv_editing + 1, adv_frontier) for p in confirmed.get(i, [])
+        ))
     if invalidated:
         st.warning(f"{len(invalidated)} previously-confirmed/skipped item(s) are no longer available "
                    f"(a setting changed since) and were removed — revisit those blocks with Previous.")
@@ -4294,14 +4328,14 @@ elif matching_mode == "Manual step-through":
             pass
     skips[current_block] = still_valid_current_skips
 
-    clip_count_shortfall = sum(1 for i in range(current_block) if len(confirmed.get(i, [])) < recommended_counts[i])
+    clip_count_shortfall = sum(1 for i in range(adv_frontier) if len(confirmed.get(i, [])) < recommended_counts[i])
     duration_shortfall_sec = 0.0  # Advanced mode never partially fills — a slot is either a full-length match or absent
 
     # Build the timeline for the chart's markers: real picks for confirmed
     # blocks, empty for anything not yet reached.
     timeline = []
     for i, sg in enumerate(segments):
-        picks = confirmed.get(i, []) if i < current_block else []
+        picks = confirmed.get(i, []) if i < adv_frontier else []
         timeline.append({
             "segment_index": i, "track_time": [round(sg["start"], 2), round(sg["end"], 2)],
             "segment_energy": sg["energy"], "segment_intensity": sg["intensity"],
@@ -4830,9 +4864,17 @@ else:
     # Manual step-through UI
     # -----------------------------------------------------------------------
 
+    def _adv_start_edit(k: int) -> None:
+        """Open confirmed block k for editing; its current clips start ticked."""
+        st.session_state["adv_editing_block"] = k
+        st.session_state["adv_viewing"] = None
+        for key in [x for x in st.session_state if x.startswith(f"adv_pick_{k}_")]:
+            st.session_state.pop(key, None)
+        st.session_state.pop(f"adv_similar_{k}", None)
+
     if current_block >= len(segments):
         st.success(f"✅ All {len(segments)} blocks confirmed. Review below — click ✏️ Edit on any block "
-                   f"to jump straight to it, or use Restart to start over.")
+                   f"to change just that block (the others stay as they are), or use Restart to start over.")
 
         rev_top_cols = st.columns([2, 2, 3])
         with rev_top_cols[0]:
@@ -4847,9 +4889,9 @@ else:
                 help="Type a block number and press Enter or click Go.",
                 label_visibility="collapsed",
             )
-            if st.button("↩ Go to block", key="adv_review_jump_go"):
-                st.session_state["adv_current_block"] = int(rev_jump) - 1
-                st.session_state["adv_viewing"] = None
+            if st.button("✏️ Edit block", key="adv_review_jump_go",
+                         help="Re-pick this block's clips. Every other block stays as it is."):
+                _adv_start_edit(int(rev_jump) - 1)
                 st.rerun()
 
         st.subheader("Confirmed timeline")
@@ -4869,9 +4911,8 @@ else:
                 )
             with hdr_cols[1]:
                 if st.button("✏️ Edit", key=f"adv_edit_block_{seg_idx}",
-                             help=f"Jump to block {seg_idx + 1} to re-pick its clips."):
-                    st.session_state["adv_current_block"] = seg_idx
-                    st.session_state["adv_viewing"] = None
+                             help=f"Re-pick block {seg_idx + 1}'s clips. Every other block stays as it is."):
+                    _adv_start_edit(seg_idx)
                     st.rerun()
 
             if not entry["scenes"]:
@@ -4902,12 +4943,18 @@ else:
 
         adv_role_tag = ("  🎬 INTRO BLOCK" if current_block in intro_blocks_0based
                        else "  🎬 OUTRO BLOCK" if current_block in outro_blocks_0based else "")
-        st.subheader(f"Block {current_block + 1} of {len(segments)}  "
+        st.subheader(f"{'✏️ Editing block' if adv_editing is not None else 'Block'} "
+                     f"{current_block + 1} of {len(segments)}  "
                      f"({seg['start']:.1f}s – {seg['end']:.1f}s, intensity {seg['intensity']:.2f}){adv_role_tag}")
+        if adv_editing is not None:
+            st.info("Every other block stays confirmed. The candidates only use footage no other block uses"
+                    + (" — and, with sequential order on, only footage between each video's clips in the "
+                       "blocks before and after this one." if sequential_mode else ".")
+                    + " This block's current clips start ticked; 💾 Save block keeps your changes.")
         st.caption(f"Recommended simultaneous clips for this block: {rec_count} "
                    f"(from your split-screen settings) — this is a guide only; select any number below.")
 
-        if st.button(f"⚡⚡ Auto-fill ALL remaining blocks ({len(segments) - current_block} left)",
+        if adv_editing is None and st.button(f"⚡⚡ Auto-fill ALL remaining blocks ({len(segments) - current_block} left)",
                      key="adv_autofill_all",
                      help="Automatically picks the best-scoring clip(s) for every block from here to the "
                           "end, using each block's own recommended count — same as clicking Auto-fill and "
@@ -5033,9 +5080,15 @@ else:
 
         nav_cols = st.columns([2, 2, 3])
         with nav_cols[0]:
-            if st.button("◀ Previous", disabled=(current_block == 0), key="adv_prev"):
-                st.session_state["adv_current_block"] = current_block - 1
-                st.session_state["adv_viewing"] = None
+            if adv_editing is not None:
+                if st.button("✖ Cancel edit", key="adv_cancel_edit",
+                             help="Leave this block exactly as it was confirmed."):
+                    st.session_state.pop("adv_editing_block", None)
+                    st.session_state["adv_viewing"] = None
+                    st.rerun()
+            elif st.button("◀ Previous", disabled=(current_block == 0), key="adv_prev",
+                           help="Edit the previous block — every other block stays confirmed."):
+                _adv_start_edit(current_block - 1)
                 st.rerun()
         with nav_cols[2]:
             jump_target = st.number_input(
@@ -5044,16 +5097,35 @@ else:
                 help="Type a block number and press Enter to jump directly to it.",
                 label_visibility="collapsed",
             )
-            if st.button("↩ Go to block", key="adv_jump_go"):
-                st.session_state["adv_current_block"] = int(jump_target) - 1
-                st.session_state["adv_viewing"] = None
+            if st.button("↩ Go to block", key="adv_jump_go", disabled=adv_editing is not None,
+                         help="A block before your progress opens it for editing (the others stay "
+                              "confirmed); a later one moves ahead to it."):
+                _target = int(jump_target) - 1
+                if _target < adv_frontier and confirmed.get(_target):
+                    _adv_start_edit(_target)
+                else:
+                    st.session_state["adv_current_block"] = _target
+                    st.session_state["adv_viewing"] = None
                 st.rerun()
         with nav_cols[1]:
-            if st.button("Confirm & Next ▶", type="primary", key="adv_next"):
+            if st.button("💾 Save block" if adv_editing is not None else "Confirm & Next ▶",
+                         type="primary", key="adv_next"):
                 chosen = [c for c in st.session_state.get(f"adv_candidates_{current_block}", [])
                          if st.session_state.get(f"adv_pick_{current_block}_{cand_key(c)}")]
                 new_confirmed = []
+                _original = {(p["video_id"], p["scene_id"]): p for p in confirmed.get(current_block, [])}
                 for c in chosen:
+                    # Editing and kept a clip that was already here: keep its exact window.
+                    if adv_editing is not None and not c.get("similar") \
+                            and (c["video_id"], c["scene_id"]) in _original:
+                        _p = _original.pop((c["video_id"], c["scene_id"]))
+                        try:
+                            new_confirmed.append(carve_span(queues, _p["video_id"], _p["scene_id"],
+                                                            _p["offset_into_scene_sec"], _p["clip_duration_sec"],
+                                                            sequential_mode))
+                            continue
+                        except ValueError:
+                            pass
                     try:
                         pick = carve_span(queues, c["video_id"], c["scene_id"],
                                           c["window_offset_sec"], c["window_duration_sec"], sequential_mode)
@@ -5061,7 +5133,10 @@ else:
                     except ValueError as e:
                         st.warning(f"Couldn't use {c['video_id']} #{c['scene_id']}: {e}")
                 confirmed[current_block] = new_confirmed
-                st.session_state["adv_current_block"] = current_block + 1
+                if adv_editing is not None:
+                    st.session_state.pop("adv_editing_block", None)  # back to where you were
+                else:
+                    st.session_state["adv_current_block"] = current_block + 1
                 st.session_state["adv_viewing"] = None
                 st.rerun()
 
@@ -5083,7 +5158,8 @@ else:
         # depend on it: deselecting a video removes it from queues, and without this the cached
         # candidate list would still show that video's clips until something else invalidated it.
         search_key = (adv_key, current_block, int(max_shape_matches), sequential_mode,
-                     prior_picks_fingerprint, current_skips_fingerprint, tuple(sorted(selected_videos)))
+                     prior_picks_fingerprint, current_skips_fingerprint, tuple(sorted(selected_videos)),
+                     _edit_fp)
         cache = st.session_state.get(f"adv_search_cache_{current_block}")
         block_audio_curve = get_block_audio_curve(track, seg["start"], seg["end"])  # cheap — always needed, cache or not
 
@@ -5161,7 +5237,7 @@ else:
                               autofill_weights, catalogues, similar_ctx)
 
 
-if matching_mode == "Manual step-through" and current_block < len(segments):
+if matching_mode == "Manual step-through" and adv_frontier < len(segments):
     st.warning(
         f"Only {current_block} of {len(segments)} blocks confirmed — exporting/rendering now will "
         f"leave the rest empty. Finish stepping through above first, or export anyway if intentional."
