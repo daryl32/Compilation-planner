@@ -1567,6 +1567,20 @@ def render_swap_for_similar(mode: str, confirmed_map: dict, seg_idx: int, n_bloc
             st.rerun()
 
 
+def blocks_to_show(label: str, key: str, n_blocks: int) -> int:
+    """'Blocks to show' slider for the review lists: its range is 1…n_blocks and
+    it defaults to every block (capped at 50 for long tracks). When the number
+    of blocks changes (new track, different segmentation), it resets to that
+    default instead of keeping a value from the old range."""
+    if n_blocks <= 1:
+        return n_blocks
+    default = min(n_blocks, 50)
+    if st.session_state.get(f"{key}__n") != n_blocks:
+        st.session_state.pop(key, None)
+        st.session_state[f"{key}__n"] = n_blocks
+    return st.slider(label, 1, n_blocks, default, key=key)
+
+
 def limit_queue_before(queues: dict, video_id: str, abs_end_sec: float) -> None:
     """Drop every bit of video_id's queued footage at or after abs_end_sec
     (absolute time in the video), trimming a span that crosses it. Used when
@@ -4445,7 +4459,7 @@ if matching_mode == "Auto":
         "🚫 **Reject** — replace it here too, but permanently ban the original from the whole plan.  "
         "✕ **Remove** — delete this slot (fewer simultaneous clips); the original can still be used elsewhere."
     )
-    preview_count = st.slider("Segments to preview below", 5, 50, 15)
+    preview_count = blocks_to_show("Segments to preview below", "auto_preview_count", len(timeline))
 
     for entry in timeline[:preview_count]:
         t0, t1 = entry["track_time"]
@@ -4560,7 +4574,7 @@ elif matching_mode == "Choreography":
                 st.rerun()
 
         st.subheader("Confirmed timeline")
-        chor_preview = st.slider("Blocks to show below", 5, 50, min(15, len(segments)), key="chor_preview_count")
+        chor_preview = blocks_to_show("Blocks to show below", "chor_preview_count", len(segments))
         for entry in timeline[:chor_preview]:
             seg_idx = entry["segment_index"]
             t0, t1 = entry["track_time"]
@@ -4895,7 +4909,7 @@ else:
                 st.rerun()
 
         st.subheader("Confirmed timeline")
-        preview_count = st.slider("Blocks to show below", 5, 50, min(15, len(segments)), key="adv_preview_count")
+        preview_count = blocks_to_show("Blocks to show below", "adv_preview_count", len(segments))
         for entry in timeline[:preview_count]:
             seg_idx = entry["segment_index"]
             t0, t1 = entry["track_time"]
