@@ -116,6 +116,47 @@ def _sidebar(page_path: str) -> None:
     st.sidebar.divider()
 
 
+# Every dropdown (selectbox / multiselect) is pick-from-the-list only. Streamlit
+# builds them on a searchable text input, so clicking one shows a text cursor
+# and, on a phone or iPad, pops up the keyboard. This marks those inputs
+# read-only (no typing, no keyboard; clicking still opens the list) — installed
+# once into the page and re-applied to new dropdowns as they appear, since
+# Streamlit redraws on every interaction.
+_NO_DROPDOWN_TYPING_JS = """
+<script>
+(function () {
+  const doc = window.parent.document;
+  if (doc.getElementById("no-dropdown-typing")) return;
+  const style = doc.createElement("style");
+  style.textContent = '[data-baseweb="select"] input { caret-color: transparent !important; cursor: pointer !important; }';
+  doc.head.appendChild(style);
+  const s = doc.createElement("script");
+  s.id = "no-dropdown-typing";
+  s.textContent = `
+    (function () {
+      function fix() {
+        document.querySelectorAll('[data-baseweb="select"] input').forEach(function (el) {
+          if (!el.readOnly) { el.readOnly = true; el.setAttribute("inputmode", "none"); }
+        });
+      }
+      fix();
+      new MutationObserver(fix).observe(document.body, { childList: true, subtree: true });
+    })();
+  `;
+  doc.head.appendChild(s);
+})();
+</script>
+"""
+
+
+def _lock_dropdown_typing() -> None:
+    try:
+        import streamlit.components.v1 as components
+        components.html(_NO_DROPDOWN_TYPING_JS, height=0)
+    except Exception:
+        pass  # cosmetic only — never break the page over it
+
+
 def page_setup(name: str, page_path: str, *, title: str = None, anchor: str = None) -> None:
     """Call first on every page.
 
@@ -126,6 +167,7 @@ def page_setup(name: str, page_path: str, *, title: str = None, anchor: str = No
     anchor: HTML anchor for the heading (e.g. for a "Back to top" link)"""
     st.set_page_config(page_title=page_title(name), layout="wide")
     env_banner()
+    _lock_dropdown_typing()
     if not st.user.is_logged_in:
         _sign_in_screen(name)
     if st.user.email not in WHITELISTED_EMAILS:
