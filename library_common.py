@@ -14,7 +14,7 @@ from pathlib import Path
 import streamlit as st
 
 import config
-from config import CATALOGUE_DIR
+from config import CATALOGUE_DIR, AUDIO_DIR
 
 # Small 480p copies of the source videos, used by the range picker so scrubbing
 # is fast and the server doesn't load multi-GB originals into memory. Same
@@ -224,15 +224,20 @@ def mark_pending(stem: str) -> None:
 
 
 def push_pending(token: dict) -> dict:
-    """Upload every pending file in CATALOGUE_DIR to scene-labeling/catalogue.
-    Returns {stem: error} for any that failed (those stay pending)."""
+    """Upload every pending file to Drive: plain stems are video catalogues
+    (CATALOGUE_DIR → scene-labeling/catalogue); "audio:<stem>" entries are
+    track catalogues (AUDIO_DIR → scene-labeling/audio_catalogue), e.g. ones
+    the server analysed. Returns {entry: error} for any that failed (those stay pending)."""
     from drive_oauth import push_file_with_oauth
     failed = {}
     for stem in sorted(read_pending()):
-        path = CATALOGUE_DIR / f"{stem}.json"
+        if stem.startswith("audio:"):
+            path, folder = AUDIO_DIR / f"{stem[6:]}.json", "scene-labeling/audio_catalogue"
+        else:
+            path, folder = CATALOGUE_DIR / f"{stem}.json", "scene-labeling/catalogue"
         if not path.exists():
             continue  # nothing to push any more
-        err = push_file_with_oauth(token, path, "scene-labeling/catalogue")
+        err = push_file_with_oauth(token, path, folder)
         if err:
             failed[stem] = err
     write_pending(set(failed))

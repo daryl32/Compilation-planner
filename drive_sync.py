@@ -266,6 +266,38 @@ def download_source_video(drive_rel_path: str, dest: Path, progress_callback=Non
         return str(e)
 
 
+AUDIO_FILE_EXTENSIONS = (".m4a", ".mp3", ".wav", ".flac", ".aac", ".ogg", ".opus")
+
+
+def list_drive_audio(folder_path: str = "Audio-Library") -> tuple:
+    """Every audio file under a My Drive folder (and its subfolders).
+    folder_path is below "My Drive", e.g. "Audio-Library" — it must be shared
+    with the service account. Returns ([{"name", "rel", "size"}], error or None);
+    "rel" is the path below My Drive, as used in a catalogue's source_path."""
+    try:
+        service = _get_service()
+        parent_id = None
+        for part in [p for p in folder_path.split("/") if p]:
+            parent_id = _find_folder(service, part, parent_id)
+            if not parent_id:
+                return [], f"Folder '{part}' not found in Drive — is it shared with the service account?"
+        out, stack = [], [(parent_id, folder_path.strip("/"))]
+        while stack:
+            fid, rel = stack.pop()
+            for f in _list_files(service, fid):
+                if f["name"].lower().endswith(AUDIO_FILE_EXTENSIONS):
+                    out.append({"name": f["name"], "rel": f"{rel}/{f['name']}", "size": int(f.get("size", 0))})
+            resp = service.files().list(
+                q=f"'{fid}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+                fields="files(id, name)", pageSize=1000,
+            ).execute()
+            for sub in resp.get("files", []):
+                stack.append((sub["id"], f"{rel}/{sub['name']}"))
+        return sorted(out, key=lambda f: f["rel"].lower()), None
+    except Exception as e:
+        return [], str(e)
+
+
 def drive_writes_blocked() -> str | None:
     """The test copy (config.DRIVE_WRITES = False) never writes to Google Drive.
     Returns the message to show instead, or None when writes are allowed."""

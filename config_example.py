@@ -41,3 +41,9 @@ WHITELISTED_EMAILS = [
 # (default: a "proxies" folder next to CATALOGUE_DIR)
 # ---------------------------------------------------------------------------
 # PROXY_DIR = _BASE / "proxies"
+
+# ---------------------------------------------------------------------------
+# Optional: the My Drive folder holding your music (Media Library → Audio →
+# "Check for new tracks" lists it; must be shared with the service account)
+# ---------------------------------------------------------------------------
+# AUDIO_LIBRARY_DRIVE_FOLDER = "Audio-Library"

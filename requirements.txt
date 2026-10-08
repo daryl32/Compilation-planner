@@ -16,6 +16,12 @@ Pillow>=10.0.0
 opencv-python>=4.8.0
 numpy>=1.26.0
 
+# --- Server audio analysis (audio_analysis.py; also needs ffmpeg) ---
+scipy>=1.11.0
+# Optional, used automatically when installed (both need torch, CPU is fine):
+#   pip install beat_this     # better downbeats
+#   pip install demucs        # vocals (slow on CPU — a few minutes per song)
+
 # --- Utilities ---
 tqdm>=4.66.0
 

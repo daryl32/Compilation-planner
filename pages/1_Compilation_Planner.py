@@ -20,6 +20,7 @@ from PIL import Image
 from render_preview import render_plan_dict, colab_to_local
 import video_ranking as VR
 import similarity as SIM
+import cut_scoring as CS
 import preview_snippets
 from library_common import (scene_tags, render_range_picker, library_ranges, master_thumbnail_path, proxy_path,
                             refresh_caches_after_sync)
@@ -103,15 +104,26 @@ def resolve_thumbnail(stored_path: str, video_id: str) -> Path:
 # Data loading (cached — only recomputes when inputs actually change)
 # ---------------------------------------------------------------------------
 
-@st.cache_data
 def list_tracks():
+    # Not cached: a folder listing is cheap, and new tracks (synced, or analysed
+    # on the server from the Media Library) should appear without a restart.
     return sorted(f.stem for f in AUDIO_DIR.glob("*.json") if f.name != "audio_index.json")
 
 
-@st.cache_data
-def load_track(track_id: str) -> dict:
+@st.cache_data(max_entries=4)
+def _load_track_file(track_id: str, mtime: float) -> dict:
     with open(AUDIO_DIR / f"{track_id}.json") as f:
         return json.load(f)
+
+
+def load_track(track_id: str) -> dict:
+    """The track's catalogue — re-read whenever the file changes (e.g. after the
+    server adds its extra analysis)."""
+    try:
+        mtime = (AUDIO_DIR / f"{track_id}.json").stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return _load_track_file(track_id, mtime)
 
 
 @st.cache_data
@@ -2139,10 +2151,12 @@ AUDIO_SETTINGS_KEYS = [
     "fast_energy_thresh", "fast_max_bars", "fast_cooldown_bars",
     "phrase_lock_bars", "cinematic_bars", "dynamic_priority_override", "override_delta_thresh",
     "override_clear_secs",
+    *CS.DEFAULTS.keys(),
 ]
 
 SEG_ADAPTIVE = "Adaptive (energy-change + hits)"
 SEG_RHYTHM = "Rhythm Engine (bar cutting styles)"
+SEG_SCORED = "Scored cuts (all signals)"
 
 # Which settings each segmentation method actually uses (beats_per_bar: all).
 SEG_METHOD_KEYS = {
@@ -2151,6 +2165,7 @@ SEG_METHOD_KEYS = {
     SEG_RHYTHM: ["fast_energy_thresh", "fast_max_bars", "fast_cooldown_bars", "phrase_lock_bars",
                  "cinematic_bars", "dynamic_priority_override", "override_delta_thresh",
                  "override_clear_secs"],
+    SEG_SCORED: list(CS.DEFAULTS.keys()),
 }
 
 
@@ -2169,6 +2184,8 @@ def segmentation_settings() -> dict:
 def build_segments(track: dict, cfg: dict) -> list:
     """Segments for this track with the settings from segmentation_settings()."""
     bpb = int(cfg.get("beats_per_bar", 4))
+    if cfg["method"] == SEG_SCORED:
+        return CS.build_scored_segments(track, cfg)
     if cfg["method"] == SEG_RHYTHM:
         return build_rhythm_engine_segments(
             track, bpb, float(cfg["fast_energy_thresh"]), int(cfg["fast_max_bars"]),
@@ -2179,6 +2196,117 @@ def build_segments(track: dict, cfg: dict) -> list:
         track, float(cfg["change_window_secs"]), float(cfg["change_threshold"]),
         float(cfg["min_segment_sec"]), bool(cfg["react_to_hits"]), float(cfg["hit_threshold"]),
         float(cfg["snap_secs"]), float(cfg["max_segment_sec"]), bpb)
+
+
+def _render_scored_cut_settings(track: dict, _v) -> None:
+    """Dials for the Scored cuts method."""
+    a = track.get("analysis") or {}
+    if not a:
+        st.info("This track only has the basic analysis, so cuts are scored from hits and beats alone. "
+                "Add the extra analysis (bars, drums, sections, drops, vocals) from the **Media Library → "
+                "Audio → 🔬 Audio analysis** panel for the full set of signals.")
+    elif a.get("vocals") is None:
+        st.caption("No vocal analysis for this track (Demucs isn't installed on the server) — the vocal "
+                   "weights have no effect.")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.slider("Min segment length (s)", 0.3, 8.0, value=float(_v("sc_min_sec")), step=0.1, key="sc_min_sec",
+                  help="No two cuts closer than this.")
+        st.slider("Max segment length (s)", 0.0, 30.0, value=float(_v("sc_max_sec")), step=0.5, key="sc_max_sec",
+                  help="No segment longer than this, if there's any reasonable cut in range. 0 = no limit.")
+    with col2:
+        st.slider("Average bars per cut", 0.5, 8.0, value=float(_v("sc_bars_per_cut")), step=0.25,
+                  key="sc_bars_per_cut", help="Overall cut rate: 1 = about one cut per bar, 4 = one per 4 bars.")
+        st.slider("Follow the energy", 0.0, 1.0, value=float(_v("sc_follow_energy")), step=0.05,
+                  key="sc_follow_energy",
+                  help="How much faster loud, busy passages cut than quiet ones. 0 = same rate everywhere.")
+    st.markdown("**What makes a good cut** — weight of each reason (0 = ignore)")
+    wcols = st.columns(3)
+    weight_help = {
+        "sc_w_hit": ("Big hit", "Any sharp new sound (onset strength)."),
+        "sc_w_kick": ("Kick", "Low-frequency drum hits."),
+        "sc_w_snare": ("Snare / clap", "Mid-frequency drum hits."),
+        "sc_w_harmony": ("Chord change", "The notes / chords change."),
+        "sc_w_bar": ("Bar line", "The first beat of a bar."),
+        "sc_w_phrase": ("Phrase line", "Every 4 / 8 / 16 bars from a section start — 16 counts most."),
+        "sc_w_section": ("Section change", "Verse → chorus etc., found from a change in the sound."),
+        "sc_w_drop": ("Drop", "The moment a build-up lands."),
+        "sc_w_vocal": ("Vocal line start / end", "Where a sung phrase begins or ends."),
+        "sc_w_vocal_mid": ("Avoid cutting mid-vocal", "Penalty for cutting while a vocal line is being sung."),
+    }
+    for i, (key, (label, hlp)) in enumerate(weight_help.items()):
+        with wcols[i % 3]:
+            st.slider(label, 0.0, 5.0, value=float(_v(key)), step=0.1, key=key, help=hlp)
+
+
+def add_analysis_overlays(fig, track: dict) -> None:
+    """Sections (shaded + labelled), build-ups, drops, bar lines and the extra
+    curves from the server analysis — most hidden until clicked in the legend."""
+    a = track.get("analysis") or {}
+    if not a:
+        return
+    shades = ["rgba(120,120,220,0.07)", "rgba(220,140,60,0.08)", "rgba(60,180,120,0.08)",
+              "rgba(200,80,160,0.07)", "rgba(160,160,60,0.08)"]
+    for sec in a.get("sections") or []:
+        idx = (ord(sec["label"][0]) - ord("A")) % len(shades)
+        fig.add_vrect(x0=sec["start"], x1=sec["end"], fillcolor=shades[idx], line_width=0, layer="below",
+                      annotation_text=sec["label"], annotation_position="top left",
+                      annotation_font_size=10, annotation_font_color="rgba(90,90,90,0.9)")
+    for b in a.get("builds") or []:
+        fig.add_vrect(x0=b["start"], x1=b["end"], fillcolor="rgba(250,200,0,0.10)", line_width=0, layer="below")
+    rate = float(a.get("rate", 30))
+    curves = [("kick", "Kick", "rgba(200,60,40,0.6)"), ("snare", "Snare", "rgba(40,140,200,0.6)"),
+              ("hat", "Hi-hat", "rgba(120,120,120,0.5)"), ("harmony", "Chord change", "rgba(60,170,90,0.7)"),
+              ("novelty", "Section novelty", "rgba(150,60,200,0.7)"), ("vocals", "Vocals", "rgba(230,120,0,0.8)")]
+    for key, name, colour in curves:
+        vals = a.get(key)
+        if vals:
+            fig.add_trace(go.Scatter(x=[i / rate for i in range(len(vals))], y=vals, mode="lines", name=name,
+                                     line=dict(color=colour, width=1), visible="legendonly"))
+    xs, ys = [], []
+    for t in a.get("downbeats") or []:
+        xs += [t, t, None]
+        ys += [0, 0.08, None]
+    if xs:
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name="Bar lines", hoverinfo="skip",
+                                 line=dict(color="rgba(60,60,60,0.5)", width=1), visible="legendonly"))
+    if a.get("drops"):
+        fig.add_trace(go.Scatter(x=a["drops"], y=[1.02] * len(a["drops"]), mode="markers+text", name="Drop",
+                                 text=["drop"] * len(a["drops"]), textposition="top center",
+                                 marker=dict(symbol="triangle-down", size=9, color="rgba(220,40,40,0.9)")))
+
+
+CUT_KIND_STYLES = (
+    ("change", "rgba(0,160,120,0.7)", "Cut: energy change (snapped)"),
+    ("hit", "rgba(220,60,60,0.55)", "Cut: big hit"),
+    ("fill", "rgba(230,150,30,0.6)", "Cut: max-length split (on strongest beat)"),
+    ("cinematic", "rgba(80,120,220,0.5)", "Rhythm Engine: CINEMATIC"),
+    ("fast", "rgba(230,150,30,0.6)", "Rhythm Engine: FAST"),
+    ("override", "rgba(230,30,200,0.75)", "Rhythm Engine: Dynamic Priority Override"),
+    ("sc_section", "rgba(150,60,200,0.9)", "Scored cut: section change"),
+    ("sc_drop", "rgba(220,40,40,0.9)", "Scored cut: drop"),
+    ("sc_phrase", "rgba(60,90,200,0.8)", "Scored cut: phrase line"),
+    ("sc_bar", "rgba(90,90,90,0.6)", "Scored cut: bar line"),
+    ("sc_kick", "rgba(200,60,40,0.6)", "Scored cut: kick"),
+    ("sc_snare", "rgba(40,140,200,0.6)", "Scored cut: snare"),
+    ("sc_hit", "rgba(220,60,60,0.55)", "Scored cut: big hit"),
+    ("sc_harmony", "rgba(60,170,90,0.7)", "Scored cut: chord change"),
+    ("sc_vocal", "rgba(230,120,0,0.8)", "Scored cut: vocal line"),
+    ("sc_beat", "rgba(140,140,140,0.5)", "Scored cut: beat"),
+)
+
+
+def add_cut_markers(fig, segments: list) -> None:
+    """Vertical markers at every cut, coloured by why the cut happened."""
+    for _kind, _colour, _label in CUT_KIND_STYLES:
+        _xs, _ys = [], []
+        for _sg in segments:
+            if _sg.get("cut") == _kind:
+                _xs += [_sg["start"], _sg["start"], None]
+                _ys += [0, 1, None]
+        if _xs:
+            fig.add_trace(go.Scatter(x=_xs, y=_ys, mode="lines", name=_label,
+                                     line=dict(color=_colour, width=1, dash="dot"), hoverinfo="skip"))
 
 
 @fragment
@@ -2204,7 +2332,7 @@ def render_audio_settings_section(track: dict) -> None:
         return st.session_state.get(key, _shadow.get(key, DIAL_DEFAULTS.get(key)))
 
     st.subheader("Segmentation method")
-    _seg_options = [SEG_ADAPTIVE, SEG_RHYTHM]
+    _seg_options = [SEG_ADAPTIVE, SEG_RHYTHM, SEG_SCORED]
     _seg_default = _v("segmentation_method")
     segmentation_method = st.radio(
         "Method", _seg_options,
@@ -2213,14 +2341,18 @@ def render_audio_settings_section(track: dict) -> None:
         help="Adaptive: detects individual cut points from energy changes and hits, ported from the VSE "
              "add-on's block detector. Rhythm Engine: assigns a named cutting STYLE to each bar based on its "
              "energy — CINEMATIC (slow, multi-bar) or FAST (one segment per bar) — a different feel driven "
-             "by musical structure rather than individual events.",
+             "by musical structure rather than individual events. Scored cuts: scores every beat for how "
+             "good a cut it would be (hits, drums, chord changes, bars, phrases, sections, drops, vocals — "
+             "weights below) and picks the best set of cuts together, within your min/max lengths.",
     )
     beats_per_bar = st.number_input(
         "Beats per bar", min_value=2, max_value=12, value=int(_v("beats_per_bar")), key="beats_per_bar",
         help="4 = common time (most pop/rock/EDM). Use 3 for a waltz, 6 for 6/8, etc.",
     )
 
-    if segmentation_method == SEG_ADAPTIVE:
+    if segmentation_method == SEG_SCORED:
+        _render_scored_cut_settings(track, _v)
+    elif segmentation_method == SEG_ADAPTIVE:
         col1, col2 = st.columns(2)
         with col1:
             st.slider("Energy-change window (s)", 0.5, 6.0, value=float(_v("change_window_secs")), step=0.1,
@@ -2310,23 +2442,8 @@ def render_audio_settings_section(track: dict) -> None:
                                   mode="lines", name="Track energy",
                                   line=dict(color="rgba(100,150,255,0.5)")))
 
-    for _kind, _colour, _label in (
-        ("change", "rgba(0,160,120,0.7)", "Cut: energy change (snapped)"),
-        ("hit",    "rgba(220,60,60,0.55)", "Cut: big hit"),
-        ("fill",   "rgba(230,150,30,0.6)", "Cut: max-length split"),
-        ("cinematic", "rgba(80,120,220,0.5)", "Rhythm Engine: CINEMATIC"),
-        ("fast",   "rgba(230,150,30,0.6)", "Rhythm Engine: FAST"),
-        ("override", "rgba(230,30,200,0.75)", "Rhythm Engine: Dynamic Priority Override"),
-    ):
-        _xs, _ys = [], []
-        for _sg in _segs:
-            if _sg.get("cut") == _kind:
-                _xs += [_sg["start"], _sg["start"], None]
-                _ys += [0, 1, None]
-        if _xs:
-            afig.add_trace(go.Scatter(x=_xs, y=_ys, mode="lines", name=_label,
-                                      line=dict(color=_colour, width=1, dash="dot"),
-                                      hoverinfo="skip"))
+    add_analysis_overlays(afig, track)
+    add_cut_markers(afig, _segs)
 
     _dt, _dens = compute_density_curve(track)
     afig.add_trace(go.Scatter(x=_dt, y=_dens, mode="lines", name="Density (1.5 s smoothed)",
@@ -2590,16 +2707,12 @@ def _moving_average(values, half_window: int):
 
 
 def compute_bar_times(track: dict, beats_per_bar: int = 4) -> list:
-    """Group detected beats into bars, assuming a constant beats_per_bar
-    (4 = common/4-4 time — most pop, rock, EDM; use 3 for a waltz, etc.).
-    Anchored at the first detected beat, which is a reasonable default for
-    most consistent-tempo tracks without a pickup beat. Purely derived from
-    the beat_times audio_pipeline.py already stores in Colab — no new audio
-    processing or re-running the backfill needed for this."""
-    beats = track.get("beat_times") or []
-    if len(beats) < beats_per_bar:
-        return []
-    return beats[0::beats_per_bar]
+    """Bar start times for beats_per_bar beats per bar (4 = common time; 3 for
+    a waltz, etc.). Uses the real downbeats when the server's extra analysis
+    is present; otherwise every Nth beat counting from the first detected beat."""
+    # Real downbeats from the server's extra analysis when the track has it
+    # (see cut_scoring.bar_lines); otherwise every Nth beat from the first.
+    return CS.bar_lines(track, beats_per_bar)
 
 
 def _snap_to_bar_or_onset(i: int, bar_frames: np.ndarray, onset: np.ndarray, snap: int, n: int) -> int:
@@ -2779,8 +2892,10 @@ def build_rhythm_engine_segments(
 
     bar_bounds = list(bar_times) + [duration]
     raw_segments = []  # (start, end, cut_kind)
-    if bar_bounds[0] > MIN_OVERRIDE_GAP_SEC:
-        raw_segments.append((0.0, bar_bounds[0], "start"))  # lead-in before the first bar
+    # Lead-in before the first bar: its own segment if at least a bar long,
+    # otherwise folded into the first bar.
+    if bar_bounds[0] >= bar_bounds[1] - bar_bounds[0]:
+        raw_segments.append((0.0, bar_bounds[0], "start"))
     else:
         bar_bounds[0] = 0.0
     i = 0
@@ -3433,6 +3548,8 @@ DIAL_DEFAULTS = {
     "dynamic_priority_override": False,
     "override_delta_thresh": 0.15,
     "override_clear_secs": 1.0,
+    # Segmentation — Scored cuts
+    **CS.DEFAULTS,
     # Split screen & intensity
     "split_screen_enabled": False,
     "min_clips": 1,
@@ -4527,21 +4644,9 @@ else:
                               y=[e["energy"] for e in track["energy_envelope"]],
                               mode="lines", name="Track energy", line=dict(color="rgba(100,150,255,0.5)")))
 
-# Vertical markers at every cut, coloured by why the cut happened
-for _kind, _colour, _label in (("change", "rgba(0,160,120,0.7)", "Cut: energy change (snapped)"),
-                                ("hit", "rgba(220,60,60,0.55)", "Cut: big hit"),
-                                ("fill", "rgba(230,150,30,0.6)", "Cut: max-length split (on strongest beat)"),
-                                ("cinematic", "rgba(80,120,220,0.5)", "Rhythm Engine: CINEMATIC"),
-                                ("fast", "rgba(230,150,30,0.6)", "Rhythm Engine: FAST"),
-                                ("override", "rgba(230,30,200,0.75)", "Rhythm Engine: Dynamic Priority Override")):
-    _xs, _ys = [], []
-    for _seg in segments:
-        if _seg.get("cut") == _kind:
-            _xs += [_seg["start"], _seg["start"], None]
-            _ys += [0, 1, None]
-    if _xs:
-        fig.add_trace(go.Scatter(x=_xs, y=_ys, mode="lines", name=_label,
-                                  line=dict(color=_colour, width=1, dash="dot"), hoverinfo="skip"))
+# Sections / drops / extra curves, then a marker at every cut coloured by why it happened
+add_analysis_overlays(fig, track)
+add_cut_markers(fig, segments)
 
 single_x, single_y, single_text = [], [], []
 split_x, split_y, split_text = [], [], []

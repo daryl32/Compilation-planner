@@ -3,14 +3,17 @@ Media Library — two libraries, picked at the top of the page:
   Videos: search, filter and sort, and set each video's library time range
           (the part of the video the Compilation Planner should use).
   Audio:  search, filter and sort the music tracks, see their energy shape
-          and play them.
+          and play them; analyse new tracks (and add the extra cut-finding
+          analysis to existing ones) on the server.
 """
 
 import json
+import time
 from pathlib import Path
 
 import streamlit as st
 
+import config
 from config import CATALOGUE_DIR, AUDIO_DIR
 from library_common import (
     scene_tags, tc_to_seconds, format_mmss, overlap_with_range,
@@ -322,12 +325,138 @@ def load_audio_library(signature: tuple) -> dict:
             "energy": [round(sum(rms[i:i + step]) / len(rms[i:i + step]), 4)
                        for i in range(0, len(rms), step)],
             "added": mtime,
+            "extra": int((t.get("analysis") or {}).get("version", 0)) >= EXTRA_ANALYSIS_VERSION,
+            "extra_info": _extra_summary(t.get("analysis")),
         }
     return tracks
 
 
+EXTRA_ANALYSIS_VERSION = 2   # same as audio_analysis.ANALYSIS_VERSION (kept here so this page loads without scipy)
+AUDIO_LIBRARY_FOLDER = getattr(config, "AUDIO_LIBRARY_DRIVE_FOLDER", "Audio-Library")
+
+
+def _extra_summary(a: dict) -> str:
+    if not a:
+        return ""
+    bits = [f"{len(a.get('sections') or [])} sections",
+            f"{len(a.get('downbeats') or [])} bars"]
+    if a.get("drops"):
+        bits.append(f"{len(a['drops'])} drop(s)")
+    if a.get("vocals") is not None:
+        bits.append("vocals")
+    return ", ".join(bits)
+
+
+def _audio_analysis_module():
+    """audio_analysis needs scipy — import lazily so the page works without it."""
+    try:
+        import audio_analysis
+        return audio_analysis, None
+    except Exception as e:
+        return None, str(e)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _drive_audio_files(folder: str) -> tuple:
+    from drive_sync import list_drive_audio
+    return list_drive_audio(folder)
+
+
+@st.fragment(run_every=4)
+def _analysis_progress(aa) -> None:
+    status = aa.read_status()
+    if not status:
+        return
+    running = aa.worker_running()
+    active = {k: v for k, v in status.items() if v.get("state") in ("queued", "running")}
+    if active and not running:
+        st.warning("Analysis jobs are waiting but the worker isn't running (the server may have restarted).")
+        if st.button("▶️ Restart analysis", key="aa_restart"):
+            aa.start_worker()
+            st.rerun()
+    icons = {"queued": "⏳", "running": "⚙️", "done": "✅", "error": "❌"}
+    order = {"running": 0, "queued": 1, "error": 2, "done": 3}
+    for tid, info in sorted(status.items(), key=lambda kv: (order.get(kv[1].get("state"), 9), kv[0].lower())):
+        kind = "new track" if info.get("kind") == "new" else "extra analysis"
+        st.caption(f"{icons.get(info.get('state'), '•')} **{tid}** — {kind}: {info.get('msg', '')}")
+    if not active:
+        if st.button("Clear finished", key="aa_clear"):
+            aa.clear_finished_status()
+            st.rerun()
+    # Once everything is done, reload the page so new/updated tracks show.
+    if st.session_state.get("_aa_was_active") and not active:
+        st.session_state["_aa_was_active"] = False
+        st.rerun(scope="app")
+    st.session_state["_aa_was_active"] = bool(active)
+
+
+def render_analysis_panel(tracks: dict) -> None:
+    """Server-side analysis: new tracks in the Audio-Library, and the extra
+    cut-finding analysis (bars, drums, sections, build-ups, vocals) for
+    tracks that only have the original Colab analysis."""
+    missing_extra = sorted(tid for tid, t in tracks.items() if not t["extra"])
+    with st.expander(f"🔬 Audio analysis — {len(missing_extra)} track(s) without the extra analysis",
+                     expanded=bool(missing_extra) or bool(st.session_state.get("_aa_was_active"))):
+        aa, err = _audio_analysis_module()
+        if aa is None:
+            st.error(f"Audio analysis isn't available on this server: {err}. "
+                     f"Install it with: `pip install scipy` (in the app's venv), then restart the app.")
+            return
+        st.caption("Runs on the server in the background (about a second or two per track, plus a few "
+                   "minutes each for vocals when Demucs is installed) — you can leave this page.")
+        extras = []
+        extras.append("better downbeats: **beat_this** ✅" if aa.beat_this_available()
+                      else "better downbeats: beat_this not installed (using an estimate)")
+        extras.append("vocals: **Demucs** ✅" if aa.demucs_available() else "vocals: Demucs not installed (skipped)")
+        st.caption(" · ".join(extras))
+
+        cols = st.columns(2)
+        with cols[0]:
+            if st.button(f"➕ Add extra analysis to {len(missing_extra)} track(s)", key="aa_extra",
+                         disabled=not missing_extra,
+                         help="Keeps each track's existing beats and energy; adds bars, drums, "
+                              "sections, phrases, build-ups/drops (and vocals if available)."):
+                n = aa.enqueue([{"track_id": tid, "kind": "extra"} for tid in missing_extra])
+                aa.start_worker()
+                st.session_state["_aa_was_active"] = True
+                st.toast(f"Queued {n} track(s).")
+                st.rerun()
+        with cols[1]:
+            if st.button(f"🔍 Check {AUDIO_LIBRARY_FOLDER} for new tracks", key="aa_check",
+                         help="Lists audio files in your Google Drive folder that have no catalogue yet."):
+                _drive_audio_files.clear()
+                st.session_state["aa_checked"] = True
+
+        if st.session_state.get("aa_checked"):
+            files, drive_err = _drive_audio_files(AUDIO_LIBRARY_FOLDER)
+            if drive_err:
+                st.error(f"Couldn't list {AUDIO_LIBRARY_FOLDER}: {drive_err}")
+            else:
+                known_names = {Path(t["source_path"]).name for t in tracks.values() if t["source_path"]}
+                known_ids = set(tracks)
+                new = [f for f in files if f["name"] not in known_names and Path(f["name"]).stem not in known_ids]
+                if not new:
+                    st.success(f"Every track in {AUDIO_LIBRARY_FOLDER} ({len(files)}) is already analysed.")
+                else:
+                    st.markdown(f"**{len(new)} new track(s)** in {AUDIO_LIBRARY_FOLDER}:")
+                    st.caption("\n".join(f"• {f['rel']}" for f in new[:30])
+                               + (f"\n… and {len(new) - 30} more" if len(new) > 30 else ""))
+                    if st.button(f"🎵 Analyse {len(new)} new track(s)", type="primary", key="aa_new"):
+                        n = aa.enqueue([{"track_id": Path(f["name"]).stem, "kind": "new", "drive_rel": f["rel"]}
+                                        for f in new])
+                        aa.start_worker()
+                        st.session_state["_aa_was_active"] = True
+                        st.session_state["aa_checked"] = False
+                        st.toast(f"Queued {n} new track(s).")
+                        st.rerun()
+
+        if aa.read_status() or st.session_state.get("_aa_was_active"):
+            _analysis_progress(aa)   # refreshes itself every few seconds
+
+
 def render_audio():
     tracks = load_audio_library(_audio_signature())
+    render_analysis_panel(tracks)
 
     st.sidebar.header("Filter")
     name_query = st.sidebar.text_input("Search name", placeholder="part of a track name", key="aud_name")
@@ -356,7 +485,7 @@ def render_audio():
     descending = st.sidebar.toggle("Descending", value=(sort_by != "Name"), key="aud_desc")
 
     if not tracks:
-        st.info("No audio catalogues found. Process a track in Colab, then sync from Google Drive.")
+        st.info("No audio catalogues yet — use **Check for new tracks** above, or sync from Google Drive.")
         return
 
     rows = []
@@ -393,6 +522,7 @@ def render_audio():
                 info.append(f"energy variation {t['variance']:.2f}")
                 if t["hit_rate"]:
                     info.append(f"{t['hit_rate']:.1f} hits/min")
+                info.append(f"🔬 {t['extra_info']}" if t["extra"] else "basic analysis only")
                 st.caption("  ·  ".join(info))
             with cols[1]:
                 if t["energy"]:
