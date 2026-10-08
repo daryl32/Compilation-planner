@@ -4554,7 +4554,9 @@ if matching_mode == "Manual step-through":
     fig.add_vline(x=segments[min(current_block, len(segments) - 1)]["start"],
                   line=dict(color="rgba(200,30,180,0.6)", width=2, dash="dash"))
 elif matching_mode == "Choreography":
-    fig.add_vline(x=segments[min(chor_block, len(segments) - 1)]["start"],
+    # Marks the block being worked on: the one being edited, else the next unconfirmed one.
+    _chor_mark = chor_editing if chor_editing is not None else chor_block
+    fig.add_vline(x=segments[min(_chor_mark, len(segments) - 1)]["start"],
                   line=dict(color="rgba(200,30,180,0.6)", width=2, dash="dash"))
 
 fig.update_layout(
@@ -4887,7 +4889,7 @@ elif matching_mode == "Choreography":
                          help="A block before your progress opens it for editing (the others stay "
                               "committed); a later one moves ahead to it."):
                 _target = int(chor_jump) - 1
-                if _target < chor_frontier and chor_confirmed.get(_target):
+                if _target < chor_frontier:  # even an empty block: never move progress back
                     _chor_start_edit(_target)
                 else:
                     st.session_state["chor_current_block"] = _target
@@ -4967,8 +4969,8 @@ elif matching_mode == "Choreography":
         # uses for its candidate cards.
         chor_video_stats = {}
         for vid in selected_videos:
-            used = sum(p["clip_duration_sec"] for i in range(chor_block) for p in chor_confirmed.get(i, [])
-                      if p["video_id"] == vid)
+            used = sum(p["clip_duration_sec"] for i in range(chor_frontier) if i != chor_editing
+                       for p in chor_confirmed.get(i, []) if p["video_id"] == vid)
             remaining = sum(span["remaining_sec"] for span in queues.get(vid, []))
             chor_video_stats[vid] = {"used": used, "remaining": remaining}
 
@@ -5231,7 +5233,7 @@ else:
                          help="A block before your progress opens it for editing (the others stay "
                               "confirmed); a later one moves ahead to it."):
                 _target = int(jump_target) - 1
-                if _target < adv_frontier and confirmed.get(_target):
+                if _target < adv_frontier:  # even an empty block: never move progress back
                     _adv_start_edit(_target)
                 else:
                     st.session_state["adv_current_block"] = _target
@@ -5372,9 +5374,9 @@ if matching_mode == "Manual step-through" and adv_frontier < len(segments):
         f"Only {current_block} of {len(segments)} blocks confirmed — exporting/rendering now will "
         f"leave the rest empty. Finish stepping through above first, or export anyway if intentional."
     )
-if matching_mode == "Choreography" and chor_block < len(segments):
+if matching_mode == "Choreography" and chor_frontier < len(segments):
     st.warning(
-        f"Only {chor_block} of {len(segments)} blocks confirmed — exporting/rendering now will "
+        f"Only {chor_frontier} of {len(segments)} blocks confirmed — exporting/rendering now will "
         f"leave the rest empty. Finish stepping through above first, or export anyway if intentional."
     )
 
