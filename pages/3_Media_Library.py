@@ -327,6 +327,9 @@ def load_audio_library(signature: tuple) -> dict:
             "added": mtime,
             "extra": int((t.get("analysis") or {}).get("version", 0)) >= EXTRA_ANALYSIS_VERSION,
             "extra_info": _extra_summary(t.get("analysis")),
+            "sections": [{"start": x["start"], "end": x["end"], "label": x["label"]}
+                         for x in (t.get("analysis") or {}).get("sections") or []],
+            "drops": list((t.get("analysis") or {}).get("drops") or []),
         }
     return tracks
 
@@ -509,11 +512,12 @@ def render_audio():
     n_pages = (len(rows) - 1) // PAGE_SIZE + 1
     page = st.number_input(f"Page (of {n_pages})", 1, n_pages, 1, key="aud_page") if n_pages > 1 else 1
     st.session_state.setdefault("aud_open_player", None)
+    st.session_state.setdefault("aud_open_detail", None)
 
     for t in rows[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]:
         tid = t["track_id"]
         with st.container(border=True):
-            cols = st.columns([6, 3, 1])
+            cols = st.columns([6, 3, 1, 1])
             with cols[0]:
                 st.markdown(f"**{tid}**")
                 info = [f"⏱ {format_mmss(t['duration'])}"]
@@ -525,8 +529,21 @@ def render_audio():
                 info.append(f"🔬 {t['extra_info']}" if t["extra"] else "basic analysis only")
                 st.caption("  ·  ".join(info))
             with cols[1]:
-                if t["energy"]:
+                if t["energy"] and t["extra"]:
+                    from audio_charts import mini_figure
+                    st.plotly_chart(mini_figure(t["energy"], t["duration"], t["sections"], t["drops"]),
+                                    use_container_width=True, config={"displayModeBar": False},
+                                    key=f"aud_mini_{tid}")
+                elif t["energy"]:
                     st.line_chart(t["energy"], height=70)
+            with cols[3]:
+                if st.button("🔬", key=f"aud_detail_{tid}", disabled=not t["extra"],
+                             help="Show the extra analysis: sections, build-ups, drops, bar lines, drums, "
+                                  "chord changes and vocals" if t["extra"]
+                             else "Add the extra analysis (panel above) to see it here"):
+                    st.session_state["aud_open_detail"] = (
+                        None if st.session_state["aud_open_detail"] == tid else tid)
+                    st.rerun()
             with cols[2]:
                 if st.button("▶️", key=f"aud_toggle_{tid}", help="Play this track"):
                     # One player open at a time.
@@ -534,8 +551,39 @@ def render_audio():
                         None if st.session_state["aud_open_player"] == tid else tid)
                     st.rerun()
 
+            if st.session_state["aud_open_detail"] == tid:
+                _render_analysis_detail(tid)
             if st.session_state["aud_open_player"] == tid:
                 _render_audio_player(tid, t["source_path"])
+
+
+@st.cache_data(max_entries=3, show_spinner=False)
+def _load_track(track_id: str, mtime: float) -> dict:
+    return json.loads((AUDIO_DIR / f"{track_id}.json").read_text())
+
+
+def _render_analysis_detail(track_id: str) -> None:
+    from audio_charts import track_figure
+    path = AUDIO_DIR / f"{track_id}.json"
+    try:
+        track = _load_track(track_id, path.stat().st_mtime)
+    except (OSError, ValueError) as e:
+        st.error(f"Couldn't read this track: {e}")
+        return
+    a = track.get("analysis") or {}
+    st.plotly_chart(track_figure(track), use_container_width=True, key=f"aud_detail_chart_{track_id}")
+    secs = a.get("sections") or []
+    bits = []
+    if secs:
+        bits.append("Sections: " + " → ".join(f"{x['label']} ({format_mmss(x['start'])})" for x in secs)
+                    + " — the same letter means they sound alike.")
+    if a.get("drops"):
+        bits.append("Drops at " + ", ".join(format_mmss(d) for d in a["drops"]) + " (red ▼); build-ups shaded yellow.")
+    m = a.get("methods") or {}
+    bits.append(f"Bar lines: {'beat_this model' if m.get('downbeats') == 'beat_this' else 'estimated'} · "
+                f"vocals: {'Demucs' if m.get('vocals') else 'not analysed'} · "
+                "click Kick, Snare, Hi-hat, Chord change, Section novelty, Vocals or Bar lines in the legend to show them.")
+    st.caption("  \n".join(bits))
 
 
 def _render_audio_player(track_id: str, source_path: str):

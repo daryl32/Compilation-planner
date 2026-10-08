@@ -21,6 +21,7 @@ from render_preview import render_plan_dict, colab_to_local
 import video_ranking as VR
 import similarity as SIM
 import cut_scoring as CS
+from audio_charts import add_analysis_overlays
 import preview_snippets
 from library_common import (scene_tags, render_range_picker, library_ranges, master_thumbnail_path, proxy_path,
                             refresh_caches_after_sync)
@@ -2237,43 +2238,6 @@ def _render_scored_cut_settings(track: dict, _v) -> None:
     for i, (key, (label, hlp)) in enumerate(weight_help.items()):
         with wcols[i % 3]:
             st.slider(label, 0.0, 5.0, value=float(_v(key)), step=0.1, key=key, help=hlp)
-
-
-def add_analysis_overlays(fig, track: dict) -> None:
-    """Sections (shaded + labelled), build-ups, drops, bar lines and the extra
-    curves from the server analysis — most hidden until clicked in the legend."""
-    a = track.get("analysis") or {}
-    if not a:
-        return
-    shades = ["rgba(120,120,220,0.07)", "rgba(220,140,60,0.08)", "rgba(60,180,120,0.08)",
-              "rgba(200,80,160,0.07)", "rgba(160,160,60,0.08)"]
-    for sec in a.get("sections") or []:
-        idx = (ord(sec["label"][0]) - ord("A")) % len(shades)
-        fig.add_vrect(x0=sec["start"], x1=sec["end"], fillcolor=shades[idx], line_width=0, layer="below",
-                      annotation_text=sec["label"], annotation_position="top left",
-                      annotation_font_size=10, annotation_font_color="rgba(90,90,90,0.9)")
-    for b in a.get("builds") or []:
-        fig.add_vrect(x0=b["start"], x1=b["end"], fillcolor="rgba(250,200,0,0.10)", line_width=0, layer="below")
-    rate = float(a.get("rate", 30))
-    curves = [("kick", "Kick", "rgba(200,60,40,0.6)"), ("snare", "Snare", "rgba(40,140,200,0.6)"),
-              ("hat", "Hi-hat", "rgba(120,120,120,0.5)"), ("harmony", "Chord change", "rgba(60,170,90,0.7)"),
-              ("novelty", "Section novelty", "rgba(150,60,200,0.7)"), ("vocals", "Vocals", "rgba(230,120,0,0.8)")]
-    for key, name, colour in curves:
-        vals = a.get(key)
-        if vals:
-            fig.add_trace(go.Scatter(x=[i / rate for i in range(len(vals))], y=vals, mode="lines", name=name,
-                                     line=dict(color=colour, width=1), visible="legendonly"))
-    xs, ys = [], []
-    for t in a.get("downbeats") or []:
-        xs += [t, t, None]
-        ys += [0, 0.08, None]
-    if xs:
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name="Bar lines", hoverinfo="skip",
-                                 line=dict(color="rgba(60,60,60,0.5)", width=1), visible="legendonly"))
-    if a.get("drops"):
-        fig.add_trace(go.Scatter(x=a["drops"], y=[1.02] * len(a["drops"]), mode="markers+text", name="Drop",
-                                 text=["drop"] * len(a["drops"]), textposition="top center",
-                                 marker=dict(symbol="triangle-down", size=9, color="rgba(220,40,40,0.9)")))
 
 
 CUT_KIND_STYLES = (
