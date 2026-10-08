@@ -18,6 +18,7 @@ from PIL import Image
 
 from render_preview import render_plan_dict, colab_to_local
 import video_ranking as VR
+import similarity as SIM
 from library_common import (scene_tags, render_range_picker, library_ranges, master_thumbnail_path,
                             refresh_caches_after_sync)
 
@@ -1093,7 +1094,8 @@ _SUPPORTS_KEYED_CONTAINER = _container_supports_key()
 def render_candidate_grid(candidates: list, current_block: int, already_keys: set, seg: dict,
                           block_audio_curve, prev_block_videos: set = None,
                           video_stats: dict = None, recommended_count: int = 0,
-                          autofill_weights: dict = None, catalogues: dict = None) -> None:
+                          autofill_weights: dict = None, catalogues: dict = None,
+                          similar_ctx: dict = None) -> None:
     """The candidate thumbnails, 'Use this clip' checkboxes, 'View fit'
     buttons, and the overlay chart — as a fragment, so ticking a box or
     switching which fit you're viewing only reruns THIS, not the whole page
@@ -1149,11 +1151,19 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
             )
             chosen = select_autofill_picks(ranked, recommended_count,
                                            autofill_weights.get("allow_same_video", False))
-            chosen_keys = {(c["video_id"], c["scene_id"]) for c in chosen}
+            chosen_keys = {cand_key(c) for c in chosen}
             for c in candidates:
-                st.session_state[f"adv_pick_{current_block}_{c['video_id']}_{c['scene_id']}"] = \
-                    (c["video_id"], c["scene_id"]) in chosen_keys
+                st.session_state[f"adv_pick_{current_block}_{cand_key(c)}"] = cand_key(c) in chosen_keys
             st.rerun()
+
+    if any(c.get("similar") for c in candidates):
+        if st.button("✖ Clear ✨ results", key=f"adv_sim_clear_{current_block}",
+                     help="Remove the ✨ More-like-this clips from the grid (ticked ones are unticked too)."):
+            for c in candidates:
+                if c.get("similar"):
+                    st.session_state.pop(f"adv_pick_{current_block}_{cand_key(c)}", None)
+            st.session_state.pop(f"adv_similar_{current_block}", None)
+            rerun_full()
 
     # Sort candidates alphabetically by video_id then scene_id for a stable
     # grid layout — cards don't jump around when skipping ahead changes what's
@@ -1168,13 +1178,15 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
         is_repeat = c["video_id"] in prev_block_videos
         stats = video_stats.get(c["video_id"], {})
         with cand_cols[i % len(cand_cols)]:
-            box_key = f"cand_box_{current_block}_{c['video_id']}_{c['scene_id']}"
+            box_key = f"cand_box_{current_block}_{cand_key(c)}"
             box = st.container(border=True, key=box_key) if _SUPPORTS_KEYED_CONTAINER else st.container(border=True)
             if is_repeat and _SUPPORTS_KEYED_CONTAINER:
                 highlight_keys.append(box_key)
             with box:
                 if is_repeat:
                     st.caption("🔵 same video as previous block")
+                if c.get("similar"):
+                    st.caption(f"✨ {c['similar']}% like {c['similar_to']} — {c['similar_reason']}")
                 if c.get("intro_candidate"):
                     st.caption("🎬 intro candidate")
                 if c.get("outro_candidate"):
@@ -1191,12 +1203,12 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                 st.caption(f"trimmed to {c['window_offset_sec']:.1f}s–"
                           f"{c['window_offset_sec'] + c['window_duration_sec']:.1f}s in the scene")
                 st.caption(f"used so far: {stats.get('used', 0.0):.0f}s  ·  remaining: {stats.get('remaining', 0.0):.0f}s")
-                st.checkbox("Use this clip", key=f"adv_pick_{current_block}_{c['video_id']}_{c['scene_id']}",
-                           value=key_id in already_keys)
+                st.checkbox("Use this clip", key=f"adv_pick_{current_block}_{cand_key(c)}",
+                           value=(key_id in already_keys) and not c.get("similar"))
                 btn_cols = st.columns(3)
                 with btn_cols[0]:
-                    if st.button("🔍 View fit", key=f"adv_view_{current_block}_{c['video_id']}_{c['scene_id']}"):
-                        st.session_state["adv_viewing"] = i
+                    if st.button("🔍 View fit", key=f"adv_view_{current_block}_{cand_key(c)}"):
+                        st.session_state["adv_viewing"] = cand_key(c)
                         st.rerun()
                 with btn_cols[1]:
                     # Skip back: remove the most recent forward-skip for this video/scene
@@ -1207,7 +1219,7 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                     # by video_id only — the skip was against this video, not this specific scene.
                     _live_skips = st.session_state.get("adv_skips", {}).get(current_block, [])
                     skip_back_possible = any(sk["video_id"] == c["video_id"] for sk in _live_skips)
-                    if st.button("⏮️ Skip back", key=f"adv_skipback_{current_block}_{c['video_id']}_{c['scene_id']}",
+                    if st.button("⏮️ Skip back", key=f"adv_skipback_{current_block}_{cand_key(c)}",
                                disabled=not skip_back_possible,
                                help="Undo the last Skip Ahead for this video, restoring its earlier footage "
                                     "as a candidate again."):
@@ -1223,7 +1235,7 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                         st.session_state["adv_viewing"] = None
                         rerun_full()
                 with btn_cols[2]:
-                    if st.button("⏭️ Skip ahead", key=f"adv_skip_{current_block}_{c['video_id']}_{c['scene_id']}",
+                    if st.button("⏭️ Skip ahead", key=f"adv_skip_{current_block}_{cand_key(c)}",
                                help="Give up this video's current footage without using it, so a later, "
                                     "possibly better-matching part of the same video becomes reachable."):
                         st.session_state["adv_skips"].setdefault(current_block, []).append(
@@ -1231,6 +1243,20 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                         )
                         st.session_state["adv_viewing"] = None
                         rerun_full()
+                if similar_ctx and st.button("✨ More like this", key=f"adv_more_{current_block}_{cand_key(c)}",
+                                             use_container_width=True,
+                                             help="Find clips like this one in your selected videos' still-available "
+                                                  "footage — they're added to the grid marked ✨."):
+                    found = similar_ctx["find"](c)
+                    if found is None:
+                        st.warning("This clip has no frame-by-frame motion data to compare with.")
+                    else:
+                        st.session_state[f"adv_similar_{current_block}"] = {
+                            "key": similar_ctx["search_key"], "results": found}
+                        if not found:
+                            st.info("Nothing similar is available for this block.")
+                        else:
+                            rerun_full()
 
     if highlight_keys:
         css = "\n".join(f'div[class*="st-key-{k}"] {{ border: 3px solid #1c6fea !important; }}' for k in highlight_keys)
@@ -1239,11 +1265,13 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
     # Default to showing the top candidate's fit immediately — no click needed
     # for the common case of just checking the best match. Explicitly clicking
     # a different candidate still switches the view as before.
+    # adv_viewing holds the candidate's key (an index used to point into a
+    # differently-sorted list, so View fit could show the wrong clip).
     viewing = st.session_state.get("adv_viewing")
-    if viewing is None and candidates:
-        viewing = 0
-    if viewing is not None and viewing < len(candidates):
-        vc = candidates[viewing]
+    vc = next((x for x in candidates if cand_key(x) == viewing), None) if viewing is not None else None
+    if vc is None and candidates:
+        vc = candidates[0]
+    if vc is not None:
         vfig = go.Figure()
         audio_n = resample_curve(block_audio_curve, SHAPE_MATCH_POINTS)
         clip_n = resample_curve(vc["curve_slice"], SHAPE_MATCH_POINTS)
@@ -1260,6 +1288,280 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
         vfig.update_layout(height=250, margin=dict(t=30, b=20), title=f"Shape score: {vc['score']:.2f}",
                            legend=dict(orientation="h", y=-0.3))
         st.plotly_chart(vfig, use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
+# ✨ More like this — similar videos, similar clips, swap for similar
+# (similarity.py does the scoring: tags + movement, no AI model)
+# ---------------------------------------------------------------------------
+
+def cand_key(c: dict) -> str:
+    """Widget/pick key for a Manual step-through candidate. Shape-search
+    candidates are one per scene; ✨ results carry their own _key so they can
+    sit next to a candidate from the same scene."""
+    return c.get("_key") or f"{c['video_id']}_{c['scene_id']}"
+
+
+def _clip_curve(video_id: str, scene_id: int, offset_sec: float, duration_sec: float):
+    """(values, fps) of a clip's slice of its scene's motion curve, or (None, None)."""
+    curve = load_motion_curves_for_video(video_id).get(scene_id)
+    if not curve or not curve.get("values"):
+        return None, None
+    fps = float(curve["fps"])
+    vals = np.asarray(curve["values"], dtype=float)
+    a = int(round(offset_sec * fps))
+    b = a + max(1, int(round(duration_sec * fps)))
+    return vals[a:b], fps
+
+
+def find_similar_clips(ref: dict, spans: list, duration: float, exclude=None, top: int = 6,
+                       max_per_video: int = 2):
+    """Clips of exactly `duration` from `spans` (available footage) most like
+    ref = {"video_id", "scene_id", "offset", "tags"}. Windows step by half a
+    clip (coarser on very large pools, to stay quick); results never overlap
+    each other and come at most max_per_video from one video. Returns
+    [(similarity, reason, (span, offset, values, fps))], or None if the
+    reference clip has no motion curve to compare."""
+    ref_vals, ref_fps = _clip_curve(ref["video_id"], ref["scene_id"], ref["offset"], duration)
+    if ref_vals is None or ref_vals.size == 0:
+        return None
+    total = sum(sp["remaining_sec"] for sp in spans)
+    step = max(0.5, duration / 2, total / 4000.0)
+    pool = []
+    for span in spans:
+        off = span["offset_sec"]
+        end = span["offset_sec"] + span["remaining_sec"]
+        while off + duration <= end + 1e-6:
+            if not (exclude and exclude(span, off)):
+                vals, fps = _clip_curve(span["video_id"], span["scene_id"], off, duration)
+                if vals is not None and vals.size:
+                    pool.append((SIM.clip_descriptor(vals, fps, span.get("tags", [])), (span, off, vals, fps)))
+            off += step
+    idf = SIM.tag_idf(load_all_catalogues(), lambda sc: sc.get("tags", []))
+    ranked = SIM.rank_similar_clips(SIM.clip_descriptor(ref_vals, ref_fps, ref.get("tags", [])), pool, idf,
+                                    top=len(pool))
+    # Keep the results varied: no two overlapping clips, and at most
+    # max_per_video from any one video — otherwise near-copies of the same
+    # stretch of footage crowd everything else out.
+    chosen, per_video = [], {}
+    for sim, reason, payload in ranked:
+        span, off = payload[0], payload[1]
+        vid = span["video_id"]
+        if per_video.get(vid, 0) >= max_per_video:
+            continue
+        if any(o[0]["video_id"] == vid and o[0]["scene_id"] == span["scene_id"] and abs(o[1] - off) < duration
+               for _, _, o in chosen):
+            continue
+        chosen.append((sim, reason, payload))
+        per_video[vid] = per_video.get(vid, 0) + 1
+        if len(chosen) >= top:
+            break
+    return chosen
+
+
+def more_like_this_for_grid(c: dict, seg: dict, queues: dict, excluded_here: set, global_excluded: set,
+                            sequential: bool, audio_curve, existing: list) -> list | None:
+    """✨ for a Manual step-through card: block-length clips from the SELECTED
+    videos' still-available footage (same spans the grid searches — sequential
+    rule, exclusions and tag filter already applied), most like candidate c.
+    Returned in the same shape as shape-search candidates, so View fit,
+    ticking and Confirm work on them unchanged."""
+    duration = seg["end"] - seg["start"]
+    spans = [sp for sp in get_candidate_spans(queues, sequential, global_excluded, min_duration=duration)
+             if (sp["video_id"], sp["scene_id"]) not in excluded_here]
+
+    def exclude(span, off):
+        if (span["video_id"], span["scene_id"]) == (c["video_id"], c["scene_id"]) \
+                and abs(off - c["window_offset_sec"]) < duration:
+            return True  # overlaps the reference clip itself
+        return any((e["video_id"], e["scene_id"]) == (span["video_id"], span["scene_id"])
+                   and abs(e["window_offset_sec"] - off) < 0.25 for e in existing)
+
+    found = find_similar_clips({"video_id": c["video_id"], "scene_id": c["scene_id"],
+                                "offset": c["window_offset_sec"], "tags": c.get("tags", [])},
+                               spans, duration, exclude, top=6)
+    if found is None:
+        return None
+    out = []
+    for sim, reason, (span, off, vals, fps) in found:
+        out.append({
+            "video_id": span["video_id"], "scene_id": span["scene_id"],
+            "scene_start_sec": span["scene_start_sec"],
+            "window_offset_sec": round(off, 3), "window_duration_sec": round(duration, 3),
+            "score": round(shape_score(vals, audio_curve), 3),
+            "motion_norm": span["motion_norm"], "curve_slice": vals, "fps": fps,
+            "tags": span["tags"], "thumbnail": span["thumbnail"],
+            "intro_candidate": span.get("intro_candidate", False),
+            "outro_candidate": span.get("outro_candidate", False),
+            "similar": int(round(100 * sim)), "similar_reason": reason,
+            "similar_to": f"{c['video_id']} #{c['scene_id']}",
+            "_key": f"{span['video_id']}_{span['scene_id']}_s{int(round(off * 10))}",
+        })
+    return out
+
+
+def compute_similar_videos(ref_id: str, tag_filter: tuple, time_ranges: dict) -> list:
+    """✨ Similar videos: [(similarity, reason, video_id)] — top 5 from the whole
+    library, each judged on its usable footage (range + tag filter applied)."""
+    catalogues = load_all_catalogues()
+    wanted = {t.lower() for t in tag_filter}
+    videos = {}
+    for vid, cat in catalogues.items():
+        summary = VR.load_summary(CATALOGUE_DIR, vid)
+        if summary is None:
+            continue
+        rng = time_ranges.get(vid)
+        feats = VR.video_features(summary, {sc["scene_id"]: sc for sc in cat["scenes"]}, rng, tuple(tag_filter))
+        if not feats:
+            continue
+        tag_seconds = {}
+        for sc in cat["scenes"]:
+            if sc.get("excluded"):
+                continue
+            a, b = _tc_to_seconds(sc["start_tc"]), _tc_to_seconds(sc["end_tc"])
+            a, b = _overlap_with_range(a, b, rng)
+            if a is None:
+                continue
+            tags = sc.get("tags", [])
+            if wanted and not (wanted & {t.lower() for t in tags}):
+                continue
+            for t in tags:
+                tag_seconds[t] = tag_seconds.get(t, 0.0) + (b - a)
+        videos[vid] = {"tag_seconds": tag_seconds, "level": feats["level"],
+                       "dynamics": feats["dynamics"], "punch": feats["punch"]}
+    idf = SIM.tag_idf(catalogues, lambda sc: sc.get("tags", []))
+    return SIM.rank_similar_videos(ref_id, videos, idf, top=5)
+
+
+def _add_video_to_selection(video_id: str) -> None:
+    """➕ from the ✨ Similar videos panel — runs as a button callback (before
+    widgets redraw), so it can tick the video and add it to the extra list."""
+    if video_id not in st.session_state.get("recommended_ids", []):
+        extras = list(st.session_state.get("extra_videos", []))
+        if video_id not in extras:
+            extras.append(video_id)
+        st.session_state["extra_videos"] = extras
+    st.session_state[f"select_video_{video_id}"] = True
+
+
+def replacement_pool(confirmed_map: dict, seg_idx: int, pick_idx: int, n_blocks: int) -> dict:
+    """Footage still available for ONE placed clip if every other confirmed clip
+    stays where it is: earlier blocks are replayed as usual, every other clip
+    is taken out, and in sequential mode each video is also cut off before its
+    clip in any later block — so a replacement keeps the order intact."""
+    q = build_footage_queues(tuple(selected_videos), tuple(tag_filter), effective_time_ranges())
+    for i in range(seg_idx):
+        for p in confirmed_map.get(i, []):
+            try:
+                carve_span(q, p["video_id"], p["scene_id"], p["offset_into_scene_sec"],
+                           p["clip_duration_sec"], sequential_mode)
+            except ValueError:
+                pass
+    earliest_later = {}
+    for i in range(seg_idx, n_blocks):
+        for j, p in enumerate(confirmed_map.get(i, [])):
+            if i == seg_idx and j == pick_idx:
+                continue
+            try:
+                carve_span(q, p["video_id"], p["scene_id"], p["offset_into_scene_sec"],
+                           p["clip_duration_sec"], False)
+            except ValueError:
+                pass
+            if i > seg_idx:
+                earliest_later[p["video_id"]] = min(earliest_later.get(p["video_id"], float("inf")),
+                                                    p["clip_start_sec"])
+    if sequential_mode:
+        for vid, t in earliest_later.items():
+            limit_queue_before(q, vid, t)
+    return q
+
+
+def _swap_candidates(mode: str, confirmed_map: dict, seg_idx: int, pick_idx: int, n_blocks: int) -> list | None:
+    """Top 3 replacements for one placed clip, from the selected videos'
+    available pool (see replacement_pool). Videos already in this block are
+    left out (Choreography always; Manual unless 'Allow multiple clips from the
+    same video' is on), apart from the clip's own video."""
+    pick = confirmed_map[seg_idx][pick_idx]
+    duration = pick["clip_duration_sec"]
+    q = replacement_pool(confirmed_map, seg_idx, pick_idx, n_blocks)
+    others = {p["video_id"] for j, p in enumerate(confirmed_map.get(seg_idx, [])) if j != pick_idx}
+    if mode == "manual" and allow_same_video:
+        others = set()
+    others.discard(pick["video_id"])
+    gex = st.session_state.get("global_excluded_scenes", set())
+    spans = [sp for vid, sps in q.items() if vid not in others for sp in sps
+             if sp["remaining_sec"] >= duration - 1e-6 and (vid, sp["scene_id"]) not in gex]
+
+    def exclude(span, off):
+        return (span["video_id"], span["scene_id"]) == (pick["video_id"], pick["scene_id"]) \
+            and abs(off - pick["offset_into_scene_sec"]) < duration
+
+    return find_similar_clips({"video_id": pick["video_id"], "scene_id": pick["scene_id"],
+                               "offset": pick["offset_into_scene_sec"], "tags": pick.get("tags", [])},
+                              spans, duration, exclude, top=3)
+
+
+def render_swap_for_similar(mode: str, confirmed_map: dict, seg_idx: int, n_blocks: int) -> None:
+    """🔁 Swap for similar panel under a review-list block, when one of its
+    clips was picked. mode: "manual" or "chor"."""
+    target = st.session_state.get("swap_target")
+    if not target or target[0] != mode or target[1] != seg_idx:
+        return
+    pick_idx = target[2]
+    picks = confirmed_map.get(seg_idx, [])
+    if pick_idx >= len(picks):
+        st.session_state.pop("swap_target", None)
+        return
+    pick = picks[pick_idx]
+    with st.container(border=True):
+        st.markdown(f"**🔁 Swap `{pick['video_id']}` #{pick['scene_id']} for something similar** "
+                    f"— from your selected videos' available footage; every other block stays as it is.")
+        cache_key = (mode, seg_idx, pick_idx, pick["video_id"], pick["scene_id"], pick["offset_into_scene_sec"])
+        cached = st.session_state.get("swap_results")
+        if not cached or cached["key"] != cache_key:
+            with st.spinner("Finding similar clips…"):
+                found = _swap_candidates(mode, confirmed_map, seg_idx, pick_idx, n_blocks)
+            cached = {"key": cache_key, "found": found}
+            st.session_state["swap_results"] = cached
+        found = cached["found"]
+        if found is None:
+            st.warning("This clip has no frame-by-frame motion data, so there's nothing to compare it with. "
+                       "Run the motion-curve backfill for its video.")
+        elif not found:
+            st.info("No other footage of this length is available for this block.")
+        else:
+            cols = st.columns(len(found))
+            for k, (col, (sim, reason, (span, off, _vals, _fps))) in enumerate(zip(cols, found)):
+                with col:
+                    thumb = get_nearest_thumbnail(catalogues, span["video_id"], span["scene_start_sec"] + off)
+                    if thumb is not None:
+                        st.image(thumb, width=180)
+                    st.caption(f"`{span['video_id']}` #{span['scene_id']} at "
+                               f"{format_mmss(span['scene_start_sec'] + off)}  ·  **{int(round(100 * sim))}% similar**")
+                    st.caption(reason)
+                    if st.button("Use this", key=f"swap_use_{mode}_{seg_idx}_{k}", type="primary"):
+                        q = replacement_pool(confirmed_map, seg_idx, pick_idx, n_blocks)
+                        try:
+                            new_pick = carve_span(q, span["video_id"], span["scene_id"], off,
+                                                  pick["clip_duration_sec"], sequential_mode)
+                        except ValueError as e:
+                            st.error(f"Couldn't use that clip: {e}")
+                        else:
+                            confirmed_map[seg_idx][pick_idx] = new_pick
+                            if mode == "chor":
+                                ov = st.session_state.setdefault("chor_overrides", {}).setdefault(seg_idx, {})
+                                ov.pop(pick["video_id"], None)
+                                ov[new_pick["video_id"]] = (new_pick["scene_id"], off)
+                                if new_pick["video_id"] != pick["video_id"]:
+                                    st.session_state[f"chor_pick_{seg_idx}_{pick['video_id']}"] = False
+                                st.session_state[f"chor_pick_{seg_idx}_{new_pick['video_id']}"] = True
+                            st.session_state.pop("swap_target", None)
+                            st.session_state.pop("swap_results", None)
+                            st.rerun()
+        if st.button("Cancel", key=f"swap_cancel_{mode}_{seg_idx}"):
+            st.session_state.pop("swap_target", None)
+            st.session_state.pop("swap_results", None)
+            st.rerun()
 
 
 def limit_queue_before(queues: dict, video_id: str, abs_end_sec: float) -> None:
@@ -1953,12 +2255,45 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
             else:
                 st.write(f"{title} — no scenes match the current tag filter / time range{range_tag}")
         with row_cols[3]:
+            if st.button("✨", key=f"sim_toggle_{video_id}", help="Find videos similar to this one"):
+                st.session_state["show_similar_videos"] = (
+                    None if st.session_state.get("show_similar_videos") == video_id else video_id)
+                rerun_fragment()
             if st.button("🎚️", key=f"range_toggle_{video_id}", help="Set a time range for this video"):
                 # One picker open at a time: each open picker embeds a full video player,
                 # which is the heaviest thing on this page to re-render.
                 _was_open = st.session_state["show_range_picker"].get(video_id, False)
                 st.session_state["show_range_picker"] = {video_id: not _was_open}
                 rerun_fragment()
+
+        if st.session_state.get("show_similar_videos") == video_id:
+            with st.container(border=True):
+                st.markdown(f"**✨ Videos similar to `{video_id}`** — by tags and movement, "
+                            f"within each video's time range" + (" and tag filter" if tag_filter else ""))
+                _sk = (video_id, tuple(tag_filter), tuple(sorted((v, tuple(r)) for v, r in effective_time_ranges().items())))
+                _cached = st.session_state.get("similar_videos_cache")
+                if not _cached or _cached["key"] != _sk:
+                    _cached = {"key": _sk, "found": compute_similar_videos(video_id, tuple(tag_filter),
+                                                                          effective_time_ranges())}
+                    st.session_state["similar_videos_cache"] = _cached
+                if not _cached["found"]:
+                    st.caption("No other videos to compare with.")
+                _selected_now = set(st.session_state.get("committed_selected_videos", []))
+                for _sim, _reason, _vid in _cached["found"]:
+                    sc = st.columns([1.5, 7, 1.5])
+                    with sc[0]:
+                        _t = video_list_thumbnail(catalogues, _vid, effective_time_ranges().get(_vid))
+                        if _t is not None:
+                            st.image(_t, width=110)
+                    with sc[1]:
+                        st.markdown(f"**{_vid}** · ⏱ {format_mmss(get_video_duration(_vid))} · "
+                                    f"**{int(round(100 * _sim))}% similar**")
+                        st.caption(_reason)
+                    with sc[2]:
+                        _is_sel = _vid in _selected_now or st.session_state.get(f"select_video_{_vid}", False)
+                        st.button("✓ Selected" if _is_sel else "➕ Add", key=f"sim_add_{video_id}_{_vid}",
+                                  disabled=_is_sel, on_click=_add_video_to_selection, args=(_vid,),
+                                  use_container_width=True)
 
         if st.session_state["show_range_picker"].get(video_id):
             with st.container(border=True):
@@ -4194,7 +4529,7 @@ elif matching_mode == "Choreography":
                 st.caption("No clip selected for this block.")
             else:
                 cols = st.columns(len(entry["scenes"]))
-                for col, s in zip(cols, entry["scenes"]):
+                for _j, (col, s) in enumerate(zip(cols, entry["scenes"])):
                     with col:
                         nearest_thumb = get_nearest_thumbnail(catalogues, s["video_id"], s["clip_start_sec"])
                         if nearest_thumb is not None:
@@ -4203,6 +4538,11 @@ elif matching_mode == "Choreography":
                             st.image(s["thumbnail"], width=180)
                         st.caption(f"`{s['video_id']}` #{s['scene_id']}  — {s['clip_duration_sec']:.1f}s")
                         st.caption(", ".join(s.get("tags", [])))
+                        if st.button("🔁 Swap for similar", key=f"swap_chor_{seg_idx}_{_j}",
+                                     help="Show the 3 most similar clips available for this spot."):
+                            st.session_state["swap_target"] = ("chor", seg_idx, _j)
+                            st.rerun()
+                render_swap_for_similar("chor", chor_confirmed, seg_idx, len(segments))
             st.divider()
 
     else:
@@ -4522,7 +4862,7 @@ else:
                 st.caption("No clip selected for this block.")
             else:
                 cols = st.columns(len(entry["scenes"]))
-                for col, s in zip(cols, entry["scenes"]):
+                for _j, (col, s) in enumerate(zip(cols, entry["scenes"])):
                     with col:
                         nearest_thumb = get_nearest_thumbnail(catalogues, s["video_id"], s["clip_start_sec"])
                         if nearest_thumb is not None:
@@ -4531,6 +4871,11 @@ else:
                             st.image(s["thumbnail"], width=180)
                         st.caption(f"`{s['video_id']}` #{s['scene_id']}  — {s['clip_duration_sec']:.1f}s")
                         st.caption(", ".join(s.get("tags", [])))
+                        if st.button("🔁 Swap for similar", key=f"swap_manual_{seg_idx}_{_j}",
+                                     help="Show the 3 most similar clips available for this spot."):
+                            st.session_state["swap_target"] = ("manual", seg_idx, _j)
+                            st.rerun()
+                render_swap_for_similar("manual", confirmed, seg_idx, len(segments))
             st.divider()
 
     else:
@@ -4637,7 +4982,7 @@ else:
                 chosen_ids_b = {id(c) for c in chosen_b}
                 new_picks = []
                 for c in cands_b:
-                    pick_key = f"adv_pick_{b}_{c['video_id']}_{c['scene_id']}"
+                    pick_key = f"adv_pick_{b}_{cand_key(c)}"
                     if id(c) in chosen_ids_b:
                         try:
                             pick = carve_span(queues, c["video_id"], c["scene_id"],
@@ -4673,7 +5018,7 @@ else:
         with nav_cols[1]:
             if st.button("Confirm & Next ▶", type="primary", key="adv_next"):
                 chosen = [c for c in st.session_state.get(f"adv_candidates_{current_block}", [])
-                         if st.session_state.get(f"adv_pick_{current_block}_{c['video_id']}_{c['scene_id']}")]
+                         if st.session_state.get(f"adv_pick_{current_block}_{cand_key(c)}")]
                 new_confirmed = []
                 for c in chosen:
                     try:
@@ -4733,6 +5078,14 @@ else:
         if adv_role_filter:
             candidates = sorted(candidates, key=lambda c: not c.get(adv_role_filter, False))
 
+        # ✨ More-like-this results for this block, kept until the search itself changes.
+        _sim_state = st.session_state.get(f"adv_similar_{current_block}")
+        similar_results = (_sim_state["results"] if _sim_state and _sim_state.get("key") == search_key else [])
+        if _sim_state and _sim_state.get("key") != search_key:
+            st.session_state.pop(f"adv_similar_{current_block}", None)
+        candidates = candidates + [r for r in similar_results
+                                   if all(cand_key(r) != cand_key(c) for c in candidates)]
+
         st.session_state[f"adv_candidates_{current_block}"] = candidates
 
         if missing_curve_videos:
@@ -4763,9 +5116,16 @@ else:
             "weight_position": weight_position, "sequential": sequential_mode,
             "allow_same_video": allow_same_video,
         }
+        _excl_here = st.session_state["segment_exclusions"].get(current_block, set())
+        _gex = st.session_state["global_excluded_scenes"]
+        similar_ctx = {
+            "search_key": search_key,
+            "find": lambda c: more_like_this_for_grid(c, seg, queues, _excl_here, _gex, sequential_mode,
+                                                      block_audio_curve, candidates),
+        }
         render_candidate_grid(candidates, current_block, already_keys, seg, block_audio_curve,
                               prev_block_videos, video_stats, recommended_counts[current_block],
-                              autofill_weights, catalogues)
+                              autofill_weights, catalogues, similar_ctx)
 
 
 if matching_mode == "Manual step-through" and current_block < len(segments):
