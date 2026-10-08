@@ -577,13 +577,16 @@ def find_shape_candidates(
             values[span_start_frame:search_end_frame], window_frames, audio_curve, bias=bias
         )
         best_start_frame = span_start_frame + best_offset
+        # Frame rounding can put the window a fraction outside the span; keep it inside.
+        win_start = min(max(best_start_frame / fps, span["offset_sec"]),
+                        span["offset_sec"] + span["remaining_sec"] - block_duration)
 
         results.append({
             "video_id": span["video_id"],
             "scene_id": span["scene_id"],
             "scene_start_sec": span["scene_start_sec"],  # + window_offset_sec = absolute position in the video
-            "window_offset_sec": round(best_start_frame / fps, 3),
-            "window_duration_sec": round(block_duration, 3),
+            "window_offset_sec": win_start,
+            "window_duration_sec": block_duration,
             "score": round(best_score, 3),
             "motion_norm": span["motion_norm"],
             "curve_slice": values[best_start_frame:best_start_frame + window_frames],
@@ -1623,6 +1626,9 @@ def skip_span(queues: dict, video_id: str, scene_id: int, sequential: bool = Fal
         spans[:] = [s for s in spans if s["scene_id"] != scene_id]
 
 
+SNAP_TOL_SEC = 0.05  # see carve_span
+
+
 def carve_span(queues: dict, video_id: str, scene_id: int, window_offset_sec: float,
                window_duration_sec: float, sequential: bool = False) -> dict:
     """Generalization of consume_span for Advanced Shape Matching: consumes
@@ -1652,15 +1658,25 @@ def carve_span(queues: dict, video_id: str, scene_id: int, window_offset_sec: fl
     earlier confirmed block since the candidate was generated, which the
     caller should treat as "re-search this block", not silently paper over."""
     spans = queues.get(video_id, [])
-    win_start = window_offset_sec
-    win_end = window_offset_sec + window_duration_sec
 
     for i, span in enumerate(spans):
         if span["scene_id"] != scene_id:
             continue
         span_start = span["offset_sec"]
         span_end = span["offset_sec"] + span["remaining_sec"]
-        if span_start - 1e-6 <= win_start and win_end <= span_end + 1e-6:
+        win_start = window_offset_sec
+        win_end = window_offset_sec + window_duration_sec
+        # Windows come from frame-rounded searches and picks are stored rounded to
+        # 0.01 s, so a window can sit a hair outside its span. Up to SNAP_TOL_SEC
+        # (about a frame) it's snapped back inside instead of being rejected —
+        # rejecting it used to leave Auto-fill blocks empty and silently drop
+        # confirmed clips on replay.
+        if span_start - SNAP_TOL_SEC <= win_start and win_end <= span_end + SNAP_TOL_SEC:
+            win_start = max(win_start, span_start)
+            if win_start + window_duration_sec > span_end:
+                win_start = max(span_start, span_end - window_duration_sec)
+            win_end = min(span_end, win_start + window_duration_sec)
+            window_duration_sec = win_end - win_start
             pick = {
                 "video_id": span["video_id"],
                 "scene_id": span["scene_id"],
@@ -4955,7 +4971,7 @@ else:
                             "video_id": best_span["video_id"],
                             "scene_id": best_span["scene_id"],
                             "scene_start_sec": best_span["scene_start_sec"],
-                            "window_offset_sec": round(best_span["offset_sec"], 3),
+                            "window_offset_sec": best_span["offset_sec"],
                             "window_duration_sec": round(seg_b["end"] - seg_b["start"], 3),
                             "score": 0.0,
                             "motion_norm": best_span["motion_norm"],
@@ -4978,21 +4994,38 @@ else:
                     weight_motion, autofill_seed,
                     weight_position=weight_position, sequential=sequential_mode, videos_per_block=rec_b,
                 )
+                # Place the weighted picks; if one can't be placed, fall through to the next
+                # best candidate (same hard rules), so a block is only ever left empty when
+                # there is genuinely no footage left for it.
                 chosen_b = select_autofill_picks(ranked_b, rec_b, allow_same_video)
-                chosen_ids_b = {id(c) for c in chosen_b}
-                new_picks = []
+                order_b = chosen_b + [c for c in ranked_b if all(c is not x for x in chosen_b)]
+                new_picks, placed_ids, used_vids_b = [], set(), set()
+                for c in order_b:
+                    if len(new_picks) >= rec_b:
+                        break
+                    if not allow_same_video and c["video_id"] in used_vids_b:
+                        continue
+                    try:
+                        pick = carve_span(queues, c["video_id"], c["scene_id"],
+                                          c["window_offset_sec"], c["window_duration_sec"], sequential_mode)
+                    except ValueError:
+                        continue
+                    new_picks.append(pick)
+                    placed_ids.add(id(c))
+                    used_vids_b.add(c["video_id"])
                 for c in cands_b:
-                    pick_key = f"adv_pick_{b}_{cand_key(c)}"
-                    if id(c) in chosen_ids_b:
-                        try:
-                            pick = carve_span(queues, c["video_id"], c["scene_id"],
-                                              c["window_offset_sec"], c["window_duration_sec"], sequential_mode)
-                            new_picks.append(pick)
-                            st.session_state[pick_key] = True
-                        except ValueError:
-                            st.session_state[pick_key] = False
-                    else:
-                        st.session_state[pick_key] = False
+                    st.session_state[f"adv_pick_{b}_{cand_key(c)}"] = id(c) in placed_ids
+                if not new_picks:
+                    # Last resort: front of whichever available footage best matches the
+                    # block's intensity — prefer pieces long enough for the whole block.
+                    _need = seg_b["end"] - seg_b["start"]
+                    _spans = [sp for sp in get_candidate_spans(queues, sequential_mode, _global_excl)
+                              if (sp["video_id"], sp["scene_id"]) not in _excl_b]
+                    if _spans:
+                        _target = seg_b.get("intensity", seg_b.get("energy", 0.5))
+                        _best = min(_spans, key=lambda sp: (sp["remaining_sec"] < _need - 1e-6,
+                                                            abs(sp["motion_norm"] - _target)))
+                        new_picks.append(consume_span(_best, _need))
                 confirmed[b] = new_picks
             st.session_state["adv_current_block"] = len(segments)
             st.session_state["adv_viewing"] = None
