@@ -4,6 +4,7 @@ energy/beat timeline, with a live visualization and JSON export for the VSE add-
 """
 
 import hashlib
+import inspect
 import json
 import math
 import random
@@ -19,7 +20,8 @@ from PIL import Image
 from render_preview import render_plan_dict, colab_to_local
 import video_ranking as VR
 import similarity as SIM
-from library_common import (scene_tags, render_range_picker, library_ranges, master_thumbnail_path,
+import preview_snippets
+from library_common import (scene_tags, render_range_picker, library_ranges, master_thumbnail_path, proxy_path,
                             refresh_caches_after_sync)
 
 # st.fragment (Streamlit 1.37+; was st.experimental_fragment in 1.33-1.36) lets
@@ -886,7 +888,7 @@ def render_choreography_block(
     seg_idx: int, seg: dict, selected_videos: list, max_chor_videos: int,
     rec_count: int, queues: dict, sequential_mode: bool, global_excluded: set,
     catalogues: dict, prev_block_videos: set = None, video_stats: dict = None,
-    role_filter: str = None, weighting: dict = None,
+    role_filter: str = None, weighting: dict = None, track: dict = None,
 ) -> None:
     """One block's choreography grid: one column per source video (up to
     max_chor_videos).  Each column has:
@@ -957,6 +959,7 @@ def render_choreography_block(
     overrides = st.session_state.setdefault("chor_overrides", {}).setdefault(seg_idx, {})
     chor_cols = st.columns(len(shown))
     highlight_keys = []
+    _show_clip = {}  # video_id -> (clip shown, all its clips, index) for the preview panel
 
     for col, video_id in zip(chor_cols, shown):
         clips = get_available_clips_for_video(queues, video_id, block_duration, sequential_mode,
@@ -1031,26 +1034,27 @@ def render_choreography_block(
                     elif display_clip.get("thumbnail") and Path(display_clip["thumbnail"]).exists():
                         st.image(display_clip["thumbnail"], width=180)
 
-                # Dropdown: which block_duration-sized window to use from this video
-                options = ["Auto (algorithm picks)"] + [c["label"] for c in clips]
-                if current_key is None:
-                    sel_idx = 0
-                else:
-                    matched = next((i + 1 for i, c in enumerate(clips)
-                                    if c["scene_id"] == current_key[0]
-                                    and abs(c["offset_sec"] - current_key[1]) < 0.1), 0)
-                    sel_idx = matched
-
-                chosen = st.selectbox(
-                    "Clip", options, index=sel_idx,
-                    key=f"chor_sel_{seg_idx}_{video_id}",
-                    label_visibility="collapsed",
-                )
-                if chosen == "Auto (algorithm picks)":
-                    overrides.pop(video_id, None)
-                else:
-                    chosen_span = clips[options.index(chosen) - 1]
-                    overrides[video_id] = (chosen_span["scene_id"], chosen_span["offset_sec"])
+                # Which trimmed clip (block-length window) this column uses: ◀ ▶ step to
+                # the previous / next one for this video (what the dropdown used to list),
+                # ↺ goes back to the automatic pick, ▶ Preview plays it with the music.
+                sel_idx = _clip_index(clips, display_clip)
+                _show_clip[video_id] = (display_clip, clips, sel_idx)
+                nav = st.columns([1, 1, 1])
+                with nav[0]:
+                    if st.button("◀", key=f"chor_prev_{seg_idx}_{video_id}", use_container_width=True,
+                                 disabled=sel_idx is None or sel_idx <= 0, help="Previous trimmed clip"):
+                        _chor_step(overrides, video_id, clips, sel_idx, -1)
+                        rerun_fragment()
+                with nav[1]:
+                    if st.button("↺", key=f"chor_auto_{seg_idx}_{video_id}", use_container_width=True,
+                                 disabled=current_key is None, help="Back to the automatic pick"):
+                        overrides.pop(video_id, None)
+                        rerun_fragment()
+                with nav[2]:
+                    if st.button("▶", key=f"chor_next_{seg_idx}_{video_id}", use_container_width=True,
+                                 disabled=sel_idx is None or sel_idx >= len(clips) - 1, help="Next trimmed clip"):
+                        _chor_step(overrides, video_id, clips, sel_idx, +1)
+                        rerun_fragment()
 
                 if display_clip is not None:
                     auto_tag = "⭐ Auto pick — " if current_key is None else ""
@@ -1060,17 +1064,129 @@ def render_choreography_block(
                     if display_clip.get("outro_candidate"):
                         role_bits.append("🎬outro")
                     role_suffix = f"  {' '.join(role_bits)}" if role_bits else ""
+                    pos = f"  ·  {sel_idx + 1}/{len(clips)}" if sel_idx is not None else ""
                     st.caption(
                         f"{auto_tag}Scene {display_clip['scene_id']}  "
                         f"{format_mmss(display_clip['scene_start_sec'] + display_clip['offset_sec'])}  "
-                        f"motion {display_clip['motion_norm']:.2f}{role_suffix}"
+                        f"motion {display_clip['motion_norm']:.2f}{role_suffix}{pos}"
                     )
+
+                _is_open = st.session_state.get("chor_preview") == (seg_idx, video_id)
+                if st.button("⏹ Close preview" if _is_open else "🎵 Preview with music",
+                             key=f"chor_prevw_{seg_idx}_{video_id}", use_container_width=True,
+                             disabled=display_clip is None):
+                    st.session_state["chor_preview"] = None if _is_open else (seg_idx, video_id)
+                    rerun_fragment()
 
                 st.checkbox("Use this clip", key=pick_key)
 
     if highlight_keys:
         css = "\n".join(f'div[class*="st-key-{k}"] {{ border: 3px solid #1c6fea !important; }}' for k in highlight_keys)
         st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+
+    target = st.session_state.get("chor_preview")
+    if target and target[0] == seg_idx and target[1] in _show_clip:
+        _render_chor_preview_panel(seg_idx, seg, target[1], _show_clip[target[1]], overrides,
+                                   catalogues, track, f"chor_pick_{seg_idx}_{target[1]}")
+
+
+def _clip_index(clips: list, clip) -> int | None:
+    """Position of `clip` in this video's list of trimmed clips (matched by scene and offset)."""
+    if clip is None:
+        return None
+    return next((i for i, c in enumerate(clips)
+                 if c["scene_id"] == clip["scene_id"] and abs(c["offset_sec"] - clip["offset_sec"]) < 0.1), None)
+
+
+def _chor_step(overrides: dict, video_id: str, clips: list, idx, step: int) -> None:
+    """Select the previous/next trimmed clip for this column (same list the dropdown had)."""
+    if idx is None:
+        return
+    j = idx + step
+    if 0 <= j < len(clips):
+        overrides[video_id] = (clips[j]["scene_id"], clips[j]["offset_sec"])
+
+
+def _local_media(raw_source: str, prefer: Path = None):
+    """(local path, None) for a media file, or (None, raw_source) if it isn't on this machine."""
+    if prefer is not None and Path(prefer).exists():
+        return Path(prefer), None
+    local = Path(colab_to_local(raw_source)) if raw_source else None
+    if local is not None and local.exists():
+        return local, None
+    return None, raw_source
+
+
+def _render_chor_preview_panel(seg_idx: int, seg: dict, video_id: str, shown: tuple, overrides: dict,
+                               catalogues: dict, track: dict, pick_key: str) -> None:
+    """🎵 Focus panel: the column's current clip playing with this block's music
+    (a synced snippet made on the server), ◀ ▶ to step through this video's
+    trimmed clips, and ✔ Use this clip."""
+    clip, clips, idx = shown
+    duration = seg["end"] - seg["start"]
+    with st.container(border=True):
+        st.markdown(f"**🎵 `{video_id}` with the music for block {seg_idx + 1}** "
+                    f"({seg['start']:.1f}s – {seg['end']:.1f}s)")
+        video_path, video_missing = _local_media(catalogues[video_id].get("source_path", ""),
+                                                 prefer=proxy_path(video_id))
+        audio_path, audio_missing = _local_media((track or {}).get("source_path", ""))
+        missing = [m for m in (video_missing, audio_missing) if m]
+        if missing:
+            st.warning("Needs " + " and ".join(Path(colab_to_local(m)).name for m in missing)
+                       + " on the server first.")
+            if _DRIVE_SYNC_AVAILABLE and all("MyDrive/" in m for m in missing):
+                if st.button("⬇️ Download from Google Drive", key=f"chor_prev_dl_{seg_idx}_{video_id}"):
+                    for m in missing:
+                        bar = st.progress(0.0, text=f"Downloading {Path(colab_to_local(m)).name}…")
+                        err = download_source_video(m.split("MyDrive/", 1)[1], Path(colab_to_local(m)),
+                                                    progress_callback=lambda p, b=bar: b.progress(min(p, 1.0)))
+                        bar.empty()
+                        if err:
+                            st.error(f"Download failed: {err}")
+                            return
+                    rerun_fragment()
+        elif clip is not None:
+            with st.spinner("Making the preview…"):
+                snippet, err = preview_snippets.make_synced_snippet(
+                    PREVIEW_DIR / "snippets", video_path,
+                    clip["scene_start_sec"] + clip["offset_sec"], duration,
+                    audio_path, seg["start"],
+                )
+            if err:
+                st.error(f"Couldn't make the preview: {err}")
+            else:
+                _video_kwargs = {"loop": True} if "loop" in inspect.signature(st.video).parameters else {}
+                st.video(str(snippet), **_video_kwargs)
+
+        pos = f"{idx + 1} of {len(clips)}" if idx is not None else "—"
+        if clip is not None:
+            st.caption(f"Scene {clip['scene_id']}  ·  "
+                       f"{format_mmss(clip['scene_start_sec'] + clip['offset_sec'])}  ·  "
+                       f"motion {clip['motion_norm']:.2f}  ·  trimmed clip {pos}"
+                       + (f"  ·  {', '.join(clip.get('tags', []))}" if clip.get("tags") else ""))
+        cols = st.columns([1, 1, 2, 1])
+        with cols[0]:
+            if st.button("◀ Previous", key=f"chor_pp_{seg_idx}_{video_id}", use_container_width=True,
+                         disabled=idx is None or idx <= 0):
+                _chor_step(overrides, video_id, clips, idx, -1)
+                rerun_fragment()
+        with cols[1]:
+            if st.button("Next ▶", key=f"chor_pn_{seg_idx}_{video_id}", use_container_width=True,
+                         disabled=idx is None or idx >= len(clips) - 1):
+                _chor_step(overrides, video_id, clips, idx, +1)
+                rerun_fragment()
+        with cols[2]:
+            def _use_and_close():
+                if clip is not None and video_id not in overrides:
+                    overrides[video_id] = (clip["scene_id"], clip["offset_sec"])  # lock in what you heard
+                st.session_state[pick_key] = True
+                st.session_state["chor_preview"] = None
+            st.button("✔ Use this clip", key=f"chor_puse_{seg_idx}_{video_id}", type="primary",
+                      use_container_width=True, on_click=_use_and_close, disabled=clip is None)
+        with cols[3]:
+            if st.button("Close", key=f"chor_pclose_{seg_idx}_{video_id}", use_container_width=True):
+                st.session_state["chor_preview"] = None
+                rerun_fragment()
 
 
 
@@ -4543,7 +4659,6 @@ elif matching_mode == "Choreography":
         overrides_k.clear()
         for vid in selected_videos:
             st.session_state[f"chor_pick_{k}_{vid}"] = False
-            st.session_state.pop(f"chor_sel_{k}_{vid}", None)
         for p in picks_k:
             st.session_state[f"chor_pick_{k}_{p['video_id']}"] = True
             overrides_k[p["video_id"]] = (p["scene_id"], p["offset_into_scene_sec"])
@@ -4871,6 +4986,7 @@ elif matching_mode == "Choreography":
             chor_rec_count, queues, sequential_mode,
             st.session_state["global_excluded_scenes"], catalogues,
             chor_prev_block_videos, chor_video_stats, chor_role_filter, chor_weighting,
+            track=track,
         )
 
 else:
