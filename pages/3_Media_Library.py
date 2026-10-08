@@ -445,11 +445,7 @@ def render_analysis_panel(tracks: dict) -> None:
         extras.append("vocals: **Demucs** ✅" if aa.demucs_available() else "vocals: Demucs not installed (skipped)")
         st.caption(" · ".join(extras))
 
-        picked = st.multiselect(
-            "Tracks to add the extra analysis to", missing_extra, key="aa_pick_extra",
-            placeholder="Choose tracks — or leave empty for all of them",
-            help="Pick just a few to try it out; leave empty to queue every track without it.")
-        targets = picked or missing_extra
+        targets = missing_extra
         cols = st.columns(2)
         with cols[0]:
             if st.button(f"➕ Add extra analysis to {len(targets)} track(s)", key="aa_extra",
@@ -457,7 +453,6 @@ def render_analysis_panel(tracks: dict) -> None:
                          help="Keeps each track's existing beats and energy; adds bars, drums, "
                               "sections, phrases, build-ups/drops (and vocals if available)."):
                 n = aa.enqueue([{"track_id": tid, "kind": "extra"} for tid in targets])
-                st.session_state.pop("aa_pick_extra", None)
                 aa.resume()
                 st.session_state["_aa_was_active"] = True
                 st.toast(f"Queued {n} track(s).")
@@ -480,14 +475,12 @@ def render_analysis_panel(tracks: dict) -> None:
                     st.success(f"Every track in {AUDIO_LIBRARY_FOLDER} ({len(files)}) is already analysed.")
                 else:
                     st.markdown(f"**{len(new)} new track(s)** in {AUDIO_LIBRARY_FOLDER}")
-                    by_rel = {f["rel"]: f for f in new}
-                    picked_new = st.multiselect("New tracks to analyse", list(by_rel), key="aa_pick_new",
-                                                placeholder="Choose tracks — or leave empty for all of them")
-                    chosen = [by_rel[r] for r in picked_new] or new
+                    st.caption("\n".join(f"• {f['rel']}" for f in new[:30])
+                               + (f"\n… and {len(new) - 30} more" if len(new) > 30 else ""))
+                    chosen = new
                     if st.button(f"🎵 Analyse {len(chosen)} new track(s)", type="primary", key="aa_new"):
                         n = aa.enqueue([{"track_id": Path(f["name"]).stem, "kind": "new", "drive_rel": f["rel"]}
                                         for f in chosen])
-                        st.session_state.pop("aa_pick_new", None)
                         aa.resume()
                         st.session_state["_aa_was_active"] = True
                         st.session_state["aa_checked"] = False
