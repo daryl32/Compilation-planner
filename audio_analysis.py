@@ -660,7 +660,8 @@ def _paths():
     from config import AUDIO_DIR
     d = AUDIO_DIR / ".analysis"
     d.mkdir(parents=True, exist_ok=True)
-    return {"queue": d / "queue.json", "status": d / "status.json", "lock": d / "worker.pid"}
+    return {"queue": d / "queue.json", "status": d / "status.json", "lock": d / "worker.pid",
+            "pause": d / "paused"}
 
 
 def _read_json(path: Path, default):
@@ -710,6 +711,55 @@ def enqueue(jobs: list) -> int:
     _write_json(p["queue"], queue)
     _write_json(p["status"], status)
     return added
+
+
+def is_paused() -> bool:
+    return _paths()["pause"].exists()
+
+
+def pause() -> None:
+    """Finish the track in progress, then stop; the rest stay queued."""
+    _paths()["pause"].write_text("1")
+
+
+def resume() -> str:
+    _paths()["pause"].unlink(missing_ok=True)
+    return start_worker()
+
+
+def stop_now(force: bool = False) -> None:
+    """Stop at once: the track in progress goes back to the front of the
+    queue (it restarts from scratch on resume) and nothing more runs until
+    Resume. force=True kills the worker outright — for when it's stuck in a
+    long step (e.g. vocal separation) and doesn't respond to a normal stop."""
+    import signal as _signal
+    p = _paths()
+    pause()
+    try:
+        pid = int(p["lock"].read_text().strip())
+        os.kill(pid, _signal.SIGKILL if force else _signal.SIGTERM)
+    except Exception:
+        pass
+    if force:
+        status = _read_json(p["status"], {})
+        for v in status.values():
+            if v.get("state") == "running":
+                v.update(state="queued", msg="stopped — will restart on resume", updated=time.time())
+        _write_json(p["status"], status)
+        p["lock"].unlink(missing_ok=True)
+
+
+def cancel_queued(track_ids=None) -> int:
+    """Remove queued (not running) jobs — all of them, or just track_ids."""
+    p = _paths()
+    status = _read_json(p["status"], {})
+    running = {k for k, v in status.items() if v.get("state") == "running"}
+    queue = _read_json(p["queue"], [])
+    drop = {j["track_id"] for j in queue
+            if j["track_id"] not in running and (track_ids is None or j["track_id"] in track_ids)}
+    _write_json(p["queue"], [j for j in queue if j["track_id"] not in drop])
+    _write_json(p["status"], {k: v for k, v in status.items() if k not in drop})
+    return len(drop)
 
 
 def clear_finished_status() -> None:
@@ -778,10 +828,19 @@ def run_worker() -> None:
     if worker_running():
         return
     p["lock"].write_text(str(os.getpid()))
+
+    class _Stopped(BaseException):
+        pass
+
+    def _on_term(_sig, _frame):
+        raise _Stopped()
+
+    import signal as _signal
+    _signal.signal(_signal.SIGTERM, _on_term)
     try:
         while True:
             queue = _read_json(p["queue"], [])
-            if not queue:
+            if not queue or p["pause"].exists():
                 break
             job = queue[0]
             tid = job["track_id"]
@@ -795,6 +854,12 @@ def run_worker() -> None:
             try:
                 _process(job, say)
                 state, msg = "done", "finished"
+            except _Stopped:
+                st = _read_json(p["status"], {})
+                st[tid] = {"state": "queued", "kind": job["kind"], "msg": "stopped — will restart on resume",
+                           "updated": time.time()}
+                _write_json(p["status"], st)
+                break
             except Exception as e:
                 traceback.print_exc()
                 state, msg = "error", str(e)[-300:]

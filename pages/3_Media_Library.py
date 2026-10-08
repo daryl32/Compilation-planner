@@ -371,12 +371,44 @@ def _analysis_progress(aa) -> None:
     if not status:
         return
     running = aa.worker_running()
+    paused = aa.is_paused()
     active = {k: v for k, v in status.items() if v.get("state") in ("queued", "running")}
-    if active and not running:
-        st.warning("Analysis jobs are waiting but the worker isn't running (the server may have restarted).")
-        if st.button("▶️ Restart analysis", key="aa_restart"):
-            aa.start_worker()
+    queued_n = sum(1 for v in status.values() if v.get("state") == "queued")
+
+    ctl = st.columns(4)
+    if running and not paused:
+        if ctl[0].button("⏸ Pause after this track", key="aa_pause",
+                         help="Finish the track being analysed, then stop. The rest stay queued."):
+            aa.pause()
             st.rerun()
+        if ctl[1].button("⏹ Stop now", key="aa_stop",
+                         help="Stop straight away and free the server. The current track goes back in the "
+                              "queue and starts again from the beginning when you resume."):
+            aa.stop_now()
+            st.session_state["_aa_stop_at"] = time.time()
+            st.rerun()
+    elif running and paused:
+        st.info("⏸ Stopping after the current track…")
+        if ctl[1].button("⏹ Stop now", key="aa_stop2"):
+            aa.stop_now()
+            st.session_state["_aa_stop_at"] = time.time()
+            st.rerun()
+        if time.time() - st.session_state.get("_aa_stop_at", time.time()) > 15:
+            if ctl[2].button("⚠️ Force stop", key="aa_force",
+                             help="The worker hasn't stopped yet (a long step like vocal separation "
+                                  "can't be interrupted) — end it immediately."):
+                aa.stop_now(force=True)
+                st.rerun()
+    elif queued_n:
+        st.info(f"⏸ Paused — {queued_n} track(s) waiting." if paused else
+                f"{queued_n} track(s) waiting, but the analysis isn't running (the server may have restarted).")
+        if ctl[0].button("▶️ Resume", key="aa_resume", type="primary"):
+            aa.resume()
+            st.rerun()
+    if queued_n and ctl[3].button("🗑 Cancel waiting", key="aa_cancel",
+                                  help="Remove every track that hasn't started yet from the queue."):
+        aa.cancel_queued()
+        st.rerun()
     icons = {"queued": "⏳", "running": "⚙️", "done": "✅", "error": "❌"}
     order = {"running": 0, "queued": 1, "error": 2, "done": 3}
     for tid, info in sorted(status.items(), key=lambda kv: (order.get(kv[1].get("state"), 9), kv[0].lower())):
@@ -413,14 +445,20 @@ def render_analysis_panel(tracks: dict) -> None:
         extras.append("vocals: **Demucs** ✅" if aa.demucs_available() else "vocals: Demucs not installed (skipped)")
         st.caption(" · ".join(extras))
 
+        picked = st.multiselect(
+            "Tracks to add the extra analysis to", missing_extra, key="aa_pick_extra",
+            placeholder="Choose tracks — or leave empty for all of them",
+            help="Pick just a few to try it out; leave empty to queue every track without it.")
+        targets = picked or missing_extra
         cols = st.columns(2)
         with cols[0]:
-            if st.button(f"➕ Add extra analysis to {len(missing_extra)} track(s)", key="aa_extra",
-                         disabled=not missing_extra,
+            if st.button(f"➕ Add extra analysis to {len(targets)} track(s)", key="aa_extra",
+                         disabled=not targets,
                          help="Keeps each track's existing beats and energy; adds bars, drums, "
                               "sections, phrases, build-ups/drops (and vocals if available)."):
-                n = aa.enqueue([{"track_id": tid, "kind": "extra"} for tid in missing_extra])
-                aa.start_worker()
+                n = aa.enqueue([{"track_id": tid, "kind": "extra"} for tid in targets])
+                st.session_state.pop("aa_pick_extra", None)
+                aa.resume()
                 st.session_state["_aa_was_active"] = True
                 st.toast(f"Queued {n} track(s).")
                 st.rerun()
@@ -441,13 +479,16 @@ def render_analysis_panel(tracks: dict) -> None:
                 if not new:
                     st.success(f"Every track in {AUDIO_LIBRARY_FOLDER} ({len(files)}) is already analysed.")
                 else:
-                    st.markdown(f"**{len(new)} new track(s)** in {AUDIO_LIBRARY_FOLDER}:")
-                    st.caption("\n".join(f"• {f['rel']}" for f in new[:30])
-                               + (f"\n… and {len(new) - 30} more" if len(new) > 30 else ""))
-                    if st.button(f"🎵 Analyse {len(new)} new track(s)", type="primary", key="aa_new"):
+                    st.markdown(f"**{len(new)} new track(s)** in {AUDIO_LIBRARY_FOLDER}")
+                    by_rel = {f["rel"]: f for f in new}
+                    picked_new = st.multiselect("New tracks to analyse", list(by_rel), key="aa_pick_new",
+                                                placeholder="Choose tracks — or leave empty for all of them")
+                    chosen = [by_rel[r] for r in picked_new] or new
+                    if st.button(f"🎵 Analyse {len(chosen)} new track(s)", type="primary", key="aa_new"):
                         n = aa.enqueue([{"track_id": Path(f["name"]).stem, "kind": "new", "drive_rel": f["rel"]}
-                                        for f in new])
-                        aa.start_worker()
+                                        for f in chosen])
+                        st.session_state.pop("aa_pick_new", None)
+                        aa.resume()
                         st.session_state["_aa_was_active"] = True
                         st.session_state["aa_checked"] = False
                         st.toast(f"Queued {n} new track(s).")
