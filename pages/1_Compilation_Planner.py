@@ -1536,6 +1536,16 @@ def format_match_breakdown(match: dict, experimental: bool, tag_filter) -> str:
     return text
 
 
+def _columns_support_valign() -> bool:
+    import inspect
+    try:
+        return "vertical_alignment" in inspect.signature(st.columns).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+_COLUMNS_SUPPORT_VALIGN = _columns_support_valign()
+
 RECOMMENDED_COUNT = 10   # how many best-matching videos are listed by default
 
 
@@ -1548,6 +1558,28 @@ def load_timeline_sprite(sprite_path: str):
     img = Image.open(sprite_path)
     img.load()  # force full read now, so the cached object doesn't hold an open file handle
     return img
+
+
+def video_list_thumbnail(catalogues: dict, video_id: str, time_range=None):
+    """Small preview for the video list: the timeline-sprite tile from the middle
+    of the video's usable range (a 120-px crop from an already-cached sprite, so
+    it's cheap), falling back to that scene's own thumbnail file. None if
+    neither exists."""
+    duration = get_video_duration(video_id)
+    a, b = time_range or (0.0, duration)
+    mid = (a + b) / 2
+    tile = get_nearest_thumbnail(catalogues, video_id, mid)
+    if tile is not None:
+        return tile
+    for sc in catalogues.get(video_id, {}).get("scenes", []):
+        try:
+            inside = _tc_to_seconds(sc["start_tc"]) <= mid <= _tc_to_seconds(sc["end_tc"])
+        except (KeyError, ValueError):
+            continue
+        if inside and sc.get("thumbnail_paths"):
+            path = resolve_thumbnail(sc["thumbnail_paths"][0], video_id)
+            return str(path) if path.exists() else None
+    return None
 
 
 def get_nearest_thumbnail(catalogues: dict, video_id: str, clip_start_sec: float):
@@ -1941,11 +1973,16 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
         else:
             range_tag = ""
 
-        row_cols = st.columns([1, 7, 1])
+        row_cols = st.columns([0.5, 1.5, 7, 1], vertical_alignment="center") \
+            if _COLUMNS_SUPPORT_VALIGN else st.columns([0.5, 1.5, 7, 1])
         with row_cols[0]:
             st.checkbox("select", value=default_checked, key=f"select_video_{video_id}",
                         label_visibility="collapsed")
         with row_cols[1]:
+            _thumb = video_list_thumbnail(catalogues, video_id, current_range)
+            if _thumb is not None:
+                st.image(_thumb, width=120)
+        with row_cols[2]:
             rank_mark = "✅ " if recommended else ""
             title = f"{rank_mark}**{video_id}** · ⏱ {format_mmss(duration)}"
             if match:
@@ -1955,7 +1992,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                                                   tag_filter))
             else:
                 st.write(f"{title} — no scenes match the current tag filter / time range{range_tag}")
-        with row_cols[2]:
+        with row_cols[3]:
             if st.button("🎚️", key=f"range_toggle_{video_id}", help="Set a time range for this video"):
                 # One picker open at a time: each open picker embeds a full video player,
                 # which is the heaviest thing on this page to re-render.
