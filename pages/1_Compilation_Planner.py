@@ -615,7 +615,17 @@ def find_shape_candidates(
         })
 
     results.sort(key=lambda r: -r["score"])
-    return results[:max_matches], missing_curve_videos
+    # A scene whose middle was used by an earlier block (non-sequential mode) is
+    # left as TWO pieces with the same (video, scene) id. Picks and checkboxes
+    # are keyed by that id, so offering both made one Auto-fill pick confirm
+    # two clips. Keep only the better-scoring piece of each scene.
+    seen, unique = set(), []
+    for r in results:
+        key = (r["video_id"], r["scene_id"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+    return unique[:max_matches], missing_curve_videos
 
 
 def compute_skip_budget(available_windows: int, remaining_blocks: int, weight_position: float) -> int:
@@ -697,6 +707,22 @@ def position_closeness(c: dict, targets: dict, default_duration: float) -> float
     duration = c.get("window_duration_sec") or default_duration
     mid = start + duration / 2
     return max(0.0, 1.0 - abs(mid - target[0]) / (2 * target[1]))
+
+
+def select_autofill_picks(ranked: list, count: int, allow_same_video: bool) -> list:
+    """The sidebar's hard rules for an automatic pick: at most `count` clips
+    (1 when split-screen is off), and — unless 'Allow multiple clips from the
+    same video' is on — no two from the same video. Walks the weighted ranking
+    best-first, skipping a clip only when its video is already used."""
+    chosen, used_videos = [], set()
+    for c in ranked:
+        if len(chosen) >= count:
+            break
+        if not allow_same_video and c["video_id"] in used_videos:
+            continue
+        chosen.append(c)
+        used_videos.add(c["video_id"])
+    return chosen
 
 
 def _stable_random_unit(seed: int, *parts) -> float:
@@ -1186,7 +1212,9 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                 sequential=autofill_weights.get("sequential", False),
                 videos_per_block=recommended_count,
             )
-            chosen_keys = {(c["video_id"], c["scene_id"]) for c in ranked[:recommended_count]}
+            chosen = select_autofill_picks(ranked, recommended_count,
+                                           autofill_weights.get("allow_same_video", False))
+            chosen_keys = {(c["video_id"], c["scene_id"]) for c in chosen}
             for c in candidates:
                 st.session_state[f"adv_pick_{current_block}_{c['video_id']}_{c['scene_id']}"] = \
                     (c["video_id"], c["scene_id"]) in chosen_keys
@@ -4657,11 +4685,12 @@ else:
                     weight_motion, autofill_seed,
                     weight_position=weight_position, sequential=sequential_mode, videos_per_block=rec_b,
                 )
-                chosen_keys_b = {(c["video_id"], c["scene_id"]) for c in ranked_b[:rec_b]}
+                chosen_b = select_autofill_picks(ranked_b, rec_b, allow_same_video)
+                chosen_ids_b = {id(c) for c in chosen_b}
                 new_picks = []
                 for c in cands_b:
                     pick_key = f"adv_pick_{b}_{c['video_id']}_{c['scene_id']}"
-                    if (c["video_id"], c["scene_id"]) in chosen_keys_b:
+                    if id(c) in chosen_ids_b:
                         try:
                             pick = carve_span(queues, c["video_id"], c["scene_id"],
                                               c["window_offset_sec"], c["window_duration_sec"], sequential_mode)
@@ -4784,6 +4813,7 @@ else:
             "weight_repeat_penalty": weight_repeat_penalty, "weight_spread": weight_spread,
             "weight_motion": weight_motion, "seed": autofill_seed,
             "weight_position": weight_position, "sequential": sequential_mode,
+            "allow_same_video": allow_same_video,
         }
         render_candidate_grid(candidates, current_block, already_keys, seg, block_audio_curve,
                               prev_block_videos, video_stats, recommended_counts[current_block],
