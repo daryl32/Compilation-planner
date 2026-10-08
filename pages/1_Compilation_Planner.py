@@ -493,7 +493,7 @@ def find_shape_candidates(
     segment: dict, queues: dict, sequential: bool, excluded_here: set, global_excluded: set,
     audio_curve: np.ndarray, max_matches: int, restrict_to_front: bool = False,
     remaining_blocks: int = 1, weight_position: float = 0.0,
-    position_targets: dict = None, weight_shape: float = 1.0,
+    position_targets: dict = None, weight_shape: float = 1.0, exclude_videos: set = None,
 ) -> list[dict]:
     """For every currently-available span at least as long as this block,
     slide a window of the block's exact duration across EVERY frame position
@@ -535,6 +535,8 @@ def find_shape_candidates(
     for span in get_candidate_spans(queues, sequential, global_excluded, min_duration=block_duration):
         key = (span["video_id"], span["scene_id"])
         if key in excluded_here or span["remaining_sec"] < block_duration - 1e-6:
+            continue
+        if exclude_videos and span["video_id"] in exclude_videos:
             continue
 
         if span["video_id"] not in video_curves_cache:
@@ -694,6 +696,29 @@ def position_closeness(c: dict, targets: dict, default_duration: float) -> float
     return max(0.0, 1.0 - abs(mid - target[0]) / (2 * target[1]))
 
 
+def widen_for_repeat_rule(cands: list, prev_block_videos: set, need: int, search) -> list:
+    """The shape search keeps only its top matches, which can all come from the
+    previous block's video(s) even when other videos have footage. When fewer
+    than `need` non-repeating videos are among cands, search again WITHOUT the
+    previous block's videos and add the best clip of each new video until there
+    are enough. search(exclude_videos) -> candidate list, best first."""
+    if not prev_block_videos or need <= 0:
+        return cands
+    have = {c["video_id"] for c in cands if c["video_id"] not in prev_block_videos}
+    if len(have) >= need:
+        return cands
+    existing = {cand_key(c) for c in cands}
+    extra = []
+    for c in search(set(prev_block_videos) | have):
+        if len(have) >= need:
+            break
+        if c["video_id"] in have or cand_key(c) in existing:
+            continue
+        extra.append(c)
+        have.add(c["video_id"])
+    return cands + extra
+
+
 def select_autofill_picks(ranked: list, count: int, allow_same_video: bool) -> list:
     """The sidebar's hard rules for an automatic pick: at most `count` clips
     (1 when split-screen is off), and — unless 'Allow multiple clips from the
@@ -723,7 +748,7 @@ def _stable_random_unit(seed: int, *parts) -> float:
 def rank_candidates_weighted(
     candidates: list, current_block: int, segments: list, confirmed: dict, queues: dict,
     prev_block_videos: set, weight_shape: float, weight_random: float,
-    weight_repeat_penalty: float, weight_spread: float, weight_motion: float, random_seed: int,
+    avoid_repeat: bool, weight_spread: float, weight_motion: float, random_seed: int,
     weight_position: float = 0.0, sequential: bool = False, videos_per_block: float = None,
 ) -> list:
     """Re-ranks candidates by a blended score. Used by Manual step-through's
@@ -740,12 +765,12 @@ def rank_candidates_weighted(
     B: a STABLE pseudo-random value — same seed+block+candidate always draws
        the same number, so a rerun from an unrelated click never reshuffles
        picks already made; change the seed to deliberately reroll.
-    C: a penalty if this candidate's video was used in the immediately
-       preceding block, scaled by how long the adjacent blocks are relative
-       to the plan's average segment length — repeating right after a long,
-       lingering shot is penalized hard; repeating during a run of short,
-       rapid cuts barely matters. This weight is also the control for "too
-       many rapid changes": raise it to settle switching down.
+    C (avoid_repeat, on/off — a hard rule, not a weight): when on, every
+       candidate from a video NOT used in the immediately preceding block
+       ranks above every candidate from one that was; the weights below only
+       order clips within each of those two groups. A repeat therefore only
+       comes out on top when no other video is available (the fallback —
+       callers check for it with repeat_fallback_videos and warn).
     D: blends "hasn't been used much yet" with "still has a lot of footage
        remaining" — pulls long, under-used videos back into rotation across
        many block decisions, rather than a long source being used once early
@@ -763,11 +788,7 @@ def rank_candidates_weighted(
     if not candidates:
         return []
 
-    seg_durations = [sg["end"] - sg["start"] for sg in segments]
-    avg_duration = max((sum(seg_durations) / len(seg_durations)) if seg_durations else 1.0, 1e-6)
     curr_duration = segments[current_block]["end"] - segments[current_block]["start"]
-    prev_duration = (segments[current_block - 1]["end"] - segments[current_block - 1]["start"]
-                     if current_block > 0 else 0.0)
     block_intensity = segments[current_block].get("intensity", segments[current_block].get("energy", 0.5))
 
     video_ids = {c["video_id"] for c in candidates}
@@ -789,11 +810,7 @@ def rank_candidates_weighted(
         A = max(0.0, c.get("score", 0.0))  # Auto mode's spans carry no shape score — A is simply 0 there
         B = _stable_random_unit(random_seed, current_block, c["video_id"], c["scene_id"])
 
-        if current_block > 0 and c["video_id"] in prev_block_videos:
-            length_factor = min(3.0, max(0.2, (prev_duration + curr_duration) / (2 * avg_duration)))
-            C = -length_factor / 3.0
-        else:
-            C = 0.0
+        is_repeat = bool(avoid_repeat and current_block > 0 and c["video_id"] in prev_block_videos)
 
         norm_used = used_by_video[c["video_id"]] / max_used
         norm_remaining = remaining_by_video[c["video_id"]] / max_remaining
@@ -804,12 +821,45 @@ def rank_candidates_weighted(
 
         F = position_closeness(c, position_targets, curr_duration) if position_targets else 0.0
 
-        combined = (weight_shape * A + weight_random * B + weight_repeat_penalty * C
+        combined = (weight_shape * A + weight_random * B
                     + weight_spread * D + weight_motion * E + weight_position * F)
-        scored.append((combined, c))
+        scored.append((is_repeat, combined, c))
 
-    scored.sort(key=lambda t: -t[0])
-    return [c for _, c in scored]
+    # Hard rule first (non-repeats before repeats), then the blended score.
+    scored.sort(key=lambda t: (t[0], -t[1]))
+    return [c for _, _, c in scored]
+
+
+def repeat_fallback_videos(picks: list, prev_block_videos: set, avoid_repeat: bool) -> list:
+    """Videos among an automatic block's picks that repeat the previous block
+    despite 'Avoid repeating previous block' being on — i.e. the fallback was
+    used because nothing else could fill the spot. Empty when the rule held."""
+    if not avoid_repeat or not prev_block_videos:
+        return []
+    return sorted({p["video_id"] for p in picks if p["video_id"] in prev_block_videos})
+
+
+def flash_repeat_fallback(blocks: list) -> None:
+    """Queue the fallback warning to show after the rerun that follows an
+    Auto-fill. blocks: 1-based block numbers where a repeat had to be used."""
+    if blocks:
+        st.session_state["repeat_fallback_flash"] = sorted(set(blocks))
+
+
+def repeat_fallback_message(blocks: list) -> str:
+    nums = ", ".join(str(b) for b in blocks[:15]) + (f" (+{len(blocks) - 15} more)" if len(blocks) > 15 else "")
+    return (f"🔁 'Avoid repeating previous block' couldn't be kept in block{'s' if len(blocks) != 1 else ''} "
+            f"{nums} — no other video had footage for {'those spots' if len(blocks) != 1 else 'that spot'}, "
+            f"so a video from the block before was reused. Add videos or widen time ranges/tags to avoid it.")
+
+
+def show_repeat_fallback_flash() -> None:
+    blocks = st.session_state.pop("repeat_fallback_flash", None)
+    if blocks:
+        msg = repeat_fallback_message(blocks)
+        st.warning(msg)
+        if hasattr(st, "toast"):
+            st.toast(msg, icon="🔁")
 
 
 CHOR_MAX_OPTIONS_PER_VIDEO = 300  # safety cap on tiled dropdown entries — see docstring below
@@ -918,7 +968,7 @@ def render_choreography_block(
     fallback). None for every other block.
 
     weighting: {"segments", "confirmed", "weight_shape", "weight_random",
-    "weight_repeat_penalty", "weight_spread", "weight_motion", "seed"} — when
+    "avoid_repeat", "weight_spread", "weight_motion", "seed"} — when
     given, the "⭐ Auto pick" preview shown for a column left on Auto uses
     rank_candidates_weighted instead of plain closest-motion-match, matching
     exactly what Confirm & Next will actually do. None falls back to plain
@@ -1017,7 +1067,7 @@ def render_choreography_block(
                         ranked = rank_candidates_weighted(
                             auto_candidates, seg_idx, weighting["segments"], weighting["confirmed"], queues,
                             prev_block_videos, weighting["weight_shape"], weighting["weight_random"],
-                            weighting["weight_repeat_penalty"], weighting["weight_spread"],
+                            weighting["avoid_repeat"], weighting["weight_spread"],
                             weighting["weight_motion"], weighting["seed"],
                             weight_position=weighting.get("weight_position", 0.0),
                             sequential=sequential_mode, videos_per_block=rec_count,
@@ -1244,7 +1294,7 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
     Skip ahead below, exactly as before.
 
     autofill_weights: {"segments", "confirmed", "queues", "weight_shape",
-    "weight_random", "weight_repeat_penalty", "weight_spread", "weight_motion", "seed"} —
+    "weight_random", "avoid_repeat", "weight_spread", "weight_motion", "seed"} —
     everything rank_candidates_weighted needs. The candidate GRID below
     always stays sorted by raw shape score regardless; only the auto-fill
     button's own picks use the weighted ranking."""
@@ -1261,7 +1311,7 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
             ranked = rank_candidates_weighted(
                 candidates, current_block, autofill_weights["segments"], autofill_weights["confirmed"],
                 autofill_weights["queues"], prev_block_videos, autofill_weights["weight_shape"],
-                autofill_weights["weight_random"], autofill_weights["weight_repeat_penalty"],
+                autofill_weights["weight_random"], autofill_weights["avoid_repeat"],
                 autofill_weights["weight_spread"], autofill_weights["weight_motion"],
                 autofill_weights["seed"],
                 weight_position=autofill_weights.get("weight_position", 0.0),
@@ -1273,6 +1323,8 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
             chosen_keys = {cand_key(c) for c in chosen}
             for c in candidates:
                 st.session_state[f"adv_pick_{current_block}_{cand_key(c)}"] = cand_key(c) in chosen_keys
+            if repeat_fallback_videos(chosen, prev_block_videos, autofill_weights["avoid_repeat"]):
+                flash_repeat_fallback([current_block + 1])
             st.rerun()
 
     if any(c.get("similar") for c in candidates):
@@ -3111,7 +3163,7 @@ def fill_slot(seg_energy: float, needed_sec: float, queues: dict, sequential: bo
     failing to fill the slot.
 
     weighting: {"seg_idx", "segments", "confirmed", "prev_block_videos",
-    "weight_shape", "weight_random", "weight_repeat_penalty", "weight_spread",
+    "weight_shape", "weight_random", "avoid_repeat", "weight_spread",
     "weight_motion", "seed"} — when given AND this isn't a role_filter block,
     the pick is the top result of rank_candidates_weighted instead of the
     plain closest-motion-match. None (or a role_filter block) keeps the
@@ -3161,14 +3213,20 @@ def fill_slot(seg_energy: float, needed_sec: float, queues: dict, sequential: bo
             ranked = rank_candidates_weighted(
                 ranked_pool, weighting["seg_idx"], weighting["segments"], weighting["confirmed"],
                 queues, weighting["prev_block_videos"], weighting["weight_shape"],
-                weighting["weight_random"], weighting["weight_repeat_penalty"],
+                weighting["weight_random"], weighting["avoid_repeat"],
                 weighting["weight_spread"], weighting["weight_motion"], weighting["seed"],
                 weight_position=weight_position, sequential=sequential,
                 videos_per_block=weighting.get("videos_per_block"),
             )
             best_span = ranked[0]
         else:
+            if weighting and weighting.get("avoid_repeat"):
+                _fresh = [s for s in candidates if s["video_id"] not in weighting["prev_block_videos"]]
+                candidates = _fresh or candidates
             best_span = min(candidates, key=lambda s: abs(s["motion_norm"] - seg_energy))
+        if weighting is not None and repeat_fallback_videos(
+                [best_span], weighting.get("prev_block_videos", set()), weighting.get("avoid_repeat")):
+            weighting.setdefault("repeat_fallbacks", set()).add(weighting["seg_idx"])
         if best_span.get("_skip_window"):
             pick = carve_span(queues, best_span["video_id"], best_span["scene_id"],
                               best_span["offset_sec"], remaining, sequential=True)
@@ -3217,13 +3275,17 @@ def match_scenes_to_track(
     outro_blocks: set = None,
     weight_shape: float = 0.0,
     weight_random: float = 0.0,
-    weight_repeat_penalty: float = 0.0,
+    avoid_repeat: bool = False,
     weight_spread: float = 0.0,
     weight_motion: float = 0.0,
     autofill_seed: int = 42,
     weight_position: float = 0.0,
+    repeat_fallbacks: set = None,
 ) -> tuple:
-    """Each slot in a segment is filled to its FULL duration with a chain of
+    """repeat_fallbacks: if a set is given, 0-based indices of blocks where
+    'Avoid repeating previous block' had to fall back to a repeat are added to it.
+
+    Each slot in a segment is filled to its FULL duration with a chain of
     one or more clips (see fill_slot) — footage running out mid-slot never
     produces a freeze or gap, it just cuts to the next best match. Leftover
     footage from any trimmed clip goes back into its queue for later reuse.
@@ -3271,10 +3333,12 @@ def match_scenes_to_track(
             "seg_idx": i, "segments": segments, "confirmed": confirmed_so_far,
             "prev_block_videos": prev_block_videos,
             "weight_shape": weight_shape, "weight_random": weight_random,
-            "weight_repeat_penalty": weight_repeat_penalty, "weight_spread": weight_spread,
+            "avoid_repeat": avoid_repeat, "weight_spread": weight_spread,
             "weight_motion": weight_motion, "seed": autofill_seed,
             "weight_position": weight_position, "videos_per_block": n_picks,
         }
+        if repeat_fallbacks is not None:
+            weighting["repeat_fallbacks"] = repeat_fallbacks
 
         slots = []
         used_videos = set()
@@ -3393,7 +3457,7 @@ DIAL_DEFAULTS = {
     # Auto-fill weights (used in Matching & Export, stored here for persistence)
     "weight_shape": 2.0,
     "weight_random": 0.5,
-    "weight_repeat_penalty": 1.5,
+    "avoid_repeat": True,
     "weight_spread": 1.0,
     "weight_motion": 1.0,
     "weight_position": 0.0,
@@ -3406,7 +3470,7 @@ DIAL_DEFAULTS = {
 # exactly like audio_settings_shadow so they survive round-trips to other
 # sections and come back at the user's last-set values rather than defaults.
 WEIGHT_KEYS = [
-    "weight_shape", "weight_random", "weight_repeat_penalty",
+    "weight_shape", "weight_random", "avoid_repeat",
     "weight_spread", "weight_motion", "weight_position", "autofill_seed",
 ]
 
@@ -3448,7 +3512,7 @@ PROJECT_SIMPLE_KEYS = [
     *AUDIO_SETTINGS_KEYS,
     "split_screen_enabled", "min_clips", "max_clips", "density_contrast",
     "vary_count", "count_seed", "min_clip_len_sec",
-    "weight_shape", "weight_random", "weight_repeat_penalty", "weight_spread", "weight_motion",
+    "weight_shape", "weight_random", "avoid_repeat", "weight_spread", "weight_motion",
     "weight_position", "autofill_seed",
     "ranking_weights", "ranking_experimental",
     "committed_selected_videos", "committed_tag_filter", "known_extra_videos", "extra_videos",
@@ -4071,10 +4135,11 @@ with st.expander("⚙️ Auto-fill weighting", expanded=False):
                   disabled=_autofill_disabled,
                   help="Adds variety. Reproducible — same seed always gives same picks.")
     with _wt_cols[1]:
-        st.slider("C — Avoid repeating previous block", 0.0, 5.0, step=0.1,
-                  key="weight_repeat_penalty", disabled=_autofill_disabled,
-                  help="Penalizes reusing a video from the immediately preceding block. "
-                       "Also your control for 'too many rapid changes' — raise to settle.")
+        st.toggle("C — Avoid repeating previous block", key="avoid_repeat", disabled=_autofill_disabled,
+                  help="On: a hard rule — automatic picks never reuse a video from the block just "
+                       "before, unless no other video has footage for that spot. Then it falls back "
+                       "to a repeat and warns you which blocks. The other weights only choose among "
+                       "the allowed clips. Off: repeats are treated like any other clip.")
         st.slider("D — Balance use between videos", 0.0, 5.0, step=0.1, key="weight_spread",
                   disabled=_autofill_disabled,
                   help="Favors videos used least so far and those with the most footage left, "
@@ -4107,12 +4172,13 @@ st.session_state["weight_settings_shadow"] = {
 # Always read weight values from session_state (widgets above have already written them)
 weight_shape = st.session_state.get("weight_shape", 2.0)
 weight_random = st.session_state.get("weight_random", 0.5)
-weight_repeat_penalty = st.session_state.get("weight_repeat_penalty", 1.5)
+avoid_repeat = bool(st.session_state.get("avoid_repeat", True))
 weight_spread = st.session_state.get("weight_spread", 1.0)
 weight_motion = st.session_state.get("weight_motion", 1.0)
 autofill_seed = st.session_state.get("autofill_seed", 42)
 # F only exists in sequential mode — outside it, it has no effect at all.
 weight_position = st.session_state.get("weight_position", 0.0) if sequential_mode else 0.0
+show_repeat_fallback_flash()  # left by an Auto-fill on the previous run, if it had to repeat
 
 # ---------------------------------------------------------------------------
 # Per-scene matching against the beat timeline
@@ -4223,9 +4289,11 @@ if matching_mode == "Auto":
         st.session_state["global_excluded_scenes"],
         vary_count, int(count_seed), min_clip_len_sec,
         intro_blocks_0based, outro_blocks_0based,
-        weight_shape, weight_random, weight_repeat_penalty, weight_spread, weight_motion, autofill_seed,
-        weight_position=weight_position,
+        weight_shape, weight_random, avoid_repeat, weight_spread, weight_motion, autofill_seed,
+        weight_position=weight_position, repeat_fallbacks=(_auto_repeat_fallbacks := set()),
     )
+    if _auto_repeat_fallbacks:
+        st.warning(repeat_fallback_message([i + 1 for i in sorted(_auto_repeat_fallbacks)]))
 
     split_count = sum(1 for e in timeline if e["split_screen"])
     total_picks = sum(len(e["scenes"]) for e in timeline)
@@ -4780,6 +4848,7 @@ elif matching_mode == "Choreography":
                           "recommended clip count, picking the best motion-matching window per chosen "
                           "video — same as ticking videos and confirming repeatedly. You can still revisit "
                           "and adjust any block afterward with Previous or ✏️ Edit."):
+            _chor_rep_fallbacks = []
             for b in range(chor_block, len(segments)):
                 seg_b = segments[b]
                 block_duration_b = seg_b["end"] - seg_b["start"]
@@ -4825,7 +4894,7 @@ elif matching_mode == "Choreography":
                         auto_candidates_b = clips_b
                     ranked_b = rank_candidates_weighted(
                         auto_candidates_b, b, segments, chor_confirmed, queues, prev_block_videos_b,
-                        weight_shape, weight_random, weight_repeat_penalty, weight_spread,
+                        weight_shape, weight_random, avoid_repeat, weight_spread,
                         weight_motion, autofill_seed,
                         weight_position=weight_position, sequential=sequential_mode,
                         videos_per_block=rec_b,
@@ -4839,12 +4908,17 @@ elif matching_mode == "Choreography":
                 # candidates to fill every slot, the REMAINING slots naturally fall back
                 # to the best untagged ones — this IS the fallback-to-original-behaviour
                 # rule, expressed as "run out of tagged options, keep going down the list."
+                # 'Avoid repeating previous block' (C, when on) outranks everything else.
+                _rep_b = lambda t: bool(avoid_repeat and t[0] in prev_block_videos_b)
                 if role_filter_b:
-                    candidates_b.sort(key=lambda t: (not t[2], t[3]))
+                    candidates_b.sort(key=lambda t: (_rep_b(t), not t[2], t[3]))
                 else:
-                    candidates_b.sort(key=lambda t: t[3])
+                    candidates_b.sort(key=lambda t: (_rep_b(t), t[3]))
                 chosen_b = [(vid, best) for vid, best, _, _ in candidates_b[:rec_b]]
                 chosen_vids_b = {vid for vid, _ in chosen_b}
+                if repeat_fallback_videos([{"video_id": v} for v in chosen_vids_b],
+                                          prev_block_videos_b, avoid_repeat):
+                    _chor_rep_fallbacks.append(b + 1)
 
                 new_picks_b = []
                 for vid, clip in chosen_b:
@@ -4864,6 +4938,7 @@ elif matching_mode == "Choreography":
 
                 chor_confirmed[b] = new_picks_b
 
+            flash_repeat_fallback(_chor_rep_fallbacks)
             st.session_state["chor_current_block"] = len(segments)
             st.rerun()
 
@@ -4943,7 +5018,7 @@ elif matching_mode == "Choreography":
                         ranked = rank_candidates_weighted(
                             auto_candidates, chor_block, segments, chor_confirmed, queues,
                             chor_prev_block_videos, weight_shape, weight_random,
-                            weight_repeat_penalty, weight_spread, weight_motion, autofill_seed,
+                            avoid_repeat, weight_spread, weight_motion, autofill_seed,
                             weight_position=weight_position, sequential=sequential_mode,
                             videos_per_block=max(1, len(chosen_videos)),
                         )
@@ -4977,7 +5052,7 @@ elif matching_mode == "Choreography":
         chor_weighting = {
             "segments": segments, "confirmed": chor_confirmed,
             "weight_shape": weight_shape, "weight_random": weight_random,
-            "weight_repeat_penalty": weight_repeat_penalty, "weight_spread": weight_spread,
+            "avoid_repeat": avoid_repeat, "weight_spread": weight_spread,
             "weight_motion": weight_motion, "seed": autofill_seed,
             "weight_position": weight_position,
         }
@@ -5092,6 +5167,7 @@ else:
                           "end, using each block's own recommended count — same as clicking Auto-fill and "
                           "Confirm & Next repeatedly. You can still revisit and adjust any block afterward "
                           "with Previous."):
+            _adv_rep_fallbacks = []
             for b in range(current_block, len(segments)):
                 seg_b = segments[b]
                 audio_curve_b = get_block_audio_curve(track, seg_b["start"], seg_b["end"])
@@ -5167,9 +5243,18 @@ else:
                 # loop (or already-confirmed history if b == current_block) — cascades correctly,
                 # same as the repetition penalty would see stepping through manually one at a time.
                 prev_videos_b = {p["video_id"] for p in confirmed.get(b - 1, [])} if b > 0 else set()
+                if avoid_repeat:
+                    cands_b = widen_for_repeat_rule(
+                        cands_b, prev_videos_b, 1 if allow_same_video else rec_b,
+                        lambda ex: find_shape_candidates(
+                            seg_b, queues, sequential_mode, _excl_b, _global_excl, audio_curve_b,
+                            max(rec_b, 1), restrict_to_front=sequential_mode,
+                            remaining_blocks=len(segments) - b, weight_position=weight_position,
+                            position_targets=_pos_targets_b, weight_shape=weight_shape,
+                            exclude_videos=ex)[0])
                 ranked_b = rank_candidates_weighted(
                     cands_b, b, segments, confirmed, queues, prev_videos_b,
-                    weight_shape, weight_random, weight_repeat_penalty, weight_spread,
+                    weight_shape, weight_random, avoid_repeat, weight_spread,
                     weight_motion, autofill_seed,
                     weight_position=weight_position, sequential=sequential_mode, videos_per_block=rec_b,
                 )
@@ -5205,7 +5290,10 @@ else:
                         _best = min(_spans, key=lambda sp: (sp["remaining_sec"] < _need - 1e-6,
                                                             abs(sp["motion_norm"] - _target)))
                         new_picks.append(consume_span(_best, _need))
+                if repeat_fallback_videos(new_picks, prev_videos_b, avoid_repeat):
+                    _adv_rep_fallbacks.append(b + 1)
                 confirmed[b] = new_picks
+            flash_repeat_fallback(_adv_rep_fallbacks)
             st.session_state["adv_current_block"] = len(segments)
             st.session_state["adv_viewing"] = None
             st.rerun()
@@ -5289,9 +5377,10 @@ else:
         # confirmed progress — see adv_key's own comment), but the SEARCH result genuinely does
         # depend on it: deselecting a video removes it from queues, and without this the cached
         # candidate list would still show that video's clips until something else invalidated it.
+        prev_block_videos = {p["video_id"] for p in confirmed.get(current_block - 1, [])} if current_block > 0 else set()
         search_key = (adv_key, current_block, int(max_shape_matches), sequential_mode,
                      prior_picks_fingerprint, current_skips_fingerprint, tuple(sorted(selected_videos)),
-                     _edit_fp)
+                     _edit_fp, avoid_repeat, tuple(sorted(prev_block_videos)))
         cache = st.session_state.get(f"adv_search_cache_{current_block}")
         block_audio_curve = get_block_audio_curve(track, seg["start"], seg["end"])  # cheap — always needed, cache or not
 
@@ -5302,6 +5391,18 @@ else:
                 seg, queues, sequential_mode, st.session_state["segment_exclusions"].get(current_block, set()),
                 st.session_state["global_excluded_scenes"], block_audio_curve, int(max_shape_matches),
             )
+            if avoid_repeat:
+                # Make sure Auto-fill has enough non-repeating videos to choose from
+                # (C's hard rule) — adds their best clip to the grid if the top
+                # matches all came from the previous block's videos.
+                _rc = recommended_counts[current_block]
+                candidates = widen_for_repeat_rule(
+                    candidates, prev_block_videos, 1 if allow_same_video else _rc,
+                    lambda ex: find_shape_candidates(
+                        seg, queues, sequential_mode,
+                        st.session_state["segment_exclusions"].get(current_block, set()),
+                        st.session_state["global_excluded_scenes"], block_audio_curve,
+                        max(_rc, 1), exclude_videos=ex)[0])
             st.session_state[f"adv_search_cache_{current_block}"] = {
                 "key": search_key, "candidates": candidates, "missing": missing_curve_videos,
             }
@@ -5337,8 +5438,6 @@ else:
             st.info("No candidate clips at least this block's length are currently available. "
                     "Try a shorter block (adjust segmentation), or widen your video/tag selection.")
 
-        prev_block_videos = {p["video_id"] for p in confirmed.get(current_block - 1, [])} if current_block > 0 else set()
-
         video_stats = {}
         for c in candidates:
             vid = c["video_id"]
@@ -5352,7 +5451,7 @@ else:
         autofill_weights = {
             "segments": segments, "confirmed": confirmed, "queues": queues,
             "weight_shape": weight_shape, "weight_random": weight_random,
-            "weight_repeat_penalty": weight_repeat_penalty, "weight_spread": weight_spread,
+            "avoid_repeat": avoid_repeat, "weight_spread": weight_spread,
             "weight_motion": weight_motion, "seed": autofill_seed,
             "weight_position": weight_position, "sequential": sequential_mode,
             "allow_same_video": allow_same_video,
