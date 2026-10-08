@@ -14,7 +14,7 @@ import streamlit as st
 from config import CATALOGUE_DIR, AUDIO_DIR
 from library_common import (
     scene_tags, tc_to_seconds, format_mmss, overlap_with_range,
-    library_ranges, set_library_range,
+    library_ranges, set_library_range, master_thumbnail_scenes,
     render_range_picker,
 )
 
@@ -62,7 +62,7 @@ def load_library(signature: tuple) -> dict:
                 continue
             thumbs = s.get("thumbnail_paths") or []
             scenes.append({
-                "start": start, "end": end,
+                "scene_id": s["scene_id"], "start": start, "end": end,
                 "tags": scene_tags(s),
                 "excluded": bool(s.get("excluded")),
                 "intro": bool(s.get("intro_candidate")),
@@ -138,6 +138,7 @@ def video_stats(video: dict, time_range, wanted: set, match_all: bool) -> dict:
 def render_videos():
     library = load_library(_catalogue_signature())
     ranges = library_ranges()
+    masters = master_thumbnail_scenes()
 
     st.sidebar.header("Filter")
     name_query = st.sidebar.text_input("Search name", placeholder="part of a video name")
@@ -223,8 +224,12 @@ def render_videos():
         with st.container(border=True):
             cols = st.columns([2, 6, 1])
             with cols[0]:
-                if stats["thumb"]:
-                    thumb_path = CATALOGUE_DIR / "thumbnails" / vid / stats["thumb"]
+                # ⭐ master thumbnail chosen in the Reviewer, else the first usable scene's
+                _master = next((s["thumb"] for s in video["scenes"]
+                                if s["scene_id"] == masters.get(vid) and s["thumb"]), None)
+                _thumb_name = _master or stats["thumb"]
+                if _thumb_name:
+                    thumb_path = CATALOGUE_DIR / "thumbnails" / vid / _thumb_name
                     if thumb_path.exists():
                         st.image(str(thumb_path), width=220)
             with cols[1]:

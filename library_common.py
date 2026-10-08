@@ -156,6 +156,51 @@ def set_library_range(video_id: str, time_range) -> None:
     save_library_meta(meta)
 
 
+def master_thumbnail_scenes() -> dict:
+    """{video_id: scene_id} for every video with a chosen master thumbnail."""
+    out = {}
+    for vid, entry in load_library_meta().items():
+        sid = entry.get("thumbnail_scene") if isinstance(entry, dict) else None
+        if isinstance(sid, int):
+            out[vid] = sid
+    return out
+
+
+def set_master_thumbnail(video_id: str, scene_id) -> None:
+    """Use this scene's thumbnail as the video's master thumbnail (None = clear)."""
+    meta = load_library_meta()
+    entry = meta.get(video_id) if isinstance(meta.get(video_id), dict) else {}
+    if scene_id is None:
+        entry.pop("thumbnail_scene", None)
+    else:
+        entry["thumbnail_scene"] = int(scene_id)
+    if entry:
+        meta[video_id] = entry
+    else:
+        meta.pop(video_id, None)
+    save_library_meta(meta)
+
+
+def scene_thumbnail_path(video_id: str, scene: dict):
+    """Local path of a scene's (first) thumbnail image, or None if it isn't here.
+    Always built from CATALOGUE_DIR — never trust the stored path, which was
+    written by whichever environment processed the video."""
+    paths = scene.get("thumbnail_paths") or []
+    if not paths:
+        return None
+    p = CATALOGUE_DIR / "thumbnails" / video_id / Path(paths[0]).name
+    return p if p.exists() else None
+
+
+def master_thumbnail_path(video_id: str, scenes: list, masters: dict = None):
+    """The chosen master thumbnail's image path for this video, or None."""
+    sid = (masters if masters is not None else master_thumbnail_scenes()).get(video_id)
+    if sid is None:
+        return None
+    scene = next((s for s in scenes if s.get("scene_id") == sid), None)
+    return scene_thumbnail_path(video_id, scene) if scene else None
+
+
 # ---------------------------------------------------------------------------
 # Edits not yet pushed to Drive
 # ---------------------------------------------------------------------------

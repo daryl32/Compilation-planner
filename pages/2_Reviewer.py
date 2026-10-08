@@ -8,7 +8,8 @@ from pathlib import Path
 import streamlit as st
 
 from config import CATALOGUE_DIR
-from library_common import (scene_tags, mark_pending,
+from library_common import (scene_tags, mark_pending, master_thumbnail_scenes, set_master_thumbnail,
+                            scene_thumbnail_path,
                             library_ranges, tc_to_seconds, format_mmss, overlap_with_range)
 
 
@@ -132,6 +133,37 @@ else:
     reviewed_count = sum(1 for s in data["scenes"] if s.get("reviewed"))
     st.caption(f"Source: {data['source_path']}  |  {len(data['scenes'])} scenes  |  {reviewed_count} reviewed")
 
+    # ⭐ Master thumbnail — the picture used for this video in the Media Library
+    # and the planner's video list. Saved straight away (library_meta.json).
+    video_id = data["video_id"]
+    master_sid = master_thumbnail_scenes().get(video_id)
+    _thumb_choices = [None] + [s["scene_id"] for s in data["scenes"] if s.get("thumbnail_paths")]
+    _scene_by_id = {s["scene_id"]: s for s in data["scenes"]}
+    with st.container(border=True):
+        mt_cols = st.columns([1, 3])
+        with mt_cols[0]:
+            _mp = scene_thumbnail_path(video_id, _scene_by_id[master_sid]) if master_sid in _scene_by_id else None
+            if _mp:
+                st.image(str(_mp), width=160)
+            else:
+                st.caption("No master thumbnail chosen — pages pick one automatically.")
+        with mt_cols[1]:
+            _picked = st.selectbox(
+                "⭐ Video thumbnail", _thumb_choices,
+                index=_thumb_choices.index(master_sid) if master_sid in _thumb_choices else 0,
+                format_func=lambda sid: "Automatic" if sid is None
+                    else f"Scene {sid}  ·  {_scene_by_id[sid]['start_tc']}",
+                key=f"master_thumb_{selected}",
+                help="Used for this video in the Media Library and the Compilation Planner's video list. "
+                     "You can also pick it from a scene below.",
+            )
+            if _picked != master_sid:
+                set_master_thumbnail(video_id, _picked)
+                st.session_state["rev_saved_msg"] = (
+                    "Video thumbnail set to automatic." if _picked is None
+                    else f"Video thumbnail set to scene {_picked}.")
+                st.rerun()
+
     lib_range = library_ranges().get(data["video_id"]) if use_library_range else None
     if lib_range:
         _outside = sum(
@@ -170,14 +202,23 @@ else:
             continue
         shown.append((scene, current_tags, trimmed_to))
 
-    def scene_header(scene, trimmed_to):
-        """Thumbnail and status badges (left column)."""
+    def scene_header(scene, trimmed_to, star_button: bool = False):
+        """Thumbnail and status badges (left column). star_button: offer
+        '⭐ Use as video thumbnail' (not possible inside the review form)."""
         if scene["thumbnail_paths"]:
             thumb_path = OUTPUT_DIR / "thumbnails" / data["video_id"] / Path(scene["thumbnail_paths"][0]).name
             if thumb_path.exists():
                 st.image(str(thumb_path), width=280)
             else:
                 st.warning(f"Thumbnail not found: {thumb_path}")
+        if scene["scene_id"] == master_sid:
+            st.success("⭐ Video thumbnail")
+        elif star_button and scene["thumbnail_paths"]:
+            if st.button("⭐ Use as video thumbnail", key=f"star_{selected}_{scene['scene_id']}"):
+                set_master_thumbnail(video_id, scene["scene_id"])
+                st.session_state.pop(f"master_thumb_{selected}", None)
+                st.session_state["rev_saved_msg"] = f"Video thumbnail set to scene {scene['scene_id']}."
+                st.rerun()
         if trimmed_to:
             st.warning(f"✂️ Trimmed by library range — uses {format_mmss(trimmed_to[0])}–{format_mmss(trimmed_to[1])}")
         if scene.get("reviewed"):
@@ -201,7 +242,7 @@ else:
         for scene, current_tags, trimmed_to in shown:
             cols = st.columns([1, 2])
             with cols[0]:
-                scene_header(scene, trimmed_to)
+                scene_header(scene, trimmed_to, star_button=True)
             with cols[1]:
                 st.markdown(f"**Scene {scene['scene_id']}**  ·  {scene['start_tc']} → {scene['end_tc']}")
                 st.markdown("Tags: " + ", ".join(f"`{t}`" for t in current_tags))
@@ -241,6 +282,11 @@ else:
                     )
                     st.checkbox("Exclude from planner (e.g. intro/outro clip)",
                                 value=scene.get("excluded", False), key=f"excluded_{selected}_{sid}")
+                    if scene.get("thumbnail_paths"):
+                        st.checkbox("⭐ Use as video thumbnail", value=(sid == master_sid),
+                                    key=f"thumb_{selected}_{sid}",
+                                    help="Saved with the button. If you tick more than one, the last "
+                                         "one ticked further down the page wins.")
                     role_cols = st.columns(2)
                     with role_cols[0]:
                         st.checkbox(
@@ -293,6 +339,24 @@ else:
                         scene["corrected_tags"] = current_tags  # confirmed as correct
                     scene["reviewed"] = True
 
+            # ⭐ thumbnail ticks: a newly ticked scene becomes the master (the lowest
+            # one on the page if several); unticking the current master clears it.
+            _ticked = [sc["scene_id"] for sc, _, _ in shown
+                       if st.session_state.get(f"thumb_{selected}_{sc['scene_id']}")]
+            _new_master = master_sid
+            _newly = [sid for sid in _ticked if sid != master_sid]
+            if _newly:
+                _new_master = _newly[-1]
+            elif master_sid is not None and any(sc["scene_id"] == master_sid for sc, _, _ in shown) \
+                    and master_sid not in _ticked:
+                _new_master = None
+            thumb_msg = ""
+            if _new_master != master_sid:
+                set_master_thumbnail(video_id, _new_master)
+                st.session_state.pop(f"master_thumb_{selected}", None)
+                thumb_msg = (" Video thumbnail set to automatic." if _new_master is None
+                             else f" Video thumbnail set to scene {_new_master}.")
+
             if changed or mark_all:
                 cat_path.write_text(json.dumps(data, indent=2))
                 mark_pending(cat_path.stem)
@@ -301,10 +365,12 @@ else:
                     f"Saved {changed} changed scene(s)"
                     + (f"; all {len(shown)} shown scenes marked reviewed." if mark_all else ".")
                 )
-            else:
+            elif not thumb_msg:
                 st.session_state["rev_saved_msg"] = "Nothing had changed — nothing to save."
+            if thumb_msg:
+                st.session_state["rev_saved_msg"] = (st.session_state.get("rev_saved_msg", "") + thumb_msg).strip()
             # Fresh widgets next run, so they show what was just saved.
             for scene, _, _ in shown:
-                for prefix in ("tags", "excluded", "intro", "outro"):
+                for prefix in ("tags", "excluded", "intro", "outro", "thumb"):
                     st.session_state.pop(f"{prefix}_{selected}_{scene['scene_id']}", None)
             st.rerun()

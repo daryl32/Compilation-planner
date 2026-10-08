@@ -18,7 +18,7 @@ from PIL import Image
 
 from render_preview import render_plan_dict, colab_to_local
 import video_ranking as VR
-from library_common import (scene_tags, render_range_picker, library_ranges,
+from library_common import (scene_tags, render_range_picker, library_ranges, master_thumbnail_path,
                             refresh_caches_after_sync)
 
 # st.fragment (Streamlit 1.37+; was st.experimental_fragment in 1.33-1.36) lets
@@ -1561,10 +1561,14 @@ def load_timeline_sprite(sprite_path: str):
 
 
 def video_list_thumbnail(catalogues: dict, video_id: str, time_range=None):
-    """Small preview for the video list: the timeline-sprite tile from the middle
+    """Small preview for the video list: the ⭐ master thumbnail chosen in the
+    Reviewer if there is one, otherwise the timeline-sprite tile from the middle
     of the video's usable range (a 120-px crop from an already-cached sprite, so
     it's cheap), falling back to that scene's own thumbnail file. None if
     neither exists."""
+    master = master_thumbnail_path(video_id, catalogues.get(video_id, {}).get("scenes", []))
+    if master is not None:  # ⭐ chosen in the Reviewer
+        return str(master)
     duration = get_video_duration(video_id)
     a, b = time_range or (0.0, duration)
     mid = (a + b) / 2
