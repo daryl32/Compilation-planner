@@ -17,6 +17,7 @@ import plotly.graph_objects as go
 from PIL import Image
 
 from render_preview import render_plan_dict, colab_to_local
+import video_ranking as VR
 from library_common import (scene_tags, render_range_picker, library_ranges,
                             refresh_caches_after_sync)
 
@@ -1445,114 +1446,94 @@ def load_all_audio_tracks() -> dict:
     return tracks
 
 
-def compute_track_features(track: dict) -> dict:
-    """A track's ENERGY SHAPE, not its level — level is destroyed by the
-    per-track 0-1 normalisation in audio_pipeline.py (every track's mean ends
-    up in a similar band regardless of how it actually sounds), but variance
-    and hit density survive that normalisation because they describe the
-    pattern, not the absolute scale."""
-    hires = track.get("hires")
-    if hires:
-        rms = np.asarray(hires["rms"], dtype=float)
-        onset = np.asarray(hires.get("onset", []), dtype=float)
-    else:
-        rms = np.asarray([e["energy"] for e in track["energy_envelope"]], dtype=float)
-        onset = np.array([])
-    duration_min = max(track["duration_sec"] / 60.0, 0.1)
-    hit_rate = float((onset >= 0.8).sum()) / duration_min if len(onset) else 0.0
-    return {"variance": float(rms.std()), "hit_rate": hit_rate, "level": float(rms.mean())}
-
-
-def compute_video_features(video_id: str, tag_filter: tuple, video_time_ranges: dict = None) -> dict:
-    """A video's motion SHAPE — variance across scenes and how often it has a
-    standout burst (motion_intensity_max notably above motion_intensity) —
-    the video-side counterpart to compute_track_features. Unlike audio,
-    video motion is never per-video normalised at storage time, so its level
-    stays genuinely comparable across videos — level is kept as a fallback
-    when duration/scene count is too small to trust variance/hit_rate."""
-    video_time_ranges = video_time_ranges or {}
-    cat = load_all_catalogues().get(video_id)
-    if not cat:
-        return {"variance": 0.0, "hit_rate": 0.0, "level": 0.0}
-    filtered = [s for s in cat["scenes"] if scene_is_usable(s, tag_filter)]
-    time_range = video_time_ranges.get(video_id)
-    if time_range:
-        filtered = [
-            s for s in filtered
-            if _overlap_with_range(_tc_to_seconds(s["start_tc"]), _tc_to_seconds(s["end_tc"]), time_range)[0] is not None
-        ]
-    if not filtered:
-        return {"variance": 0.0, "hit_rate": 0.0, "level": 0.0}
-    levels = np.array([s.get("motion_intensity", 0.0) for s in filtered])
-    peaks = np.array([s.get("motion_intensity_max", 0.0) for s in filtered])
-    duration_min = sum(_tc_to_seconds(s["end_tc"]) - _tc_to_seconds(s["start_tc"]) for s in filtered) / 60.0
-    bursts = float((peaks > levels * 1.5).sum()) / max(duration_min, 0.1)
-    return {"variance": float(levels.std()), "hit_rate": bursts, "level": float(levels.mean())}
-
-
-def _population_z(values: dict) -> dict:
-    """z-score a {key: value} dict against its own population (mean/std across
-    all its values) — 0.0 for every entry if there's no spread to measure."""
-    arr = np.array(list(values.values()), dtype=float)
-    mean, std = arr.mean(), arr.std()
-    if std < 1e-9:
-        return {k: 0.0 for k in values}
-    return {k: (v - mean) / std for k, v in values.items()}
-
-
-def compute_video_energy_matches(track: dict, tag_filter: tuple, video_time_ranges: dict = None) -> list[dict]:
-    """Rank videos by SHAPE similarity to the track: variance (dynamic swings)
-    and hit density (frequent standout moments), each independently z-scored
-    against its own library (all candidate videos / all tracks in your audio
-    folder) so the two domains sit on a comparable "how unusual for its own
-    library" scale before being compared. See compute_track_features for why
-    a simple level-to-level comparison doesn't differentiate tracks."""
-    video_time_ranges = video_time_ranges or {}
+def compute_video_rankings(track: dict, tag_filter: tuple, time_ranges: dict,
+                           weights: dict, experimental: bool) -> list[dict]:
+    """Match score (0–100) for every video with usable footage, best first — see
+    video_ranking.py for the metrics. Each video is compared against the WHOLE
+    library (ranges applied, no tag filter), so the tag filter never shifts the
+    scale. Per-video motion summaries are cached on disk; any missing ones are
+    built here with a progress bar (first run, or after new videos sync in)."""
     catalogues = load_all_catalogues()
+    video_ids = sorted(catalogues)
+    todo = VR.missing_summaries(CATALOGUE_DIR, video_ids)
+    if todo:
+        bar = st.progress(0.0, text=f"Analysing motion curves for {len(todo)} video(s) (one-off)…")
+        for i, vid in enumerate(todo):
+            VR.load_summary(CATALOGUE_DIR, vid)
+            bar.progress((i + 1) / len(todo), text=f"Analysing motion curves… {vid}")
+        bar.empty()
 
-    raw_video = {}
-    scene_counts = {}
-    for video_id, cat in catalogues.items():
-        filtered = [s for s in cat["scenes"] if scene_is_usable(s, tag_filter)]
-        time_range = video_time_ranges.get(video_id)
-        if time_range:
-            filtered = [
-                s for s in filtered
-                if _overlap_with_range(_tc_to_seconds(s["start_tc"]), _tc_to_seconds(s["end_tc"]), time_range)[0] is not None
-            ]
-        if not filtered:
+    feats, reference = {}, {}
+    for vid in video_ids:
+        summary = VR.load_summary(CATALOGUE_DIR, vid)
+        if summary is None:
             continue
-        raw_video[video_id] = compute_video_features(video_id, tag_filter, video_time_ranges)
-        scene_counts[video_id] = len(filtered)
+        scenes_by_id = {sc["scene_id"]: sc for sc in catalogues[vid]["scenes"]}
+        rng = time_ranges.get(vid)
+        reference[vid] = VR.video_features(summary, scenes_by_id, rng, ())
+        feats[vid] = (VR.video_features(summary, scenes_by_id, rng, tuple(tag_filter))
+                      if tag_filter else reference[vid])
+    return VR.score_videos(
+        track, load_all_audio_tracks(), feats, reference, weights, tuple(tag_filter),
+        usage=VR.recent_project_usage(PROJECTS_DIR), experimental=experimental,
+    )
 
-    if not raw_video:
-        return []
 
-    video_var_z = _population_z({k: v["variance"] for k, v in raw_video.items()})
-    video_hit_z = _population_z({k: v["hit_rate"] for k, v in raw_video.items()})
-    video_lvl_z = _population_z({k: v["level"] for k, v in raw_video.items()})
+def _ranking_weights() -> dict:
+    stored = st.session_state.setdefault("ranking_weights", dict(VR.DEFAULT_WEIGHTS))
+    return {m: float(stored.get(m, VR.DEFAULT_WEIGHTS[m])) for m in VR.METRICS}
 
-    all_tracks = load_all_audio_tracks()
-    track_feats = {tid: compute_track_features(t) for tid, t in all_tracks.items()}
-    if track.get("track_id") not in track_feats:
-        track_feats[track.get("track_id", "_current")] = compute_track_features(track)
-    tvar_z = _population_z({k: v["variance"] for k, v in track_feats.items()})
-    thit_z = _population_z({k: v["hit_rate"] for k, v in track_feats.items()})
-    this_track_id = track.get("track_id") or "_current"
-    t_var, t_hit = tvar_z[this_track_id], thit_z[this_track_id]
 
-    results = []
-    for video_id, feat in raw_video.items():
-        diff = round(abs(video_var_z[video_id] - t_var) + abs(video_hit_z[video_id] - t_hit), 3)
-        results.append({
-            "video_id": video_id,
-            "avg_motion_norm": round((video_lvl_z[video_id] + 3) / 6, 3),  # kept only for the on-screen label
-            "variance_z": round(video_var_z[video_id], 2),
-            "hit_rate_z": round(video_hit_z[video_id], 2),
-            "matching_scene_count": scene_counts[video_id],
-            "diff_from_track": diff,
-        })
-    return sorted(results, key=lambda r: r["diff_from_track"])
+def render_ranking_weights(tag_filter: list) -> None:
+    """⚙️ Ranking weights — one slider per metric. Values live in the plain
+    session_state dict "ranking_weights" (saved with projects), so they
+    survive this section's widgets being unrendered."""
+    weights = _ranking_weights()
+    with st.expander("⚙️ Ranking weights — how the top videos are chosen", expanded=False):
+        st.caption("Each video gets a 0–100 match score from these metrics. 0 switches a metric off; "
+                   "higher makes it count more. The list re-ranks as you change them.")
+        experimental = st.toggle("Show experimental metrics (movement tempo, energy arc)",
+                                 value=bool(st.session_state.get("ranking_experimental", False)),
+                                 key="ranking_experimental_toggle")
+        st.session_state["ranking_experimental"] = experimental
+        shown = [m for m in VR.METRICS if experimental or m not in VR.EXPERIMENTAL]
+        cols = st.columns(3)
+        for i, m in enumerate(shown):
+            with cols[i % 3]:
+                disabled = (m == "relevance" and not tag_filter)
+                weights[m] = st.slider(
+                    VR.LABELS[m], 0.0, 5.0, value=weights[m], step=0.1, key=f"rank_w_{m}",
+                    disabled=disabled,
+                    help=VR.HELP[m] + (" (Set a tag filter above to use it.)" if disabled else ""),
+                )
+        if st.button("Reset to defaults", key="rank_w_reset"):
+            weights = dict(VR.DEFAULT_WEIGHTS)
+            for m in VR.METRICS:
+                st.session_state.pop(f"rank_w_{m}", None)
+            st.session_state["ranking_weights"] = weights
+            rerun_fragment()
+        st.session_state["ranking_weights"] = weights
+
+
+def format_match_breakdown(match: dict, experimental: bool, tag_filter) -> str:
+    short = {"dynamics": "dyn", "punch": "punch", "footage": "footage", "pace": "pace",
+             "spread": "spread", "relevance": "tags", "freshness": "fresh", "tempo": "tempo", "arc": "arc"}
+    parts = []
+    for m in VR.METRICS:
+        if m in VR.EXPERIMENTAL and not experimental:
+            continue
+        if m == "relevance" and not tag_filter:
+            continue
+        v = match["parts"][m]
+        dots = "●" * int(round(v * 4)) + "○" * (4 - int(round(v * 4)))
+        label = short[m]
+        if m == "tempo" and match.get("tempo_bpm"):
+            label += f" ({match['tempo_bpm']:.0f} BPM)"
+        parts.append(f"{label} {dots}")
+    text = "  ·  ".join(parts)
+    if match.get("curve_coverage", 1.0) < 0.5:
+        text += "  ·  ⚠️ no motion curves for most scenes (run the motion-curve backfill)"
+    return text
 
 
 RECOMMENDED_COUNT = 10   # how many best-matching videos are listed by default
@@ -1606,23 +1587,24 @@ def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list)
     Video Selection fragment on every one of its own reruns.
 
     The RANKING itself (video_matches/top_ids/other_options) is cached and
-    only recomputed when the track or tag filter actually changes — ticking
-    a checkbox, adding something from the dropdown, or setting a time range
-    doesn't touch either, so the top-10 list stays stable through all of
-    that instead of recomputing (and visually redrawing) on every click.
-    One consequence worth knowing: a video's displayed match stats (shape
-    distance, variance/hit-rate z, matching scene count) reflect whatever
-    they were when the track/tag filter was last (re)selected — applying a
-    time range won't immediately update those numbers, by the same design.
+    only recomputed when something it depends on changes: the track, the tag
+    filter, any video's effective time range, or the ranking weights.
+    Ticking a checkbox or adding something from the dropdown doesn't, so the
+    list doesn't redraw on every click.
 
     SELECTION (who's ticked) is never cached — always computed fresh, since
     it's cheap and must reflect the current checkboxes exactly."""
-    cache_key = (track.get("track_id"), tag_filter)
+    _ranges = effective_time_ranges()
+    _weights = _ranking_weights()
+    _experimental = bool(st.session_state.get("ranking_experimental", False))
+    cache_key = (track.get("track_id"), tag_filter,
+                 tuple(sorted((v, tuple(r)) for v, r in _ranges.items())),
+                 tuple(sorted(_weights.items())), _experimental)
     cache = st.session_state.get("video_ranking_cache")
     if cache and cache["key"] == cache_key:
         ranking = cache["ranking"]
     else:
-        video_matches = compute_video_energy_matches(track, tag_filter, effective_time_ranges())
+        video_matches = compute_video_rankings(track, tag_filter, _ranges, _weights, _experimental)
         top_matches = video_matches[:RECOMMENDED_COUNT]
         top_ids = [v["video_id"] for v in top_matches]
         match_by_id = {v["video_id"]: v for v in video_matches}
@@ -1907,6 +1889,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
         st.write("")
         st.button("Clear selection", on_click=_clear_video_selection, use_container_width=True)
 
+    render_ranking_weights(tag_filter)
     info = resolve_video_selection(track, tuple(tag_filter), all_video_ids)
     video_matches = info["video_matches"]
     st.session_state["recommended_ids"] = info["top_ids"]
@@ -1916,9 +1899,10 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
         return
 
     _SORT_OPTIONS = {
-        "Shape distance (best match first)": lambda v: v["diff_from_track"],
+        "Match score (best first)":          lambda v: -v["score"],
         "Matching scenes (most first)":      lambda v: -v["matching_scene_count"],
-        "Overall energy (highest first)":    lambda v: -v["avg_motion_norm"],
+        "Usable footage (most first)":       lambda v: -v["usable_sec"],
+        "Overall energy (highest first)":    lambda v: -v["level_pct"],
         "Total video length (longest first)": lambda v: -get_video_duration(v["video_id"]),
     }
     sort_by = st.selectbox(
@@ -1931,7 +1915,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
     sorted_top_matches = sorted(info["top_matches"], key=_SORT_OPTIONS[sort_by])
 
     st.subheader(f"Best-matching videos (top {RECOMMENDED_COUNT})")
-    st.caption(f"Matched on energy shape (variance + hit density), not average level" +
+    st.caption(f"Ranked by match score — see ⚙️ Ranking weights above for what counts" +
                (f"  |  filtered to tags: {', '.join(tag_filter)}" if tag_filter else ""))
     st.caption(
         "✅ marks a recommended video. ☑ is your actual selection — nothing is selected until you tick it "
@@ -1965,9 +1949,10 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
             rank_mark = "✅ " if recommended else ""
             title = f"{rank_mark}**{video_id}** · ⏱ {format_mmss(duration)}"
             if match:
-                st.write(f"{title} — shape distance: {match['diff_from_track']}  |  "
-                         f"variance z: {match['variance_z']}  |  hit-rate z: {match['hit_rate_z']}  |  "
-                         f"{match['matching_scene_count']} matching scenes{range_tag}")
+                st.write(f"{title} — match **{match['score']:.0f}%**  |  "
+                         f"{match['matching_scene_count']} scenes · {format_mmss(match['usable_sec'])} usable{range_tag}")
+                st.caption(format_match_breakdown(match, bool(st.session_state.get("ranking_experimental")),
+                                                  tag_filter))
             else:
                 st.write(f"{title} — no scenes match the current tag filter / time range{range_tag}")
         with row_cols[2]:
@@ -2987,6 +2972,7 @@ PROJECT_SIMPLE_KEYS = [
     "vary_count", "count_seed", "min_clip_len_sec",
     "weight_shape", "weight_random", "weight_repeat_penalty", "weight_spread", "weight_motion",
     "weight_position", "autofill_seed",
+    "ranking_weights", "ranking_experimental",
     "committed_selected_videos", "committed_tag_filter", "known_extra_videos", "extra_videos",
     "adv_current_block", "chor_current_block",
     "intro_block_indices", "outro_block_indices",
