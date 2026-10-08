@@ -2135,10 +2135,50 @@ def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list)
 AUDIO_SETTINGS_KEYS = [
     "segmentation_method", "beats_per_bar",
     "change_window_secs", "change_threshold", "min_segment_sec", "max_segment_sec",
-    "use_bar_snapping", "react_to_hits", "hit_threshold", "snap_secs",
-    "hyper_delta_thresh", "fast_energy_thresh", "hyper_cooldown_bars",
+    "react_to_hits", "hit_threshold", "snap_secs",
+    "fast_energy_thresh", "fast_max_bars", "fast_cooldown_bars",
     "phrase_lock_bars", "cinematic_bars", "dynamic_priority_override", "override_delta_thresh",
+    "override_clear_secs",
 ]
+
+SEG_ADAPTIVE = "Adaptive (energy-change + hits)"
+SEG_RHYTHM = "Rhythm Engine (bar cutting styles)"
+
+# Which settings each segmentation method actually uses (beats_per_bar: all).
+SEG_METHOD_KEYS = {
+    SEG_ADAPTIVE: ["change_window_secs", "change_threshold", "min_segment_sec", "max_segment_sec",
+                   "react_to_hits", "hit_threshold", "snap_secs"],
+    SEG_RHYTHM: ["fast_energy_thresh", "fast_max_bars", "fast_cooldown_bars", "phrase_lock_bars",
+                 "cinematic_bars", "dynamic_priority_override", "override_delta_thresh",
+                 "override_clear_secs"],
+}
+
+
+def segmentation_settings() -> dict:
+    """The current segmentation method plus exactly the settings it uses —
+    the one place the preview chart, the matching and the export read them from."""
+    method = st.session_state.get("segmentation_method", SEG_ADAPTIVE)
+    if method not in SEG_METHOD_KEYS:
+        method = SEG_ADAPTIVE
+    out = {"method": method, "beats_per_bar": int(st.session_state.get("beats_per_bar", 4))}
+    for k in SEG_METHOD_KEYS[method]:
+        out[k] = st.session_state.get(k, DIAL_DEFAULTS.get(k))
+    return out
+
+
+def build_segments(track: dict, cfg: dict) -> list:
+    """Segments for this track with the settings from segmentation_settings()."""
+    bpb = int(cfg.get("beats_per_bar", 4))
+    if cfg["method"] == SEG_RHYTHM:
+        return build_rhythm_engine_segments(
+            track, bpb, float(cfg["fast_energy_thresh"]), int(cfg["fast_max_bars"]),
+            int(cfg["fast_cooldown_bars"]), int(cfg["phrase_lock_bars"]), int(cfg["cinematic_bars"]),
+            bool(cfg["dynamic_priority_override"]), float(cfg["override_delta_thresh"]),
+            float(cfg["override_clear_secs"]))
+    return build_track_segments(
+        track, float(cfg["change_window_secs"]), float(cfg["change_threshold"]),
+        float(cfg["min_segment_sec"]), bool(cfg["react_to_hits"]), float(cfg["hit_threshold"]),
+        float(cfg["snap_secs"]), float(cfg["max_segment_sec"]), bpb)
 
 
 @fragment
@@ -2164,7 +2204,7 @@ def render_audio_settings_section(track: dict) -> None:
         return st.session_state.get(key, _shadow.get(key, DIAL_DEFAULTS.get(key)))
 
     st.subheader("Segmentation method")
-    _seg_options = ["Adaptive (energy-change + hits)", "Rhythm Engine (bar cutting styles)"]
+    _seg_options = [SEG_ADAPTIVE, SEG_RHYTHM]
     _seg_default = _v("segmentation_method")
     segmentation_method = st.radio(
         "Method", _seg_options,
@@ -2172,15 +2212,15 @@ def render_audio_settings_section(track: dict) -> None:
         key="segmentation_method",
         help="Adaptive: detects individual cut points from energy changes and hits, ported from the VSE "
              "add-on's block detector. Rhythm Engine: assigns a named cutting STYLE to each bar based on its "
-             "energy and momentum — CINEMATIC (slow, multi-bar), FAST (one segment per bar), or HYPER (one "
-             "segment per beat) — a different feel driven by musical structure rather than individual events.",
+             "energy — CINEMATIC (slow, multi-bar) or FAST (one segment per bar) — a different feel driven "
+             "by musical structure rather than individual events.",
     )
     beats_per_bar = st.number_input(
         "Beats per bar", min_value=2, max_value=12, value=int(_v("beats_per_bar")), key="beats_per_bar",
         help="4 = common time (most pop/rock/EDM). Use 3 for a waltz, 6 for 6/8, etc.",
     )
 
-    if segmentation_method == "Adaptive (energy-change + hits)":
+    if segmentation_method == SEG_ADAPTIVE:
         col1, col2 = st.columns(2)
         with col1:
             st.slider("Energy-change window (s)", 0.5, 6.0, value=float(_v("change_window_secs")), step=0.1,
@@ -2196,9 +2236,6 @@ def render_audio_settings_section(track: dict) -> None:
                       key="max_segment_sec",
                       help="Segments longer than this are split at their strongest beat. 0 = no limit.")
         with col2:
-            st.checkbox("Snap structural cuts to bar lines", value=bool(_v("use_bar_snapping")),
-                        key="use_bar_snapping",
-                        help="Structural cuts land on the nearest musical bar line instead of raw signal crossings.")
             react = st.checkbox("Cut on big hits", value=bool(_v("react_to_hits")), key="react_to_hits",
                                 help="Adds segment boundaries at the strongest onsets.")
             st.slider("Big-hit threshold", 0.5, 1.0, value=float(_v("hit_threshold")), step=0.01,
@@ -2206,24 +2243,19 @@ def render_audio_settings_section(track: dict) -> None:
                       help="Onset strength (0-1) a hit needs to become a cut.")
             st.slider("Snap radius (s)", 0.0, 1.0, value=float(_v("snap_secs")), step=0.05, key="snap_secs",
                       help="Energy-change cuts move onto the strongest hit within this distance.")
-        # local variables for the preview chart below
-        _seg_method = "adaptive"
-        _hyper_delta = _fast_thresh = 0.0
-        _hyper_cd = _phrase_lock = _cine_bars = 0
-        _dpo = False
-        _override_thresh = 0.0
     else:
         col1, col2 = st.columns(2)
         with col1:
-            st.slider("Hyper delta threshold", 0.05, 1.0, value=float(_v("hyper_delta_thresh")), step=0.01,
-                      key="hyper_delta_thresh",
-                      help="How sharp a bar-to-bar energy jump triggers HYPER.")
             st.slider("Fast energy threshold", 0.1, 1.0, value=float(_v("fast_energy_thresh")), step=0.01,
                       key="fast_energy_thresh",
-                      help="Bars above this (and no sharp jump) become FAST instead of CINEMATIC.")
-            st.number_input("Hyper cooldown (bars)", min_value=1, max_value=8,
-                            value=int(_v("hyper_cooldown_bars")), key="hyper_cooldown_bars",
-                            help="HYPER is forced to exit after this many bars.")
+                      help="Bars louder than this become FAST (one cut per bar) instead of CINEMATIC.")
+            st.number_input("FAST max run (bars)", min_value=0, max_value=64,
+                            value=int(_v("fast_max_bars")), key="fast_max_bars",
+                            help="After this many FAST bars in a row, FAST is forced to stop. 0 = no limit.")
+            st.number_input("FAST cooldown (bars)", min_value=0, max_value=32,
+                            value=int(_v("fast_cooldown_bars")), key="fast_cooldown_bars",
+                            help="Once a FAST run ends (forced or not), this many bars must pass before "
+                                 "FAST can start again.")
         with col2:
             st.number_input("Phrase lock (bars)", min_value=1, max_value=8,
                             value=int(_v("phrase_lock_bars")), key="phrase_lock_bars",
@@ -2237,14 +2269,10 @@ def render_audio_settings_section(track: dict) -> None:
             st.slider("Override sensitivity", 0.02, 1.0, value=float(_v("override_delta_thresh")), step=0.01,
                       key="override_delta_thresh", disabled=not dpo,
                       help="How large a single-frame RMS jump triggers a forced cut.")
-        _seg_method = "rhythm"
-        _hyper_delta = st.session_state.get("hyper_delta_thresh", 0.35)
-        _fast_thresh = st.session_state.get("fast_energy_thresh", 0.75)
-        _hyper_cd = int(st.session_state.get("hyper_cooldown_bars", 2))
-        _phrase_lock = int(st.session_state.get("phrase_lock_bars", 4))
-        _cine_bars = int(st.session_state.get("cinematic_bars", 4))
-        _dpo = st.session_state.get("dynamic_priority_override", False)
-        _override_thresh = st.session_state.get("override_delta_thresh", 0.15)
+            st.slider("Clear zone (s)", 0.0, 4.0, value=float(_v("override_clear_secs")), step=0.1,
+                      key="override_clear_secs", disabled=not dpo,
+                      help="A dynamic cut takes priority: any other cut closer than this, before or after "
+                           "it, is removed — and two dynamic cuts closer than this keep only the stronger.")
 
     # ---- Live preview chart ------------------------------------------------
     st.divider()
@@ -2253,25 +2281,12 @@ def render_audio_settings_section(track: dict) -> None:
                "Scene match dots appear on the Matching & Export step once clips are assigned.")
 
     # Build segments from current widget values for the preview
-    _cws = st.session_state.get("change_window_secs", 2.0)
-    _ct = st.session_state.get("change_threshold", 0.12)
-    _mins = st.session_state.get("min_segment_sec", 2.0)
-    _maxs = st.session_state.get("max_segment_sec", 8.0)
-    _rth = st.session_state.get("react_to_hits", True)
-    _ht = st.session_state.get("hit_threshold", 0.9)
-    _snap = st.session_state.get("snap_secs", 0.3)
-    _ubs = st.session_state.get("use_bar_snapping", True)
-    _bpb = int(beats_per_bar)
     _dc = st.session_state.get("density_contrast", 1.0)
     _min_c = st.session_state.get("min_clips", 1)
     _max_c = st.session_state.get("max_clips", 4) if st.session_state.get("split_screen_enabled") else 1
     _rs, _re = st.session_state.get("ramp_range", (0.2, 0.85))
 
-    if segmentation_method == "Adaptive (energy-change + hits)":
-        _segs = build_track_segments(track, _cws, _ct, _mins, _rth, _ht, _snap, _maxs, _bpb, _ubs)
-    else:
-        _segs = build_rhythm_engine_segments(track, _bpb, _hyper_delta, _fast_thresh,
-                                             _hyper_cd, _phrase_lock, _cine_bars, _dpo, _override_thresh)
+    _segs = build_segments(track, segmentation_settings())
     apply_segment_intensity(_segs, track, _dc)
     _rec_counts = [
         clips_for_intensity(sg["intensity"], _min_c, _max_c, _rs, _re, False, None)
@@ -2301,7 +2316,6 @@ def render_audio_settings_section(track: dict) -> None:
         ("fill",   "rgba(230,150,30,0.6)", "Cut: max-length split"),
         ("cinematic", "rgba(80,120,220,0.5)", "Rhythm Engine: CINEMATIC"),
         ("fast",   "rgba(230,150,30,0.6)", "Rhythm Engine: FAST"),
-        ("hyper",  "rgba(220,60,60,0.55)", "Rhythm Engine: HYPER"),
         ("override", "rgba(230,30,200,0.75)", "Rhythm Engine: Dynamic Priority Override"),
     ):
         _xs, _ys = [], []
@@ -2606,32 +2620,34 @@ def _snap_to_bar_or_onset(i: int, bar_frames: np.ndarray, onset: np.ndarray, sna
 # ---------------------------------------------------------------------------
 # Rhythm Engine: an alternative segmentation method, ported from a reference
 # state-machine design. Instead of detecting individual cut POINTS, it works
-# at bar granularity — each bar gets assigned a cutting STYLE (CINEMATIC =
-# slow, multi-bar segments; FAST = one segment per bar; HYPER = one segment
-# per BEAT) based on that bar's smoothed energy and how sharply it jumped
-# from before. Phrase-locking commits to a style for several bars at a time
-# so it doesn't flicker; a cooldown forces an exit from HYPER after a few
-# bars so rapid cutting can't run away. This is a genuinely different feel
-# from the Adaptive method above — named "styles" driven by musical momentum,
-# rather than reacting to individual detected events.
+# at bar granularity — each bar gets a cutting STYLE: CINEMATIC (slow,
+# multi-bar segments) or FAST (one segment per bar), from that bar's
+# smoothed energy. Phrase-locking commits to a style for several bars so it
+# doesn't flicker; FAST has a maximum run length and a cooldown so rapid
+# cutting can't run on for too long or restart straight away.
 # ---------------------------------------------------------------------------
 
 RHYTHM_STATE_CINEMATIC = "CINEMATIC"
 RHYTHM_STATE_FAST = "FAST"
-RHYTHM_STATE_HYPER = "HYPER"
 
 
 def compute_cutting_states(
     track: dict,
     beats_per_bar: int = 4,
-    hyper_delta_thresh: float = 0.35,
     fast_energy_thresh: float = 0.75,
-    hyper_cooldown_bars: int = 2,
+    fast_max_bars: int = 8,
+    fast_cooldown_bars: int = 4,
     phrase_lock_bars: int = 4,
 ) -> list:
     """Assigns a cutting style to every bar. Returns a list of state strings,
     one per bar (same length/order as compute_bar_times' output), or an
-    empty list if there isn't enough beat/hires data to form bars."""
+    empty list if there isn't enough beat/hires data to form bars.
+
+    fast_max_bars: a FAST run is forced back to CINEMATIC after this many
+    bars (0 = no limit). fast_cooldown_bars: after ANY FAST run ends, this
+    many bars must pass before FAST may start again. phrase_lock_bars: a
+    newly chosen style is held for this many bars (the FAST limit still
+    applies inside the lock)."""
     bar_times = compute_bar_times(track, beats_per_bar)
     hires = track.get("hires")
     if len(bar_times) < 2 or not hires:
@@ -2648,57 +2664,39 @@ def compute_cutting_states(
     max_e = bar_energies.max() if bar_energies.max() > 0 else 1.0
     norm = bar_energies / max_e
     local_smooth = np.convolve(norm, np.ones(2) / 2, mode="same")
-    deltas = np.diff(norm, prepend=norm[0])
 
     states = []
-    current_state = RHYTHM_STATE_CINEMATIC
-    hyper_cooldown = 0
-    phrase_lock = 0
+    current = RHYTHM_STATE_CINEMATIC
+    fast_run = 0          # bars in the current FAST run
+    fast_allowed_at = 0   # first bar index where FAST may start again
+    lock = 0              # bars still held by phrase lock
 
     for i in range(len(bar_times)):
-        energy, delta = local_smooth[i], deltas[i]
-        if hyper_cooldown > 0:
-            hyper_cooldown -= 1
-        if phrase_lock > 0:
-            phrase_lock -= 1
-            states.append(current_state)
-            continue
-
-        if current_state == RHYTHM_STATE_HYPER and hyper_cooldown == 0:
-            current_state = RHYTHM_STATE_FAST if energy > fast_energy_thresh else RHYTHM_STATE_CINEMATIC
-
-        if delta > hyper_delta_thresh and hyper_cooldown == 0:
-            current_state = RHYTHM_STATE_HYPER
-            hyper_cooldown = hyper_cooldown_bars
-            phrase_lock = hyper_cooldown_bars
-        elif energy > fast_energy_thresh:
-            if current_state != RHYTHM_STATE_FAST:
-                current_state = RHYTHM_STATE_FAST
-                phrase_lock = phrase_lock_bars
+        if current == RHYTHM_STATE_FAST and fast_max_bars > 0 and fast_run >= fast_max_bars:
+            current, lock = RHYTHM_STATE_CINEMATIC, 0          # forced out: max run reached
+            fast_allowed_at = i + max(0, fast_cooldown_bars)
+        elif lock > 0:
+            lock -= 1
         else:
-            if current_state != RHYTHM_STATE_CINEMATIC:
-                current_state = RHYTHM_STATE_CINEMATIC
-                phrase_lock = phrase_lock_bars
-
-        states.append(current_state)
+            want = (RHYTHM_STATE_FAST if local_smooth[i] > fast_energy_thresh and i >= fast_allowed_at
+                    else RHYTHM_STATE_CINEMATIC)
+            if want != current:
+                if current == RHYTHM_STATE_FAST:                 # FAST ended on its own
+                    fast_allowed_at = i + max(0, fast_cooldown_bars)
+                current = want
+                lock = max(0, phrase_lock_bars - 1)
+        fast_run = fast_run + 1 if current == RHYTHM_STATE_FAST else 0
+        states.append(current)
 
     return states
 
 
-MIN_OVERRIDE_GAP_SEC = 0.15  # an override this close to an existing boundary is skipped, not a degenerate sliver
-
-
 def find_dynamic_priority_cuts(track: dict, bar_times: list, override_delta_thresh: float) -> list:
-    """Secondary pass, run right after the main state-machine loop: scans the
-    RAW, frame-by-frame derivative of RMS — NOT the bar-averaged, 2-bar-
-    smoothed energy the state machine itself uses — for instantaneous jumps
-    that view can miss entirely. The state machine's smoothing is
-    deliberately built to filter out brief spikes (right for overall
-    pacing), but that can also wash out a single dramatic hit or drop that
-    happens to land mid-bar. For each bar where the raw derivative's peak
-    exceeds override_delta_thresh, returns the EXACT time (in seconds) of
-    that peak frame — a forced cut point, independent of whatever state the
-    state machine assigned that bar."""
+    """Secondary pass, run after the state machine: scans the RAW,
+    frame-by-frame change in RMS — not the bar-averaged, smoothed energy the
+    state machine uses — for instantaneous jumps (a single dramatic hit or
+    drop mid-bar). For each bar whose biggest jump exceeds
+    override_delta_thresh, returns (time_sec, jump_size) at that exact frame."""
     hires = track.get("hires")
     if not hires or len(bar_times) < 2:
         return []
@@ -2707,7 +2705,7 @@ def find_dynamic_priority_cuts(track: dict, bar_times: list, override_delta_thre
     raw_deltas = np.abs(np.diff(rms, prepend=rms[0]))
 
     bar_frames = [round(bt * rate) for bt in bar_times] + [len(rms)]
-    override_times = []
+    out = []
     for i in range(len(bar_times)):
         s, e = bar_frames[i], bar_frames[i + 1]
         if e <= s:
@@ -2715,93 +2713,96 @@ def find_dynamic_priority_cuts(track: dict, bar_times: list, override_delta_thre
         window = raw_deltas[s:e]
         peak_idx = int(np.argmax(window))
         if window[peak_idx] > override_delta_thresh:
-            override_times.append((s + peak_idx) / rate)
-    return override_times
+            out.append(((s + peak_idx) / rate, float(window[peak_idx])))
+    return out
 
 
-def apply_dynamic_priority_overrides(raw_segments: list, override_times: list) -> list:
-    """Splits whichever segment each override time falls inside, at that
-    EXACT point — independent of the segment's original kind or boundaries.
-    The piece AFTER the split is tagged "override", matching the existing
-    convention that a segment's "cut" field names why ITS boundary exists.
-    An override too close to an already-existing boundary is skipped rather
-    than creating a near-zero-length sliver segment."""
-    result = list(raw_segments)
-    for ot in sorted(override_times):
-        for idx, (s, e, kind) in enumerate(result):
-            if s + MIN_OVERRIDE_GAP_SEC < ot < e - MIN_OVERRIDE_GAP_SEC:
-                result[idx:idx + 1] = [(s, ot, kind), (ot, e, "override")]
-                break
-    return result
+MIN_OVERRIDE_GAP_SEC = 0.15  # never leave a sliver shorter than this next to a dynamic cut
+
+
+def apply_dynamic_priority_overrides(raw_segments: list, overrides: list, clear_secs: float,
+                                     duration: float) -> list:
+    """Dynamic cuts take priority over the state machine's own cuts.
+
+    overrides: [(time_sec, strength)]. Dynamic cuts closer than clear_secs to
+    each other keep only the strongest; then every ordinary cut closer than
+    clear_secs (before OR after) to a kept dynamic cut is removed, and the
+    dynamic cut is added. The segment after a dynamic cut is tagged
+    "override"; every other segment keeps its original kind."""
+    if not overrides:
+        return raw_segments
+    gap = max(clear_secs, MIN_OVERRIDE_GAP_SEC)
+    kept = []
+    for t, strength in sorted(overrides, key=lambda o: -o[1]):
+        if gap < t < duration - MIN_OVERRIDE_GAP_SEC and all(abs(t - k) >= gap for k in kept):
+            kept.append(t)
+    if not kept:
+        return raw_segments
+    bounds = [(s, kind) for s, _, kind in raw_segments
+              if s <= 1e-6 or all(abs(s - k) >= gap for k in kept)]
+    bounds += [(t, "override") for t in kept]
+    bounds.sort()
+    out = []
+    for (s, kind), nxt in zip(bounds, bounds[1:] + [(duration, None)]):
+        if nxt[0] > s:
+            out.append((s, nxt[0], kind))
+    return out
 
 
 def build_rhythm_engine_segments(
     track: dict,
     beats_per_bar: int = 4,
-    hyper_delta_thresh: float = 0.35,
     fast_energy_thresh: float = 0.75,
-    hyper_cooldown_bars: int = 2,
+    fast_max_bars: int = 8,
+    fast_cooldown_bars: int = 4,
     phrase_lock_bars: int = 4,
     cinematic_bars: int = 4,
     dynamic_priority_override: bool = False,
     override_delta_thresh: float = 0.15,
+    override_clear_secs: float = 1.0,
 ) -> list:
     """Converts the per-bar cutting states into actual segments, in the same
     {"start","end","energy","cut","cut_strength"} schema build_track_segments
-    produces — so everything downstream (matching, the intensity/clip-count
-    ramp, Advanced mode, the chart) works with either segmentation method
-    unchanged. CINEMATIC runs are grouped into cinematic_bars-bar chunks;
-    FAST bars each become their own segment; HYPER runs are subdivided by
-    BEAT (the fastest cut rate available). Falls back to the whole track as
-    one segment if there isn't enough data to form even one bar."""
+    produces — so everything downstream works with either method unchanged.
+    CINEMATIC runs are grouped into cinematic_bars-bar chunks; FAST bars each
+    become their own segment. Falls back to the whole track as one segment if
+    there isn't enough data to form even one bar."""
     duration = float(track["duration_sec"])
     hires = track.get("hires")
     bar_times = compute_bar_times(track, beats_per_bar)
-    states = compute_cutting_states(track, beats_per_bar, hyper_delta_thresh,
-                                    fast_energy_thresh, hyper_cooldown_bars, phrase_lock_bars)
+    states = compute_cutting_states(track, beats_per_bar, fast_energy_thresh, fast_max_bars,
+                                    fast_cooldown_bars, phrase_lock_bars)
 
     if len(bar_times) < 2 or not states:
         energy = float(np.mean(hires["rms"])) if hires else 0.0
         return [{"start": 0.0, "end": duration, "energy": round(energy, 3), "cut": "start", "cut_strength": 0.0}]
 
     bar_bounds = list(bar_times) + [duration]
-    beat_times = track.get("beat_times") or []
-
     raw_segments = []  # (start, end, cut_kind)
+    if bar_bounds[0] > MIN_OVERRIDE_GAP_SEC:
+        raw_segments.append((0.0, bar_bounds[0], "start"))  # lead-in before the first bar
+    else:
+        bar_bounds[0] = 0.0
     i = 0
     while i < len(states):
-        state = states[i]
-        if state == RHYTHM_STATE_HYPER:
-            j = i
-            while j < len(states) and states[j] == RHYTHM_STATE_HYPER:
-                j += 1
-            bar_start, bar_end = bar_bounds[i], bar_bounds[j]
-            beats_in_range = [b for b in beat_times if bar_start < b < bar_end]
-            bounds = sorted({bar_start, *beats_in_range, bar_end})
-            for k in range(len(bounds) - 1):
-                raw_segments.append((bounds[k], bounds[k + 1], "hyper"))
-            i = j
-        elif state == RHYTHM_STATE_FAST:
-            j = i
-            while j < len(states) and states[j] == RHYTHM_STATE_FAST:
-                raw_segments.append((bar_bounds[j], bar_bounds[j + 1], "fast"))
-                j += 1
-            i = j
+        j = i
+        while j < len(states) and states[j] == states[i]:
+            j += 1
+        if states[i] == RHYTHM_STATE_FAST:
+            for k in range(i, j):
+                raw_segments.append((bar_bounds[k], bar_bounds[k + 1], "fast"))
         else:
-            j = i
-            while j < len(states) and states[j] == RHYTHM_STATE_CINEMATIC:
-                j += 1
             k = i
             while k < j:
                 chunk_end = min(k + max(1, cinematic_bars), j)
                 raw_segments.append((bar_bounds[k], bar_bounds[chunk_end], "cinematic"))
                 k = chunk_end
-            i = j
+        i = j
 
     raw_segments.sort()
     if dynamic_priority_override:
-        override_times = find_dynamic_priority_cuts(track, bar_times, override_delta_thresh)
-        raw_segments = apply_dynamic_priority_overrides(raw_segments, override_times)
+        overrides = find_dynamic_priority_cuts(track, bar_times, override_delta_thresh)
+        raw_segments = apply_dynamic_priority_overrides(raw_segments, overrides, override_clear_secs, duration)
 
     rate = float(hires["rate"]) if hires else 0.0
     rms = np.asarray(hires["rms"], dtype=float) if hires else np.array([])
@@ -2834,7 +2835,6 @@ def build_track_segments(
     snap_secs: float,
     max_block_secs: float = 0.0,
     beats_per_bar: int = 4,
-    use_bar_snapping: bool = True,
 ) -> list[dict]:
     """Tight segmentation on the 30 Hz signals from audio_pipeline.py.
 
@@ -2844,16 +2844,8 @@ def build_track_segments(
        `change_threshold` are genuine level changes (drops, build-ups,
        chorus in/out). Steady beat ripple averages out, so it can't slowly
        accumulate into false cuts.
-    2. SNAP — each energy-change cut moves onto the nearest BAR LINE (derived
-       from the track's own beat grid, assuming beats_per_bar beats per bar)
-       if one is close enough to plausibly be the same musical moment —
-       otherwise it falls back to the strongest nearby onset (the add-on's
-       "Clip Change" score) within ±snap_secs, same as before bar-awareness
-       existed. This is what keeps segment LENGTHS feeling musically
-       consistent — a structural change lands on a real phrase boundary
-       (start of a bar) instead of wherever the raw energy signal happened
-       to cross a threshold. use_bar_snapping=False restores the pure
-       onset-snap behaviour if you'd rather not quantize to bars.
+    2. SNAP — each energy-change cut moves onto the strongest nearby onset
+       (the add-on's "Clip Change" score) within ±snap_secs.
     3. BIG HITS — onset peaks at or above hit_threshold become extra cuts,
        landing exactly on the transient, NOT snapped to a bar line — a hit
        can legitimately fall mid-bar, and forcing it onto the bar grid would
@@ -2889,8 +2881,9 @@ def build_track_segments(
     min_len = max(1, round(rate * min_block_secs))
     snap = max(0, round(rate * snap_secs))
 
-    bar_times = compute_bar_times(track, beats_per_bar) if use_bar_snapping else []
-    bar_frames = np.array([round(bt * rate) for bt in bar_times]) if bar_times else np.array([])
+    # Bar snapping was retired (the "Snap structural cuts to bar lines" toggle);
+    # with no bar frames, snapping and max-length splits use onsets only.
+    bar_frames = np.array([])
 
     # 1. step detector: |mean(after) - mean(before)|
     c = np.concatenate([[0.0], np.cumsum(rms)])
@@ -2906,7 +2899,7 @@ def build_track_segments(
     for i in change_peaks:
         if change[i] < change_threshold:
             continue
-        # 2. snap onto the nearest bar line, or the strongest nearby onset if none is close
+        # 2. snap onto the strongest nearby onset
         pos = _snap_to_bar_or_onset(i, bar_frames, onset, snap, n)
         candidates.append((1.0 + float(change[i]), int(pos), "change"))
 
@@ -3431,15 +3424,15 @@ DIAL_DEFAULTS = {
     "react_to_hits": True,
     "hit_threshold": 0.9,
     "snap_secs": 0.3,
-    "use_bar_snapping": True,
     # Segmentation — Rhythm Engine
-    "hyper_delta_thresh": 0.35,
     "fast_energy_thresh": 0.75,
-    "hyper_cooldown_bars": 2,
+    "fast_max_bars": 8,
+    "fast_cooldown_bars": 4,
     "phrase_lock_bars": 4,
     "cinematic_bars": 4,
     "dynamic_priority_override": False,
     "override_delta_thresh": 0.15,
+    "override_clear_secs": 1.0,
     # Split screen & intensity
     "split_screen_enabled": False,
     "min_clips": 1,
@@ -4055,34 +4048,8 @@ selected_videos = list(st.session_state.get("committed_selected_videos", []))
 
 # Segmentation + split-screen values are set in the Audio Settings section
 # and stored in session_state; read them here for the Matching computation.
-segmentation_method = st.session_state.get("segmentation_method", "Adaptive (energy-change + hits)")
-beats_per_bar = int(st.session_state.get("beats_per_bar", 4))
 
-if segmentation_method == "Adaptive (energy-change + hits)":
-    change_window_secs = st.session_state.get("change_window_secs", 2.0)
-    change_threshold = st.session_state.get("change_threshold", 0.12)
-    min_segment_sec = st.session_state.get("min_segment_sec", 2.0)
-    max_segment_sec = st.session_state.get("max_segment_sec", 8.0)
-    react_to_hits = st.session_state.get("react_to_hits", True)
-    hit_threshold = st.session_state.get("hit_threshold", 0.9)
-    snap_secs = st.session_state.get("snap_secs", 0.3)
-    use_bar_snapping = st.session_state.get("use_bar_snapping", True)
-    hyper_delta_thresh = fast_energy_thresh = 0.0
-    hyper_cooldown_bars = phrase_lock_bars = cinematic_bars = 0
-    dynamic_priority_override = False
-    override_delta_thresh = 0.0
-else:
-    hyper_delta_thresh = st.session_state.get("hyper_delta_thresh", 0.35)
-    fast_energy_thresh = st.session_state.get("fast_energy_thresh", 0.75)
-    hyper_cooldown_bars = int(st.session_state.get("hyper_cooldown_bars", 2))
-    phrase_lock_bars = int(st.session_state.get("phrase_lock_bars", 4))
-    cinematic_bars = int(st.session_state.get("cinematic_bars", 4))
-    dynamic_priority_override = st.session_state.get("dynamic_priority_override", False)
-    override_delta_thresh = st.session_state.get("override_delta_thresh", 0.15)
-    change_window_secs = change_threshold = min_segment_sec = max_segment_sec = 0.0
-    use_bar_snapping = True
-    react_to_hits = False
-    hit_threshold = snap_secs = 0.0
+seg_cfg = segmentation_settings()
 
 # Split-screen values are set by the sidebar widgets (always live regardless of active section)
 min_clips = st.session_state["min_clips"]
@@ -4186,10 +4153,7 @@ show_repeat_fallback_flash()  # left by an Auto-fill on the previous run, if it 
 
 # Manual overrides (reject / swap) are keyed by segment index, which only stays
 # meaningful for a given track + segment length — reset them if either changes.
-state_key = (track_id, segmentation_method, change_window_secs, change_threshold, min_segment_sec,
-             max_segment_sec, react_to_hits, hit_threshold, snap_secs, use_bar_snapping, beats_per_bar,
-             hyper_delta_thresh, fast_energy_thresh, hyper_cooldown_bars, phrase_lock_bars, cinematic_bars,
-             dynamic_priority_override, override_delta_thresh)
+state_key = (track_id, tuple(sorted(seg_cfg.items())))
 if st.session_state.get("planner_state_key") != state_key:
     st.session_state["planner_state_key"] = state_key
     if not _consume_load_suppression("Auto"):
@@ -4213,17 +4177,10 @@ if not queues:
 
 total_footage_sec = sum(span["remaining_sec"] for spans in queues.values() for span in spans)
 
-if segmentation_method == "Adaptive (energy-change + hits)":
-    segments = build_track_segments(track, change_window_secs, change_threshold, min_segment_sec,
-                                    react_to_hits, hit_threshold, snap_secs, max_segment_sec,
-                                    beats_per_bar, use_bar_snapping)
-else:
-    segments = build_rhythm_engine_segments(track, beats_per_bar, hyper_delta_thresh, fast_energy_thresh,
-                                            hyper_cooldown_bars, phrase_lock_bars, cinematic_bars,
-                                            dynamic_priority_override, override_delta_thresh)
+segments = build_segments(track, seg_cfg)
 apply_segment_intensity(segments, track, density_contrast)
 if not track.get("hires"):
-    if segmentation_method == "Adaptive (energy-change + hits)":
+    if seg_cfg["method"] == SEG_ADAPTIVE:
         st.warning("This track was analysed before the 30 Hz onset signals existed, so cuts use the older, "
                    "looser method. Re-run audio_pipeline.py in Colab to upgrade it.")
     else:
@@ -4576,7 +4533,6 @@ for _kind, _colour, _label in (("change", "rgba(0,160,120,0.7)", "Cut: energy ch
                                 ("fill", "rgba(230,150,30,0.6)", "Cut: max-length split (on strongest beat)"),
                                 ("cinematic", "rgba(80,120,220,0.5)", "Rhythm Engine: CINEMATIC"),
                                 ("fast", "rgba(230,150,30,0.6)", "Rhythm Engine: FAST"),
-                                ("hyper", "rgba(220,60,60,0.55)", "Rhythm Engine: HYPER"),
                                 ("override", "rgba(230,30,200,0.75)", "Rhythm Engine: Dynamic Priority Override")):
     _xs, _ys = [], []
     for _seg in segments:
@@ -5494,25 +5450,7 @@ export_plan = {
     "track_source_path": colab_to_local(track["source_path"]),
     "track_duration_sec": track["duration_sec"],
     "bpm": track["bpm"],
-    "segmentation": {
-        "method": segmentation_method if track.get("hires") else "legacy",
-        "change_window_secs": change_window_secs,
-        "change_threshold": change_threshold,
-        "min_segment_sec": min_segment_sec,
-        "max_segment_sec": max_segment_sec,
-        "hyper_delta_thresh": hyper_delta_thresh,
-        "fast_energy_thresh": fast_energy_thresh,
-        "hyper_cooldown_bars": hyper_cooldown_bars,
-        "phrase_lock_bars": phrase_lock_bars,
-        "cinematic_bars": cinematic_bars,
-        "dynamic_priority_override": dynamic_priority_override,
-        "override_delta_thresh": override_delta_thresh,
-        "use_bar_snapping": use_bar_snapping,
-        "beats_per_bar": beats_per_bar,
-        "react_to_hits": react_to_hits,
-        "hit_threshold": hit_threshold,
-        "snap_secs": snap_secs,
-    },
+    "segmentation": {**seg_cfg, "method": seg_cfg["method"] if track.get("hires") else "legacy"},
     "sequential_video_order": sequential_mode,
     "globally_rejected_clips": [list(k) for k in st.session_state["global_excluded_scenes"]],
     "video_time_ranges": {k: list(v) for k, v in effective_time_ranges().items()},
