@@ -11,7 +11,7 @@ and the weights can be tuned in "⚙️ Ranking weights".
   pace       how fast the video cuts vs. how fast the track is (BPM)
   spread     share of time calm / medium / intense — compared as whole distributions
   relevance  with a tag filter: how much of the video actually carries those tags
-  freshness  fewer appearances in recent saved projects = higher
+  freshness  fewer appearances in recent saved projects and renders = higher
   tempo  ⚗  dominant rhythm of the movement vs. the track's BPM (½× and 2× count)
   arc    ⚗  the track's energy over time vs. the video's motion over its usable range
 
@@ -38,6 +38,7 @@ HIST_BINS = 12
 ARC_POINTS = 60
 FOOTAGE_SHARE = 0.25          # full "footage" marks once usable ≥ this share of the track
 RECENT_PROJECTS = 10          # freshness looks at this many most recent saved projects
+RECENT_RENDERS = 10           # ... and this many most recent renders
 
 METRICS = ["dynamics", "punch", "footage", "pace", "spread", "relevance", "freshness", "tempo", "arc"]
 EXPERIMENTAL = {"tempo", "arc"}
@@ -63,8 +64,8 @@ HELP = {
               "track does — 'mostly calm with rare peaks' vs 'busy throughout'.",
     "relevance": "Only with a tag filter: the share of the video's usable footage that carries those "
                  "tags. Without a filter it has no effect.",
-    "freshness": f"Lower for videos selected in your {RECENT_PROJECTS} most recent saved projects, "
-                 "for more variety between compilations.",
+    "freshness": f"Lower for videos used in your {RECENT_PROJECTS} most recent saved projects and "
+                 f"{RECENT_RENDERS} most recent renders, for more variety between compilations.",
     "tempo": "EXPERIMENTAL — finds the dominant rhythm in the video's movement and compares it with the "
              "track's BPM (half and double time count as a match). Scored by how clear that rhythm is.",
     "arc": "EXPERIMENTAL — the track's energy over time (build, drop, outro) against the video's motion "
@@ -352,6 +353,34 @@ def recent_project_usage(projects_dir: Path) -> dict:
             continue
         for vid in set(data.get("committed_selected_videos") or []):
             usage[vid] = usage.get(vid, 0) + 1
+    return usage
+
+
+def recent_render_usage(preview_dir: Path) -> dict:
+    """{video_id: how many of the most recent renders used it} — from the render
+    details files (see renders.py) next to each render in preview_dir."""
+    usage = {}
+    try:
+        files = sorted((p for p in Path(preview_dir).glob("*.json") if not p.name.startswith(".")),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return usage
+    for p in files[:RECENT_RENDERS]:
+        try:
+            data = json.loads(p.read_text())
+        except (ValueError, OSError):
+            continue
+        for vid in {v.get("video_id") for v in data.get("videos") or [] if isinstance(v, dict)}:
+            if vid:
+                usage[vid] = usage.get(vid, 0) + 1
+    return usage
+
+
+def combined_usage(projects_dir: Path, preview_dir: Path) -> dict:
+    """Recent appearances in saved projects plus recent renders, per video."""
+    usage = recent_project_usage(projects_dir)
+    for vid, n in recent_render_usage(preview_dir).items():
+        usage[vid] = usage.get(vid, 0) + n
     return usage
 
 

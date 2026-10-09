@@ -228,11 +228,24 @@ def push_pending(token: dict) -> dict:
     (CATALOGUE_DIR → scene-labeling/catalogue); "audio:<stem>" entries are
     track catalogues (AUDIO_DIR → scene-labeling/audio_catalogue), e.g. ones
     the server analysed; "thumb:<video_id>/<file>" entries are thumbnails
-    (CATALOGUE_DIR/thumbnails → scene-labeling/catalogue/thumbnails).
+    (CATALOGUE_DIR/thumbnails → scene-labeling/catalogue/thumbnails);
+    "render:<file>.mp4" entries are a render's details (rating, notes, keep)
+    edited while Drive wasn't connected (PREVIEW_DIR → scene-labeling/previews).
     Returns {entry: error} for any that failed (those stay pending)."""
     from drive_oauth import push_file_with_oauth
     failed = {}
     for stem in sorted(read_pending()):
+        if stem.startswith("render:"):
+            from config import PREVIEW_DIR
+            from renders import sync_sidecar, load_render, on_drive
+            mp4 = PREVIEW_DIR / stem[7:]
+            meta = load_render(mp4)
+            if meta is None or not on_drive(meta):
+                continue  # deleted, or not on Drive — its details go up with its upload
+            err = sync_sidecar(mp4, token)
+            if err:
+                failed[stem] = err
+            continue
         if stem.startswith("audio:"):
             path, folder = AUDIO_DIR / f"{stem[6:]}.json", "scene-labeling/audio_catalogue"
         elif stem.startswith("thumb:"):

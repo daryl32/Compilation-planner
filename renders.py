@@ -85,14 +85,16 @@ def _write_json(path: Path, data: dict) -> None:
 # Metadata
 # ---------------------------------------------------------------------------
 
-def probe(mp4: Path) -> dict:
-    """Length (s), width and height of a video file via ffprobe. {} if it can't be read."""
+def probe(mp4: Path, input_args: list = None) -> dict:
+    """Length (s), width and height of a video file via ffprobe (or of the
+    ffmpeg-style input_args, e.g. a Drive stream). {} if it can't be read."""
     if shutil.which("ffprobe") is None:
         return {}
+    src = [a for a in (input_args or []) if a != "-i"] if input_args else [str(mp4)]
     try:
         proc = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=width,height:format=duration", "-of", "json", str(mp4)],
+             "-show_entries", "stream=width,height:format=duration", "-of", "json", *src],
             capture_output=True, text=True, timeout=30)
         info = json.loads(proc.stdout or "{}")
     except (subprocess.SubprocessError, ValueError, OSError):
@@ -362,6 +364,86 @@ def delete_render(mp4: Path, token: dict = None) -> str | None:
     for p in (mp4, sidecar_path(mp4), thumb_path(mp4)):
         p.unlink(missing_ok=True)
     return None
+
+
+def restore_from_drive() -> dict:
+    """Bring the server's list of renders in line with Google Drive
+    (scene-labeling/previews), read with the service account:
+      • a render on Drive whose details file is missing here gets it back —
+        downloaded from Drive, or rebuilt from the file itself if Drive has none;
+      • a render that's here and also on Drive (e.g. uploaded by older versions)
+        is marked as on Drive, so its server copy can be cleared.
+    Never deletes anything. Returns {"restored", "linked", "errors"}."""
+    from drive_sync import list_drive_folder, download_drive_file
+    files, err = list_drive_folder(DRIVE_FOLDER)
+    if err:
+        return {"restored": 0, "linked": 0, "errors": [err]}
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    by_name = {f["name"]: f for f in files}
+    restored = linked = 0
+    errors = []
+    for name, f in sorted(by_name.items()):
+        if not name.endswith(".mp4") or name.startswith("."):
+            continue
+        mp4 = PREVIEW_DIR / name
+        side = sidecar_path(mp4)
+        size = int(f.get("size") or 0)
+        modified = (f.get("modifiedTime") or "").replace("Z", "+00:00") or None
+        drive_info = {"file_id": f["id"], "size": size, "uploaded": modified}
+        js = by_name.get(side.name)
+        if js:
+            drive_info["sidecar_id"] = js["id"]
+
+        meta = None
+        if side.exists():
+            try:
+                meta = json.loads(side.read_text())
+            except (ValueError, OSError):
+                meta = None
+        if isinstance(meta, dict) and "render_file" in meta:
+            if on_drive(meta):
+                if js and not meta["drive"].get("sidecar_id"):
+                    meta["drive"]["sidecar_id"] = js["id"]
+                    _save_meta(mp4, meta)
+                continue
+            if mp4.exists() and size and mp4.stat().st_size != size:
+                continue   # a different file with the same name — leave it alone
+            meta["drive"] = drive_info
+            _save_meta(mp4, meta)
+            linked += 1
+            continue
+
+        meta = None
+        if js:
+            tmp = side.with_name(side.name + ".download")
+            try:
+                download_drive_file(js["id"], tmp)
+                meta = json.loads(tmp.read_text())
+            except Exception as e:
+                errors.append(f"{js['name']}: {e}")
+            finally:
+                tmp.unlink(missing_ok=True)
+        if not isinstance(meta, dict) or "render_file" not in meta:
+            m = _PREVIEW_NAME.match(name)
+            meta = {
+                "schema": SIDECAR_SCHEMA, "render_file": name, "backfilled": True,
+                "created": modified,
+                "track": {"track_id": m.group("track") if m else None},
+                "size_bytes": size,
+                "segments": None, "split_segments": None, "clip_count": None, "videos": [],
+                "settings": {}, "plan": None, "user": _user_fields({}),
+            }
+            try:
+                from drive_sync import access_token, stream_url
+                meta.update(probe(mp4, ["-headers", f"Authorization: Bearer {access_token()}\r\n",
+                                        "-i", stream_url(f["id"])]))
+            except Exception:
+                pass
+        meta["drive"] = drive_info
+        meta["user"] = _user_fields(meta)
+        _save_meta(mp4, meta)
+        restored += 1
+    return {"restored": restored, "linked": linked, "errors": errors}
 
 
 def _input_args(meta: dict) -> list:
