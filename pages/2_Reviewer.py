@@ -282,8 +282,11 @@ else:
         st.markdown(f"**Scene {SE.scene_label(scene)}** · {fmt_precise(start)} → {fmt_precise(end)} "
                     f"({fmt_dur(end - start)})")
 
-        lo = math.ceil((start + SE.MIN_PART_SEC) * 10) / 10
-        hi = math.floor((end - SE.MIN_PART_SEC) * 10) / 10
+        # Slider positions in tenths of a second (coarser for very long scenes, so
+        # the slider never has more than ~20,000 stops).
+        lo10 = math.ceil((start + SE.MIN_PART_SEC) * 10)
+        hi10 = math.floor((end - SE.MIN_PART_SEC) * 10)
+        lo, hi = lo10 / 10, hi10 / 10
         if hi <= lo:
             st.warning("This scene is too short to split.")
             return
@@ -293,19 +296,30 @@ else:
             st.video(str(vids[0]), start_time=int(start), end_time=int(math.ceil(end)))
             st.caption("Play the scene to find the moment, then move the slider there.")
 
-        if pos_key not in st.session_state:
-            st.session_state[pos_key] = min(hi, max(lo, round((start + end) / 2, 1)))
+        step10 = max(1, math.ceil((hi10 - lo10) / 20000))
+        positions = [x / 10 for x in range(lo10, hi10 + 1, step10)]
+        if positions[-1] != hi:
+            positions.append(hi)
+
+        def snap(t: float) -> float:
+            """The slider position nearest t."""
+            i = round((t * 10 - lo10) / step10)
+            return positions[max(0, min(len(positions) - 1, i))]
+
+        if st.session_state.get(pos_key) not in positions:
+            st.session_state[pos_key] = snap(st.session_state.get(pos_key, (start + end) / 2))
         suggested = [t for t in SE.cut_suggestions_from_sprite(data, sprite_path, scene) if lo <= t <= hi]
         if suggested:
             st.caption("💡 Big picture changes found in the timeline thumbnails:")
             bcols = st.columns(len(suggested))
             for i, t in enumerate(suggested):
                 bcols[i].button(f"Go to {fmt_precise(t)}", key=f"{pos_key}_go{i}",
-                                on_click=_set_state, args=(pos_key, t))
+                                on_click=_set_state, args=(pos_key, snap(t)))
 
-        pos = st.slider("Cut at (seconds into the video)", min_value=float(lo), max_value=float(hi),
-                        step=0.1, format="%.1f", key=pos_key)
-        st.caption(f"{fmt_precise(pos)} — {pos - start:.1f}s into the scene")
+        # Labelled like the video player's clock (m:ss, plus tenths of a second).
+        pos = st.select_slider("Cut at (time in the video)", options=positions,
+                               format_func=fmt_precise, key=pos_key)
+        st.caption(f"{fmt_precise(pos)} in the video — {pos - start:.1f}s into the scene")
         img = frame_at(pos)
         if img is not None:
             st.image(img, width=360, caption="Frame at the cut (first frame of the next part)")
