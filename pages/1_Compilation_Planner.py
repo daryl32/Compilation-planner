@@ -10,6 +10,7 @@ import math
 import random
 import re
 import datetime
+import time
 from pathlib import Path
 
 import numpy as np
@@ -5622,20 +5623,54 @@ def ensure_render_sources_local() -> list:
     return errors
 
 
+_stream_sources = False
+if _DRIVE_SYNC_AVAILABLE:
+    _stream_sources = st.toggle(
+        "Stream original videos from Google Drive", value=True, key="render_stream_sources",
+        help="On: videos and the track that aren't on the server are read straight from Google Drive "
+             "while rendering — only the seconds each clip uses are fetched, and nothing is stored. "
+             "If a stream fails, that file is downloaded instead. Off: every missing file is "
+             "downloaded to the server first (the old way).",
+    )
+
 if st.button("🎬 Render Preview", type="primary"):
-    _src_errors = ensure_render_sources_local()
-    if _src_errors:
-        st.error("Can't render — some source files are missing and couldn't be downloaded:\n\n"
-                 + "\n".join(f"- {e}" for e in _src_errors))
-        st.stop()
+    if not _stream_sources:
+        _src_errors = ensure_render_sources_local()
+        if _src_errors:
+            st.error("Can't render — some source files are missing and couldn't be downloaded:\n\n"
+                     + "\n".join(f"- {e}" for e in _src_errors))
+            st.stop()
     out_path = next_preview_path()
     progress_bar = st.progress(0.0, text="Rendering...")
+    _render_started = time.time()
 
     def _progress(done, total):
         progress_bar.progress(done / total, text=f"Rendering segment {done}/{total}...")
 
+    def _notice(text):
+        progress_bar.progress(progress_bar_value[0], text=text)
+
+    progress_bar_value = [0.0]
+
+    def _progress_tracked(done, total):
+        progress_bar_value[0] = done / total
+        _progress(done, total)
+
     try:
-        render_plan_dict(export_plan, str(out_path), progress_callback=_progress)
+        _src_stats = render_plan_dict(export_plan, str(out_path), progress_callback=_progress_tracked,
+                                      stream=_stream_sources, notice=_notice) or {}
+        _secs = time.time() - _render_started
+        _how = []
+        if _src_stats.get("streamed"):
+            _how.append(f"{_src_stats['streamed']} streamed from Drive")
+        if _src_stats.get("downloaded"):
+            _how.append(f"{_src_stats['downloaded']} downloaded after a stream failed")
+        if _src_stats.get("local"):
+            _how.append(f"{_src_stats['local']} already on the server")
+        st.session_state["render_last_stats"] = (
+            f"Last render took {int(_secs // 60)}:{int(_secs % 60):02d}"
+            + (f" — source files: {', '.join(_how)}." if _how else ".")
+        )
         progress_bar.progress(1.0, text="Done.")
         if _OAUTH_AVAILABLE and st.session_state.get(_OAUTH_SESSION_KEY):
             progress_bar.progress(1.0, text="Uploading to Drive…")
@@ -5651,6 +5686,9 @@ if st.button("🎬 Render Preview", type="primary"):
         st.rerun()
     except Exception as e:
         st.error(f"Render failed: {e}")
+
+if st.session_state.get("render_last_stats"):
+    st.caption("⏱️ " + st.session_state["render_last_stats"])
 
 versions = existing_preview_versions()
 if versions:

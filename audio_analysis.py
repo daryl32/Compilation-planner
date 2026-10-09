@@ -56,6 +56,9 @@ OUT_RATE = 30               # stored curves, same as hires
 N_MELS = 96
 ENERGY_ENVELOPE_SEC = 0.5   # coarse energy_envelope step for new tracks
 AUDIO_EXTENSIONS = (".m4a", ".mp3", ".wav", ".flac", ".aac", ".ogg", ".opus")
+# Device for the optional torch models (beat_this, Demucs). The server runs on
+# CPU; analyse_audio_local.py sets "cuda" when a GPU is available.
+TORCH_DEVICE = os.environ.get("AUDIO_ANALYSIS_DEVICE", "cpu")
 
 
 # ---------------------------------------------------------------------------
@@ -258,25 +261,31 @@ def estimate_downbeat_phase(beat_times: np.ndarray, kick: np.ndarray, harmony: n
     return int(np.argmax(score))
 
 
-def downbeats_from_model(path) -> np.ndarray | None:
-    """beat_this (CPJKU) downbeats, or None if it isn't installed / fails.
-    The audio is decoded with ffmpeg here (beat_this's own file loader can't
-    always read .m4a), then handed to the model as samples."""
+def beats_from_model(path) -> tuple | None:
+    """(beats, downbeats) from beat_this (CPJKU), or None if it isn't
+    installed / fails. The audio is decoded with ffmpeg here (beat_this's own
+    file loader can't always read .m4a), then handed to the model as samples."""
     try:
         import beat_this.inference as bti  # type: ignore
     except Exception:
         return None
     try:
         if hasattr(bti, "Audio2Beats"):
-            model = bti.Audio2Beats(checkpoint_path="final0", device="cpu", dbn=False)
-            _beats, downbeats = model(decode_audio(path, sr=SR), SR)
+            model = bti.Audio2Beats(checkpoint_path="final0", device=TORCH_DEVICE, dbn=False)
+            beats, downbeats = model(decode_audio(path, sr=SR), SR)
         else:
-            model = bti.File2Beats(checkpoint_path="final0", device="cpu", dbn=False)
-            _beats, downbeats = model(str(path))
-        return np.asarray(downbeats, dtype=float)
+            model = bti.File2Beats(checkpoint_path="final0", device=TORCH_DEVICE, dbn=False)
+            beats, downbeats = model(str(path))
+        return np.asarray(beats, dtype=float), np.asarray(downbeats, dtype=float)
     except Exception:
         traceback.print_exc()
         return None
+
+
+def downbeats_from_model(path) -> np.ndarray | None:
+    """beat_this downbeats only (see beats_from_model)."""
+    res = beats_from_model(path)
+    return None if res is None else res[1]
 
 
 def _snap_to_beats(times: np.ndarray, beat_times: np.ndarray, max_dist: float = 0.12) -> list:
@@ -479,7 +488,8 @@ def vocal_curve(path, n_out: int) -> np.ndarray | None:
         ref = wav.mean(0)
         wav = (wav - ref.mean()) / (ref.std() + 1e-8)
         with torch.no_grad():
-            sources = apply_model(model, wav[None], device="cpu", split=True, overlap=0.1, progress=False)[0]
+            sources = apply_model(model, wav[None], device=TORCH_DEVICE, split=True, overlap=0.1, progress=False)[0]
+        sources = sources.cpu()
         vocals = sources[model.sources.index("vocals")].mean(0).numpy()
         hop = int(model.samplerate / OUT_RATE)
         nfr = len(vocals) // hop
@@ -525,10 +535,12 @@ def _r(x, nd: int = 2) -> list:
 
 
 def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocals: bool = True,
-                 progress=None) -> dict:
+                 progress=None, model_beats: bool = False) -> dict:
     """Analyse one audio file. existing: the track's current catalogue (Colab),
     whose beats/energy are kept. Returns a dict of fields to merge into the
-    track JSON: always "analysis"; for a new track also the core fields."""
+    track JSON: always "analysis"; for a new track also the core fields.
+    model_beats: for a new track, take the beat grid from beat_this too (when
+    installed) instead of the built-in tracker — used by the local GPU script."""
     say = progress or (lambda msg: None)
     say("decoding audio")
     y = decode_audio(path)
@@ -565,11 +577,17 @@ def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocal
     low_energy = _norm01(_smooth(np.sqrt(mel[:, centres < 150].sum(axis=1)), int(FPS * 0.25)))
 
     # beats: keep Colab's if present
+    model_res = None
     if existing and existing.get("beat_times"):
         beat_times = np.asarray(existing["beat_times"], dtype=float)
         bpm = float(existing.get("bpm") or 0) or (60.0 / float(np.median(np.diff(beat_times)))
                                                    if len(beat_times) > 1 else 120.0)
         beats_method = "existing"
+    elif model_beats and (model_res := beats_from_model(path)) is not None and len(model_res[0]) > 8:
+        say("beat grid from beat_this")
+        beat_times = model_res[0]
+        bpm = 60.0 / float(np.polyfit(np.arange(len(beat_times)), beat_times, 1)[0])
+        beats_method = "beat_this"
     else:
         say("finding the beat")
         bpm = estimate_tempo(onset_full)
@@ -589,7 +607,7 @@ def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocal
     energy_jump = _norm01(energy_jump, 99)
 
     say("finding downbeats")
-    model_db = downbeats_from_model(path)
+    model_db = model_res[1] if model_res is not None else downbeats_from_model(path)
     if model_db is not None and len(model_db) >= 2 and len(beat_times):
         downbeats = _snap_to_beats(model_db, beat_times) or list(model_db)
         db_method = "beat_this"
@@ -640,7 +658,7 @@ def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocal
         "vocal_starts": vocal_starts, "vocal_ends": vocal_ends,
     }
     out = {"analysis": analysis}
-    if beats_method == "server":
+    if beats_method != "existing":
         n_env = int(duration / ENERGY_ENVELOPE_SEC) + 1
         step = int(OUT_RATE * ENERGY_ENVELOPE_SEC)
         env = [{"time": round(i * ENERGY_ENVELOPE_SEC, 2),
@@ -652,7 +670,7 @@ def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocal
             "beat_times": _r(beat_times, 3),
             "energy_envelope": env,
             "hires": {"rate": OUT_RATE, "rms": _r(rms30, 3), "onset": _r(to30(onset_full), 3)},
-            "analysed_by": "server",
+            "analysed_by": os.environ.get("AUDIO_ANALYSED_BY", "server"),
         })
     return out
 
