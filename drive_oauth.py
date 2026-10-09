@@ -118,7 +118,8 @@ def _find_or_create_folder(service, name: str, parent_id: str = None) -> str:
     if name == "catalogue":
         return CATALOGUE_FOLDER_ID
 
-    q = f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    from drive_sync import q_escape
+    q = f"name='{q_escape(name)}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
     if parent_id:
         q += f" and '{parent_id}' in parents"
     resp = service.files().list(q=q, fields="files(id)").execute()
@@ -161,7 +162,8 @@ def push_file_with_oauth(
         mime_type = mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"
 
         # Update if exists, create if not
-        q = f"name='{local_path.name}' and '{parent_id}' in parents and trashed=false"
+        from drive_sync import q_escape
+        q = f"name='{q_escape(local_path.name)}' and '{parent_id}' in parents and trashed=false"
         resp = service.files().list(q=q, fields="files(id)").execute()
         existing = resp.get("files", [])
 
