@@ -174,11 +174,19 @@ def _summary_path(catalogue_dir: Path, video_id: str) -> Path:
     return catalogue_dir / ".ranking_cache" / f"{video_id}.npz"
 
 
+def _scene_order(s: dict) -> tuple:
+    try:
+        return (_tc(s["start_tc"]), s["scene_id"])
+    except (KeyError, ValueError):
+        return (float("inf"), s.get("scene_id", 0))
+
+
 def build_summary(catalogue: dict) -> dict:
     """Condense every scene's motion curve to ~SUMMARY_RATE_HZ. Scenes without a
     curve (motion-curve backfill not run) use their average motion as a flat line."""
     ids, starts, ends, offsets, rates, has_curve, chunks = [], [], [], [0], [], [], []
-    for s in sorted(catalogue["scenes"], key=lambda s: s["scene_id"]):
+    # Time order — scene_id isn't chronological once the Reviewer has split a scene.
+    for s in sorted(catalogue["scenes"], key=_scene_order):
         try:
             start, end = _tc(s["start_tc"]), _tc(s["end_tc"])
         except (KeyError, ValueError):

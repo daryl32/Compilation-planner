@@ -3,14 +3,17 @@ Reviewer — browse and correct auto-generated scene tags.
 """
 
 import json
+import math
+import tempfile
 from pathlib import Path
 
 import streamlit as st
 
 from config import CATALOGUE_DIR
 from library_common import (scene_tags, mark_pending, master_thumbnail_scenes, set_master_thumbnail,
-                            scene_thumbnail_path,
+                            scene_thumbnail_path, proxy_path,
                             library_ranges, tc_to_seconds, format_mmss, overlap_with_range)
+import scene_edits as SE
 
 
 def load_labels() -> list:
@@ -53,6 +56,20 @@ use_library_range = st.sidebar.toggle(
     "Use library range", value=True,
     help="Only show scenes inside the video's Media Library time range. "
          "Turn off to see every scene in the original video.",
+)
+st.sidebar.divider()
+
+# Split / combine suggestions
+st.sidebar.header("Split / combine suggestions")
+show_suggestions = st.sidebar.toggle("Show suggestions", value=True)
+suggest_long_sec = st.sidebar.number_input(
+    "Suggest splitting clips longer than (seconds)", min_value=5.0, value=SE.DEFAULT_LONG_SEC, step=10.0,
+    disabled=not show_suggestions,
+)
+suggest_short_sec = st.sidebar.number_input(
+    "Suggest combining runs of clips shorter than (seconds)", min_value=0.1, value=SE.DEFAULT_SHORT_SEC, step=0.5,
+    disabled=not show_suggestions,
+    help="Flags two or more touching clips in a row that are each shorter than this.",
 )
 st.sidebar.divider()
 
@@ -167,16 +184,205 @@ else:
     elif use_library_range:
         st.caption("No library range set for this video — showing every scene.")
 
+    # -----------------------------------------------------------------------
+    # Split / combine (saved straight away, like the ⭐ button)
+    # -----------------------------------------------------------------------
+    thumbs_dir = OUTPUT_DIR / "thumbnails" / video_id
+    sprite_path = OUTPUT_DIR / "timeline_sprites" / f"{video_id}.jpg"
+    ordered_all = SE.sorted_scenes(data["scenes"])
+    scene_by_id = {s["scene_id"]: s for s in data["scenes"]}
+    next_of = {a["scene_id"]: b["scene_id"] for a, b in zip(ordered_all, ordered_all[1:])}
+
+    def fmt_dur(sec: float) -> str:
+        return f"{sec:.1f}s" if sec < 60 else format_mmss(sec)
+
+    def fmt_precise(sec: float) -> str:
+        m, s = divmod(max(0.0, sec), 60)
+        h, m = divmod(int(m), 60)
+        return f"{h}:{m:02d}:{s:04.1f}" if h else f"{m}:{s:04.1f}"
+
+    def video_paths() -> list:
+        """Preview copy first (fast to seek), then the source video — whichever exist here."""
+        paths = [proxy_path(video_id)]
+        try:
+            from render_preview import colab_to_local
+            paths.append(Path(colab_to_local(data.get("source_path", ""))))
+        except Exception:
+            pass
+        return [p for p in paths if p and Path(p).exists()]
+
+    def save_edit(message: str, new_thumbs=()) -> None:
+        """Write the catalogue, queue it (and any new thumbnails) for Drive, rerun."""
+        present = {s["scene_id"] for s in data["scenes"]}
+        if master_sid is not None and master_sid not in present:
+            # The ⭐ scene was combined into another — keep using that one.
+            holder = next((s for s in data["scenes"]
+                           if any(o.get("scene_id") == master_sid
+                                  for o in (s.get("edit") or {}).get("originals", []))), None)
+            set_master_thumbnail(video_id, holder["scene_id"] if holder else None)
+        cat_path.write_text(json.dumps(data, indent=2))
+        mark_pending(cat_path.stem)
+        for t in new_thumbs:
+            mark_pending(f"thumb:{video_id}/{Path(t).name}")
+        st.cache_data.clear()  # so the Compilation Planner sees the change straight away
+        st.session_state["rev_saved_msg"] = message
+        st.rerun()
+
+    def do_merge(ids: list) -> None:
+        try:
+            new_id = SE.merge_scenes(data, ids)
+        except SE.EditError as e:
+            st.error(str(e))
+            return
+        save_edit(f"Combined {len(ids)} scenes into scene {new_id}.")
+
+    def do_undo(sid) -> None:
+        try:
+            msg = SE.undo_edit(data, sid)
+        except SE.EditError as e:
+            st.error(str(e))
+            return
+        save_edit(msg)
+
+    def dismiss(key: str) -> None:
+        lst = data.setdefault("dismissed_edit_suggestions", [])
+        if key not in lst:
+            lst.append(key)
+        save_edit("Suggestion dismissed.")
+
+    def frame_at(t: float):
+        """A picture of the video at t: an exact frame if a video is here, else the
+        nearest timeline-sprite tile. None if neither is available."""
+        vids = video_paths()
+        if vids:
+            dest = Path(tempfile.gettempdir()) / "reviewer_frames" / f"{video_id}_{int(round(t * 10))}.jpg"
+            if dest.exists() or SE.grab_frame(vids[0], t, dest, width=480):
+                return str(dest)
+        return SE.sprite_tile(data, sprite_path, t)
+
+    def _set_state(key, value):
+        st.session_state[key] = value
+
+    def _add_cut(cuts_key, pos_key):
+        cuts = st.session_state.setdefault(cuts_key, [])
+        t = round(float(st.session_state[pos_key]), 1)
+        if t not in cuts:
+            cuts.append(t)
+            cuts.sort()
+
+    def _remove_cut(cuts_key, t):
+        st.session_state[cuts_key] = [c for c in st.session_state.get(cuts_key, []) if c != t]
+
+    @st.dialog("✂️ Split scene", width="large")
+    def split_dialog(sid):
+        scene = scene_by_id[sid]
+        start, end = SE.scene_start_sec(scene), SE.scene_end_sec(scene)
+        cuts_key, pos_key = f"split_cuts_{video_id}_{sid}", f"split_pos_{video_id}_{sid}"
+        cuts = st.session_state.setdefault(cuts_key, [])
+        st.markdown(f"**Scene {SE.scene_label(scene)}** · {fmt_precise(start)} → {fmt_precise(end)} "
+                    f"({fmt_dur(end - start)})")
+
+        lo = math.ceil((start + SE.MIN_PART_SEC) * 10) / 10
+        hi = math.floor((end - SE.MIN_PART_SEC) * 10) / 10
+        if hi <= lo:
+            st.warning("This scene is too short to split.")
+            return
+
+        vids = video_paths()
+        if vids:
+            st.video(str(vids[0]), start_time=int(start), end_time=int(math.ceil(end)))
+            st.caption("Play the scene to find the moment, then move the slider there.")
+
+        if pos_key not in st.session_state:
+            st.session_state[pos_key] = min(hi, max(lo, round((start + end) / 2, 1)))
+        suggested = [t for t in SE.cut_suggestions_from_sprite(data, sprite_path, scene) if lo <= t <= hi]
+        if suggested:
+            st.caption("💡 Big picture changes found in the timeline thumbnails:")
+            bcols = st.columns(len(suggested))
+            for i, t in enumerate(suggested):
+                bcols[i].button(f"Go to {fmt_precise(t)}", key=f"{pos_key}_go{i}",
+                                on_click=_set_state, args=(pos_key, t))
+
+        pos = st.slider("Cut at (seconds into the video)", min_value=float(lo), max_value=float(hi),
+                        step=0.1, format="%.1f", key=pos_key)
+        st.caption(f"{fmt_precise(pos)} — {pos - start:.1f}s into the scene")
+        img = frame_at(pos)
+        if img is not None:
+            st.image(img, width=360, caption="Frame at the cut (first frame of the next part)")
+        else:
+            st.caption("No preview frame available (no video or timeline thumbnails here).")
+
+        bc = st.columns(2)
+        bc[0].button("➕ Add cut here", key=f"{pos_key}_add", on_click=_add_cut, args=(cuts_key, pos_key),
+                     use_container_width=True)
+        bc[1].button("Clear cuts", key=f"{pos_key}_clear", on_click=_set_state, args=(cuts_key, []),
+                     disabled=not cuts, use_container_width=True)
+
+        if cuts:
+            bounds = [start] + cuts + [end]
+            st.markdown("**Parts:**")
+            for i, (a, b) in enumerate(zip(bounds, bounds[1:])):
+                pc = st.columns([4, 1])
+                pc[0].markdown(f"{i + 1}. {fmt_precise(a)} → {fmt_precise(b)} ({fmt_dur(b - a)})")
+                if i < len(cuts):
+                    pc[1].button("✖ cut", key=f"{pos_key}_rm{i}", on_click=_remove_cut, args=(cuts_key, cuts[i]),
+                                 help=f"Remove the cut at {fmt_precise(cuts[i])}")
+            st.caption("Each part starts unreviewed with this scene's tags. Undo is available afterwards. "
+                       "Compilation Planner projects that already picked clips from this scene may need "
+                       "those picks redone.")
+        if st.button(f"✂️ Split into {len(cuts) + 1} parts" if cuts else "✂️ Split",
+                     type="primary", disabled=not cuts, use_container_width=True, key=f"{pos_key}_go"):
+            try:
+                ids = SE.split_scene(data, sid, cuts)
+            except SE.EditError as e:
+                st.error(str(e))
+                return
+            new_thumbs = []
+            with st.spinner("Making thumbnails for the new parts…"):
+                for s in data["scenes"]:
+                    if s["scene_id"] in ids[1:]:
+                        p = SE.make_part_thumbnail(data, s, thumbs_dir, vids, sprite_path)
+                        if p:
+                            new_thumbs.append(p)
+            st.session_state.pop(cuts_key, None)
+            st.session_state.pop(pos_key, None)
+            save_edit(f"Scene {sid} split into {len(ids)} parts (scenes {', '.join(map(str, ids))}).", new_thumbs)
+
+    # Suggestions — only for scenes inside the library range (when it's in use).
+    in_range = [
+        s for s in data["scenes"]
+        if not lib_range
+        or overlap_with_range(tc_to_seconds(s["start_tc"]), tc_to_seconds(s["end_tc"]), lib_range)[0] is not None
+    ]
+    if show_suggestions:
+        sugg = SE.suggest_edits(in_range, suggest_long_sec, suggest_short_sec,
+                                data.get("dismissed_edit_suggestions", []))
+    else:
+        sugg = {"split": [], "merge": []}
+    split_sugg = set(sugg["split"])
+    merge_group_of = {sid: grp for grp in sugg["merge"] for sid in grp}
+    if sugg["split"] or sugg["merge"]:
+        parts_txt = []
+        if sugg["split"]:
+            parts_txt.append(f"{len(sugg['split'])} long clip(s) could be split")
+        if sugg["merge"]:
+            parts_txt.append(f"{len(sugg['merge'])} run(s) of short clips could be combined")
+        st.info("💡 " + " · ".join(parts_txt)
+                + (" — turn off Review / correction mode to split or combine." if review_mode else "."))
+
     tag_filter = st.text_input("Filter by tag (optional)")
-    filter_cols = st.columns(2)
+    filter_cols = st.columns(3)
     with filter_cols[0]:
         show_only_excluded = st.checkbox("Show only excluded scenes", value=False)
     with filter_cols[1]:
         show_only_intro_outro = st.checkbox("Show only intro/outro candidates", value=False)
+    with filter_cols[2]:
+        show_only_suggested = st.checkbox("Show only split/combine suggestions", value=False,
+                                          disabled=not show_suggestions)
 
-    # Which scenes to show (filters and the library range).
+    # Which scenes to show (filters and the library range), in time order.
     shown = []
-    for scene in data["scenes"]:
+    for scene in ordered_all:
         current_tags = scene_tags(scene)
         trimmed_to = None
         if lib_range:
@@ -191,6 +397,9 @@ else:
         if show_only_excluded and not scene.get("excluded"):
             continue
         if show_only_intro_outro and not (scene.get("intro_candidate") or scene.get("outro_candidate")):
+            continue
+        if show_only_suggested and show_suggestions and not (
+                scene["scene_id"] in split_sugg or scene["scene_id"] in merge_group_of):
             continue
         shown.append((scene, current_tags, trimmed_to))
 
@@ -221,6 +430,47 @@ else:
         if scene.get("outro_candidate"):
             st.info("🎬 Outro candidate")
 
+    def scene_title(scene) -> str:
+        dur = SE.scene_duration(scene)
+        return (f"**Scene {SE.scene_label(scene)}**  ·  {scene['start_tc']} → {scene['end_tc']}"
+                f"  ·  {fmt_dur(dur)}")
+
+    def merge_banner(grp: list, buttons: bool) -> None:
+        total = sum(SE.scene_duration(scene_by_id[i]) for i in grp)
+        text = (f"🔗 **Possible over-split:** scenes {grp[0]}–{grp[-1]} are {len(grp)} touching clips, "
+                f"{fmt_dur(total)} in total, each under {suggest_short_sec:g}s.")
+        if not buttons:
+            st.info(text)
+            return
+        with st.container(border=True):
+            st.markdown(text)
+            bc = st.columns([2, 1, 3])
+            if bc[0].button(f"🔗 Combine these {len(grp)}", key=f"merge_run_{selected}_{grp[0]}", type="primary"):
+                do_merge(grp)
+            if bc[1].button("Dismiss", key=f"merge_dismiss_{selected}_{grp[0]}"):
+                dismiss(SE.suggestion_key("merge", grp))
+
+    def edit_buttons(scene) -> None:
+        sid = scene["scene_id"]
+        if sid in split_sugg:
+            wc = st.columns([4, 1])
+            wc[0].warning(f"✂️ {fmt_dur(SE.scene_duration(scene))} long — consider splitting.")
+            if wc[1].button("Dismiss", key=f"split_dismiss_{selected}_{sid}"):
+                dismiss(SE.suggestion_key("split", [sid]))
+        bc = st.columns(3)
+        if bc[0].button("✂️ Split…", key=f"split_{selected}_{sid}", use_container_width=True):
+            split_dialog(sid)
+        nxt = next_of.get(sid)
+        if nxt is not None and bc[1].button("🔗 Combine with next", key=f"merge_next_{selected}_{sid}",
+                                            use_container_width=True,
+                                            help=f"Join this scene and scene {nxt} into one."):
+            do_merge([sid, nxt])
+        edit = scene.get("edit") or {}
+        if edit.get("kind") == "merge" or edit.get("kind") == "split" or "split_from" in scene:
+            label = "↩️ Undo combine" if edit.get("kind") == "merge" else "↩️ Undo split"
+            if bc[2].button(label, key=f"undo_{selected}_{sid}", use_container_width=True):
+                do_undo(sid)
+
     BACK_TO_TOP = (
         '<a href="#reviewer-top" target="_self" style="display:inline-block;padding:0.4rem 0.9rem;'
         'border:1px solid rgba(128,128,128,0.4);border-radius:0.5rem;text-decoration:none;">'
@@ -231,12 +481,16 @@ else:
         st.info("No scenes match these filters.")
     elif not review_mode:
         for scene, current_tags, trimmed_to in shown:
+            grp = merge_group_of.get(scene["scene_id"])
+            if grp and grp[0] == scene["scene_id"]:
+                merge_banner(grp, buttons=True)
             cols = st.columns([1, 2])
             with cols[0]:
                 scene_header(scene, trimmed_to, star_button=True)
             with cols[1]:
-                st.markdown(f"**Scene {scene['scene_id']}**  ·  {scene['start_tc']} → {scene['end_tc']}")
+                st.markdown(scene_title(scene))
                 st.markdown("Tags: " + ", ".join(f"`{t}`" for t in current_tags))
+                edit_buttons(scene)
             st.divider()
         st.markdown(BACK_TO_TOP, unsafe_allow_html=True)
     else:
@@ -262,11 +516,17 @@ else:
 
             for scene, current_tags, trimmed_to in shown:
                 sid = scene["scene_id"]
+                grp = merge_group_of.get(sid)
+                if grp and grp[0] == sid:
+                    merge_banner(grp, buttons=False)
                 cols = st.columns([1, 2])
                 with cols[0]:
                     scene_header(scene, trimmed_to)
                 with cols[1]:
-                    st.markdown(f"**Scene {sid}**  ·  {scene['start_tc']} → {scene['end_tc']}")
+                    st.markdown(scene_title(scene))
+                    if sid in split_sugg:
+                        st.warning(f"✂️ {fmt_dur(SE.scene_duration(scene))} long — consider splitting "
+                                   "(turn off Review mode to split).")
                     st.multiselect(
                         "Tags", options=sorted(set(CANDIDATE_LABELS) | set(current_tags)),
                         default=current_tags, key=f"tags_{selected}_{sid}",

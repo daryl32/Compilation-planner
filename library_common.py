@@ -227,12 +227,19 @@ def push_pending(token: dict) -> dict:
     """Upload every pending file to Drive: plain stems are video catalogues
     (CATALOGUE_DIR → scene-labeling/catalogue); "audio:<stem>" entries are
     track catalogues (AUDIO_DIR → scene-labeling/audio_catalogue), e.g. ones
-    the server analysed. Returns {entry: error} for any that failed (those stay pending)."""
+    the server analysed; "thumb:<video_id>/<file>" entries are thumbnails
+    (CATALOGUE_DIR/thumbnails → scene-labeling/catalogue/thumbnails).
+    Returns {entry: error} for any that failed (those stay pending)."""
     from drive_oauth import push_file_with_oauth
     failed = {}
     for stem in sorted(read_pending()):
         if stem.startswith("audio:"):
             path, folder = AUDIO_DIR / f"{stem[6:]}.json", "scene-labeling/audio_catalogue"
+        elif stem.startswith("thumb:"):
+            # "thumb:<video_id>/<file>" — a thumbnail the Reviewer made for a split scene.
+            vid, _, name = stem[6:].partition("/")
+            path = CATALOGUE_DIR / "thumbnails" / vid / name
+            folder = f"scene-labeling/catalogue/thumbnails/{vid}"
         else:
             path, folder = CATALOGUE_DIR / f"{stem}.json", "scene-labeling/catalogue"
         if not path.exists():

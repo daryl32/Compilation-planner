@@ -274,7 +274,8 @@ MIN_LEFTOVER_SEC = 0.5
 
 def build_footage_queues(candidate_video_ids: tuple, tag_filter: tuple, video_time_ranges: dict = None) -> dict:
     """video_id -> list of mutable 'span' dicts, one per usable scene, sorted
-    by scene_id (chronological order within that video). Each span tracks how
+    by start time (chronological order within that video — not scene_id, which
+    stops being chronological once the Reviewer splits a scene). Each span tracks how
     much of that scene's footage is still unused — segments consume from the
     front of a span, and any leftover stays available for a later segment to
     pick up. motion_norm is normalized PER VIDEO, matching the previous
@@ -301,7 +302,7 @@ def build_footage_queues(candidate_video_ids: tuple, tag_filter: tuple, video_ti
         time_range = video_time_ranges.get(video_id)
 
         spans = []
-        for scene in sorted(filtered, key=lambda s: s["scene_id"]):
+        for scene in sorted(filtered, key=lambda s: (_tc_to_seconds(s["start_tc"]), s["scene_id"])):
             scene_start_sec = _tc_to_seconds(scene["start_tc"])
             scene_end_sec = _tc_to_seconds(scene["end_tc"])
             eff_start, eff_end = _overlap_with_range(scene_start_sec, scene_end_sec, time_range)
@@ -1805,7 +1806,7 @@ def skip_span(queues: dict, video_id: str, scene_id: int, sequential: bool = Fal
     scene's span no longer exists (already used or already skipped).
 
     sequential=True also discards every OTHER remaining span in this video
-    with a smaller scene_id, not just the exact one skipped. Without this,
+    that starts earlier, not just the exact one skipped. Without this,
     skipping straight to a much later scene_id (jumping over several scenes
     the search never individually touched) left those in-between scenes
     sitting untouched in the queue — free to resurface as a candidate on a
@@ -1816,7 +1817,9 @@ def skip_span(queues: dict, video_id: str, scene_id: int, sequential: bool = Fal
     if not any(s["scene_id"] == scene_id for s in spans):
         raise ValueError(f"No available span for {video_id} scene {scene_id} to skip — it may already be gone.")
     if sequential:
-        spans[:] = [s for s in spans if s["scene_id"] > scene_id]
+        # By start time, not scene_id (not chronological after a Reviewer split).
+        t0 = next(s["scene_start_sec"] for s in spans if s["scene_id"] == scene_id)
+        spans[:] = [s for s in spans if s["scene_start_sec"] > t0]
     else:
         spans[:] = [s for s in spans if s["scene_id"] != scene_id]
 
@@ -1893,7 +1896,9 @@ def carve_span(queues: dict, video_id: str, scene_id: int, window_offset_sec: fl
 
             spans[i:i + 1] = replacements
             if sequential:
-                spans[:] = [s for s in spans if s["scene_id"] >= scene_id]
+                # By start time, not scene_id (not chronological after a Reviewer split).
+                t0 = span["scene_start_sec"]
+                spans[:] = [s for s in spans if s["scene_start_sec"] >= t0]
             return pick
 
     raise ValueError(

@@ -46,6 +46,14 @@ def _catalogue_signature() -> tuple:
     return tuple(sig)
 
 
+def _scene_order(s: dict) -> tuple:
+    """Time order — scene_id isn't chronological once the Reviewer has split a scene."""
+    try:
+        return (tc_to_seconds(s["start_tc"]), s["scene_id"])
+    except (KeyError, ValueError):
+        return (float("inf"), s.get("scene_id", 0))
+
+
 @st.cache_data(max_entries=2)
 def load_library(signature: tuple) -> dict:
     """video_id -> slim summary of its catalogue (no motion curves)."""
@@ -58,7 +66,7 @@ def load_library(signature: tuple) -> dict:
         if not (isinstance(cat, dict) and "video_id" in cat and "scenes" in cat):
             continue
         scenes = []
-        for s in sorted(cat["scenes"], key=lambda s: s["scene_id"]):
+        for s in sorted(cat["scenes"], key=_scene_order):
             try:
                 start, end = tc_to_seconds(s["start_tc"]), tc_to_seconds(s["end_tc"])
             except (KeyError, ValueError):
