@@ -16,6 +16,7 @@ Usage in planner_app.py:
 """
 
 import json
+import time
 import urllib.parse
 import requests
 from pathlib import Path
@@ -48,7 +49,10 @@ def get_auth_url(state: str = "") -> str:
         "redirect_uri":  REDIRECT_URI,
         "response_type": "code",
         "scope":         " ".join(SCOPES),
-        "access_type":   "online",
+        # offline: Google also returns a refresh token, so the connection keeps
+        # working after the 1-hour access token expires (with "online" there
+        # is none, and saving after an hour failed with a refresh error).
+        "access_type":   "offline",
         "prompt":        "consent",
     }
     if state:
@@ -66,14 +70,31 @@ def exchange_code_for_token(code: str) -> dict | None:
         "grant_type":    "authorization_code",
     })
     if resp.status_code == 200:
-        return resp.json()
+        token = resp.json()
+        token["obtained_at"] = time.time()
+        return token
     return None
+
+
+EXPIRED_MESSAGE = ("Your Google Drive connection has expired — click Disconnect Drive, then "
+                   "Connect Google Drive again (your edits are kept and will be saved after).")
+
+
+def token_expired(token_dict: dict) -> bool:
+    """True when the access token is past its lifetime and can't be renewed
+    (a connection made before refresh tokens were requested)."""
+    if not token_dict or token_dict.get("refresh_token"):
+        return False
+    obtained = float(token_dict.get("obtained_at", 0))
+    lifetime = float(token_dict.get("expires_in", 3600))
+    return not obtained or time.time() > obtained + lifetime - 60
 
 
 def _get_service(token_dict: dict):
     """Build a Drive API service from a token dict."""
     creds = Credentials(
         token=token_dict["access_token"],
+        refresh_token=token_dict.get("refresh_token"),
         token_uri=TOKEN_URL,
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
@@ -125,6 +146,8 @@ def push_file_with_oauth(
     blocked = drive_writes_blocked()
     if blocked:
         return blocked
+    if token_expired(token_dict):
+        return EXPIRED_MESSAGE
     try:
         service = _get_service(token_dict)
         import mimetypes
@@ -155,6 +178,8 @@ def push_file_with_oauth(
             ).execute()
         return None
     except Exception as e:
+        if "refresh" in str(e).lower() and ("token" in str(e).lower() or "credentials" in str(e).lower()):
+            return EXPIRED_MESSAGE
         return str(e)
 
 

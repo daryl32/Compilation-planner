@@ -25,19 +25,29 @@ APP_VERSION = "1.6.0"
 # ImportError, when oauth_config.py is missing — so catch everything here.
 try:
     from drive_oauth import (
-        get_auth_url, exchange_code_for_token, push_file_with_oauth,
+        get_auth_url, exchange_code_for_token, push_file_with_oauth, token_expired,
         SESSION_KEY as DRIVE_SESSION_KEY,
     )
     OAUTH_AVAILABLE = True
 except Exception:
     get_auth_url = exchange_code_for_token = push_file_with_oauth = None
+    token_expired = lambda token: False
     DRIVE_SESSION_KEY = "_drive_oauth_token"
     OAUTH_AVAILABLE = False
 
 
 def drive_token():
-    """The signed-in Drive token for this session, or None."""
-    return st.session_state.get(DRIVE_SESSION_KEY) if OAUTH_AVAILABLE else None
+    """The signed-in Drive token for this session, or None. A connection that
+    has expired and can't renew itself is dropped, so the sidebar offers to
+    reconnect instead of every save failing."""
+    if not OAUTH_AVAILABLE:
+        return None
+    token = st.session_state.get(DRIVE_SESSION_KEY)
+    if token and token_expired(token):
+        st.session_state.pop(DRIVE_SESSION_KEY, None)
+        st.session_state["_drive_expired_note"] = True
+        return None
+    return token
 
 
 def _sign_in_screen(name: str) -> None:
@@ -91,6 +101,8 @@ def _sidebar(page_path: str) -> None:
                     st.session_state.pop(DRIVE_SESSION_KEY, None)
                     st.rerun()
             else:
+                if st.session_state.pop("_drive_expired_note", False):
+                    st.warning("Your Google Drive connection expired — please connect again.")
                 st.caption("Connect to save plans, projects, previews, tag corrections, labels "
                            "and library ranges to your Google Drive.")
                 auth_url = get_auth_url(state=page_path)
