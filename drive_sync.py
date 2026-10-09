@@ -30,6 +30,12 @@ SCOPES = ["https://www.googleapis.com/auth/drive"]
 DRIVE_SCENE_LABELING = "scene-labeling"
 
 
+def q_escape(value: str) -> str:
+    """Escape a value for a Drive search query (q=…name='…'): backslashes and
+    single quotes must be backslash-escaped, e.g. "Movin' To The Sun"."""
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
+
+
 def _get_service():
     from googleapiclient.discovery import build
     from google.oauth2 import service_account
@@ -41,7 +47,7 @@ def _get_service():
 
 def _find_folder(service, name: str, parent_id: str = None) -> str | None:
     """Return the Drive folder ID for `name`, optionally within `parent_id`."""
-    q = f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    q = f"name='{q_escape(name)}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
     if parent_id:
         q += f" and '{parent_id}' in parents"
     resp = service.files().list(q=q, fields="files(id, name)").execute()
@@ -88,7 +94,7 @@ def _upload_file(service, local_path: Path, folder_id: str) -> None:
 
     # Check if file already exists in folder
     resp = service.files().list(
-        q=f"name='{local_path.name}' and '{folder_id}' in parents and trashed=false",
+        q=f"name='{q_escape(local_path.name)}' and '{folder_id}' in parents and trashed=false",
         fields="files(id)",
     ).execute()
     existing = resp.get("files", [])
@@ -236,9 +242,8 @@ def download_source_video(drive_rel_path: str, dest: Path, progress_callback=Non
                         f"the service account?")
 
         file_name = parts[-1]
-        safe = file_name.replace("'", "\\'")
         resp = service.files().list(
-            q=f"name='{safe}' and '{parent_id}' in parents and trashed=false",
+            q=f"name='{q_escape(file_name)}' and '{parent_id}' in parents and trashed=false",
             fields="files(id, name, size)",
         ).execute()
         files = resp.get("files", [])
