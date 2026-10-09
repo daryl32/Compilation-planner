@@ -3851,6 +3851,62 @@ def load_project(path: Path) -> list:
     return _apply_project_load_dict(data)
 
 
+def _canon(value):
+    """Lists of pairs (saved sets, e.g. excluded clips) in a fixed order — sets have none."""
+    if isinstance(value, dict):
+        return {k: _canon(v) for k, v in value.items()}
+    if isinstance(value, list):
+        items = [_canon(v) for v in value]
+        if items and all(isinstance(v, list) for v in items):
+            items.sort(key=lambda v: json.dumps(v, sort_keys=True, default=str))
+        return items
+    return value
+
+
+def _normalise(data: dict) -> dict:
+    """JSON round-trip (tuples → lists, int keys → str, sets → sorted lists) so saved and
+    current compare like for like."""
+    return _canon(json.loads(json.dumps(data, default=list)))
+
+
+def _remember_project(name: str, data: dict) -> None:
+    """Track this project as the one being worked on (for prefill and 'unsaved changes')."""
+    st.session_state["_loaded_project"] = {"name": name, "data": _normalise(data)}
+
+
+def _project_changes(loaded: dict) -> int:
+    """How many saved areas of the remembered project differ from the current session.
+    Only what the file holds is compared — settings it never had (e.g. defaults added
+    since) don't count — and for tick boxes only the ticked ones matter."""
+    saved = loaded["data"]
+    current = _normalise(_build_project_save_dict())
+    changed = 0
+    for key, value in saved.items():
+        if key.startswith("_"):
+            continue
+        now = current.get(key)
+        if key.endswith("_pick_state"):
+            value = {k for k, v in (value or {}).items() if v}
+            now = {k for k, v in (now or {}).items() if v}
+        if now != value:
+            changed += 1
+    return changed
+
+
+def _do_save_project(name: str) -> None:
+    out_path, drive_err = save_project(name)
+    _remember_project(out_path.stem, _build_project_save_dict())
+    st.session_state["_prefill_project_name"] = out_path.stem
+    if drive_err:
+        notice = ("warning", f"Saved locally but Drive upload failed: {drive_err}")
+    elif _DRIVE_SYNC_AVAILABLE:
+        notice = ("success", f"Saved and uploaded to Drive: {out_path.name}")
+    else:
+        notice = ("success", f"Saved as {out_path.name}")
+    st.session_state["_project_notices"] = [notice]
+    st.rerun()
+
+
 def list_saved_projects() -> list:
     if not PROJECTS_DIR.exists():
         return []
@@ -3991,6 +4047,9 @@ if _reopen:
     st.session_state["_audio_appscope"] = _appscope
     st.session_state["_reopen_notice"] = {**{k: v for k, v in _reopen.items() if k != "data"},
                                           "warnings": _reopen_warnings}
+    st.session_state.pop("_loaded_project", None)   # a render's state isn't that saved project's
+    if _reopen.get("project_name"):
+        st.session_state["_prefill_project_name"] = _reopen["project_name"]
     st.rerun()
 _reopen_notice = st.session_state.pop("_reopen_notice", None)
 if _reopen_notice:
@@ -4004,29 +4063,48 @@ if _reopen_notice:
     for _w in _reopen_notice.get("warnings") or []:
         st.warning(_w)
 
+# The project you loaded (or last saved) is remembered: its name is filled in for
+# saving back, and the sidebar shows when there are changes since its last save.
+if "_prefill_project_name" in st.session_state:   # set by a load/reopen — applied before the box is drawn
+    st.session_state["project_save_name"] = st.session_state.pop("_prefill_project_name")
+
 st.sidebar.header("Project")
+_loaded = st.session_state.get("_loaded_project")
+if _loaded:
+    _n_changed = _project_changes(_loaded)
+    if _n_changed:
+        st.sidebar.warning(f"📂 **{_loaded['name']}** — unsaved changes ({_n_changed} area"
+                           f"{'' if _n_changed == 1 else 's'})")
+        if st.sidebar.button(f"💾 Save changes to '{_loaded['name']}'", type="primary",
+                             use_container_width=True, key="project_quick_save"):
+            _do_save_project(_loaded["name"])
+    else:
+        st.sidebar.caption(f"📂 **{_loaded['name']}** — all changes saved")
+for _kind, _msg in st.session_state.pop("_project_notices", []):
+    getattr(st.sidebar, _kind)(_msg)
+
 with st.sidebar.expander("💾 Save / 📂 Load", expanded=False):
     st.caption("Saves every setting plus matching progress (Auto, Manual step-through, and "
                "Choreography all at once) so you can close this and pick up again later.")
-    _save_name = st.text_input("Project name", key="project_save_name", placeholder="my-compilation")
-    if st.button("💾 Save Project", disabled=not _save_name.strip(), use_container_width=True):
-        _out_path, _drive_err = save_project(_save_name.strip())
-        if _drive_err:
-            st.warning(f"Saved locally but Drive upload failed: {_drive_err}")
-        elif _DRIVE_SYNC_AVAILABLE:
-            st.success(f"Saved and uploaded to Drive: {_out_path.name}")
-        else:
-            st.success(f"Saved as {_out_path.name}")
+    _save_name = st.text_input("Project name", key="project_save_name", placeholder="my-compilation",
+                               help="Filled in with the project you loaded — save to update it, or type a "
+                                    "new name to save a copy.")
+    _overwrites = _save_name.strip() and (PROJECTS_DIR / f"{sanitize_filename(_save_name.strip())}.json").exists()
+    if st.button("💾 Save Project" + (" (update)" if _overwrites else ""), disabled=not _save_name.strip(),
+                 use_container_width=True):
+        _do_save_project(_save_name.strip())
 
     st.divider()
     _existing_projects = list_saved_projects()
     if _existing_projects:
         _load_choice = st.selectbox("Load project", ["—"] + _existing_projects, key="project_load_choice")
         if _load_choice != "—" and st.button("📂 Load Project", use_container_width=True):
-            _load_warnings = load_project(PROJECTS_DIR / f"{_load_choice}.json")
-            for _w in _load_warnings:
-                st.warning(_w)
-            st.success(f"Loaded '{_load_choice}'.")
+            _path = PROJECTS_DIR / f"{_load_choice}.json"
+            _load_warnings = load_project(_path)
+            _remember_project(_load_choice, json.loads(_path.read_text()))
+            st.session_state["_prefill_project_name"] = _load_choice
+            st.session_state["_project_notices"] = ([("warning", _w) for _w in _load_warnings]
+                                                    + [("success", f"Loaded '{_load_choice}'.")])
             st.rerun()
     else:
         st.caption("No saved projects yet.")

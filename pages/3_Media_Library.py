@@ -908,7 +908,8 @@ def _reopen_in_planner(r: dict) -> None:
     if track_id and not (AUDIO_DIR / f"{track_id}.json").exists():
         st.warning(f"Track **{track_id}** isn't in the audio library any more — the planner will "
                    f"open on its first track instead.")
-    st.session_state["_reopen_project"] = {"data": data, "kind": kind, "label": Path(r["path"]).name}
+    st.session_state["_reopen_project"] = {"data": data, "kind": kind, "label": Path(r["path"]).name,
+                                           "project_name": r.get("project_name")}
     st.switch_page("pages/1_Compilation_Planner.py")
 
 
