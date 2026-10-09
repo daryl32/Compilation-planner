@@ -1102,27 +1102,39 @@ def render_choreography_block(
                     elif display_clip.get("thumbnail") and Path(display_clip["thumbnail"]).exists():
                         st.image(display_clip["thumbnail"], width=180)
 
-                # Which trimmed clip (block-length window) this column uses: ◀ ▶ step to
-                # the previous / next one for this video (what the dropdown used to list),
-                # ↺ goes back to the automatic pick, ▶ Preview plays it with the music.
+                # Which trimmed clip (block-length window) this column uses: ⏪ ◀ ▶ ⏩ step
+                # back/forward 5 or 1 through this video's trimmed clips, the slider jumps
+                # anywhere in the list, ↺ goes back to the automatic pick, 🎵 Preview plays
+                # it with the music.
                 sel_idx = _clip_index(clips, display_clip)
                 _show_clip[video_id] = (display_clip, clips, sel_idx)
-                nav = st.columns([1, 1, 1])
-                with nav[0]:
-                    if st.button("◀", key=f"chor_prev_{seg_idx}_{video_id}", use_container_width=True,
-                                 disabled=sel_idx is None or sel_idx <= 0, help="Previous trimmed clip"):
-                        _chor_step(overrides, video_id, clips, sel_idx, -1)
-                        rerun_fragment()
-                with nav[1]:
+                _at_start = sel_idx is None or sel_idx <= 0
+                _at_end = sel_idx is None or sel_idx >= len(clips) - 1
+                nav = st.columns(5)
+                for _col, (_lbl, _step, _off, _tip) in zip(
+                        [nav[0], nav[1], nav[3], nav[4]],
+                        [("⏪", -CHOR_SKIP, _at_start, f"Back {CHOR_SKIP} trimmed clips"),
+                         ("◀", -1, _at_start, "Previous trimmed clip"),
+                         ("▶", +1, _at_end, "Next trimmed clip"),
+                         ("⏩", +CHOR_SKIP, _at_end, f"Forward {CHOR_SKIP} trimmed clips")]):
+                    with _col:
+                        if st.button(_lbl, key=f"chor_step{_step:+d}_{seg_idx}_{video_id}",
+                                     use_container_width=True, disabled=_off, help=_tip):
+                            _chor_step(overrides, video_id, clips, sel_idx, _step)
+                            rerun_fragment()
+                with nav[2]:
                     if st.button("↺", key=f"chor_auto_{seg_idx}_{video_id}", use_container_width=True,
                                  disabled=current_key is None, help="Back to the automatic pick"):
                         overrides.pop(video_id, None)
                         rerun_fragment()
-                with nav[2]:
-                    if st.button("▶", key=f"chor_next_{seg_idx}_{video_id}", use_container_width=True,
-                                 disabled=sel_idx is None or sel_idx >= len(clips) - 1, help="Next trimmed clip"):
-                        _chor_step(overrides, video_id, clips, sel_idx, +1)
-                        rerun_fragment()
+                if sel_idx is not None and len(clips) > 1:
+                    # Kept in step with ◀ ▶ / Auto: set to the current position before it's drawn;
+                    # dragging it selects that clip (on_change runs before the rerun).
+                    _slider_key = f"chor_slider_{seg_idx}_{video_id}"
+                    st.session_state[_slider_key] = sel_idx + 1
+                    st.slider("Trimmed clip", 1, len(clips), key=_slider_key, label_visibility="collapsed",
+                              on_change=_chor_slider_changed, args=(overrides, video_id, clips, _slider_key),
+                              help="Drag to skip through this video's trimmed clips")
 
                 if display_clip is not None:
                     auto_tag = "⭐ Auto pick — " if current_key is None else ""
@@ -1166,11 +1178,22 @@ def _clip_index(clips: list, clip) -> int | None:
                  if c["scene_id"] == clip["scene_id"] and abs(c["offset_sec"] - clip["offset_sec"]) < 0.1), None)
 
 
+CHOR_SKIP = 5   # trimmed clips skipped by ⏪ / ⏩ in Choreography
+
+
 def _chor_step(overrides: dict, video_id: str, clips: list, idx, step: int) -> None:
-    """Select the previous/next trimmed clip for this column (same list the dropdown had)."""
-    if idx is None:
+    """Move this column's trimmed clip by `step` (±1 or ±CHOR_SKIP), stopping at
+    the first / last clip rather than refusing a jump that would overshoot."""
+    if idx is None or not clips:
         return
-    j = idx + step
+    j = max(0, min(len(clips) - 1, idx + step))
+    if j != idx:
+        overrides[video_id] = (clips[j]["scene_id"], clips[j]["offset_sec"])
+
+
+def _chor_slider_changed(overrides: dict, video_id: str, clips: list, slider_key: str) -> None:
+    """Choreography card slider moved: select that trimmed clip (1-based position)."""
+    j = int(st.session_state.get(slider_key, 1)) - 1
     if 0 <= j < len(clips):
         overrides[video_id] = (clips[j]["scene_id"], clips[j]["offset_sec"])
 
@@ -1232,18 +1255,19 @@ def _render_chor_preview_panel(seg_idx: int, seg: dict, video_id: str, shown: tu
                        f"{format_mmss(clip['scene_start_sec'] + clip['offset_sec'])}  ·  "
                        f"motion {clip['motion_norm']:.2f}  ·  trimmed clip {pos}"
                        + (f"  ·  {', '.join(clip.get('tags', []))}" if clip.get("tags") else ""))
-        cols = st.columns([1, 1, 2, 1])
-        with cols[0]:
-            if st.button("◀ Previous", key=f"chor_pp_{seg_idx}_{video_id}", use_container_width=True,
-                         disabled=idx is None or idx <= 0):
-                _chor_step(overrides, video_id, clips, idx, -1)
-                rerun_fragment()
-        with cols[1]:
-            if st.button("Next ▶", key=f"chor_pn_{seg_idx}_{video_id}", use_container_width=True,
-                         disabled=idx is None or idx >= len(clips) - 1):
-                _chor_step(overrides, video_id, clips, idx, +1)
-                rerun_fragment()
-        with cols[2]:
+        cols = st.columns([1, 1, 1, 1, 2, 1])
+        _at_start = idx is None or idx <= 0
+        _at_end = idx is None or idx >= len(clips) - 1
+        for _col, (_lbl, _step, _off) in zip(cols[:4], [(f"⏪ {CHOR_SKIP}", -CHOR_SKIP, _at_start),
+                                                       ("◀ Previous", -1, _at_start),
+                                                       ("Next ▶", +1, _at_end),
+                                                       (f"{CHOR_SKIP} ⏩", +CHOR_SKIP, _at_end)]):
+            with _col:
+                if st.button(_lbl, key=f"chor_p{_step:+d}_{seg_idx}_{video_id}", use_container_width=True,
+                             disabled=_off):
+                    _chor_step(overrides, video_id, clips, idx, _step)
+                    rerun_fragment()
+        with cols[4]:
             def _use_and_close():
                 if clip is not None and video_id not in overrides:
                     overrides[video_id] = (clip["scene_id"], clip["offset_sec"])  # lock in what you heard
@@ -1251,7 +1275,7 @@ def _render_chor_preview_panel(seg_idx: int, seg: dict, video_id: str, shown: tu
                 st.session_state["chor_preview"] = None
             st.button("✔ Use this clip", key=f"chor_puse_{seg_idx}_{video_id}", type="primary",
                       use_container_width=True, on_click=_use_and_close, disabled=clip is None)
-        with cols[3]:
+        with cols[5]:
             if st.button("Close", key=f"chor_pclose_{seg_idx}_{video_id}", use_container_width=True):
                 st.session_state["chor_preview"] = None
                 rerun_fragment()
