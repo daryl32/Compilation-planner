@@ -5,6 +5,9 @@ Media Library — two libraries, picked at the top of the page:
   Audio:  search, filter and sort the music tracks, see their energy shape
           and play them; analyse new tracks (and add the extra cut-finding
           analysis to existing ones) on the server.
+  Analytics: what your rated renders say about the planner settings behind
+          them — one card per area of settings, with an insight and a
+          suggestion each (read-only; nothing feeds back into the planner).
   Renders: the saved Render Preview MP4s — track, length, the videos and clips
           each one used, the planner settings behind it; play, rate, keep,
           download its plan, delete, and clean up old ones.
@@ -31,7 +34,7 @@ from page_setup import page_setup, drive_token
 PAGE_SIZE = 20
 
 page_setup("Media Library", "pages/3_Media_Library.py", title="📁 Media Library")
-library_kind = st.radio("Library", ["🎬 Videos", "🎵 Audio", "🎞️ Renders"], horizontal=True,
+library_kind = st.radio("Library", ["🎬 Videos", "🎵 Audio", "🎞️ Renders", "📈 Analytics"], horizontal=True,
                         key="lib_kind", label_visibility="collapsed")
 
 
@@ -1009,8 +1012,11 @@ def _render_render_detail(r: dict, update_user_fields) -> None:
     if new != {"rating": user["rating"], "keep": user["keep"], "notes": user["notes"]}:
         update_user_fields(path, **new)
         from renders import on_drive, sync_sidecar
-        if on_drive(r) and drive_token():
-            sync_sidecar(path, drive_token())   # keep the Drive backup of these details current
+        if on_drive(r):
+            # Keep the Drive backup of these details current — now, or once Drive is connected.
+            if not (drive_token() and sync_sidecar(path, drive_token()) is None):
+                from library_common import mark_pending
+                mark_pending(f"render:{name}")
         st.rerun()
 
     plan = r.get("plan")
@@ -1068,6 +1074,21 @@ def _render_drive_panel(renders: list) -> None:
         st.caption("Renders are saved to **scene-labeling/previews** in your Google Drive as they're made "
                    "(when Drive is connected). Once there, the server copy can go — playback, thumbnails "
                    "and comparisons then read them from Drive.")
+        try:
+            from drive_sync import credentials_available
+            can_check = credentials_available()
+        except Exception:
+            can_check = False
+        if can_check and st.button("🔄 Check Drive for renders", key="ren_restore",
+                                   help="Brings back the details of any render that's on Google Drive but "
+                                        "missing here, and marks renders already on Drive as uploaded. "
+                                        "Also runs with every Drive sync."):
+            from renders import restore_from_drive
+            with st.spinner("Checking Google Drive…"):
+                res = restore_from_drive()
+            st.session_state["ren_flash_errors"] = res["errors"][:10]
+            st.toast(f"Restored {res['restored']} render(s), matched {res['linked']} already on Drive.")
+            st.rerun()
         auto = st.toggle("Clear renders from the server automatically once they're on Drive",
                          value=auto_clear_enabled(), key="ren_auto_clear")
         if auto != auto_clear_enabled():
@@ -1171,6 +1192,93 @@ def _render_cleanup_panel(renders: list, delete_render, format_size) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Analytics
+# ---------------------------------------------------------------------------
+
+_SERIES = "#2a78d6"   # single-series mark colour (reads on light and dark backgrounds)
+
+
+def _chart_layout(fig, height: int, x_title: str, y_title: str = None):
+    fig.update_layout(
+        height=height, margin=dict(l=4, r=12, t=6, b=4), showlegend=False,
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        hoverlabel=dict(font_size=12),
+    )
+    fig.update_xaxes(title_text=x_title, title_font_size=11, tickfont_size=10,
+                     gridcolor="rgba(128,128,128,0.15)", zeroline=False)
+    fig.update_yaxes(title_text=y_title, title_font_size=11, tickfont_size=10,
+                     gridcolor="rgba(128,128,128,0.15)", zeroline=False)
+    return fig
+
+
+def _draw_chart(chart: dict, key: str) -> None:
+    import plotly.graph_objects as go
+    kind = chart.get("kind")
+    if kind == "bars":
+        items = chart.get("bars") or []
+        if not items:
+            return
+        counting = chart.get("count")
+        items = list(reversed(items))   # best at the top
+        xs = [g["n"] if counting else (g["mean"] or 0) for g in items]
+        labels = [f"{g['n']}" if counting else
+                  (f"{g['mean']:.1f}★  ·  {g['rated']} rated" if g["mean"] else f"no ratings  ·  {g['n']} renders")
+                  for g in items]
+        fig = go.Figure(go.Bar(
+            x=xs, y=[g["group"] for g in items], orientation="h", marker_color=_SERIES,
+            text=labels, textposition="outside", cliponaxis=False, width=0.6,
+            hovertemplate="%{y}: %{text}<extra></extra>",
+        ))
+        _chart_layout(fig, 40 + 30 * len(items), chart.get("x_title", ""))
+        if not counting:
+            fig.update_xaxes(range=[0, 5.9], dtick=1)
+        else:
+            fig.update_xaxes(range=[0, max(xs + [1]) * 1.25])
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=key)
+    elif kind == "scatter":
+        pts = chart.get("points") or []
+        if not pts:
+            st.caption("No data to plot yet.")
+            return
+        rating_axis = "y_title" not in chart
+        fig = go.Figure(go.Scatter(
+            x=[p["x"] for p in pts], y=[p["y"] for p in pts], mode="markers",
+            marker=dict(size=10, color=_SERIES, opacity=0.85, line=dict(width=2, color="rgba(255,255,255,0.9)")),
+            text=[p["name"] for p in pts],
+            hovertemplate="%{text}<br>%{x:.1f} → %{y}" + ("★" if rating_axis else " min") + "<extra></extra>",
+        ))
+        _chart_layout(fig, 230, chart.get("x_title", ""), chart.get("y_title", "Rating (★)"))
+        if rating_axis:
+            fig.update_yaxes(range=[0.5, 5.5], dtick=1)
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=key)
+
+
+def render_analytics_tab():
+    from render_analytics import build_cards
+    renders = load_renders(_renders_signature())
+    c = st.columns([2, 5])
+    period = c[0].selectbox("Renders from", ["All time", "Last 30 days", "Last 7 days"], key="ana_period")
+    c[1].caption("Theoretical for now — these insights come from your star ratings on renders and **don't "
+                 "change the planner**. Rate renders in 🎞️ Renders (ℹ️ on each one) to sharpen them.")
+    days = {"All time": None, "Last 30 days": 30, "Last 7 days": 7}[period]
+    cards = build_cards(renders, days)
+    for i in range(0, len(cards), 2):
+        cols = st.columns(2)
+        for col, card in zip(cols, cards[i:i + 2]):
+            with col, st.container(border=True):
+                st.markdown(f"#### {card['title']}")
+                st.caption(card["subtitle"])
+                _draw_chart(card["chart"], key=f"ana_{card['key']}")
+                if card.get("extra_chart"):
+                    _draw_chart(card["extra_chart"], key=f"ana_{card['key']}_2")
+                st.markdown(f"**Insight:** {card['insight']}")
+                st.markdown(f"**Try:** {card['recommendation']}")
+                if card.get("table"):
+                    with st.expander("Data"):
+                        st.dataframe(card["table"], hide_index=True, use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
 # Page
 # ---------------------------------------------------------------------------
 
@@ -1178,5 +1286,7 @@ if library_kind == "🎵 Audio":
     render_audio()
 elif library_kind == "🎞️ Renders":
     render_renders()
+elif library_kind == "📈 Analytics":
+    render_analytics_tab()
 else:
     render_videos()

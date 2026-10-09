@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import math
+import os
 import random
 import re
 import datetime
@@ -1952,7 +1953,7 @@ def compute_video_rankings(track: dict, tag_filter: tuple, time_ranges: dict,
                       if tag_filter else reference[vid])
     return VR.score_videos(
         track, load_all_audio_tracks(), feats, reference, weights, tuple(tag_filter),
-        usage=VR.recent_project_usage(PROJECTS_DIR), experimental=experimental,
+        usage=VR.combined_usage(PROJECTS_DIR, PREVIEW_DIR), experimental=experimental,
     )
 
 
@@ -2094,6 +2095,19 @@ def get_nearest_thumbnail(catalogues: dict, video_id: str, clip_start_sec: float
     return sprite.crop((c * tile_w, r * tile_h, (c + 1) * tile_w, (r + 1) * tile_h))
 
 
+def _usage_signature() -> tuple:
+    """Changes whenever a project is saved or a render is made/deleted, so the
+    ranking (its freshness metric) is recomputed then — and only then."""
+    sig = []
+    for d in (PROJECTS_DIR, PREVIEW_DIR):
+        try:
+            entries = [e for e in os.scandir(d) if e.name.endswith(".json") and not e.name.startswith(".")]
+            sig.append((len(entries), max((e.stat().st_mtime for e in entries), default=0.0)))
+        except OSError:
+            sig.append((0, 0.0))
+    return tuple(sig)
+
+
 def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list) -> dict:
     """Which videos are recommended (the top-10 ranking) and which are
     currently selected, read entirely from session_state — called by the
@@ -2112,7 +2126,7 @@ def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list)
     _experimental = bool(st.session_state.get("ranking_experimental", False))
     cache_key = (track.get("track_id"), tag_filter,
                  tuple(sorted((v, tuple(r)) for v, r in _ranges.items())),
-                 tuple(sorted(_weights.items())), _experimental)
+                 tuple(sorted(_weights.items())), _experimental, _usage_signature())
     random_seed = st.session_state.get("random_top_seed")
     cache = st.session_state.get("video_ranking_cache")
     if cache and cache["key"] == cache_key and cache.get("seed") == random_seed:

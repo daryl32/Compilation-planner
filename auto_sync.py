@@ -70,6 +70,15 @@ def run_sync(progress_callback=None) -> dict:
         except Exception as e:  # network down, credentials missing, ...
             result = {"synced": 0, "skipped": 0, "errors": [str(e)]}
 
+        # Render details (Media Library → Renders) for renders that live on Drive.
+        try:
+            from renders import restore_from_drive
+            r = restore_from_drive()
+            result["synced"] += r["restored"] + r["linked"]
+            result["errors"] += r["errors"]
+        except Exception as e:
+            result["errors"].append(f"Renders: {e}")
+
         finished = _now_iso()
         _write_status({
             "finished_at": finished,

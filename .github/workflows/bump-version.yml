@@ -1,0 +1,45 @@
+# Every push to main bumps APP_VERSION in page_setup.py and commits it back.
+#   patch by default (1.6.0 → 1.6.1)
+#   put [minor] in a pushed commit message for 1.6.0 → 1.7.0, [major] for → 2.0.0
+#   put [skip version] in the last commit message to skip the bump
+# The bump commit is pushed with the workflow token, so it doesn't start this
+# workflow again; the server's deploy webhook simply pulls it too.
+name: Bump version
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bump-version
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    if: >-
+      github.actor != 'github-actions[bot]' &&
+      !contains(github.event.head_commit.message, '[skip version]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Bump APP_VERSION
+        id: bump
+        env:
+          COMMIT_MESSAGES: ${{ join(github.event.commits.*.message, ' ') }}
+        run: echo "version=$(python3 .github/scripts/bump_version.py)" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add page_setup.py
+          git commit -m "Version $VERSION [skip version]"
+          git push origin HEAD:main

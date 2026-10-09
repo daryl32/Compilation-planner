@@ -247,6 +247,26 @@ def find_drive_file(drive_rel_path: str, service=None) -> tuple:
 _token_cache = {"token": None, "expires": 0.0}
 
 
+def list_drive_folder(drive_rel_path: str) -> tuple:
+    """(files, None) for a folder below My Drive, e.g. "scene-labeling/previews"
+    — each file {"id", "name", "modifiedTime", "size"} — or ([], error string)."""
+    try:
+        service = _get_service()
+        parent_id = None
+        for name in [p for p in drive_rel_path.replace("\\", "/").split("/") if p]:
+            parent_id = _find_folder(service, name, parent_id)
+            if not parent_id:
+                return [], f"Folder '{name}' not found in Drive"
+        return _list_files(service, parent_id), None
+    except Exception as e:
+        return [], str(e)
+
+
+def download_drive_file(file_id: str, dest: Path) -> None:
+    """Download one Drive file by id (raises on failure)."""
+    _download_file(_get_service(), file_id, Path(dest))
+
+
 def access_token() -> str:
     """A short-lived OAuth access token for the service account (cached, and
     refreshed a few minutes before it expires). Used to let ffmpeg read Drive
