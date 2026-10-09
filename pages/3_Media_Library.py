@@ -713,7 +713,7 @@ STARS = ["–", "★", "★★", "★★★", "★★★★", "★★★★★"]
 
 def render_renders():
     from renders import (format_size, clips_outside_ranges, delete_render, make_thumbnail,
-                         update_user_fields)
+                         update_user_fields, reopen_state)
     renders = load_renders(_renders_signature())
     ranges = library_ranges()
     vid_use, track_use = render_usage()
@@ -777,6 +777,11 @@ def render_renders():
         st.info("No renders match these filters.")
         return
 
+    by_name = {Path(r["path"]).name: r for r in renders}
+    st.session_state.setdefault("ren_compare", [])
+    st.session_state["ren_compare"] = [n for n in st.session_state["ren_compare"] if n in by_name]
+    _render_compare_panel(by_name, st.session_state["ren_compare"], ranges)
+
     n_pages = (len(rows) - 1) // PAGE_SIZE + 1
     page = st.number_input(f"Page (of {n_pages})", 1, n_pages, 1, key="ren_page") if n_pages > 1 else 1
     st.session_state.setdefault("ren_open_player", None)
@@ -789,7 +794,7 @@ def render_renders():
         track = r.get("track") or {}
         user = r["user"]
         with st.container(border=True):
-            cols = st.columns([2, 6, 1, 1, 1])
+            cols = st.columns([2, 6, 1, 1, 1, 1, 1])
             with cols[0]:
                 thumb = make_thumbnail(path)
                 if thumb:
@@ -835,6 +840,20 @@ def render_renders():
                     st.session_state["ren_open_detail"] = None if st.session_state["ren_open_detail"] == name else name
                     st.rerun()
             with cols[4]:
+                comparing = name in st.session_state["ren_compare"]
+                if st.button("✅" if comparing else "⚖️", key=f"ren_cmp_{name}",
+                             help="Remove from the comparison" if comparing
+                             else "Compare side by side — pick two renders"):
+                    _toggle_compare(name)
+                    st.rerun()
+            with cols[5]:
+                if st.button("↩️", key=f"ren_reopen_{name}", disabled=reopen_state(r)[0] is None,
+                             help="Open the Compilation Planner with this render's settings and matches"
+                             if r.get("project") else
+                             "Open the Compilation Planner with this render's settings (matches are rebuilt)"
+                             if r.get("plan") else "No plan was saved with this render"):
+                    _reopen_in_planner(r)
+            with cols[6]:
                 if st.button("🗑️", key=f"ren_del_{name}", disabled=user["keep"],
                              help="Kept — unkeep it (ℹ️) to delete" if user["keep"] else "Delete this render"):
                     st.session_state["ren_confirm_delete"] = name
@@ -858,6 +877,106 @@ def render_renders():
                     st.warning("This file is no longer on the server.")
             if st.session_state["ren_open_detail"] == name:
                 _render_render_detail(r, update_user_fields)
+
+
+def _toggle_compare(name: str) -> None:
+    """Keep at most two renders picked; picking a third drops the oldest pick."""
+    picked = list(st.session_state.get("ren_compare", []))
+    if name in picked:
+        picked.remove(name)
+    else:
+        picked = (picked + [name])[-2:]
+    st.session_state["ren_compare"] = picked
+
+
+def _reopen_in_planner(r: dict) -> None:
+    from renders import reopen_state
+    data, kind = reopen_state(r)
+    if data is None:
+        st.warning("This render has no saved plan, so it can't be reopened.")
+        return
+    track_id = data.get("track_id")
+    if track_id and not (AUDIO_DIR / f"{track_id}.json").exists():
+        st.warning(f"Track **{track_id}** isn't in the audio library any more — the planner will "
+                   f"open on its first track instead.")
+    st.session_state["_reopen_project"] = {"data": data, "kind": kind, "label": Path(r["path"]).name}
+    st.switch_page("pages/1_Compilation_Planner.py")
+
+
+def _fmt_setting(v) -> str:
+    if v is None:
+        return "—"
+    if isinstance(v, float):
+        return f"{v:g}"
+    if isinstance(v, (list, tuple)):
+        return ", ".join(map(str, v)) if v else "(none)"
+    return str(v)
+
+
+def _render_compare_panel(by_name: dict, picked: list, ranges: dict) -> None:
+    from renders import compare_settings, compare_videos, format_size
+    if not picked:
+        return
+    with st.container(border=True):
+        head = st.columns([6, 1])
+        if len(picked) < 2:
+            head[0].markdown(f"**⚖️ Compare** — picked **{picked[0]}**. Pick one more with ⚖️.")
+        else:
+            head[0].markdown("**⚖️ Side-by-side compare**")
+        if head[1].button("Clear", key="ren_cmp_clear"):
+            st.session_state["ren_compare"] = []
+            st.rerun()
+        if len(picked) < 2:
+            return
+        a, b = by_name[picked[0]], by_name[picked[1]]
+        longest = max(a.get("duration_sec") or 0, b.get("duration_sec") or 0)
+        start = 0
+        if longest >= 2:
+            start = st.slider("Start both players at (seconds)", 0, int(longest), 0, key="ren_cmp_start",
+                              help="Line both videos up at the same moment of the track, then press play on each.")
+        cols = st.columns(2)
+        for col, r, label in ((cols[0], a, "A"), (cols[1], b, "B")):
+            with col:
+                track = (r.get("track") or {}).get("track_id") or "Unknown track"
+                st.markdown(f"**{label}: {track}**  ·  {Path(r['path']).name}")
+                if Path(r["path"]).exists():
+                    st.video(str(r["path"]), start_time=min(start, int(r.get("duration_sec") or 0)))
+                bits = [f"⏱ {format_mmss(r.get('duration_sec') or 0)}", format_size(r.get("size_bytes"))]
+                if r.get("clip_count") is not None:
+                    bits.append(f"{r['segments']} segments · {r['clip_count']} clips · {len(r.get('videos') or [])} videos")
+                if r["user"]["rating"]:
+                    bits.append(STARS[r["user"]["rating"]])
+                st.caption("  ·  ".join(bits))
+                if r["user"]["notes"]:
+                    st.caption(f"📝 {r['user']['notes']}")
+                if st.button("↩️ Reopen this one in Planner", key=f"ren_cmp_reopen_{label}",
+                             disabled=not (r.get("project") or r.get("plan"))):
+                    _reopen_in_planner(r)
+
+        if (a.get("track") or {}).get("track_id") != (b.get("track") or {}).get("track_id"):
+            st.caption("ℹ️ These are renders of different tracks.")
+        diff = compare_settings(a, b)
+        vids = compare_videos(a, b)
+        c = st.columns(2)
+        with c[0]:
+            st.markdown("**Settings that differ**")
+            if diff:
+                st.dataframe([{"Setting": k, "A": _fmt_setting(va), "B": _fmt_setting(vb)} for k, va, vb in diff],
+                             hide_index=True, use_container_width=True)
+            elif a.get("settings") or b.get("settings"):
+                st.caption("Same planner settings — the difference is in the picks (seed, swaps, manual choices).")
+            else:
+                st.caption("Settings weren't saved for these renders.")
+        with c[1]:
+            st.markdown("**Footage per video (seconds)**")
+            if vids:
+                only_a = sum(1 for _, x, y in vids if x and not y)
+                only_b = sum(1 for _, x, y in vids if y and not x)
+                st.dataframe([{"Video": v, "A": round(x, 1), "B": round(y, 1)} for v, x, y in vids],
+                             hide_index=True, use_container_width=True, height=min(320, 38 + 35 * len(vids)))
+                st.caption(f"{len(vids) - only_a - only_b} video(s) in both · {only_a} only in A · {only_b} only in B")
+            else:
+                st.caption("Videos weren't recorded for these renders.")
 
 
 def _render_render_detail(r: dict, update_user_fields) -> None:

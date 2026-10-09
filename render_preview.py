@@ -309,7 +309,7 @@ def render_segment(entry: dict, idx: int, tmp_dir: Path, sources: SourceResolver
 
 
 def render_plan_dict(plan: dict, output_path: str, progress_callback=None, stream: bool = True,
-                     notice=None, app_version: str = None) -> dict:
+                     notice=None, app_version: str = None, extra_meta: dict = None) -> dict:
     """Core renderer, operating on an already-loaded plan dict. Used both by
     the CLI (render_plan below) and directly by the planner app on its
     in-memory plan, with no need to write/read a JSON file in between.
@@ -319,7 +319,8 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
     straight from Google Drive (see module docstring). notice(text): status
     messages, e.g. when a stream fails and a file is downloaded instead.
     Returns {"streamed": n, "downloaded": n, "local": n} source-file counts.
-    Also writes the render's metadata sidecar (renders.py) next to the MP4."""
+    Also writes the render's metadata sidecar (renders.py) next to the MP4;
+    extra_meta (e.g. the planner's full project state) is stored in it too."""
     import time
     started = time.time()
     check_ffmpeg()
@@ -396,7 +397,7 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
     try:
         from renders import write_render_metadata
         write_render_metadata(output_path, plan, render_seconds=time.time() - started,
-                              source_stats=stats, app_version=app_version)
+                              source_stats=stats, app_version=app_version, extra=extra_meta)
     except Exception as e:   # metadata is a nice-to-have — never fail a finished render over it
         print(f"Couldn't write render metadata: {e}", file=sys.stderr)
     return stats

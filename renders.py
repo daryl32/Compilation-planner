@@ -11,6 +11,11 @@ unknown).
 The sidecar also holds what you set in the Media Library's Renders tab:
 rating, notes and "keep" (kept renders can't be deleted until unkept).
 
+Renders made from the Compilation Planner also store the planner's full
+project state ("project", the same dict as a saved project), so a render can be
+reopened in the planner exactly as it was. Renders without it can still be
+reopened with the settings recovered from their plan (project_from_plan).
+
 No Streamlit here — render_preview.py (also run from the command line) uses it.
 """
 
@@ -121,9 +126,11 @@ def _user_fields(old: dict) -> dict:
 
 
 def write_render_metadata(output_path, plan: dict, render_seconds: float = None,
-                          source_stats: dict = None, app_version: str = None) -> Path:
+                          source_stats: dict = None, app_version: str = None,
+                          extra: dict = None) -> Path:
     """Write the sidecar JSON for a finished render. Keeps any rating/notes/keep
-    already on an older sidecar of the same name. Returns the sidecar path."""
+    already on an older sidecar of the same name. extra: more keys to store
+    (e.g. "project" — the planner state). Returns the sidecar path."""
     mp4 = Path(output_path)
     side = sidecar_path(mp4)
     old = {}
@@ -149,8 +156,11 @@ def write_render_metadata(output_path, plan: dict, render_seconds: float = None,
         **summarise_plan(plan),
         "settings": {k: plan[k] for k in SETTING_KEYS if k in plan},
         "plan": plan,
-        "user": _user_fields(old),
     }
+    for k, v in (extra or {}).items():
+        if k not in meta:
+            meta[k] = v
+    meta["user"] = _user_fields(old)
     _write_json(side, meta)
     return side
 
@@ -238,6 +248,79 @@ def make_thumbnail(mp4: Path, at_fraction: float = 0.3) -> Path | None:
     except (subprocess.SubprocessError, OSError):
         return None
     return out if out.exists() else None
+
+
+# ---------------------------------------------------------------------------
+# Reopening in the planner
+# ---------------------------------------------------------------------------
+
+# Plan key -> planner session key, for renders that don't carry a project.
+_PLAN_TO_PROJECT = {
+    "track_id": "track_id", "matching_mode": "matching_mode",
+    "split_screen_enabled": "split_screen_enabled", "min_clips": "min_clips", "max_clips": "max_clips",
+    "density_contrast": "density_contrast", "vary_clip_count": "vary_count",
+    "clip_count_seed": "count_seed", "min_clip_len_sec": "min_clip_len_sec",
+    "allow_same_video": "allow_same_video", "sequential_video_order": "sequential_mode",
+    "selected_videos": "committed_selected_videos", "tag_filter": "committed_tag_filter",
+}
+_SEG_METHOD_KEY = {"method": "segmentation_method"}
+
+
+def project_from_plan(plan: dict) -> dict:
+    """Planner settings recovered from an exported plan (no matching progress —
+    the planner rebuilds the matches from these settings)."""
+    data = {"_version": 1, "_from_plan": True}
+    for src, dst in _PLAN_TO_PROJECT.items():
+        if plan.get(src) is not None:
+            data[dst] = plan[src]
+    if plan.get("ramp_start") is not None and plan.get("ramp_end") is not None:
+        data["ramp_range"] = [plan["ramp_start"], plan["ramp_end"]]
+    seg = plan.get("segmentation") or {}
+    for k, v in seg.items():
+        if k == "method":
+            if v and v != "legacy":
+                data["segmentation_method"] = v
+        else:
+            data[k] = v
+    return data
+
+
+def reopen_state(meta: dict) -> tuple:
+    """(project dict, "full" | "settings") to load into the planner for this
+    render, or (None, None) if it has neither a project nor a plan."""
+    if isinstance(meta.get("project"), dict):
+        return meta["project"], "full"
+    if isinstance(meta.get("plan"), dict) and meta["plan"].get("track_id"):
+        return project_from_plan(meta["plan"]), "settings"
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# Comparing renders
+# ---------------------------------------------------------------------------
+
+def compare_settings(a: dict, b: dict) -> list:
+    """[(setting, value in a, value in b)] for planner settings that differ."""
+    sa, sb = a.get("settings") or {}, b.get("settings") or {}
+    rows = []
+    for k in sorted(set(sa) | set(sb)):
+        va, vb = sa.get(k), sb.get(k)
+        if isinstance(va, dict) or isinstance(vb, dict):
+            va, vb = va or {}, vb or {}
+            for kk in sorted(set(va) | set(vb)):
+                if va.get(kk) != vb.get(kk):
+                    rows.append((f"{k}.{kk}", va.get(kk), vb.get(kk)))
+        elif va != vb:
+            rows.append((k, va, vb))
+    return rows
+
+
+def compare_videos(a: dict, b: dict) -> list:
+    """[(video_id, seconds in a, seconds in b)] for every video in either render."""
+    sa = {v["video_id"]: v["seconds"] for v in a.get("videos") or []}
+    sb = {v["video_id"]: v["seconds"] for v in b.get("videos") or []}
+    return sorted(((vid, sa.get(vid, 0.0), sb.get(vid, 0.0)) for vid in set(sa) | set(sb)),
+                  key=lambda r: -(r[1] + r[2]))
 
 
 # ---------------------------------------------------------------------------

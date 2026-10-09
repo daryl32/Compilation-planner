@@ -3909,6 +3909,30 @@ def _run_auto_tune():
     st.session_state["auto_tune_report"] = why
 
 
+# Media Library → Renders → "Reopen in Planner": load that render's saved project
+# state (or the settings recovered from its plan) exactly like 📂 Load Project.
+_reopen = st.session_state.pop("_reopen_project", None)
+if _reopen:
+    _reopen_warnings = _apply_project_load_dict(_reopen["data"])
+    # Make the app-scope audio snapshot agree with what was just loaded.
+    _appscope = st.session_state.get("_audio_appscope", {})
+    _appscope.update({k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state})
+    st.session_state["_audio_appscope"] = _appscope
+    st.session_state["_reopen_notice"] = {**{k: v for k, v in _reopen.items() if k != "data"},
+                                          "warnings": _reopen_warnings}
+    st.rerun()
+_reopen_notice = st.session_state.pop("_reopen_notice", None)
+if _reopen_notice:
+    if _reopen_notice.get("kind") == "full":
+        st.success(f"↩️ Reopened from render **{_reopen_notice['label']}** — settings and matches "
+                   f"are as they were when it was rendered.")
+    else:
+        st.info(f"↩️ Reopened from render **{_reopen_notice['label']}** — this render was made before full "
+                f"project state was saved, so only its settings were restored. Matches are rebuilt from "
+                f"them and may differ from the render.")
+    for _w in _reopen_notice.get("warnings") or []:
+        st.warning(_w)
+
 st.sidebar.header("Project")
 with st.sidebar.expander("💾 Save / 📂 Load", expanded=False):
     st.caption("Saves every setting plus matching progress (Auto, Manual step-through, and "
@@ -5660,7 +5684,10 @@ if st.button("🎬 Render Preview", type="primary"):
     try:
         _src_stats = render_plan_dict(export_plan, str(out_path), progress_callback=_progress_tracked,
                                       stream=_stream_sources, notice=_notice,
-                                      app_version=APP_VERSION) or {}
+                                      app_version=APP_VERSION,
+                                      extra_meta={"project": _build_project_save_dict(),
+                                                  "project_name": (st.session_state.get("project_save_name") or "").strip() or None},
+                                      ) or {}
         _secs = time.time() - _render_started
         _how = []
         if _src_stats.get("streamed"):
