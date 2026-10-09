@@ -211,6 +211,63 @@ def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None,
     return {"synced": synced, "skipped": skipped, "errors": errors}
 
 
+def find_drive_file(drive_rel_path: str, service=None) -> tuple:
+    """({"id", "name", "size"}, None) for a file below My Drive, e.g.
+    "Videos-PH/clip.mp4" — or (None, error string). The first folder must be
+    shared with the service account."""
+    parts = [p for p in drive_rel_path.replace("\\", "/").split("/") if p]
+    if len(parts) < 2:
+        return None, f"Unexpected Drive path: {drive_rel_path}"
+    service = service or _get_service()
+
+    parent_id = None
+    for folder_name in parts[:-1]:
+        parent_id = _find_folder(service, folder_name, parent_id)
+        if not parent_id:
+            return None, (f"Folder '{folder_name}' not found in Drive — is it shared with "
+                          f"the service account?")
+
+    file_name = parts[-1]
+    safe = file_name.replace("'", "\\'")
+    resp = service.files().list(
+        q=f"name='{safe}' and '{parent_id}' in parents and trashed=false",
+        fields="files(id, name, size)",
+    ).execute()
+    files = resp.get("files", [])
+    if not files:
+        return None, f"'{file_name}' not found in Drive folder '{parts[-2]}'"
+    return files[0], None
+
+
+_token_cache = {"token": None, "expires": 0.0}
+
+
+def access_token() -> str:
+    """A short-lived OAuth access token for the service account (cached, and
+    refreshed a few minutes before it expires). Used to let ffmpeg read Drive
+    files directly over HTTPS — see stream_url()."""
+    import time
+    if _token_cache["token"] and time.time() < _token_cache["expires"] - 300:
+        return _token_cache["token"]
+    from google.oauth2 import service_account
+    from google.auth.transport.requests import Request
+    creds = service_account.Credentials.from_service_account_file(CREDENTIALS_PATH, scopes=SCOPES)
+    creds.refresh(Request())
+    expiry = creds.expiry.timestamp() if creds.expiry else time.time() + 3000
+    if creds.expiry and creds.expiry.tzinfo is None:   # google-auth gives naive UTC
+        from datetime import timezone
+        expiry = creds.expiry.replace(tzinfo=timezone.utc).timestamp()
+    _token_cache.update(token=creds.token, expires=expiry)
+    return creds.token
+
+
+def stream_url(file_id: str) -> str:
+    """Direct download URL for a Drive file. Supports HTTP range requests, so a
+    reader such as ffmpeg can seek and fetch only the part it needs. Needs an
+    "Authorization: Bearer <access_token()>" header."""
+    return f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&supportsAllDrives=true"
+
+
 def download_source_video(drive_rel_path: str, dest: Path, progress_callback=None) -> str | None:
     """
     Download one source video from Drive to `dest`.
@@ -223,28 +280,10 @@ def download_source_video(drive_rel_path: str, dest: Path, progress_callback=Non
     """
     try:
         from googleapiclient.http import MediaIoBaseDownload
-        parts = [p for p in drive_rel_path.replace("\\", "/").split("/") if p]
-        if len(parts) < 2:
-            return f"Unexpected Drive path: {drive_rel_path}"
         service = _get_service()
-
-        parent_id = None
-        for folder_name in parts[:-1]:
-            parent_id = _find_folder(service, folder_name, parent_id)
-            if not parent_id:
-                return (f"Folder '{folder_name}' not found in Drive — is it shared with "
-                        f"the service account?")
-
-        file_name = parts[-1]
-        safe = file_name.replace("'", "\\'")
-        resp = service.files().list(
-            q=f"name='{safe}' and '{parent_id}' in parents and trashed=false",
-            fields="files(id, name, size)",
-        ).execute()
-        files = resp.get("files", [])
-        if not files:
-            return f"'{file_name}' not found in Drive folder '{parts[-2]}'"
-        drive_file = files[0]
+        drive_file, err = find_drive_file(drive_rel_path, service)
+        if err:
+            return err
         size = int(drive_file.get("size", 0))
 
         if dest.exists() and size and dest.stat().st_size == size:
