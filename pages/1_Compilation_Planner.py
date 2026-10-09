@@ -1102,27 +1102,39 @@ def render_choreography_block(
                     elif display_clip.get("thumbnail") and Path(display_clip["thumbnail"]).exists():
                         st.image(display_clip["thumbnail"], width=180)
 
-                # Which trimmed clip (block-length window) this column uses: ◀ ▶ step to
-                # the previous / next one for this video (what the dropdown used to list),
-                # ↺ goes back to the automatic pick, ▶ Preview plays it with the music.
+                # Which trimmed clip (block-length window) this column uses: ⏪ ◀ ▶ ⏩ step
+                # back/forward 5 or 1 through this video's trimmed clips, the slider jumps
+                # anywhere in the list, ↺ goes back to the automatic pick, 🎵 Preview plays
+                # it with the music.
                 sel_idx = _clip_index(clips, display_clip)
                 _show_clip[video_id] = (display_clip, clips, sel_idx)
-                nav = st.columns([1, 1, 1])
-                with nav[0]:
-                    if st.button("◀", key=f"chor_prev_{seg_idx}_{video_id}", use_container_width=True,
-                                 disabled=sel_idx is None or sel_idx <= 0, help="Previous trimmed clip"):
-                        _chor_step(overrides, video_id, clips, sel_idx, -1)
-                        rerun_fragment()
-                with nav[1]:
+                _at_start = sel_idx is None or sel_idx <= 0
+                _at_end = sel_idx is None or sel_idx >= len(clips) - 1
+                nav = st.columns(5)
+                for _col, (_lbl, _step, _off, _tip) in zip(
+                        [nav[0], nav[1], nav[3], nav[4]],
+                        [("⏪", -CHOR_SKIP, _at_start, f"Back {CHOR_SKIP} trimmed clips"),
+                         ("◀", -1, _at_start, "Previous trimmed clip"),
+                         ("▶", +1, _at_end, "Next trimmed clip"),
+                         ("⏩", +CHOR_SKIP, _at_end, f"Forward {CHOR_SKIP} trimmed clips")]):
+                    with _col:
+                        if st.button(_lbl, key=f"chor_step{_step:+d}_{seg_idx}_{video_id}",
+                                     use_container_width=True, disabled=_off, help=_tip):
+                            _chor_step(overrides, video_id, clips, sel_idx, _step)
+                            rerun_fragment()
+                with nav[2]:
                     if st.button("↺", key=f"chor_auto_{seg_idx}_{video_id}", use_container_width=True,
                                  disabled=current_key is None, help="Back to the automatic pick"):
                         overrides.pop(video_id, None)
                         rerun_fragment()
-                with nav[2]:
-                    if st.button("▶", key=f"chor_next_{seg_idx}_{video_id}", use_container_width=True,
-                                 disabled=sel_idx is None or sel_idx >= len(clips) - 1, help="Next trimmed clip"):
-                        _chor_step(overrides, video_id, clips, sel_idx, +1)
-                        rerun_fragment()
+                if sel_idx is not None and len(clips) > 1:
+                    # Kept in step with ◀ ▶ / Auto: set to the current position before it's drawn;
+                    # dragging it selects that clip (on_change runs before the rerun).
+                    _slider_key = f"chor_slider_{seg_idx}_{video_id}"
+                    st.session_state[_slider_key] = sel_idx + 1
+                    st.slider("Trimmed clip", 1, len(clips), key=_slider_key, label_visibility="collapsed",
+                              on_change=_chor_slider_changed, args=(overrides, video_id, clips, _slider_key),
+                              help="Drag to skip through this video's trimmed clips")
 
                 if display_clip is not None:
                     auto_tag = "⭐ Auto pick — " if current_key is None else ""
@@ -1166,11 +1178,22 @@ def _clip_index(clips: list, clip) -> int | None:
                  if c["scene_id"] == clip["scene_id"] and abs(c["offset_sec"] - clip["offset_sec"]) < 0.1), None)
 
 
+CHOR_SKIP = 5   # trimmed clips skipped by ⏪ / ⏩ in Choreography
+
+
 def _chor_step(overrides: dict, video_id: str, clips: list, idx, step: int) -> None:
-    """Select the previous/next trimmed clip for this column (same list the dropdown had)."""
-    if idx is None:
+    """Move this column's trimmed clip by `step` (±1 or ±CHOR_SKIP), stopping at
+    the first / last clip rather than refusing a jump that would overshoot."""
+    if idx is None or not clips:
         return
-    j = idx + step
+    j = max(0, min(len(clips) - 1, idx + step))
+    if j != idx:
+        overrides[video_id] = (clips[j]["scene_id"], clips[j]["offset_sec"])
+
+
+def _chor_slider_changed(overrides: dict, video_id: str, clips: list, slider_key: str) -> None:
+    """Choreography card slider moved: select that trimmed clip (1-based position)."""
+    j = int(st.session_state.get(slider_key, 1)) - 1
     if 0 <= j < len(clips):
         overrides[video_id] = (clips[j]["scene_id"], clips[j]["offset_sec"])
 
@@ -1232,18 +1255,19 @@ def _render_chor_preview_panel(seg_idx: int, seg: dict, video_id: str, shown: tu
                        f"{format_mmss(clip['scene_start_sec'] + clip['offset_sec'])}  ·  "
                        f"motion {clip['motion_norm']:.2f}  ·  trimmed clip {pos}"
                        + (f"  ·  {', '.join(clip.get('tags', []))}" if clip.get("tags") else ""))
-        cols = st.columns([1, 1, 2, 1])
-        with cols[0]:
-            if st.button("◀ Previous", key=f"chor_pp_{seg_idx}_{video_id}", use_container_width=True,
-                         disabled=idx is None or idx <= 0):
-                _chor_step(overrides, video_id, clips, idx, -1)
-                rerun_fragment()
-        with cols[1]:
-            if st.button("Next ▶", key=f"chor_pn_{seg_idx}_{video_id}", use_container_width=True,
-                         disabled=idx is None or idx >= len(clips) - 1):
-                _chor_step(overrides, video_id, clips, idx, +1)
-                rerun_fragment()
-        with cols[2]:
+        cols = st.columns([1, 1, 1, 1, 2, 1])
+        _at_start = idx is None or idx <= 0
+        _at_end = idx is None or idx >= len(clips) - 1
+        for _col, (_lbl, _step, _off) in zip(cols[:4], [(f"⏪ {CHOR_SKIP}", -CHOR_SKIP, _at_start),
+                                                       ("◀ Previous", -1, _at_start),
+                                                       ("Next ▶", +1, _at_end),
+                                                       (f"{CHOR_SKIP} ⏩", +CHOR_SKIP, _at_end)]):
+            with _col:
+                if st.button(_lbl, key=f"chor_p{_step:+d}_{seg_idx}_{video_id}", use_container_width=True,
+                             disabled=_off):
+                    _chor_step(overrides, video_id, clips, idx, _step)
+                    rerun_fragment()
+        with cols[4]:
             def _use_and_close():
                 if clip is not None and video_id not in overrides:
                     overrides[video_id] = (clip["scene_id"], clip["offset_sec"])  # lock in what you heard
@@ -1251,7 +1275,7 @@ def _render_chor_preview_panel(seg_idx: int, seg: dict, video_id: str, shown: tu
                 st.session_state["chor_preview"] = None
             st.button("✔ Use this clip", key=f"chor_puse_{seg_idx}_{video_id}", type="primary",
                       use_container_width=True, on_click=_use_and_close, disabled=clip is None)
-        with cols[3]:
+        with cols[5]:
             if st.button("Close", key=f"chor_pclose_{seg_idx}_{video_id}", use_container_width=True):
                 st.session_state["chor_preview"] = None
                 rerun_fragment()
@@ -3827,6 +3851,62 @@ def load_project(path: Path) -> list:
     return _apply_project_load_dict(data)
 
 
+def _canon(value):
+    """Lists of pairs (saved sets, e.g. excluded clips) in a fixed order — sets have none."""
+    if isinstance(value, dict):
+        return {k: _canon(v) for k, v in value.items()}
+    if isinstance(value, list):
+        items = [_canon(v) for v in value]
+        if items and all(isinstance(v, list) for v in items):
+            items.sort(key=lambda v: json.dumps(v, sort_keys=True, default=str))
+        return items
+    return value
+
+
+def _normalise(data: dict) -> dict:
+    """JSON round-trip (tuples → lists, int keys → str, sets → sorted lists) so saved and
+    current compare like for like."""
+    return _canon(json.loads(json.dumps(data, default=list)))
+
+
+def _remember_project(name: str, data: dict) -> None:
+    """Track this project as the one being worked on (for prefill and 'unsaved changes')."""
+    st.session_state["_loaded_project"] = {"name": name, "data": _normalise(data)}
+
+
+def _project_changes(loaded: dict) -> int:
+    """How many saved areas of the remembered project differ from the current session.
+    Only what the file holds is compared — settings it never had (e.g. defaults added
+    since) don't count — and for tick boxes only the ticked ones matter."""
+    saved = loaded["data"]
+    current = _normalise(_build_project_save_dict())
+    changed = 0
+    for key, value in saved.items():
+        if key.startswith("_"):
+            continue
+        now = current.get(key)
+        if key.endswith("_pick_state"):
+            value = {k for k, v in (value or {}).items() if v}
+            now = {k for k, v in (now or {}).items() if v}
+        if now != value:
+            changed += 1
+    return changed
+
+
+def _do_save_project(name: str) -> None:
+    out_path, drive_err = save_project(name)
+    _remember_project(out_path.stem, _build_project_save_dict())
+    st.session_state["_prefill_project_name"] = out_path.stem
+    if drive_err:
+        notice = ("warning", f"Saved locally but Drive upload failed: {drive_err}")
+    elif _DRIVE_SYNC_AVAILABLE:
+        notice = ("success", f"Saved and uploaded to Drive: {out_path.name}")
+    else:
+        notice = ("success", f"Saved as {out_path.name}")
+    st.session_state["_project_notices"] = [notice]
+    st.rerun()
+
+
 def list_saved_projects() -> list:
     if not PROJECTS_DIR.exists():
         return []
@@ -3967,6 +4047,9 @@ if _reopen:
     st.session_state["_audio_appscope"] = _appscope
     st.session_state["_reopen_notice"] = {**{k: v for k, v in _reopen.items() if k != "data"},
                                           "warnings": _reopen_warnings}
+    st.session_state.pop("_loaded_project", None)   # a render's state isn't that saved project's
+    if _reopen.get("project_name"):
+        st.session_state["_prefill_project_name"] = _reopen["project_name"]
     st.rerun()
 _reopen_notice = st.session_state.pop("_reopen_notice", None)
 if _reopen_notice:
@@ -3980,29 +4063,48 @@ if _reopen_notice:
     for _w in _reopen_notice.get("warnings") or []:
         st.warning(_w)
 
+# The project you loaded (or last saved) is remembered: its name is filled in for
+# saving back, and the sidebar shows when there are changes since its last save.
+if "_prefill_project_name" in st.session_state:   # set by a load/reopen — applied before the box is drawn
+    st.session_state["project_save_name"] = st.session_state.pop("_prefill_project_name")
+
 st.sidebar.header("Project")
+_loaded = st.session_state.get("_loaded_project")
+if _loaded:
+    _n_changed = _project_changes(_loaded)
+    if _n_changed:
+        st.sidebar.warning(f"📂 **{_loaded['name']}** — unsaved changes ({_n_changed} area"
+                           f"{'' if _n_changed == 1 else 's'})")
+        if st.sidebar.button(f"💾 Save changes to '{_loaded['name']}'", type="primary",
+                             use_container_width=True, key="project_quick_save"):
+            _do_save_project(_loaded["name"])
+    else:
+        st.sidebar.caption(f"📂 **{_loaded['name']}** — all changes saved")
+for _kind, _msg in st.session_state.pop("_project_notices", []):
+    getattr(st.sidebar, _kind)(_msg)
+
 with st.sidebar.expander("💾 Save / 📂 Load", expanded=False):
     st.caption("Saves every setting plus matching progress (Auto, Manual step-through, and "
                "Choreography all at once) so you can close this and pick up again later.")
-    _save_name = st.text_input("Project name", key="project_save_name", placeholder="my-compilation")
-    if st.button("💾 Save Project", disabled=not _save_name.strip(), use_container_width=True):
-        _out_path, _drive_err = save_project(_save_name.strip())
-        if _drive_err:
-            st.warning(f"Saved locally but Drive upload failed: {_drive_err}")
-        elif _DRIVE_SYNC_AVAILABLE:
-            st.success(f"Saved and uploaded to Drive: {_out_path.name}")
-        else:
-            st.success(f"Saved as {_out_path.name}")
+    _save_name = st.text_input("Project name", key="project_save_name", placeholder="my-compilation",
+                               help="Filled in with the project you loaded — save to update it, or type a "
+                                    "new name to save a copy.")
+    _overwrites = _save_name.strip() and (PROJECTS_DIR / f"{sanitize_filename(_save_name.strip())}.json").exists()
+    if st.button("💾 Save Project" + (" (update)" if _overwrites else ""), disabled=not _save_name.strip(),
+                 use_container_width=True):
+        _do_save_project(_save_name.strip())
 
     st.divider()
     _existing_projects = list_saved_projects()
     if _existing_projects:
         _load_choice = st.selectbox("Load project", ["—"] + _existing_projects, key="project_load_choice")
         if _load_choice != "—" and st.button("📂 Load Project", use_container_width=True):
-            _load_warnings = load_project(PROJECTS_DIR / f"{_load_choice}.json")
-            for _w in _load_warnings:
-                st.warning(_w)
-            st.success(f"Loaded '{_load_choice}'.")
+            _path = PROJECTS_DIR / f"{_load_choice}.json"
+            _load_warnings = load_project(_path)
+            _remember_project(_load_choice, json.loads(_path.read_text()))
+            st.session_state["_prefill_project_name"] = _load_choice
+            st.session_state["_project_notices"] = ([("warning", _w) for _w in _load_warnings]
+                                                    + [("success", f"Loaded '{_load_choice}'.")])
             st.rerun()
     else:
         st.caption("No saved projects yet.")
