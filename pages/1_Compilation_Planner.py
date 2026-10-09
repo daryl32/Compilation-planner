@@ -19,6 +19,7 @@ import plotly.graph_objects as go
 from PIL import Image
 
 from render_preview import render_plan_dict, colab_to_local
+from renders import delete_render
 import video_ranking as VR
 import similarity as SIM
 import cut_scoring as CS
@@ -79,7 +80,7 @@ except ImportError:
     _DRIVE_SYNC_AVAILABLE = False
 
 # Sign-in, whitelist, Drive connect, title and the shared sidebar — see page_setup.py
-from page_setup import (page_setup, push_file_with_oauth,
+from page_setup import (page_setup, push_file_with_oauth, APP_VERSION,
                         OAUTH_AVAILABLE as _OAUTH_AVAILABLE, DRIVE_SESSION_KEY as _OAUTH_SESSION_KEY)
 page_setup("Compilation Planner", "pages/1_Compilation_Planner.py")
 # The background Drive sync timer may have pulled new catalogues/audio since
@@ -5658,7 +5659,8 @@ if st.button("🎬 Render Preview", type="primary"):
 
     try:
         _src_stats = render_plan_dict(export_plan, str(out_path), progress_callback=_progress_tracked,
-                                      stream=_stream_sources, notice=_notice) or {}
+                                      stream=_stream_sources, notice=_notice,
+                                      app_version=APP_VERSION) or {}
         _secs = time.time() - _render_started
         _how = []
         if _src_stats.get("streamed"):
@@ -5702,7 +5704,7 @@ if versions:
                 st.video(str(path))
                 st.caption(path.name)
                 if st.button("🗑️ Delete", key=f"delete_preview_{path.name}"):
-                    path.unlink(missing_ok=True)
+                    delete_render(path)   # also removes its metadata and thumbnail
                     st.rerun()
 else:
     st.caption("No previews rendered yet for this track.")

@@ -309,7 +309,7 @@ def render_segment(entry: dict, idx: int, tmp_dir: Path, sources: SourceResolver
 
 
 def render_plan_dict(plan: dict, output_path: str, progress_callback=None, stream: bool = True,
-                     notice=None) -> dict:
+                     notice=None, app_version: str = None) -> dict:
     """Core renderer, operating on an already-loaded plan dict. Used both by
     the CLI (render_plan below) and directly by the planner app on its
     in-memory plan, with no need to write/read a JSON file in between.
@@ -318,7 +318,10 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
     console-only output. stream: read sources that aren't on this machine
     straight from Google Drive (see module docstring). notice(text): status
     messages, e.g. when a stream fails and a file is downloaded instead.
-    Returns {"streamed": n, "downloaded": n, "local": n} source-file counts."""
+    Returns {"streamed": n, "downloaded": n, "local": n} source-file counts.
+    Also writes the render's metadata sidecar (renders.py) next to the MP4."""
+    import time
+    started = time.time()
     check_ffmpeg()
     sources = SourceResolver(stream=stream, notice=notice)
 
@@ -387,9 +390,16 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
         ]))
 
     print(f"\nDone: {output_path}")
-    return {"streamed": len(sources.streamed - sources.downloaded),
-            "downloaded": len(sources.downloaded),
-            "local": len(local_at_start)}
+    stats = {"streamed": len(sources.streamed - sources.downloaded),
+             "downloaded": len(sources.downloaded),
+             "local": len(local_at_start)}
+    try:
+        from renders import write_render_metadata
+        write_render_metadata(output_path, plan, render_seconds=time.time() - started,
+                              source_stats=stats, app_version=app_version)
+    except Exception as e:   # metadata is a nice-to-have — never fail a finished render over it
+        print(f"Couldn't write render metadata: {e}", file=sys.stderr)
+    return stats
 
 
 def render_plan(plan_path: str, output_path: str = "preview_output.mp4"):

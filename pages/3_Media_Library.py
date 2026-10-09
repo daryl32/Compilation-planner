@@ -5,16 +5,21 @@ Media Library — two libraries, picked at the top of the page:
   Audio:  search, filter and sort the music tracks, see their energy shape
           and play them; analyse new tracks (and add the extra cut-finding
           analysis to existing ones) on the server.
+  Renders: the saved Render Preview MP4s — track, length, the videos and clips
+          each one used, the planner settings behind it; play, rate, keep,
+          download its plan, delete, and clean up old ones.
 """
 
+import datetime
 import json
+import shutil
 import time
 from pathlib import Path
 
 import streamlit as st
 
 import config
-from config import CATALOGUE_DIR, AUDIO_DIR
+from config import CATALOGUE_DIR, AUDIO_DIR, PREVIEW_DIR
 from library_common import (
     scene_tags, tc_to_seconds, format_mmss, overlap_with_range,
     library_ranges, set_library_range, master_thumbnail_scenes,
@@ -26,7 +31,7 @@ from page_setup import page_setup
 PAGE_SIZE = 20
 
 page_setup("Media Library", "pages/3_Media_Library.py", title="📁 Media Library")
-library_kind = st.radio("Library", ["🎬 Videos", "🎵 Audio"], horizontal=True,
+library_kind = st.radio("Library", ["🎬 Videos", "🎵 Audio", "🎞️ Renders"], horizontal=True,
                         key="lib_kind", label_visibility="collapsed")
 
 
@@ -150,6 +155,7 @@ def render_videos():
     library = load_library(_catalogue_signature())
     ranges = library_ranges()
     masters = master_thumbnail_scenes()
+    vid_use, _ = render_usage()
 
     st.sidebar.header("Filter")
     name_query = st.sidebar.text_input("Search name", placeholder="part of a video name")
@@ -173,6 +179,7 @@ def render_videos():
         "Scene count": lambda r: len(r["video"]["scenes"]),
         "% reviewed": lambda r: r["stats"]["reviewed_pct"],
         "Date added": lambda r: r["video"]["added"],
+        "Times rendered": lambda r: vid_use.get(r["video"]["video_id"], 0),
     }
     sort_options = list(SORTS) if tag_filter else [k for k in SORTS if k != "Tagged footage"]
     sort_by = st.sidebar.selectbox("Sort by", sort_options,
@@ -249,6 +256,8 @@ def render_videos():
                         f"  ·  {len(video['scenes'])} scenes  ·  {stats['reviewed_pct']:.0f}% reviewed")
                 if tag_filter:
                     line += f"  ·  🏷️ {format_mmss(stats['tagged'])} tagged"
+                if vid_use.get(vid):
+                    line += f"  ·  🎞️ in {vid_use[vid]} render(s)"
                 st.caption(line)
                 if rng:
                     st.caption(f"📚 Library range {format_mmss(rng[0])}–{format_mmss(rng[1])}")
@@ -501,6 +510,7 @@ def render_analysis_panel(tracks: dict) -> None:
 
 def render_audio():
     tracks = load_audio_library(_audio_signature())
+    _, track_use = render_usage()
     render_analysis_panel(tracks)
 
     st.sidebar.header("Filter")
@@ -521,6 +531,7 @@ def render_audio():
         "Energy variation": lambda t: t["variance"],
         "Hits per minute": lambda t: t["hit_rate"],
         "Date added": lambda t: t["added"],
+        "Times rendered": lambda t: track_use.get(t["track_id"], 0),
     }
     sort_by = st.sidebar.selectbox(
         "Sort by", list(sorts), key="aud_sort",
@@ -569,6 +580,8 @@ def render_audio():
                 if t["hit_rate"]:
                     info.append(f"{t['hit_rate']:.1f} hits/min")
                 info.append(f"🔬 {t['extra_info']}" if t["extra"] else "basic analysis only")
+                if track_use.get(tid):
+                    info.append(f"🎞️ in {track_use[tid]} render(s)")
                 st.caption("  ·  ".join(info))
             with cols[1]:
                 if t["energy"] and t["extra"]:
@@ -651,10 +664,316 @@ def _render_audio_player(track_id: str, source_path: str):
 
 
 # ---------------------------------------------------------------------------
+# Renders
+# ---------------------------------------------------------------------------
+
+def _renders_signature() -> tuple:
+    """(name, mtime, size) of every render MP4 and sidecar — reloads on any change."""
+    if not PREVIEW_DIR.exists():
+        return ()
+    sig = []
+    for f in sorted([*PREVIEW_DIR.glob("*.mp4"), *PREVIEW_DIR.glob("*.json")]):
+        try:
+            st_ = f.stat()
+            sig.append((f.name, st_.st_mtime, st_.st_size))
+        except OSError:
+            continue
+    return tuple(sig)
+
+
+@st.cache_data(max_entries=2, show_spinner="Reading renders…")
+def load_renders(signature: tuple) -> list:
+    from renders import list_renders
+    return list_renders()
+
+
+def render_usage() -> tuple:
+    """(videos, tracks) Counters — how many saved renders used each one."""
+    from renders import usage_counts
+    return usage_counts(load_renders(_renders_signature()))
+
+
+def _when(iso: str) -> str:
+    try:
+        return datetime.datetime.fromisoformat(iso).strftime("%d %b %Y %H:%M")
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _age_days(iso: str) -> float:
+    try:
+        then = datetime.datetime.fromisoformat(iso)
+        return (datetime.datetime.now(then.tzinfo) - then).total_seconds() / 86400
+    except (TypeError, ValueError):
+        return 0.0
+
+
+STARS = ["–", "★", "★★", "★★★", "★★★★", "★★★★★"]
+
+
+def render_renders():
+    from renders import (format_size, clips_outside_ranges, delete_render, make_thumbnail,
+                         update_user_fields)
+    renders = load_renders(_renders_signature())
+    ranges = library_ranges()
+    vid_use, track_use = render_usage()
+
+    st.sidebar.header("Filter")
+    name_query = st.sidebar.text_input("Search track", placeholder="part of a track name", key="ren_name")
+    video_filter = st.sidebar.multiselect("Uses video", sorted(vid_use, key=str.lower), key="ren_videos",
+                                          help="Show renders that use any of these videos.")
+    min_rating = st.sidebar.selectbox("Rating at least", STARS, key="ren_rating")
+    kept_only = st.sidebar.toggle("Kept only", key="ren_kept")
+
+    st.sidebar.header("Sort")
+    sorts = {
+        "Newest": lambda r: r.get("created") or "",
+        "Track": lambda r: ((r.get("track") or {}).get("track_id") or "").lower(),
+        "Length": lambda r: r.get("duration_sec") or 0,
+        "Size": lambda r: r.get("size_bytes") or 0,
+        "Rating": lambda r: r["user"]["rating"],
+        "Videos used": lambda r: len(r.get("videos") or []),
+    }
+    sort_by = st.sidebar.selectbox("Sort by", list(sorts), key="ren_sort")
+    descending = st.sidebar.toggle("Descending", value=(sort_by != "Track"), key="ren_desc")
+
+    if not renders:
+        st.info("No renders yet — use **🎬 Render Preview** in the Compilation Planner.")
+        return
+
+    # Storage
+    total_size = sum(r.get("size_bytes") or 0 for r in renders)
+    try:
+        disk = shutil.disk_usage(PREVIEW_DIR)
+        st.progress(min(disk.used / disk.total, 1.0),
+                    text=f"💾 Disk: {format_size(disk.used)} of {format_size(disk.total)} used "
+                         f"({format_size(disk.free)} free) — renders take {format_size(total_size)}")
+    except OSError:
+        pass
+
+    _render_usage_panel(renders, vid_use, track_use)
+    _render_cleanup_panel(renders, delete_render, format_size)
+
+    rows = []
+    wanted_rating = STARS.index(min_rating)
+    for r in renders:
+        tid = (r.get("track") or {}).get("track_id") or ""
+        if name_query and name_query.lower() not in tid.lower():
+            continue
+        if video_filter and not {v["video_id"] for v in r.get("videos") or []} & set(video_filter):
+            continue
+        if r["user"]["rating"] < wanted_rating:
+            continue
+        if kept_only and not r["user"]["keep"]:
+            continue
+        rows.append(r)
+    rows.sort(key=sorts[sort_by], reverse=descending)
+
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("Renders shown", f"{len(rows)} / {len(renders)}")
+    metric_cols[1].metric("Total length", format_mmss(sum(r.get("duration_sec") or 0 for r in rows)))
+    metric_cols[2].metric("Size", format_size(sum(r.get("size_bytes") or 0 for r in rows)))
+    if not rows:
+        st.info("No renders match these filters.")
+        return
+
+    n_pages = (len(rows) - 1) // PAGE_SIZE + 1
+    page = st.number_input(f"Page (of {n_pages})", 1, n_pages, 1, key="ren_page") if n_pages > 1 else 1
+    st.session_state.setdefault("ren_open_player", None)
+    st.session_state.setdefault("ren_open_detail", None)
+    st.session_state.setdefault("ren_confirm_delete", None)
+
+    for r in rows[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]:
+        path = Path(r["path"])
+        name = path.name
+        track = r.get("track") or {}
+        user = r["user"]
+        with st.container(border=True):
+            cols = st.columns([2, 6, 1, 1, 1])
+            with cols[0]:
+                thumb = make_thumbnail(path)
+                if thumb:
+                    st.image(str(thumb), width=220)
+            with cols[1]:
+                title = f"**{track.get('track_id') or 'Unknown track'}**"
+                if user["keep"]:
+                    title += "  📌"
+                if user["rating"]:
+                    title += f"  {STARS[user['rating']]}"
+                st.markdown(title)
+                info = [f"🗓 {_when(r.get('created'))}", f"⏱ {format_mmss(r.get('duration_sec') or 0)}"]
+                if r.get("width"):
+                    info.append(f"{r['width']}×{r['height']}")
+                info.append(format_size(r.get("size_bytes")))
+                if r.get("segments") is not None:
+                    info.append(f"{r['segments']} segments ({r.get('split_segments') or 0} split-screen)")
+                    info.append(f"{r.get('clip_count') or 0} clips from {len(r.get('videos') or [])} videos")
+                if r.get("render_seconds"):
+                    info.append(f"rendered in {format_mmss(r['render_seconds'])}")
+                mode = (r.get("settings") or {}).get("matching_mode")
+                if mode:
+                    info.append(mode)
+                st.caption("  ·  ".join(info))
+                if r.get("videos"):
+                    st.markdown(" ".join(f"`{v['video_id']}` ×{v['clips']}" for v in r["videos"][:12])
+                                + (f" … +{len(r['videos']) - 12} more" if len(r["videos"]) > 12 else ""))
+                if r.get("backfilled"):
+                    st.caption("ℹ️ Made before render details were saved — the videos it used aren't known.")
+                stale = clips_outside_ranges(r, ranges)
+                if stale:
+                    st.caption(f"⚠️ {len(stale)} clip(s) are now outside their video's library range — "
+                               f"re-rendering this track would pick different footage.")
+                if user["notes"]:
+                    st.caption(f"📝 {user['notes']}")
+            with cols[2]:
+                if st.button("▶️", key=f"ren_play_{name}", help="Play this render"):
+                    st.session_state["ren_open_player"] = None if st.session_state["ren_open_player"] == name else name
+                    st.rerun()
+            with cols[3]:
+                if st.button("ℹ️", key=f"ren_detail_{name}",
+                             help="Clip list, settings, rating, notes, keep, and the plan to download"):
+                    st.session_state["ren_open_detail"] = None if st.session_state["ren_open_detail"] == name else name
+                    st.rerun()
+            with cols[4]:
+                if st.button("🗑️", key=f"ren_del_{name}", disabled=user["keep"],
+                             help="Kept — unkeep it (ℹ️) to delete" if user["keep"] else "Delete this render"):
+                    st.session_state["ren_confirm_delete"] = name
+                    st.rerun()
+
+            if st.session_state["ren_confirm_delete"] == name:
+                c = st.columns([4, 1, 1])
+                c[0].warning(f"Delete {name} from the server?")
+                if c[1].button("Delete", key=f"ren_del_yes_{name}", type="primary"):
+                    delete_render(path)
+                    st.session_state["ren_confirm_delete"] = None
+                    st.toast(f"Deleted {name}")
+                    st.rerun()
+                if c[2].button("Cancel", key=f"ren_del_no_{name}"):
+                    st.session_state["ren_confirm_delete"] = None
+                    st.rerun()
+            if st.session_state["ren_open_player"] == name:
+                if path.exists():
+                    st.video(str(path))
+                else:
+                    st.warning("This file is no longer on the server.")
+            if st.session_state["ren_open_detail"] == name:
+                _render_render_detail(r, update_user_fields)
+
+
+def _render_render_detail(r: dict, update_user_fields) -> None:
+    path = Path(r["path"])
+    name = path.name
+    user = r["user"]
+
+    c = st.columns([2, 1, 4])
+    rating = c[0].radio("Rating", STARS, index=user["rating"], horizontal=True, key=f"ren_rate_{name}")
+    keep = c[1].toggle("📌 Keep", value=user["keep"], key=f"ren_keep_{name}",
+                       help="Kept renders can't be deleted, and Clean up skips them.")
+    notes = c[2].text_input("Notes", value=user["notes"], key=f"ren_notes_{name}",
+                            placeholder="e.g. good energy in the drop, slow intro")
+    new = {"rating": STARS.index(rating), "keep": keep, "notes": notes.strip()}
+    if new != {"rating": user["rating"], "keep": user["keep"], "notes": user["notes"]}:
+        update_user_fields(path, **new)
+        st.rerun()
+
+    plan = r.get("plan")
+    if not plan:
+        st.caption("No plan was saved with this render, so there's no clip list.")
+        return
+
+    clip_rows = []
+    for i, entry in enumerate(plan.get("timeline") or [], 1):
+        t0 = (entry.get("track_time") or [0, 0])[0]
+        slots = entry.get("scenes") or []
+        for slot_i, slot in enumerate(slots, 1):
+            for link in slot.get("chain") or []:
+                clip_rows.append({
+                    "Segment": i,
+                    "At": format_mmss(t0),
+                    "Cell": f"{slot_i}/{len(slots)}" if len(slots) > 1 else "",
+                    "Video": link.get("video_id"),
+                    "From": format_mmss(link.get("clip_start_sec") or 0),
+                    "Length (s)": round(float(link.get("clip_duration_sec") or 0), 2),
+                })
+    st.markdown(f"**Clips** ({len(clip_rows)})")
+    st.dataframe(clip_rows, hide_index=True, use_container_width=True, height=min(400, 38 + 35 * len(clip_rows)))
+
+    per_video = [{"Video": v["video_id"], "Clips": v["clips"], "Seconds": round(v["seconds"], 1)}
+                 for v in sorted(r.get("videos") or [], key=lambda v: -v["seconds"])]
+    c = st.columns(2)
+    with c[0]:
+        st.markdown("**Footage per video**")
+        st.dataframe(per_video, hide_index=True, use_container_width=True)
+    with c[1]:
+        st.markdown("**Planner settings**")
+        st.json(r.get("settings") or {}, expanded=False)
+        src = r.get("sources") or {}
+        if src:
+            st.caption(f"Sources: {src.get('local', 0)} on the server, {src.get('streamed', 0)} streamed, "
+                       f"{src.get('downloaded', 0)} downloaded" + (f" · app v{r['app_version']}" if r.get("app_version") else ""))
+    st.download_button("⬇️ Download this render's plan (JSON)", data=json.dumps(plan, indent=2),
+                       file_name=f"{path.stem}_plan.json", mime="application/json", key=f"ren_plan_{name}",
+                       help="The exact plan this render was made from — import it with the Blender add-on.")
+
+
+def _render_usage_panel(renders: list, vid_use, track_use) -> None:
+    with st.expander("📊 Usage across renders"):
+        known = [r for r in renders if not r.get("backfilled")]
+        if not known:
+            st.caption("No renders with saved details yet — new renders will show here.")
+            return
+        st.caption(f"From {len(known)} render(s) with saved details"
+                   + (f" ({len(renders) - len(known)} older ones don't record their videos)."
+                      if len(known) < len(renders) else "."))
+        c = st.columns(2)
+        with c[0]:
+            st.markdown("**Most-used videos**")
+            st.dataframe([{"Video": v, "Renders": n} for v, n in vid_use.most_common(15)],
+                         hide_index=True, use_container_width=True)
+        with c[1]:
+            st.markdown("**Most-rendered tracks**")
+            st.dataframe([{"Track": t, "Renders": n} for t, n in track_use.most_common(15)],
+                         hide_index=True, use_container_width=True)
+        all_videos = set(load_library(_catalogue_signature()))
+        unused = sorted(all_videos - set(vid_use), key=str.lower)
+        if all_videos:
+            st.caption(f"🆕 {len(unused)} of {len(all_videos)} library videos haven't been in a render yet"
+                       + (": " + ", ".join(unused[:20]) + (" …" if len(unused) > 20 else "") if unused else "."))
+
+
+def _render_cleanup_panel(renders: list, delete_render, format_size) -> None:
+    with st.expander("🧹 Clean up old renders"):
+        c = st.columns(2)
+        days = c[0].number_input("Older than (days)", 1, 3650, 30, key="ren_clean_days")
+        unrated_only = c[1].toggle("Only unrated ones", value=True, key="ren_clean_unrated")
+        targets = [r for r in renders
+                   if not r["user"]["keep"]
+                   and (not unrated_only or not r["user"]["rating"])
+                   and _age_days(r.get("created")) > days]
+        st.caption("📌 Kept renders are never included.")
+        if not targets:
+            st.caption("Nothing to clean up with these settings.")
+            return
+        size = sum(r.get("size_bytes") or 0 for r in targets)
+        st.markdown(f"**{len(targets)} render(s)**, {format_size(size)}: "
+                    + ", ".join(Path(r["path"]).name for r in targets[:10])
+                    + (" …" if len(targets) > 10 else ""))
+        sure = st.checkbox(f"Yes, delete these {len(targets)} render(s)", key="ren_clean_sure")
+        if st.button("🗑️ Delete them", disabled=not sure, key="ren_clean_go"):
+            for r in targets:
+                delete_render(Path(r["path"]))
+            st.session_state["ren_clean_sure"] = False
+            st.toast(f"Deleted {len(targets)} render(s), freed {format_size(size)}.")
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Page
 # ---------------------------------------------------------------------------
 
 if library_kind == "🎵 Audio":
     render_audio()
+elif library_kind == "🎞️ Renders":
+    render_renders()
 else:
     render_videos()
