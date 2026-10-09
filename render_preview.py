@@ -387,6 +387,7 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
             "ffmpeg", "-y", "-i", str(combined_video), *sources.input_args(track_raw),
             "-map", "0:v", "-map", "1:a:0",
             "-c:v", "copy", "-c:a", "aac", "-shortest",
+            "-movflags", "+faststart",   # index at the front: plays/streams from Drive without a full download
             output_path,
         ]))
 

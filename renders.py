@@ -16,6 +16,12 @@ project state ("project", the same dict as a saved project), so a render can be
 reopened in the planner exactly as it was. Renders without it can still be
 reopened with the settings recovered from their plan (project_from_plan).
 
+Google Drive: renders are uploaded to scene-labeling/previews (with the
+user's Drive connection — the service account can't write to personal Drive).
+The sidecar records the Drive file id ("drive"). Once a render is on Drive its
+MP4 can be cleared from the server; the sidecar and thumbnail stay here, and
+playback, thumbnails and comparisons read the MP4 from Drive instead.
+
 No Streamlit here — render_preview.py (also run from the command line) uses it.
 """
 
@@ -31,6 +37,9 @@ from config import PREVIEW_DIR
 
 SIDECAR_SCHEMA = 1
 THUMB_DIR_NAME = ".thumbs"
+COMPARE_DIR_NAME = ".compare"
+SETTINGS_FILE_NAME = ".render_settings.json"
+DRIVE_FOLDER = "scene-labeling/previews"
 _PREVIEW_NAME = re.compile(r"^temp-Video-preview-(?P<track>.+)\.(?P<num>\d{3})\.mp4$")
 
 # Planner settings worth showing for a render (all come from the exported plan).
@@ -46,10 +55,15 @@ SETTING_KEYS = [
 # ---------------------------------------------------------------------------
 
 def render_files() -> list:
-    """Every render MP4 (top level of PREVIEW_DIR only — snippets/ is separate)."""
+    """Every render, as the path of its MP4 — which may no longer be on the
+    server if it was cleared after uploading to Drive (its sidecar remains).
+    Top level of PREVIEW_DIR only — snippets/ is separate."""
     if not PREVIEW_DIR.exists():
         return []
-    return sorted(p for p in PREVIEW_DIR.glob("*.mp4") if p.is_file())
+    names = {p.name for p in PREVIEW_DIR.glob("*.mp4") if p.is_file() and not p.name.startswith(".")}
+    names |= {p.with_suffix(".mp4").name for p in PREVIEW_DIR.glob("*.json")
+              if p.is_file() and not p.name.startswith(".")}
+    return sorted(PREVIEW_DIR / n for n in names)
 
 
 def sidecar_path(mp4: Path) -> Path:
@@ -188,9 +202,10 @@ def _backfill(mp4: Path) -> dict:
     return meta
 
 
-def load_render(mp4: Path) -> dict:
+def load_render(mp4: Path) -> dict | None:
     """Sidecar for one render (backfilled on first read if missing), plus
-    "path" (the MP4) and fresh "size_bytes"."""
+    "path" (the MP4), "local" (MP4 on the server) and fresh "size_bytes".
+    None for a stray sidecar whose render is neither here nor on Drive."""
     mp4 = Path(mp4)
     side = sidecar_path(mp4)
     meta = None
@@ -199,55 +214,244 @@ def load_render(mp4: Path) -> dict:
             meta = json.loads(side.read_text())
         except (ValueError, OSError):
             meta = None
-    if not isinstance(meta, dict):
+    local = mp4.exists()
+    if not isinstance(meta, dict) or "render_file" not in meta:
+        if not local:
+            return None
         meta = _backfill(mp4)
+    if not local and not on_drive(meta):
+        return None
     meta["path"] = mp4
-    try:
-        meta["size_bytes"] = mp4.stat().st_size
-    except OSError:
-        pass
+    meta["local"] = local
+    if local:
+        try:
+            meta["size_bytes"] = mp4.stat().st_size
+        except OSError:
+            pass
     meta.setdefault("user", _user_fields({}))
     return meta
 
 
 def list_renders() -> list:
-    return [load_render(p) for p in render_files()]
+    return [m for m in (load_render(p) for p in render_files()) if m]
+
+
+def _save_meta(mp4: Path, meta: dict) -> None:
+    meta = {k: v for k, v in meta.items() if k not in ("path", "local")}
+    _write_json(sidecar_path(mp4), meta)
 
 
 def update_user_fields(mp4: Path, **fields) -> None:
     """Set rating / notes / keep on a render's sidecar."""
     meta = load_render(mp4)
-    meta.pop("path", None)
+    if meta is None:
+        return
     user = _user_fields(meta)
     user.update({k: v for k, v in fields.items() if k in ("rating", "notes", "keep")})
     meta["user"] = user
-    _write_json(sidecar_path(mp4), meta)
+    _save_meta(mp4, meta)
 
 
-def delete_render(mp4: Path) -> None:
-    """Remove a render, its sidecar and its thumbnail."""
+# ---------------------------------------------------------------------------
+# Google Drive
+# ---------------------------------------------------------------------------
+
+def on_drive(meta: dict) -> bool:
+    return bool((meta or {}).get("drive", {}).get("file_id"))
+
+
+def drive_preview_url(meta: dict) -> str | None:
+    """Google Drive's own video player for this render (plays in the browser of
+    anyone signed in to Google with access to the file — i.e. you)."""
+    fid = (meta or {}).get("drive", {}).get("file_id")
+    return f"https://drive.google.com/file/d/{fid}/preview" if fid else None
+
+
+def load_settings() -> dict:
+    try:
+        data = json.loads((PREVIEW_DIR / SETTINGS_FILE_NAME).read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def auto_clear_enabled() -> bool:
+    """Clear a render's MP4 from the server as soon as it's safely on Drive (default on)."""
+    return bool(load_settings().get("auto_clear", True))
+
+
+def set_auto_clear(value: bool) -> None:
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    data = load_settings()
+    data["auto_clear"] = bool(value)
+    _write_json(PREVIEW_DIR / SETTINGS_FILE_NAME, data)
+
+
+def upload_render(mp4: Path, token: dict) -> str | None:
+    """Upload a render's MP4 (and its sidecar, as a backup) to Drive with the
+    user's Drive connection. Checks the uploaded size matches before recording
+    it. Returns None on success, error string on failure."""
+    from drive_oauth import upload_file_with_oauth
     mp4 = Path(mp4)
+    meta = load_render(mp4)
+    if meta is None or not mp4.exists():
+        return "The render isn't on the server."
+    make_thumbnail(mp4)   # while the file is still here
+    info, err = upload_file_with_oauth(token, mp4, DRIVE_FOLDER)
+    if err:
+        return err
+    local_size = mp4.stat().st_size
+    if info.get("size") and info["size"] != local_size:
+        return f"Upload incomplete ({info['size']} of {local_size} bytes) — try again."
+    meta["drive"] = {"file_id": info["id"], "size": local_size,
+                     "uploaded": datetime.datetime.now().astimezone().isoformat(timespec="seconds")}
+    _save_meta(mp4, meta)
+    sync_sidecar(mp4, token)
+    return None
+
+
+def sync_sidecar(mp4: Path, token: dict) -> str | None:
+    """Copy the current sidecar (rating, notes, …) to Drive next to the MP4."""
+    from drive_oauth import upload_file_with_oauth
+    side = sidecar_path(mp4)
+    if not side.exists():
+        return None
+    info, err = upload_file_with_oauth(token, side, DRIVE_FOLDER)
+    if err:
+        return err
+    meta = load_render(mp4)
+    if meta is not None and on_drive(meta) and meta["drive"].get("sidecar_id") != info["id"]:
+        meta["drive"]["sidecar_id"] = info["id"]
+        _save_meta(mp4, meta)
+    return None
+
+
+def clear_local(mp4: Path) -> str | None:
+    """Delete the server's copy of a render that's on Drive (sidecar and
+    thumbnail stay). Returns None on success, error string otherwise."""
+    mp4 = Path(mp4)
+    meta = load_render(mp4)
+    if meta is None:
+        return "Unknown render."
+    if not on_drive(meta):
+        return "Not on Google Drive yet — upload it first."
+    if mp4.exists():
+        if meta["drive"].get("size") and meta["drive"]["size"] != mp4.stat().st_size:
+            return "The Drive copy is a different size from the server copy — upload it again first."
+        make_thumbnail(mp4)
+        mp4.unlink()
+    return None
+
+
+def delete_render(mp4: Path, token: dict = None) -> str | None:
+    """Remove a render everywhere: its Drive copy (to the Drive bin, so it can
+    be recovered for 30 days), and the server's MP4, sidecar and thumbnail.
+    Needs the Drive connection (token) if the render is on Drive. Returns None
+    on success, error string (and nothing deleted) on failure."""
+    mp4 = Path(mp4)
+    meta = load_render(mp4) or {}
+    if on_drive(meta):
+        if not token:
+            return "This render is on Google Drive — connect Google Drive to delete it."
+        from drive_oauth import trash_file_with_oauth
+        for fid in (meta["drive"].get("file_id"), meta["drive"].get("sidecar_id")):
+            if fid:
+                err = trash_file_with_oauth(token, fid)
+                if err:
+                    return err
     for p in (mp4, sidecar_path(mp4), thumb_path(mp4)):
         p.unlink(missing_ok=True)
+    return None
+
+
+def _input_args(meta: dict) -> list:
+    """ffmpeg input arguments for a render: the server's file, or a Drive stream
+    (read with the service account, like render_preview does for sources)."""
+    mp4 = Path(meta["path"])
+    if mp4.exists():
+        return ["-i", str(mp4)]
+    if not on_drive(meta):
+        raise FileNotFoundError(f"{mp4.name} is neither on the server nor on Google Drive")
+    from drive_sync import access_token, stream_url
+    return ["-reconnect", "1", "-reconnect_delay_max", "5", "-rw_timeout", "60000000",
+            "-headers", f"Authorization: Bearer {access_token()}\r\n",
+            "-i", stream_url(meta["drive"]["file_id"])]
 
 
 def make_thumbnail(mp4: Path, at_fraction: float = 0.3) -> Path | None:
-    """A JPEG frame from the render (cached in PREVIEW_DIR/.thumbs). None on failure."""
+    """A JPEG frame from the render (cached in PREVIEW_DIR/.thumbs; read from
+    Drive if the server copy has been cleared). None on failure."""
     mp4 = Path(mp4)
     out = thumb_path(mp4)
-    if out.exists() and out.stat().st_mtime >= mp4.stat().st_mtime:
+    if out.exists() and (not mp4.exists() or out.stat().st_mtime >= mp4.stat().st_mtime):
         return out
     if shutil.which("ffmpeg") is None:
         return None
-    out.parent.mkdir(parents=True, exist_ok=True)
-    dur = probe(mp4).get("duration_sec") or 0
+    meta = load_render(mp4) if not mp4.exists() else {"path": mp4}
+    if meta is None:
+        return None
     try:
-        subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{dur * at_fraction:.2f}", "-i", str(mp4),
+        args = _input_args(meta)
+    except Exception:
+        return None
+    out.parent.mkdir(parents=True, exist_ok=True)
+    dur = (meta.get("duration_sec") if not mp4.exists() else probe(mp4).get("duration_sec")) or 0
+    try:
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{dur * at_fraction:.2f}", *args,
                         "-frames:v", "1", "-vf", "scale=320:-2", str(out)],
-                       capture_output=True, timeout=30)
+                       capture_output=True, timeout=60)
     except (subprocess.SubprocessError, OSError):
         return None
     return out if out.exists() else None
+
+
+def make_compare_video(a: dict, b: dict, audio_from: str = "A") -> tuple:
+    """One video with render a on the left and b on the right, so both play in
+    sync from a single play button. Sound comes from a or b (audio_from). Cached
+    in PREVIEW_DIR/.compare (the last few are kept). Returns (path, None) or
+    (None, error string)."""
+    out_dir = PREVIEW_DIR / COMPARE_DIR_NAME
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{Path(a['path']).stem}__vs__{Path(b['path']).stem}__{audio_from}.mp4"
+    if out.exists() and out.stat().st_size > 0:
+        out.touch()
+        return out, None
+    if shutil.which("ffmpeg") is None:
+        return None, "ffmpeg isn't installed on this server."
+    try:
+        args_a, args_b = _input_args(a), _input_args(b)
+    except Exception as e:
+        return None, str(e)
+    w, h = 640, 360
+    fit = (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+           f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=25")
+    # The shorter one holds its last frame until the longer one ends.
+    longest = max(float(a.get("duration_sec") or 0), float(b.get("duration_sec") or 0))
+    pad = f",tpad=stop_mode=clone:stop_duration={longest:.2f}" if longest else ""
+    tmp = out.with_name(out.stem + ".part.mp4")
+    cmd = ["ffmpeg", "-y", "-v", "error", *args_a, *args_b,
+           "-filter_complex",
+           f"[0:v]{fit}{pad}[l];[1:v]{fit}{pad}[r];[l][r]hstack=inputs=2[v]",
+           "-map", "[v]", "-map", f"{0 if audio_from == 'A' else 1}:a:0?",
+           "-t", f"{longest:.2f}" if longest else "36000",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-c:a", "aac",
+           "-movflags", "+faststart", str(tmp)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    except subprocess.SubprocessError as e:
+        tmp.unlink(missing_ok=True)
+        return None, str(e)
+    if proc.returncode != 0 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        import re as _re
+        return None, _re.sub(r"Bearer [A-Za-z0-9._\-]+", "Bearer ***", (proc.stderr or "ffmpeg failed")[-400:])
+    tmp.replace(out)
+    # Keep the 4 most recent comparisons.
+    olds = sorted((p for p in out_dir.glob("*.mp4") if not p.name.endswith(".part.mp4")),
+                  key=lambda p: p.stat().st_mtime, reverse=True)
+    for p in olds[4:]:
+        p.unlink(missing_ok=True)
+    return out, None
 
 
 # ---------------------------------------------------------------------------

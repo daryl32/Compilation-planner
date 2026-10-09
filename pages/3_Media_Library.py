@@ -23,10 +23,10 @@ from config import CATALOGUE_DIR, AUDIO_DIR, PREVIEW_DIR
 from library_common import (
     scene_tags, tc_to_seconds, format_mmss, overlap_with_range,
     library_ranges, set_library_range, master_thumbnail_scenes,
-    render_range_picker,
+    render_range_picker, show_render_player,
 )
 
-from page_setup import page_setup
+from page_setup import page_setup, drive_token
 
 PAGE_SIZE = 20
 
@@ -713,7 +713,7 @@ STARS = ["–", "★", "★★", "★★★", "★★★★", "★★★★★"]
 
 def render_renders():
     from renders import (format_size, clips_outside_ranges, delete_render, make_thumbnail,
-                         update_user_fields, reopen_state)
+                         update_user_fields, reopen_state, on_drive)
     renders = load_renders(_renders_signature())
     ranges = library_ranges()
     vid_use, track_use = render_usage()
@@ -742,15 +742,16 @@ def render_renders():
         return
 
     # Storage
-    total_size = sum(r.get("size_bytes") or 0 for r in renders)
+    total_size = sum(r.get("size_bytes") or 0 for r in renders if r.get("local"))
     try:
         disk = shutil.disk_usage(PREVIEW_DIR)
         st.progress(min(disk.used / disk.total, 1.0),
-                    text=f"💾 Disk: {format_size(disk.used)} of {format_size(disk.total)} used "
-                         f"({format_size(disk.free)} free) — renders take {format_size(total_size)}")
+                    text=f"💾 Server disk: {format_size(disk.used)} of {format_size(disk.total)} used "
+                         f"({format_size(disk.free)} free) — renders on the server take {format_size(total_size)}")
     except OSError:
         pass
 
+    _render_drive_panel(renders)
     _render_usage_panel(renders, vid_use, track_use)
     _render_cleanup_panel(renders, delete_render, format_size)
 
@@ -810,6 +811,10 @@ def render_renders():
                 if r.get("width"):
                     info.append(f"{r['width']}×{r['height']}")
                 info.append(format_size(r.get("size_bytes")))
+                if on_drive(r):
+                    info.append("☁️ on Drive" + ("" if r.get("local") else " only (cleared from server)"))
+                else:
+                    info.append("💾 server only")
                 if r.get("segments") is not None:
                     info.append(f"{r['segments']} segments ({r.get('split_segments') or 0} split-screen)")
                     info.append(f"{r.get('clip_count') or 0} clips from {len(r.get('videos') or [])} videos")
@@ -861,20 +866,21 @@ def render_renders():
 
             if st.session_state["ren_confirm_delete"] == name:
                 c = st.columns([4, 1, 1])
-                c[0].warning(f"Delete {name} from the server?")
+                c[0].warning(f"Delete {name}?" + (" It's also moved to the Google Drive bin (recoverable for "
+                                                  "30 days)." if on_drive(r) else ""))
                 if c[1].button("Delete", key=f"ren_del_yes_{name}", type="primary"):
-                    delete_render(path)
-                    st.session_state["ren_confirm_delete"] = None
-                    st.toast(f"Deleted {name}")
-                    st.rerun()
+                    err = delete_render(path, drive_token())
+                    if err:
+                        st.error(err)
+                    else:
+                        st.session_state["ren_confirm_delete"] = None
+                        st.toast(f"Deleted {name}")
+                        st.rerun()
                 if c[2].button("Cancel", key=f"ren_del_no_{name}"):
                     st.session_state["ren_confirm_delete"] = None
                     st.rerun()
             if st.session_state["ren_open_player"] == name:
-                if path.exists():
-                    st.video(str(path))
-                else:
-                    st.warning("This file is no longer on the server.")
+                show_render_player(r, height=420)
             if st.session_state["ren_open_detail"] == name:
                 _render_render_detail(r, update_user_fields)
 
@@ -929,19 +935,12 @@ def _render_compare_panel(by_name: dict, picked: list, ranges: dict) -> None:
         if len(picked) < 2:
             return
         a, b = by_name[picked[0]], by_name[picked[1]]
-        longest = max(a.get("duration_sec") or 0, b.get("duration_sec") or 0)
-        start = 0
-        if longest >= 2:
-            start = st.slider("Start both players at (seconds)", 0, int(longest), 0, key="ren_cmp_start",
-                              help="Line both videos up at the same moment of the track, then press play on each.")
-        cols = st.columns(2)
-        for col, r, label in ((cols[0], a, "A"), (cols[1], b, "B")):
+        info_cols = st.columns(2)
+        for col, r, label in ((info_cols[0], a, "Left (A)"), (info_cols[1], b, "Right (B)")):
             with col:
                 track = (r.get("track") or {}).get("track_id") or "Unknown track"
-                st.markdown(f"**{label}: {track}**  ·  {Path(r['path']).name}")
-                if Path(r["path"]).exists():
-                    st.video(str(r["path"]), start_time=min(start, int(r.get("duration_sec") or 0)))
-                bits = [f"⏱ {format_mmss(r.get('duration_sec') or 0)}", format_size(r.get("size_bytes"))]
+                st.markdown(f"**{label}: {track}**  \n{Path(r['path']).name}")
+                bits = [f"⏱ {format_mmss(r.get('duration_sec') or 0)}"]
                 if r.get("clip_count") is not None:
                     bits.append(f"{r['segments']} segments · {r['clip_count']} clips · {len(r.get('videos') or [])} videos")
                 if r["user"]["rating"]:
@@ -949,9 +948,25 @@ def _render_compare_panel(by_name: dict, picked: list, ranges: dict) -> None:
                 st.caption("  ·  ".join(bits))
                 if r["user"]["notes"]:
                     st.caption(f"📝 {r['user']['notes']}")
-                if st.button("↩️ Reopen this one in Planner", key=f"ren_cmp_reopen_{label}",
+                if st.button("↩️ Reopen this one in Planner", key=f"ren_cmp_reopen_{label[-2]}",
                              disabled=not (r.get("project") or r.get("plan"))):
                     _reopen_in_planner(r)
+
+        same_track = (a.get("track") or {}).get("track_id") == (b.get("track") or {}).get("track_id")
+        audio_from = "A"
+        if not same_track:
+            audio_from = st.radio("Sound from", ["A", "B"], horizontal=True, key="ren_cmp_audio",
+                                  format_func=lambda x: f"{x} ({'left' if x == 'A' else 'right'})",
+                                  help="These are different tracks, so pick whose music to hear.")
+        from renders import make_compare_video
+        with st.spinner("Building the side-by-side video (only needed once per pair)…"):
+            cmp_path, cmp_err = make_compare_video(a, b, audio_from)
+        if cmp_err:
+            st.error(f"Couldn't build the side-by-side video: {cmp_err}")
+        else:
+            st.video(str(cmp_path))
+            st.caption("Both renders in one video — they play, pause and seek together. "
+                       "Left is A, right is B" + ("; the music is the same track." if same_track else "."))
 
         if (a.get("track") or {}).get("track_id") != (b.get("track") or {}).get("track_id"):
             st.caption("ℹ️ These are renders of different tracks.")
@@ -993,6 +1008,9 @@ def _render_render_detail(r: dict, update_user_fields) -> None:
     new = {"rating": STARS.index(rating), "keep": keep, "notes": notes.strip()}
     if new != {"rating": user["rating"], "keep": user["keep"], "notes": user["notes"]}:
         update_user_fields(path, **new)
+        from renders import on_drive, sync_sidecar
+        if on_drive(r) and drive_token():
+            sync_sidecar(path, drive_token())   # keep the Drive backup of these details current
         st.rerun()
 
     plan = r.get("plan")
@@ -1033,6 +1051,61 @@ def _render_render_detail(r: dict, update_user_fields) -> None:
     st.download_button("⬇️ Download this render's plan (JSON)", data=json.dumps(plan, indent=2),
                        file_name=f"{path.stem}_plan.json", mime="application/json", key=f"ren_plan_{name}",
                        help="The exact plan this render was made from — import it with the Blender add-on.")
+
+
+def _render_drive_panel(renders: list) -> None:
+    from renders import (on_drive, upload_render, clear_local, auto_clear_enabled, set_auto_clear,
+                         format_size)
+    for err in st.session_state.pop("ren_flash_errors", None) or []:
+        st.error(err)
+    not_uploaded = [r for r in renders if r.get("local") and not on_drive(r)]
+    clearable = [r for r in renders if r.get("local") and on_drive(r)]
+    drive_only = [r for r in renders if not r.get("local") and on_drive(r)]
+    token = drive_token()
+    title = (f"☁️ Google Drive — {len(drive_only) + len(clearable)} on Drive, "
+             f"{len(not_uploaded)} only on the server")
+    with st.expander(title, expanded=bool(not_uploaded or clearable)):
+        st.caption("Renders are saved to **scene-labeling/previews** in your Google Drive as they're made "
+                   "(when Drive is connected). Once there, the server copy can go — playback, thumbnails "
+                   "and comparisons then read them from Drive.")
+        auto = st.toggle("Clear renders from the server automatically once they're on Drive",
+                         value=auto_clear_enabled(), key="ren_auto_clear")
+        if auto != auto_clear_enabled():
+            set_auto_clear(auto)
+        c = st.columns(2)
+        with c[0]:
+            size = sum(r.get("size_bytes") or 0 for r in not_uploaded)
+            if st.button(f"☁️ Upload {len(not_uploaded)} render(s) to Drive ({format_size(size)})",
+                         key="ren_upload_all", disabled=not (not_uploaded and token),
+                         help=None if token else "Connect Google Drive in the sidebar first."):
+                errors = []
+                bar = st.progress(0.0, text="Uploading…")
+                for i, r in enumerate(not_uploaded):
+                    name = Path(r["path"]).name
+                    bar.progress(i / len(not_uploaded), text=f"Uploading {name} ({i + 1}/{len(not_uploaded)})…")
+                    err = upload_render(Path(r["path"]), token)
+                    if err:
+                        errors.append(f"{name}: {err}")
+                    elif auto:
+                        clear_local(Path(r["path"]))
+                bar.empty()
+                if errors:
+                    st.session_state["ren_flash_errors"] = errors[:10]
+                st.toast(f"Uploaded {len(not_uploaded) - len(errors)} render(s).")
+                st.rerun()
+            if not_uploaded and not token:
+                st.caption("Connect Google Drive (sidebar) to upload.")
+        with c[1]:
+            size = sum(r.get("size_bytes") or 0 for r in clearable)
+            if st.button(f"🧹 Clear {len(clearable)} server cop{'y' if len(clearable) == 1 else 'ies'} "
+                         f"({format_size(size)})", key="ren_clear_local", disabled=not clearable,
+                         help="Deletes the server's copy of renders that are safely on Google Drive."):
+                errors = [f"{Path(r['path']).name}: {e}" for r in clearable
+                          if (e := clear_local(Path(r["path"])))]
+                if errors:
+                    st.session_state["ren_flash_errors"] = errors[:10]
+                st.toast(f"Freed {format_size(size)} on the server.")
+                st.rerun()
 
 
 def _render_usage_panel(renders: list, vid_use, track_use) -> None:
@@ -1078,11 +1151,22 @@ def _render_cleanup_panel(renders: list, delete_render, format_size) -> None:
                     + ", ".join(Path(r["path"]).name for r in targets[:10])
                     + (" …" if len(targets) > 10 else ""))
         sure = st.checkbox(f"Yes, delete these {len(targets)} render(s)", key="ren_clean_sure")
+        if any(r.get("drive") for r in targets):
+            st.caption("Renders on Google Drive are moved to the Drive bin too (recoverable for 30 days)"
+                       + ("." if drive_token() else " — connect Google Drive to delete those."))
         if st.button("🗑️ Delete them", disabled=not sure, key="ren_clean_go"):
+            errors, done = [], 0
+            token = drive_token()
             for r in targets:
-                delete_render(Path(r["path"]))
+                err = delete_render(Path(r["path"]), token)
+                if err:
+                    errors.append(f"{Path(r['path']).name}: {err}")
+                else:
+                    done += 1
             st.session_state["ren_clean_sure"] = False
-            st.toast(f"Deleted {len(targets)} render(s), freed {format_size(size)}.")
+            st.toast(f"Deleted {done} render(s).")
+            if errors:
+                st.session_state["ren_flash_errors"] = errors[:10]
             st.rerun()
 
 

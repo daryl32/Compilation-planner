@@ -133,22 +133,15 @@ def _find_or_create_folder(service, name: str, parent_id: str = None) -> str:
     return folder["id"]
 
 
-def push_file_with_oauth(
-    token_dict: dict,
-    local_path: Path,
-    drive_path: str,       # e.g. "scene-labeling/compilation_plans"
-) -> str | None:
-    """
-    Upload local_path to drive_path in the user's Drive.
-    drive_path is a slash-separated folder path from Drive root.
-    Returns None on success, error string on failure.
-    """
+def upload_file_with_oauth(token_dict: dict, local_path: Path, drive_path: str) -> tuple:
+    """Upload (or replace) local_path in drive_path (e.g. "scene-labeling/previews")
+    in the user's Drive. Returns ({"id", "size"}, None) or (None, error string)."""
     from drive_sync import drive_writes_blocked
     blocked = drive_writes_blocked()
     if blocked:
-        return blocked
+        return None, blocked
     if token_expired(token_dict):
-        return EXPIRED_MESSAGE
+        return None, EXPIRED_MESSAGE
     try:
         service = _get_service(token_dict)
         import mimetypes
@@ -169,19 +162,53 @@ def push_file_with_oauth(
 
         media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
         if existing:
-            service.files().update(
+            f = service.files().update(
                 fileId=existing[0]["id"],
                 media_body=media,
+                fields="id, size",
             ).execute()
         else:
-            service.files().create(
+            f = service.files().create(
                 body={"name": local_path.name, "parents": [parent_id]},
                 media_body=media,
+                fields="id, size",
             ).execute()
-        return None
+        return {"id": f["id"], "size": int(f.get("size") or 0)}, None
     except Exception as e:
         if "refresh" in str(e).lower() and ("token" in str(e).lower() or "credentials" in str(e).lower()):
-            return EXPIRED_MESSAGE
+            return None, EXPIRED_MESSAGE
+        return None, str(e)
+
+
+def push_file_with_oauth(
+    token_dict: dict,
+    local_path: Path,
+    drive_path: str,       # e.g. "scene-labeling/compilation_plans"
+) -> str | None:
+    """
+    Upload local_path to drive_path in the user's Drive.
+    drive_path is a slash-separated folder path from Drive root.
+    Returns None on success, error string on failure.
+    """
+    _, err = upload_file_with_oauth(token_dict, local_path, drive_path)
+    return err
+
+
+def trash_file_with_oauth(token_dict: dict, file_id: str) -> str | None:
+    """Move a file this app uploaded to the Drive bin (recoverable for 30 days).
+    Returns None on success (or if it's already gone), error string on failure."""
+    from drive_sync import drive_writes_blocked
+    blocked = drive_writes_blocked()
+    if blocked:
+        return blocked
+    if token_expired(token_dict):
+        return EXPIRED_MESSAGE
+    try:
+        _get_service(token_dict).files().update(fileId=file_id, body={"trashed": True}).execute()
+        return None
+    except Exception as e:
+        if "404" in str(e) or "notFound" in str(e):
+            return None
         return str(e)
 
 

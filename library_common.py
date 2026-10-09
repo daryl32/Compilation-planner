@@ -435,3 +435,22 @@ def render_range_picker(video_id: str, source_path: str, duration: float, curren
         if st.button(clear_label, key=f"{key}_clear_{video_id}"):
             return "clear", None
     return None
+
+
+def show_render_player(meta: dict, height: int = 360) -> None:
+    """Play a saved render: the server's copy if it's still here, otherwise
+    straight from Google Drive with Drive's own player (works in a browser
+    signed in to the Google account that owns the file)."""
+    from renders import drive_preview_url
+    path = Path(meta["path"])
+    if path.exists():
+        st.video(str(path))
+        return
+    url = drive_preview_url(meta)
+    if url:
+        import streamlit.components.v1 as components
+        components.iframe(url, height=height)
+        st.caption("☁️ Playing from Google Drive. A video uploaded in the last minute or two may still be "
+                   "processing — if so, wait a moment and reopen it.")
+    else:
+        st.warning("This render is no longer on the server or Google Drive.")

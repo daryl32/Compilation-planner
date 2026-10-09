@@ -19,14 +19,15 @@ import plotly.graph_objects as go
 from PIL import Image
 
 from render_preview import render_plan_dict, colab_to_local
-from renders import delete_render
+from renders import (delete_render, load_render, render_files, upload_render, clear_local,
+                     auto_clear_enabled)
 import video_ranking as VR
 import similarity as SIM
 import cut_scoring as CS
 from audio_charts import add_analysis_overlays
 import preview_snippets
 from library_common import (scene_tags, render_range_picker, library_ranges, master_thumbnail_path, proxy_path,
-                            refresh_caches_after_sync)
+                            refresh_caches_after_sync, show_render_player)
 
 # st.fragment (Streamlit 1.37+; was st.experimental_fragment in 1.33-1.36) lets
 # part of the page rerun on its own instead of the whole script re-executing on
@@ -80,7 +81,7 @@ except ImportError:
     _DRIVE_SYNC_AVAILABLE = False
 
 # Sign-in, whitelist, Drive connect, title and the shared sidebar — see page_setup.py
-from page_setup import (page_setup, push_file_with_oauth, APP_VERSION,
+from page_setup import (page_setup, push_file_with_oauth, APP_VERSION, drive_token,
                         OAUTH_AVAILABLE as _OAUTH_AVAILABLE, DRIVE_SESSION_KEY as _OAUTH_SESSION_KEY)
 page_setup("Compilation Planner", "pages/1_Compilation_Planner.py")
 # The background Drive sync timer may have pulled new catalogues/audio since
@@ -2112,12 +2113,21 @@ def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list)
     cache_key = (track.get("track_id"), tag_filter,
                  tuple(sorted((v, tuple(r)) for v, r in _ranges.items())),
                  tuple(sorted(_weights.items())), _experimental)
+    random_seed = st.session_state.get("random_top_seed")
     cache = st.session_state.get("video_ranking_cache")
-    if cache and cache["key"] == cache_key:
+    if cache and cache["key"] == cache_key and cache.get("seed") == random_seed:
         ranking = cache["ranking"]
     else:
-        video_matches = compute_video_rankings(track, tag_filter, _ranges, _weights, _experimental)
-        top_matches = video_matches[:RECOMMENDED_COUNT]
+        if cache and cache["key"] == cache_key:
+            video_matches = cache["ranking"]["video_matches"]   # only the seed changed — no re-scoring
+        else:
+            video_matches = compute_video_rankings(track, tag_filter, _ranges, _weights, _experimental)
+        if random_seed is not None:
+            # 🎲 Randomize: RECOMMENDED_COUNT videos drawn purely at random from every video that
+            # has usable scenes — the ranking weights play no part. Same seed → same draw.
+            top_matches = random.Random(random_seed).sample(video_matches, min(RECOMMENDED_COUNT, len(video_matches)))
+        else:
+            top_matches = video_matches[:RECOMMENDED_COUNT]
         top_ids = [v["video_id"] for v in top_matches]
         match_by_id = {v["video_id"]: v for v in video_matches}
         rank_order = {v["video_id"]: i for i, v in enumerate(video_matches)}
@@ -2127,7 +2137,7 @@ def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list)
             "video_matches": video_matches, "top_matches": top_matches, "top_ids": top_ids,
             "match_by_id": match_by_id, "rank_order": rank_order, "other_options": other_options,
         }
-        st.session_state["video_ranking_cache"] = {"key": cache_key, "ranking": ranking}
+        st.session_state["video_ranking_cache"] = {"key": cache_key, "seed": random_seed, "ranking": ranking}
 
     # A stored pick can drop out of the options (e.g. it entered the top 10 after a tag change) —
     # filtered here regardless of whether the fragment's own widget-safety sanitizing has run.
@@ -2452,6 +2462,15 @@ def _select_all_recommended():
         st.session_state[f"select_video_{vid}"] = True
 
 
+def _randomize_top_videos():
+    """🎲 A fresh random seed on every press → a different random top list."""
+    st.session_state["random_top_seed"] = random.SystemRandom().randrange(1, 1_000_000)
+
+
+def _back_to_best_matches():
+    st.session_state["random_top_seed"] = None
+
+
 def _clear_video_selection():
     for key in [k for k in st.session_state if k.startswith("select_video_")]:
         st.session_state[key] = False
@@ -2467,7 +2486,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
     elsewhere): the Matching & Export section only reads this selection when
     the user switches to it, which is itself a normal full rerun — by then
     session_state already holds whatever was last set here."""
-    top_cols = st.columns([5, 2, 2])
+    top_cols = st.columns([5, 2, 2, 2])
     with top_cols[0]:
         tag_filter = st.multiselect(
             "Restrict to tags (optional)", all_tag_options, key="tag_filter",
@@ -2482,6 +2501,11 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
     with top_cols[2]:
         st.write("")
         st.button("Clear selection", on_click=_clear_video_selection, use_container_width=True)
+    with top_cols[3]:
+        st.write("")
+        st.button("🎲 Randomize", on_click=_randomize_top_videos, use_container_width=True,
+                  help=f"Replace the top list with {RECOMMENDED_COUNT} videos picked purely at random from the "
+                       f"whole library (ignores the ranking weights). Press again for a different set.")
 
     render_ranking_weights(tag_filter)
     info = resolve_video_selection(track, tuple(tag_filter), all_video_ids)
@@ -2508,9 +2532,18 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
     )
     sorted_top_matches = sorted(info["top_matches"], key=_SORT_OPTIONS[sort_by])
 
-    st.subheader(f"Best-matching videos (top {RECOMMENDED_COUNT})")
-    st.caption(f"Ranked by match score — see ⚙️ Ranking weights above for what counts" +
-               (f"  |  filtered to tags: {', '.join(tag_filter)}" if tag_filter else ""))
+    _seed = st.session_state.get("random_top_seed")
+    if _seed is not None:
+        _hc = st.columns([6, 2])
+        _hc[0].subheader(f"🎲 Random pick — {len(info['top_matches'])} videos")
+        _hc[1].button("↩️ Back to best matches", on_click=_back_to_best_matches, use_container_width=True)
+        st.caption(f"Picked at random from all {len(video_matches)} videos with usable scenes (seed {_seed}) — "
+                   f"the ranking weights aren't used. Match scores are still shown for reference." +
+                   (f"  |  filtered to tags: {', '.join(tag_filter)}" if tag_filter else ""))
+    else:
+        st.subheader(f"Best-matching videos (top {RECOMMENDED_COUNT})")
+        st.caption(f"Ranked by match score — see ⚙️ Ranking weights above for what counts" +
+                   (f"  |  filtered to tags: {', '.join(tag_filter)}" if tag_filter else ""))
     st.caption(
         "✅ marks a recommended video. ☑ is your actual selection — nothing is selected until you tick it "
         "(or use Select all recommended above), and it stays as you set it even if re-sorting moves the "
@@ -3595,7 +3628,7 @@ PROJECT_SIMPLE_KEYS = [
     "vary_count", "count_seed", "min_clip_len_sec",
     "weight_shape", "weight_random", "avoid_repeat", "weight_spread", "weight_motion",
     "weight_position", "autofill_seed",
-    "ranking_weights", "ranking_experimental",
+    "ranking_weights", "ranking_experimental", "random_top_seed",
     "committed_selected_videos", "committed_tag_filter", "known_extra_videos", "extra_videos",
     "adv_current_block", "chor_current_block",
     "intro_block_indices", "outro_block_indices",
@@ -5603,8 +5636,11 @@ preview_pattern = f"temp-Video-preview-{safe_track_id}.*.mp4"
 
 
 def existing_preview_versions() -> list[Path]:
-    files = list(PREVIEW_DIR.glob(preview_pattern))
-    return sorted(files, key=lambda p: p.name)
+    """This track's renders — including ones cleared from the server after
+    uploading to Google Drive (their details stay here), so numbering carries on."""
+    import fnmatch
+    return sorted((p for p in render_files() if fnmatch.fnmatch(p.name, preview_pattern)),
+                  key=lambda p: p.name)
 
 
 def next_preview_path() -> Path:
@@ -5701,23 +5737,31 @@ if st.button("🎬 Render Preview", type="primary"):
             + (f" — source files: {', '.join(_how)}." if _how else ".")
         )
         progress_bar.progress(1.0, text="Done.")
-        if _OAUTH_AVAILABLE and st.session_state.get(_OAUTH_SESSION_KEY):
-            progress_bar.progress(1.0, text="Uploading to Drive…")
-            _err = push_file_with_oauth(
-                st.session_state[_OAUTH_SESSION_KEY], out_path, "scene-labeling/previews"
-            )
+        _token = drive_token()
+        if _token:
+            progress_bar.progress(1.0, text="Uploading to Google Drive…")
+            _err = upload_render(out_path, _token)
             if _err:
-                st.warning(f"Rendered but Drive upload failed: {_err}")
+                st.session_state["render_drive_note"] = ("warning", f"Rendered, but the Drive upload failed: {_err} "
+                                                         f"— upload it later from Media Library → Renders.")
+            elif auto_clear_enabled():
+                clear_local(out_path)
+                st.session_state["render_drive_note"] = ("success", f"Rendered {out_path.name}, saved to Google Drive "
+                                                         f"and cleared from the server.")
             else:
-                st.success(f"Rendered and uploaded to Drive: {out_path.name}")
+                st.session_state["render_drive_note"] = ("success", f"Rendered {out_path.name} and saved to Google Drive.")
         else:
-            st.success(f"Rendered {out_path.name}")
+            st.session_state["render_drive_note"] = ("info", f"Rendered {out_path.name}. Connect Google Drive (sidebar) "
+                                                     f"to save renders there — then upload it from Media Library → Renders.")
         st.rerun()
     except Exception as e:
         st.error(f"Render failed: {e}")
 
 if st.session_state.get("render_last_stats"):
     st.caption("⏱️ " + st.session_state["render_last_stats"])
+_drive_note = st.session_state.pop("render_drive_note", None)
+if _drive_note:
+    getattr(st, _drive_note[0])(_drive_note[1])
 
 versions = existing_preview_versions()
 if versions:
@@ -5728,10 +5772,17 @@ if versions:
         cols = st.columns(cols_per_row)
         for col, path in zip(cols, row):
             with col:
-                st.video(str(path))
-                st.caption(path.name)
-                if st.button("🗑️ Delete", key=f"delete_preview_{path.name}"):
-                    delete_render(path)   # also removes its metadata and thumbnail
-                    st.rerun()
+                _meta = load_render(path)
+                if _meta is None:
+                    continue
+                show_render_player(_meta, height=300)
+                st.caption(path.name + ("  ·  ☁️ on Drive" if _meta.get("drive") else ""))
+                if st.button("🗑️ Delete", key=f"delete_preview_{path.name}",
+                             help="Deletes it from the server and moves the Google Drive copy to the Drive bin."):
+                    _del_err = delete_render(path, drive_token())   # also its metadata and thumbnail
+                    if _del_err:
+                        st.error(_del_err)
+                    else:
+                        st.rerun()
 else:
     st.caption("No previews rendered yet for this track.")
