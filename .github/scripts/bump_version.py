@@ -2,8 +2,9 @@
 Bump APP_VERSION in page_setup.py — run by .github/workflows/bump-version.yml
 on every push to main.
 
-Which part goes up is read from the pushed commit messages:
-  "[major]" anywhere → 2.0.0     "[minor]" → 1.7.0     otherwise → 1.6.1
+Which part goes up is read from the release commit's message (the last commit
+pushed), and only when the message STARTS with the tag:
+  "[major] …" → 2.0.0     "[minor] …" → 1.7.0     otherwise → 1.6.1
 Prints the new version.
 
 Usage: python bump_version.py            (messages from the COMMIT_MESSAGES env var)
@@ -20,9 +21,10 @@ PATTERN = re.compile(r'^APP_VERSION = "(\d+)\.(\d+)\.(\d+)"', re.M)
 
 def next_version(current: tuple, messages: str) -> tuple:
     major, minor, patch = current
-    if "[major]" in messages:
+    head = messages.strip().lower()
+    if head.startswith("[major]"):
         return major + 1, 0, 0
-    if "[minor]" in messages:
+    if head.startswith("[minor]"):
         return major, minor + 1, 0
     return major, minor, patch + 1
 

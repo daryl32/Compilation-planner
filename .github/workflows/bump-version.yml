@@ -1,6 +1,7 @@
 # Every push to main bumps APP_VERSION in page_setup.py and commits it back.
 #   patch by default (1.6.0 → 1.6.1)
-#   put [minor] in a pushed commit message for 1.6.0 → 1.7.0, [major] for → 2.0.0
+#   start the LAST commit's message (the merge/release commit) with [minor] for
+#   1.6.0 → 1.7.0 or [major] for → 2.0.0; earlier commits in the push are ignored
 #   put [skip version] in the last commit message to skip the bump
 # The bump commit is pushed with the workflow token, so it doesn't start this
 # workflow again; the server's deploy webhook simply pulls it too.
@@ -31,7 +32,7 @@ jobs:
       - name: Bump APP_VERSION
         id: bump
         env:
-          COMMIT_MESSAGES: ${{ join(github.event.commits.*.message, ' ') }}
+          COMMIT_MESSAGES: ${{ github.event.head_commit.message }}
         run: echo "version=$(python3 .github/scripts/bump_version.py)" >> "$GITHUB_OUTPUT"
 
       - name: Commit and push
