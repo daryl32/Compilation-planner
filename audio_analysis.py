@@ -259,16 +259,23 @@ def estimate_downbeat_phase(beat_times: np.ndarray, kick: np.ndarray, harmony: n
 
 
 def downbeats_from_model(path) -> np.ndarray | None:
-    """beat_this (CPJKU) downbeats, or None if it isn't installed / fails."""
+    """beat_this (CPJKU) downbeats, or None if it isn't installed / fails.
+    The audio is decoded with ffmpeg here (beat_this's own file loader can't
+    always read .m4a), then handed to the model as samples."""
     try:
-        from beat_this.inference import File2Beats  # type: ignore
+        import beat_this.inference as bti  # type: ignore
     except Exception:
         return None
     try:
-        f2b = File2Beats(checkpoint_path="final0", device="cpu", dbn=False)
-        _beats, downbeats = f2b(str(path))
+        if hasattr(bti, "Audio2Beats"):
+            model = bti.Audio2Beats(checkpoint_path="final0", device="cpu", dbn=False)
+            _beats, downbeats = model(decode_audio(path, sr=SR), SR)
+        else:
+            model = bti.File2Beats(checkpoint_path="final0", device="cpu", dbn=False)
+            _beats, downbeats = model(str(path))
         return np.asarray(downbeats, dtype=float)
     except Exception:
+        traceback.print_exc()
         return None
 
 
