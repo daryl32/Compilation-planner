@@ -28,7 +28,8 @@ import cut_scoring as CS
 from audio_charts import add_analysis_overlays
 import preview_snippets
 from library_common import (scene_tags, render_range_picker, library_ranges, master_thumbnail_path, proxy_path,
-                            refresh_caches_after_sync, show_render_player)
+                            refresh_caches_after_sync, show_render_player, shared_cache,
+                            clear_shared_data_caches, memory_check)
 
 # st.fragment (Streamlit 1.37+; was st.experimental_fragment in 1.33-1.36) lets
 # part of the page rerun on its own instead of the whole script re-executing on
@@ -159,11 +160,17 @@ def load_all_catalogues() -> dict:
     return catalogues
 
 
-@st.cache_data(max_entries=20)  # bounded: a long session touching many videos won't grow this forever —
-                                # oldest-used video's curves get evicted once the cap is hit
+# cache_resource, not cache_data: ONE shared copy, handed out as-is. cache_data
+# deep-copies its value on every call, and this is called once per candidate clip
+# in the similar-clips search (thousands of times per click) — each call copied the
+# whole video's frame-by-frame curves, which is what ran the server out of memory.
+# Callers only read it. Bounded, and dropped after 30 min unused.
+@shared_cache
+@st.cache_resource(max_entries=20, ttl=1800, show_spinner=False)
 def load_motion_curves_for_video(video_id: str) -> dict:
     """scene_id -> motion_curve, for ONE video, loaded and cached separately
-    from load_all_catalogues (see that function's docstring for why)."""
+    from load_all_catalogues (see that function's docstring for why).
+    SHARED — read it, never change it."""
     cat_file = CATALOGUE_DIR / f"{video_id}.json"
     if not cat_file.exists():
         return {}
@@ -997,6 +1004,8 @@ def render_choreography_block(
     session_state["chor_pick_{seg_idx}_{video_id}"] as a bool, same pattern
     as adv_pick_ in Manual step-through."""
 
+    memory_check(f"Choreography block {seg_idx + 1}")
+    autosave_now()
     prev_block_videos = prev_block_videos or set()
     video_stats = video_stats or {}
     block_duration = seg["end"] - seg["start"]
@@ -1340,6 +1349,8 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
     everything rank_candidates_weighted needs. The candidate GRID below
     always stays sorted by raw shape score regardless; only the auto-fill
     button's own picks use the weighted ranking."""
+    memory_check(f"Manual step-through block {current_block + 1}")
+    autosave_now()
     prev_block_videos = prev_block_videos or set()
     video_stats = video_stats or {}
     autofill_weights = autofill_weights or {}
@@ -1935,9 +1946,10 @@ def carve_span(queues: dict, video_id: str, scene_id: int, window_offset_sec: fl
     )
 
 
-@st.cache_data
+@shared_cache
+@st.cache_resource(ttl=1800, show_spinner=False)   # shared, not copied per call — read-only
 def load_all_audio_tracks() -> dict:
-    """track_id -> full track dict, loaded once and cached (mirrors load_all_catalogues)."""
+    """track_id -> full track dict, loaded once and cached. SHARED — read it, never change it."""
     tracks = {}
     for f in AUDIO_DIR.glob("*.json"):
         if f.name == "audio_index.json":
@@ -2051,7 +2063,10 @@ _COLUMNS_SUPPORT_VALIGN = _columns_support_valign()
 RECOMMENDED_COUNT = 10   # how many best-matching videos are listed by default
 
 
-@st.cache_data(max_entries=20)  # bounded, same pattern as load_motion_curves_for_video
+# Shared, not copied per call (cache_data handed every thumbnail crop its own full
+# copy of the sprite sheet). Only ever cropped, which makes a new small image.
+@shared_cache
+@st.cache_resource(max_entries=16, ttl=1800, show_spinner=False)
 def load_timeline_sprite(sprite_path: str):
     """The whole per-video sprite sheet, loaded and cached once per video —
     cropping a specific tile from it (get_nearest_thumbnail) is cheap and
@@ -2345,6 +2360,7 @@ def render_audio_settings_section(track: dict) -> None:
     whenever its own state DOES exist (i.e. on every normal interaction
     while staying on this section), so nothing about dragging a slider
     changes; value= only matters the moment this section is re-entered."""
+    autosave_now()
     _shadow = st.session_state.get("audio_settings_shadow", {})
 
     def _v(key):
@@ -2524,6 +2540,8 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
     elsewhere): the Matching & Export section only reads this selection when
     the user switches to it, which is itself a normal full rerun — by then
     session_state already holds whatever was last set here."""
+    memory_check("Video selection")
+    autosave_now()
     top_cols = st.columns([5, 2, 2, 2])
     with top_cols[0]:
         tag_filter = st.multiselect(
@@ -4036,6 +4054,139 @@ def _run_auto_tune():
     st.session_state["auto_tune_report"] = why
 
 
+# ---------------------------------------------------------------------------
+# Autosave & restore — your work survives the app restarting (a crash, running
+# out of memory, a deploy). Every change is written to a recovery file for you
+# (PROJECTS_DIR/.autosave/<email>.json — separate from your saved projects).
+# A new session moves that file aside and offers to restore it.
+# ---------------------------------------------------------------------------
+
+AUTOSAVE_DIR = PROJECTS_DIR / ".autosave"
+
+
+def _autosave_path(kind: str = "") -> Path:
+    who = re.sub(r"[^A-Za-z0-9._-]", "_", str(getattr(st.user, "email", None) or "user"))
+    return AUTOSAVE_DIR / f"{who}{kind}.json"
+
+
+def _progress_summary(state: dict) -> dict:
+    def blocks(key):
+        return sum(1 for v in (state.get(key) or {}).values() if v)
+    return {"track_id": state.get("track_id"), "mode": state.get("matching_mode"),
+            "videos": len(state.get("committed_selected_videos") or []),
+            "auto_blocks": len(state.get("segment_exclusions") or {}),
+            "manual_blocks": blocks("adv_confirmed"), "chor_blocks": blocks("chor_confirmed")}
+
+
+def autosave_now() -> None:
+    """Write this session's state to the recovery file — only when it changed."""
+    if not st.session_state.get("_autosave_started"):
+        return
+    try:
+        state = _normalise(_build_project_save_dict())
+        state.pop("_saved_at", None)
+        blob = json.dumps(state, sort_keys=True, default=str)
+    except Exception:
+        return
+    digest = hashlib.sha1(blob.encode()).hexdigest()
+    if digest == st.session_state.get("_autosave_hash"):
+        return
+    payload = {
+        "saved_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "summary": _progress_summary(state),
+        "loaded_project": st.session_state.get("_loaded_project"),
+        "project_name": (st.session_state.get("project_save_name") or "").strip() or None,
+        "state": state,
+    }
+    try:
+        AUTOSAVE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _autosave_path()
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, default=str))
+        tmp.replace(path)
+        st.session_state["_autosave_hash"] = digest
+    except OSError:
+        pass
+
+
+def _start_autosave_session() -> None:
+    """First run of a new session: the recovery file left by the last session is
+    moved aside (so this session's autosave can't overwrite it) and offered."""
+    if st.session_state.get("_autosave_started"):
+        return
+    st.session_state["_autosave_started"] = True
+    path, recover = _autosave_path(), _autosave_path(".recover")
+    try:
+        if path.exists():
+            data = json.loads(path.read_text())
+            s = data.get("summary") or {}
+            worth_it = s.get("track_id") and (s.get("videos") or s.get("manual_blocks") or s.get("chor_blocks")
+                                              or s.get("auto_blocks"))
+            if worth_it:
+                path.replace(recover)
+            else:
+                path.unlink()
+    except (OSError, ValueError):
+        pass
+
+
+def _restore_choice(choice: str) -> None:
+    recover = _autosave_path(".recover")
+    if choice == "restore":
+        try:
+            st.session_state["_restore_autosave"] = json.loads(recover.read_text())
+        except (OSError, ValueError):
+            st.session_state["_project_notices"] = [("error", "Couldn't read the unsaved work.")]
+            return
+    try:
+        recover.replace(_autosave_path(".discarded"))   # one step of undo, just in case
+    except OSError:
+        pass
+
+
+_start_autosave_session()
+
+_restore = st.session_state.pop("_restore_autosave", None)
+if _restore:
+    _restore_warnings = _apply_project_load_dict(_restore.get("state") or {})
+    _appscope = st.session_state.get("_audio_appscope", {})
+    _appscope.update({k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state})
+    st.session_state["_audio_appscope"] = _appscope
+    if _restore.get("loaded_project"):
+        st.session_state["_loaded_project"] = _restore["loaded_project"]
+    if _restore.get("project_name"):
+        st.session_state["_prefill_project_name"] = _restore["project_name"]
+    st.session_state["_project_notices"] = ([("warning", _w) for _w in _restore_warnings]
+                                            + [("success", "♻️ Unsaved work restored.")])
+    st.rerun()
+
+_recover_file = _autosave_path(".recover")
+if _recover_file.exists():
+    try:
+        _rec = json.loads(_recover_file.read_text())
+        _rs = _rec.get("summary") or {}
+        _when = datetime.datetime.fromisoformat(_rec["saved_at"]).strftime("%a %d %b, %H:%M")
+    except (OSError, ValueError, KeyError):
+        _rec, _rs, _when = None, {}, "?"
+    if _rec:
+        _bits = [f"track **{_rs.get('track_id')}**", str(_rs.get("mode") or "")]
+        if _rs.get("chor_blocks"):
+            _bits.append(f"{_rs['chor_blocks']} Choreography block(s) confirmed")
+        if _rs.get("manual_blocks"):
+            _bits.append(f"{_rs['manual_blocks']} Manual block(s) confirmed")
+        if _rs.get("videos"):
+            _bits.append(f"{_rs['videos']} video(s) selected")
+        if _rec.get("loaded_project"):
+            _bits.append(f"project **{_rec['loaded_project'].get('name')}**")
+        with st.container(border=True):
+            st.markdown(f"♻️ **Unsaved work from {_when}** — the app restarted before it was saved.  \n"
+                        + " · ".join(b for b in _bits if b))
+            _rc = st.columns([1, 1, 4])
+            _rc[0].button("♻️ Restore it", type="primary", on_click=_restore_choice, args=("restore",),
+                          use_container_width=True, key="autosave_restore")
+            _rc[1].button("Discard", on_click=_restore_choice, args=("discard",),
+                          use_container_width=True, key="autosave_discard")
+
 # Media Library → Renders → "Reopen in Planner": load that render's saved project
 # state (or the settings recovered from its plan) exactly like 📂 Load Project.
 _reopen = st.session_state.pop("_reopen_project", None)
@@ -4067,6 +4218,8 @@ if _reopen_notice:
 # saving back, and the sidebar shows when there are changes since its last save.
 if "_prefill_project_name" in st.session_state:   # set by a load/reopen — applied before the box is drawn
     st.session_state["project_save_name"] = st.session_state.pop("_prefill_project_name")
+
+autosave_now()
 
 st.sidebar.header("Project")
 _loaded = st.session_state.get("_loaded_project")
@@ -4145,6 +4298,7 @@ if _DRIVE_SYNC_AVAILABLE:
                 st.success(f"Synced {result['synced']} file(s), "
                            f"skipped {result['skipped']} unchanged.")
                 st.cache_data.clear()
+                clear_shared_data_caches()
 else:
     with st.sidebar.expander("☁️ Drive sync unavailable", expanded=False):
         st.caption("Service account credentials not found at /root/drive-credentials.json")

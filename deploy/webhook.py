@@ -5,6 +5,11 @@ GitHub webhook listener — deploys production and the test copy.
   push to dev  → git pull in /root/Compilation-planner-dev  + restart mediaplanner-dev
   any other branch → ignored
 
+A copy that's switched off (see "🔀 Live / test copy", deploy/setup_switch.sh)
+is updated but left off — it picks up the new code next time it starts. A pull
+that fails (e.g. local edits on the server) is reported back to GitHub as an
+error and the app is NOT restarted, instead of silently running old code.
+
 Installed to /root/webhook.py by deploy/setup_dev.sh (run as webhook.service).
 The GitHub secret is read from /root/.webhook_secret, so this file holds no
 secrets and can live in the repo. Signature check is unchanged from before.
@@ -56,8 +61,10 @@ def webhook():
     if not Path(repo_dir).is_dir():
         return f"{repo_dir} not set up — ignored", 200
 
-    subprocess.run(["git", "-C", repo_dir, "pull"])
-    subprocess.run(["systemctl", "restart", service])
+    pull = subprocess.run(["git", "-C", repo_dir, "pull", "--ff-only"], capture_output=True, text=True)
+    if pull.returncode != 0:
+        return f"git pull failed in {repo_dir} — not restarted:\n{pull.stderr or pull.stdout}", 500
+    subprocess.run(["systemctl", "try-restart", service])   # restarts it only if it's running
     return f"Deployed {ref} → {service}", 200
 
 

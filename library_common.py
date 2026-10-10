@@ -358,7 +358,119 @@ def refresh_caches_after_sync(*cached_functions) -> None:
                 fn.clear()
         else:
             st.cache_data.clear()
+            clear_shared_data_caches()
         seen["changed_at"] = changed
+
+
+# Shared (st.cache_resource) data caches registered by pages — cleared after a
+# sync and by the memory safety valve. (_sync_seen is NOT one of these.)
+_SHARED_CACHES = []
+
+
+def shared_cache(fn):
+    """Register an st.cache_resource-decorated function as a clearable data cache."""
+    _SHARED_CACHES.append(fn)
+    return fn
+
+
+def clear_shared_data_caches() -> None:
+    for fn in _SHARED_CACHES:
+        try:
+            fn.clear()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Memory: log the app's memory use, and clear caches before it gets dangerous
+# ---------------------------------------------------------------------------
+# The server has 4 GB. On 10 Oct 2026 the live app grew to 3.2 GB during a long
+# Choreography session and the kernel killed it. memory_check() runs on every
+# page run (page_setup) and inside the planner's busiest fragments: it logs the
+# app's memory to DATA/logs/memory.csv whenever it moves, and if it passes
+# MEMORY_LIMIT_MB (config.py, default 1800) it clears the data caches and hands
+# the freed memory back — the page just reloads its data on the next click.
+
+MEMORY_LIMIT_MB = float(getattr(config, "MEMORY_LIMIT_MB", 1800))
+MEMORY_LOG = CATALOGUE_DIR.parent / "logs" / "memory.csv"
+_MEMORY_LOG_MAX_BYTES = 2_000_000
+
+
+def app_memory_mb():
+    """This app's resident memory in MB (Linux), or None elsewhere."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+@st.cache_resource
+def _memory_state() -> dict:
+    return {"last_mb": 0.0, "last_time": 0.0, "peak_mb": 0.0}
+
+
+def _release_memory() -> None:
+    import gc
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)   # hand freed memory back to the system
+    except Exception:
+        pass
+
+
+def _log_memory(where: str, mb: float, note: str = "") -> None:
+    import time as _time
+    try:
+        MEMORY_LOG.parent.mkdir(parents=True, exist_ok=True)
+        if MEMORY_LOG.exists() and MEMORY_LOG.stat().st_size > _MEMORY_LOG_MAX_BYTES:
+            MEMORY_LOG.replace(MEMORY_LOG.with_suffix(".old.csv"))
+        new = not MEMORY_LOG.exists()
+        with open(MEMORY_LOG, "a") as f:
+            if new:
+                f.write("time,where,memory_mb,note\n")
+            stamp = datetime.datetime.now().isoformat(timespec="seconds")
+            f.write(f"{stamp},{where.replace(',', ';')},{mb:.0f},{note.replace(',', ';')}\n")
+    except OSError:
+        pass
+
+
+def memory_check(where: str):
+    """Log memory if it changed (or every 5 min); clear caches past the limit.
+    Returns the app's memory in MB (None if unknown)."""
+    import time as _time
+    try:
+        from app_switch import touch_heartbeat
+        touch_heartbeat()   # "someone is using this copy" — for the test copy's idle shut-down
+    except Exception:
+        pass
+    mb = app_memory_mb()
+    if mb is None:
+        return None
+    state = _memory_state()
+    state["peak_mb"] = max(state["peak_mb"], mb)
+    note = ""
+    if mb > MEMORY_LIMIT_MB:
+        st.cache_data.clear()
+        clear_shared_data_caches()
+        _release_memory()
+        after = app_memory_mb() or mb
+        note = f"over {MEMORY_LIMIT_MB:.0f} MB: cleared caches -> {after:.0f} MB"
+        try:
+            st.toast(f"🧠 Memory was high ({mb:.0f} MB) — cleared cached data to stay safe. "
+                     f"Things may load a little slower for a moment.")
+        except Exception:
+            pass
+        mb = after
+    now = _time.time()
+    if note or abs(mb - state["last_mb"]) >= 25 or now - state["last_time"] >= 300:
+        _log_memory(where, mb, note)
+        state["last_mb"], state["last_time"] = mb, now
+    return mb
 
 
 # ---------------------------------------------------------------------------
