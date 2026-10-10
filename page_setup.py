@@ -19,7 +19,7 @@ from library_common import (
     IS_TEST, page_title, env_banner, render_sync_status, read_pending, push_pending, memory_check,
 )
 
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.8.0"
 
 # Google Drive OAuth (personal Drive writes). drive_oauth raises RuntimeError, not
 # ImportError, when oauth_config.py is missing — so catch everything here.
