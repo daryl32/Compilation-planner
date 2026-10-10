@@ -16,7 +16,7 @@ import streamlit as st
 
 from config import WHITELISTED_EMAILS
 from library_common import (
-    IS_TEST, page_title, env_banner, render_sync_status, read_pending, push_pending,
+    IS_TEST, page_title, env_banner, render_sync_status, read_pending, push_pending, memory_check,
 )
 
 APP_VERSION = "1.7.1"
@@ -123,6 +123,8 @@ def _sidebar(page_path: str) -> None:
                 st.sidebar.success("Saved to Google Drive.")
                 st.rerun()
 
+    _switch_panel()
+
     if st.sidebar.button("Sign out", key="signout_btn"):
         st.logout()
     st.sidebar.divider()
@@ -161,6 +163,53 @@ _NO_DROPDOWN_TYPING_JS = """
 """
 
 
+def _switch_panel() -> None:
+    """🔀 Run the live app or the test copy (only one at a time, to save memory)."""
+    try:
+        import app_switch as AS
+        if not AS.available():
+            return
+    except Exception:
+        return
+    me, other = AS.this_copy(), AS.other_copy()
+    o = AS.COPIES[other]
+    done = st.session_state.get("_switch_done")
+    with st.sidebar.expander("🔀 Live / test copy", expanded=bool(done)):
+        if done:
+            st.success(f"The {o['name']} is running — this one switches off in a few seconds.")
+            st.link_button(f"Open the {o['name']} →", o["url"], type="primary", use_container_width=True)
+            st.caption("Unsaved work here is kept and offered to you when you come back.")
+            return
+        running = AS.is_running(other)
+        st.caption(f"You're on the **{AS.COPIES[me]['name']}**. The {o['name']} is "
+                   f"**{'running' if running else 'off'}**."
+                   + (" Only one runs at a time to save the server's memory." if not running else ""))
+        if st.button(f"🔀 Switch to the {o['name']}", key="switch_copy", use_container_width=True,
+                     help=f"Starts the {o['name']}, takes you there, then switches this one off."):
+            bar = st.progress(0.0, text=f"Starting the {o['name']}…")
+            err = AS.start(other, progress=lambda f: bar.progress(min(max(f, 0.0), 1.0),
+                                                                  text=f"Starting the {o['name']}…"))
+            bar.empty()
+            if err:
+                st.error(f"Couldn't start the {o['name']}: {err}. This copy stays on.")
+                return
+            err = AS.stop_later(me)
+            if err:
+                st.warning(f"The {o['name']} is on, but this copy couldn't switch itself off ({err}) — "
+                           f"both are running.")
+            st.session_state["_switch_done"] = True
+            st.rerun()
+        if running:
+            st.link_button(f"Open the {o['name']} →", o["url"], use_container_width=True)
+            if st.button(f"⏹ Switch the {o['name']} off", key="switch_stop_other", use_container_width=True,
+                         help="Frees its memory. Live comes back on its own whenever the test copy stops."):
+                err = AS.stop_now(other)
+                if err:
+                    st.error(err)
+                else:
+                    st.rerun()
+
+
 def _lock_dropdown_typing() -> None:
     try:
         import streamlit.components.v1 as components
@@ -187,4 +236,7 @@ def page_setup(name: str, page_path: str, *, title: str = None, anchor: str = No
     _handle_drive_callback(page_path)
     st.title(title or name, anchor=anchor)
     st.caption(f"v{APP_VERSION}  ·  {st.user.name}")
+    mb = memory_check(name)
     _sidebar(page_path)
+    if mb is not None:
+        st.sidebar.caption(f"🧠 App memory: {mb:,.0f} MB")
