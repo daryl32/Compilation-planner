@@ -132,9 +132,17 @@ def load_track(track_id: str) -> dict:
     return _load_track_file(track_id, mtime)
 
 
-@st.cache_data
+@shared_cache
+@st.cache_resource(show_spinner=False)
 def load_all_catalogues() -> dict:
-    """video_id -> catalogue dict, WITHOUT motion_curve. st.cache_data
+    """video_id -> catalogue dict, WITHOUT motion_curve. ONE SHARED COPY — read
+    it, never change it (checked Oct 2026: nothing in the planner does; spans,
+    picks and timeline entries are all built as new dicts). It used to be
+    st.cache_data, which deep-copies the whole library on every call — and this
+    is called several times per click — which is what kept running the 4 GB
+    server out of memory during long Choreography sessions. Cleared after a
+    Drive sync (refresh_caches_after_sync / Sync now) like before.
+    Older note: st.cache_data
     deep-copies its return value on every single call, and this function is
     called many times per script rerun — and every widget interaction on the
     page triggers a full rerun. motion_curve holds a frame-by-frame array per
@@ -1010,9 +1018,10 @@ def render_choreography_block(
     video_stats = video_stats or {}
     block_duration = seg["end"] - seg["start"]
     seg_target = seg.get("intensity", seg["energy"])
-    eligible = [vid for vid in selected_videos
-                if get_available_clips_for_video(queues, vid, block_duration, sequential_mode,
-                                                 global_excluded, role_filter=role_filter)]
+    _clips_by_vid = {vid: get_available_clips_for_video(queues, vid, block_duration, sequential_mode,
+                                                         global_excluded, role_filter=role_filter)
+                     for vid in selected_videos}
+    eligible = [vid for vid in selected_videos if _clips_by_vid[vid]]
     shown = eligible[:max_chor_videos]
     hidden = len(eligible) - len(shown)
 
@@ -1039,8 +1048,7 @@ def render_choreography_block(
     _show_clip = {}  # video_id -> (clip shown, all its clips, index) for the preview panel
 
     for col, video_id in zip(chor_cols, shown):
-        clips = get_available_clips_for_video(queues, video_id, block_duration, sequential_mode,
-                                               global_excluded, role_filter=role_filter)
+        clips = _clips_by_vid[video_id]
         pick_key = f"chor_pick_{seg_idx}_{video_id}"
         is_repeat = video_id in prev_block_videos
 
@@ -1538,6 +1546,13 @@ def _clip_curve(video_id: str, scene_id: int, offset_sec: float, duration_sec: f
     return vals[a:b], fps
 
 
+@shared_cache
+@st.cache_resource(show_spinner=False)
+def library_tag_idf() -> dict:
+    """{tag: weight} across the whole library — computed once, not per search."""
+    return SIM.tag_idf(load_all_catalogues(), lambda sc: sc.get("tags", []))
+
+
 def find_similar_clips(ref: dict, spans: list, duration: float, exclude=None, top: int = 6,
                        max_per_video: int = 2):
     """Clips of exactly `duration` from `spans` (available footage) most like
@@ -1561,7 +1576,7 @@ def find_similar_clips(ref: dict, spans: list, duration: float, exclude=None, to
                 if vals is not None and vals.size:
                     pool.append((SIM.clip_descriptor(vals, fps, span.get("tags", [])), (span, off, vals, fps)))
             off += step
-    idf = SIM.tag_idf(load_all_catalogues(), lambda sc: sc.get("tags", []))
+    idf = library_tag_idf()
     ranked = SIM.rank_similar_clips(SIM.clip_descriptor(ref_vals, ref_fps, ref.get("tags", [])), pool, idf,
                                     top=len(pool))
     # Keep the results varied: no two overlapping clips, and at most
@@ -5762,6 +5777,9 @@ else:
                         st.session_state["segment_exclusions"].get(current_block, set()),
                         st.session_state["global_excluded_scenes"], block_audio_curve,
                         max(_rc, 1), exclude_videos=ex)[0])
+            for _k in [k for k in st.session_state
+                       if k.startswith("adv_search_cache_") and k != f"adv_search_cache_{current_block}"]:
+                del st.session_state[_k]
             st.session_state[f"adv_search_cache_{current_block}"] = {
                 "key": search_key, "candidates": candidates, "missing": missing_curve_videos,
             }
