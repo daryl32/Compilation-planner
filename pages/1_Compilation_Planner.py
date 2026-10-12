@@ -4160,6 +4160,7 @@ def _restore_choice(choice: str) -> None:
 
 
 _start_autosave_session()
+st.session_state["_before_reset"] = autosave_now   # used by the sidebar's 🧹 Free memory
 
 _restore = st.session_state.pop("_restore_autosave", None)
 if _restore:
