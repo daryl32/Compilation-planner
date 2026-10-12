@@ -17,6 +17,7 @@ import streamlit as st
 from config import WHITELISTED_EMAILS
 from library_common import (
     IS_TEST, page_title, env_banner, render_sync_status, read_pending, push_pending, memory_check,
+    app_memory_mb, clear_shared_data_caches, _release_memory,
 )
 
 APP_VERSION = "1.8.1"
@@ -210,6 +211,53 @@ def _switch_panel() -> None:
                     st.rerun()
 
 
+# Session keys that survive a memory reset (everything else is this session's working data).
+_RESET_KEEP = {"_drive_oauth_token", "_drive_expired_note", "_switch_done"}
+
+
+def _reset_memory() -> None:
+    """🧹 Free memory: write unsaved work to its recovery file, drop this session's
+    working data and the shared data caches, and hand the memory back."""
+    before = app_memory_mb()
+    hook = st.session_state.get("_before_reset")   # the planner registers its autosave here
+    saved = False
+    if callable(hook):
+        try:
+            hook()
+            saved = True
+        except Exception:
+            pass
+    keep = _RESET_KEEP | ({DRIVE_SESSION_KEY} if DRIVE_SESSION_KEY else set())
+    for k in list(st.session_state.keys()):
+        if k not in keep:
+            try:
+                del st.session_state[k]
+            except Exception:
+                pass
+    st.cache_data.clear()
+    clear_shared_data_caches()
+    _release_memory()
+    after = app_memory_mb()
+    st.session_state["_memory_reset_note"] = (before, after, saved)
+
+
+def _memory_panel() -> None:
+    note = st.session_state.pop("_memory_reset_note", None)
+    if note:
+        before, after, saved = note
+        if before and after:
+            st.sidebar.success(f"🧹 Memory freed: {before:,.0f} → {after:,.0f} MB.")
+        else:
+            st.sidebar.success("🧹 Memory freed.")
+        if saved:
+            st.sidebar.caption("Anything unsaved was kept and will be offered back in the planner.")
+    st.sidebar.button("🧹 Free memory", key="reset_memory", on_click=_reset_memory,
+                      use_container_width=True,
+                      help="Saves your work to the recovery file, then clears this session's "
+                           "working data and cached video data. Saved projects are untouched. "
+                           "The planner starts fresh (unsaved work is offered back).")
+
+
 def _lock_dropdown_typing() -> None:
     try:
         import streamlit.components.v1 as components
@@ -240,3 +288,4 @@ def page_setup(name: str, page_path: str, *, title: str = None, anchor: str = No
     _sidebar(page_path)
     if mb is not None:
         st.sidebar.caption(f"🧠 App memory: {mb:,.0f} MB")
+    _memory_panel()
