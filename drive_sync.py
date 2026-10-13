@@ -29,6 +29,9 @@ SCOPES = ["https://www.googleapis.com/auth/drive"]
 # Folder names in Google Drive (top-level shared folders)
 DRIVE_SCENE_LABELING = "scene-labeling"
 
+# Files downloaded at once by sync_pull.
+SYNC_WORKERS = 8
+
 
 def q_escape(value: str) -> str:
     """Escape a value for a Drive search query (q=…name='…'): backslashes and
@@ -229,27 +232,72 @@ def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None,
             newest[key] = (drive_file, local_path)
     tasks = list(newest.values())
 
+    # Small, important files first, so a big catch-up of thumbnails or preview
+    # copies never holds up new catalogue or audio JSONs.
+    def priority(task):
+        p = task[1]
+        if p.parent == catalogue_dir:
+            return 0
+        if p.parent == audio_dir:
+            return 1
+        if p.parent.name == "timeline_sprites":
+            return 2
+        if p.parent.parent.name == "thumbnails":
+            return 3
+        return 4
+    tasks.sort(key=priority)
+
     synced = skipped = 0
     errors = []
     total = len(tasks)
 
-    for idx, (drive_file, local_path) in enumerate(tasks):
-        if progress_callback:
-            progress_callback(idx, total, local_path.name)
-        try:
-            # Skip if local file exists and is same size (quick check)
-            if local_path.exists() and local_path.stat().st_size == int(drive_file.get("size", 0)):
-                skipped += 1
-                continue
-            # Never overwrite a local file that is newer than the Drive copy — e.g. a
-            # Reviewer edit (excluded / intro / outro / corrected tags) not yet pushed to Drive.
-            if local_path.exists() and _local_is_newer(local_path, drive_file):
-                skipped += 1
-                continue
-            _download_file(service, drive_file["id"], local_path)
-            synced += 1
-        except Exception as e:
-            errors.append(f"{drive_file['name']}: {e}")
+    # Decide what needs downloading (cheap, local checks only).
+    todo = []
+    for drive_file, local_path in tasks:
+        # Skip if local file exists and is same size (quick check)
+        if local_path.exists() and local_path.stat().st_size == int(drive_file.get("size", 0)):
+            skipped += 1
+            continue
+        # Never overwrite a local file that is newer than the Drive copy — e.g. a
+        # Reviewer edit (excluded / intro / outro / corrected tags) not yet pushed to Drive.
+        if local_path.exists() and _local_is_newer(local_path, drive_file):
+            skipped += 1
+            continue
+        todo.append((drive_file, local_path))
+
+    # Download several at once: thumbnails are tiny, so one-at-a-time spends
+    # almost all its time waiting on round trips to Google. Each worker thread
+    # gets its own Drive client (they aren't thread-safe).
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    local = threading.local()
+
+    def fetch(drive_file, local_path):
+        if not hasattr(local, "service"):
+            local.service = _get_service()
+        tmp = local_path.with_name(local_path.name + ".part")
+        _download_file(local.service, drive_file["id"], tmp)
+        os.replace(tmp, local_path)   # never leave a half-written file in place
+
+    done = skipped
+    if progress_callback:
+        progress_callback(done, total, "")
+    with ThreadPoolExecutor(max_workers=SYNC_WORKERS) as pool:
+        futures = {pool.submit(fetch, f, p): (f, p) for f, p in todo}
+        for fut in as_completed(futures):
+            drive_file, local_path = futures[fut]
+            try:
+                fut.result()
+                synced += 1
+            except Exception as e:
+                errors.append(f"{drive_file['name']}: {e}")
+                try:
+                    local_path.with_name(local_path.name + ".part").unlink(missing_ok=True)
+                except OSError:
+                    pass
+            done += 1
+            if progress_callback:
+                progress_callback(done, total, local_path.name)
 
     return {"synced": synced, "skipped": skipped, "errors": errors}
 
