@@ -133,6 +133,65 @@ def _find_or_create_folder(service, name: str, parent_id: str = None) -> str:
     return folder["id"]
 
 
+def _service_account():
+    """The server's service-account Drive client (it can see every file in the
+    shared folders, unlike the user's drive.file login), or None if this machine
+    has no service account."""
+    try:
+        from drive_sync import credentials_available, _get_service as _sa_service
+        return _sa_service() if credentials_available() else None
+    except Exception:
+        return None
+
+
+def _upload_via_lookup(service, sa, local_path: Path, parts: list, mime_type: str) -> dict:
+    """Upload using the service account to FIND things and the user's login only
+    to CREATE them, so nothing is duplicated:
+      folders  — each level is the existing folder of that name (the oldest, i.e.
+                 the original, if there are already duplicates); only a level
+                 that doesn't exist at all is created.
+      the file — an existing file of that name is updated in place (with the
+                 user's login if the app created it, else the service account);
+                 a new file is created with the user's login."""
+    from drive_sync import _find_folders, q_escape
+    parent_id = None
+    for part in parts:
+        if part == "scene-labeling" and parent_id is None:
+            parent_id = SCENE_LABELING_FOLDER_ID
+            continue
+        if part == "catalogue" and parent_id == SCENE_LABELING_FOLDER_ID:
+            parent_id = CATALOGUE_FOLDER_ID
+            continue
+        found = _find_folders(sa, part, parent_id)
+        if found:
+            parent_id = found[0]["id"]
+        else:
+            body = {"name": part, "mimeType": "application/vnd.google-apps.folder"}
+            if parent_id:
+                body["parents"] = [parent_id]
+            parent_id = service.files().create(body=body, fields="id").execute()["id"]
+
+    resp = sa.files().list(
+        q=f"name='{q_escape(local_path.name)}' and '{parent_id}' in parents and trashed=false",
+        fields="files(id, modifiedTime)", orderBy="modifiedTime desc",
+    ).execute()
+    existing = resp.get("files", [])
+    if existing:
+        file_id = existing[0]["id"]
+        for client in (service, sa):
+            try:
+                media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
+                return client.files().update(fileId=file_id, media_body=media, fields="id, size").execute()
+            except Exception as e:
+                if not any(x in str(e) for x in ("404", "403", "notFound", "insufficient")):
+                    raise
+        # Neither could write to it: fall through and add a new copy (the sync
+        # always takes the newest copy of a name).
+    media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
+    return service.files().create(body={"name": local_path.name, "parents": [parent_id]},
+                                  media_body=media, fields="id, size").execute()
+
+
 def upload_file_with_oauth(token_dict: dict, local_path: Path, drive_path: str) -> tuple:
     """Upload (or replace) local_path in drive_path (e.g. "scene-labeling/previews")
     in the user's Drive. Returns ({"id", "size"}, None) or (None, error string)."""
@@ -145,34 +204,29 @@ def upload_file_with_oauth(token_dict: dict, local_path: Path, drive_path: str) 
     try:
         service = _get_service(token_dict)
         import mimetypes
-
-        # Walk/create the folder hierarchy
-        parts = [p for p in drive_path.split("/") if p]
-        parent_id = None
-        for part in parts:
-            parent_id = _find_or_create_folder(service, part, parent_id)
-
         mime_type = mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"
+        parts = [p for p in drive_path.split("/") if p]
 
-        # Update if exists, create if not
-        from drive_sync import q_escape
-        q = f"name='{q_escape(local_path.name)}' and '{parent_id}' in parents and trashed=false"
-        resp = service.files().list(q=q, fields="files(id)").execute()
-        existing = resp.get("files", [])
-
-        media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
-        if existing:
-            f = service.files().update(
-                fileId=existing[0]["id"],
-                media_body=media,
-                fields="id, size",
-            ).execute()
+        sa = _service_account()
+        if sa is not None:
+            f = _upload_via_lookup(service, sa, local_path, parts, mime_type)
         else:
-            f = service.files().create(
-                body={"name": local_path.name, "parents": [parent_id]},
-                media_body=media,
-                fields="id, size",
-            ).execute()
+            # No service account here (e.g. the laptop): the old way. With the
+            # drive.file permission this can only see what the app created, so it
+            # may add a second folder/file with the same name — the sync copes.
+            parent_id = None
+            for part in parts:
+                parent_id = _find_or_create_folder(service, part, parent_id)
+            from drive_sync import q_escape
+            q = f"name='{q_escape(local_path.name)}' and '{parent_id}' in parents and trashed=false"
+            existing = service.files().list(q=q, fields="files(id)").execute().get("files", [])
+            media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
+            if existing:
+                f = service.files().update(fileId=existing[0]["id"], media_body=media,
+                                           fields="id, size").execute()
+            else:
+                f = service.files().create(body={"name": local_path.name, "parents": [parent_id]},
+                                           media_body=media, fields="id, size").execute()
         return {"id": f["id"], "size": int(f.get("size") or 0)}, None
     except Exception as e:
         if "refresh" in str(e).lower() and ("token" in str(e).lower() or "credentials" in str(e).lower()):

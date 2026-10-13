@@ -55,6 +55,41 @@ def _find_folder(service, name: str, parent_id: str = None) -> str | None:
     return files[0]["id"] if files else None
 
 
+def _find_folders(service, name: str, parent_id: str = None) -> list[dict]:
+    """EVERY folder called `name` (optionally inside parent_id), oldest first, as
+    [{"id", "name", "createdTime"}]. There can be more than one: uploads made
+    with the user's Drive login (drive.file permission) can't see folders they
+    didn't create, so they used to make a second "audio_catalogue" or
+    "thumbnails" beside the real one. Read them all."""
+    q = f"name='{q_escape(name)}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    if parent_id:
+        q += f" and '{parent_id}' in parents"
+    out, page_token = [], None
+    while True:
+        resp = service.files().list(q=q, fields="nextPageToken, files(id, name, createdTime)",
+                                    pageSize=1000, pageToken=page_token).execute()
+        out.extend(resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return sorted(out, key=lambda f: f.get("createdTime", ""))
+
+
+def _list_subfolders(service, folder_id: str) -> list[dict]:
+    """Every folder directly inside folder_id (all pages)."""
+    out, page_token = [], None
+    while True:
+        resp = service.files().list(
+            q=f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            fields="nextPageToken, files(id, name, createdTime)", pageSize=1000, pageToken=page_token,
+        ).execute()
+        out.extend(resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return out
+
+
 def _list_files(service, folder_id: str) -> list[dict]:
     """List all non-folder files directly in a Drive folder."""
     results = []
@@ -154,43 +189,45 @@ def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None,
 
     tasks = []
 
-    # catalogue JSONs
-    cat_folder_id = _find_folder(service, "catalogue", scene_id)
-    if cat_folder_id:
+    def ids(name, parent_id):
+        return [f["id"] for f in _find_folders(service, name, parent_id)]
+
+    for cat_folder_id in ids("catalogue", scene_id):
+        # catalogue JSONs
         for f in _list_files(service, cat_folder_id):
             tasks.append((f, catalogue_dir / f["name"]))
 
-        # thumbnails (subfolder of catalogue)
-        thumb_id = _find_folder(service, "thumbnails", cat_folder_id)
-        if thumb_id:
-            # thumbnails are in per-video subfolders
-            resp = service.files().list(
-                q=f"'{thumb_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
-                fields="files(id, name)",
-            ).execute()
-            for vid_folder in resp.get("files", []):
+        # thumbnails (subfolder of catalogue), in per-video subfolders
+        for thumb_id in ids("thumbnails", cat_folder_id):
+            for vid_folder in _list_subfolders(service, thumb_id):
                 for f in _list_files(service, vid_folder["id"]):
                     tasks.append((f, catalogue_dir / "thumbnails" / vid_folder["name"] / f["name"]))
 
         # timeline_sprites (subfolder of catalogue)
-        sprite_id = _find_folder(service, "timeline_sprites", cat_folder_id)
-        if sprite_id:
+        for sprite_id in ids("timeline_sprites", cat_folder_id):
             for f in _list_files(service, sprite_id):
                 tasks.append((f, catalogue_dir / "timeline_sprites" / f["name"]))
 
-    # preview copies made in Colab (backfill proxies.py)
+    # preview copies (proxies)
     if proxy_dir is not None:
-        proxies_id = _find_folder(service, "proxies", scene_id)
-        if proxies_id:
+        for proxies_id in ids("proxies", scene_id):
             for f in _list_files(service, proxies_id):
                 if f["name"].endswith(".mp4") and ".part" not in f["name"]:
                     tasks.append((f, proxy_dir / f["name"]))
 
     # audio_catalogue JSONs
-    audio_folder_id = _find_folder(service, "audio_catalogue", scene_id)
-    if audio_folder_id:
+    for audio_folder_id in ids("audio_catalogue", scene_id):
         for f in _list_files(service, audio_folder_id):
             tasks.append((f, audio_dir / f["name"]))
+
+    # The same file can now appear more than once (two copies with one name, or
+    # the same name in two same-named folders): keep the newest copy of each.
+    newest = {}
+    for drive_file, local_path in tasks:
+        key = str(local_path)
+        if key not in newest or drive_file.get("modifiedTime", "") > newest[key][0].get("modifiedTime", ""):
+            newest[key] = (drive_file, local_path)
+    tasks = list(newest.values())
 
     synced = skipped = 0
     errors = []
