@@ -215,6 +215,12 @@ def _switch_panel() -> None:
 _RESET_KEEP = {"_drive_oauth_token", "_drive_expired_note", "_switch_done"}
 
 
+def session_keep_keys() -> set:
+    """Session keys that belong to the signed-in user rather than the work on a
+    page (Drive connection, live/test switch) — kept when a page starts fresh."""
+    return _RESET_KEEP | ({DRIVE_SESSION_KEY} if DRIVE_SESSION_KEY else set())
+
+
 def _reset_memory() -> None:
     """🧹 Free memory: write unsaved work to its recovery file, drop this session's
     working data and the shared data caches, and hand the memory back."""
@@ -227,7 +233,7 @@ def _reset_memory() -> None:
             saved = True
         except Exception:
             pass
-    keep = _RESET_KEEP | ({DRIVE_SESSION_KEY} if DRIVE_SESSION_KEY else set())
+    keep = session_keep_keys()
     for k in list(st.session_state.keys()):
         if k not in keep:
             try:

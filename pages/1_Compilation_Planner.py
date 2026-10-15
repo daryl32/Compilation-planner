@@ -4237,10 +4237,65 @@ if "_prefill_project_name" in st.session_state:   # set by a load/reopen — app
 
 autosave_now()
 
+
+def _new_project() -> None:
+    """🆕 New project: back to a blank planner (every setting at its default, no
+    track work, no project loaded). What was on screen is kept as a one-step
+    backup so it can be brought back."""
+    autosave_now()
+    try:
+        cur = _autosave_path()
+        if cur.exists():
+            cur.replace(_autosave_path(".before_new"))
+    except OSError:
+        pass
+    from page_setup import session_keep_keys
+    keep = session_keep_keys() | {"_autosave_started"}
+    name = (st.session_state.get("new_project_name") or "").strip()
+    for k in list(st.session_state.keys()):
+        if k not in keep:
+            try:
+                del st.session_state[k]
+            except Exception:
+                pass
+    st.cache_data.clear()
+    if name:
+        st.session_state["_prefill_project_name"] = sanitize_filename(name)
+    st.session_state["_new_project_notice"] = name or True
+
+
+def _undo_new_project() -> None:
+    backup = _autosave_path(".before_new")
+    try:
+        st.session_state["_restore_autosave"] = json.loads(backup.read_text())
+        backup.unlink()
+    except (OSError, ValueError):
+        st.session_state["_project_notices"] = [("error", "Couldn't find what you had before.")]
+
+
 st.sidebar.header("Project")
-_loaded = st.session_state.get("_loaded_project")
+_new_notice = st.session_state.pop("_new_project_notice", None)
+if _new_notice:
+    st.sidebar.success("🆕 New project started" + (f" — **{_new_notice}**" if isinstance(_new_notice, str) else "")
+                       + ". Pick a track and videos to begin.")
+    if _autosave_path(".before_new").exists():
+        st.sidebar.button("↩️ Bring back what I had", on_click=_undo_new_project, use_container_width=True,
+                          key="new_project_undo")
+_new_loaded = st.session_state.get("_loaded_project")
+_new_loaded_changes = _project_changes(_new_loaded) if _new_loaded else 0
+with st.sidebar.popover("🆕 New project", use_container_width=True):
+    st.caption("Start again from a blank planner — default settings, no track work, no project "
+               "loaded. Saved projects aren't touched, and you can bring back what's on screen "
+               "now straight afterwards.")
+    if _new_loaded and _new_loaded_changes:
+        st.warning(f"**{_new_loaded['name']}** has unsaved changes — save it first if you want to keep them.")
+    st.text_input("Name (optional)", key="new_project_name", placeholder="my-new-compilation",
+                  help="Filled in as the project name, ready for 💾 Save.")
+    st.button("🆕 Start new project", type="primary", on_click=_new_project, use_container_width=True,
+              key="new_project_go")
+_loaded = _new_loaded
 if _loaded:
-    _n_changed = _project_changes(_loaded)
+    _n_changed = _new_loaded_changes
     if _n_changed:
         st.sidebar.warning(f"📂 **{_loaded['name']}** — unsaved changes ({_n_changed} area"
                            f"{'' if _n_changed == 1 else 's'})")
