@@ -358,6 +358,8 @@ def load_audio_library(signature: tuple) -> dict:
             "added": mtime,
             "extra": int((t.get("analysis") or {}).get("version", 0)) >= EXTRA_ANALYSIS_VERSION,
             "extra_info": _extra_summary(t.get("analysis")),
+            "bars_model": ((t.get("analysis") or {}).get("methods") or {}).get("downbeats") == "beat_this",
+            "has_vocals": (t.get("analysis") or {}).get("vocals") is not None,
             "sections": [{"start": x["start"], "end": x["end"], "label": x["label"]}
                          for x in (t.get("analysis") or {}).get("sections") or []],
             "drops": list((t.get("analysis") or {}).get("drops") or []),
@@ -443,7 +445,7 @@ def _analysis_progress(aa) -> None:
     icons = {"queued": "⏳", "running": "⚙️", "done": "✅", "error": "❌"}
     order = {"running": 0, "queued": 1, "error": 2, "done": 3}
     for tid, info in sorted(status.items(), key=lambda kv: (order.get(kv[1].get("state"), 9), kv[0].lower())):
-        kind = "new track" if info.get("kind") == "new" else "extra analysis"
+        kind = "new track" if info.get("kind") == "new" else "analysis"
         st.caption(f"{icons.get(info.get('state'), '•')} **{tid}** — {kind}: {info.get('msg', '')}")
     if not active:
         if st.button("Clear finished", key="aa_clear"):
@@ -518,8 +520,57 @@ def render_analysis_panel(tracks: dict) -> None:
                         st.toast(f"Queued {n} new track(s).")
                         st.rerun()
 
+        _render_upgrade(aa, tracks)
+
         if aa.read_status() or st.session_state.get("_aa_was_active"):
             _analysis_progress(aa)   # refreshes itself every few seconds
+
+
+def _render_upgrade(aa, tracks: dict) -> None:
+    """⬆️ Re-run the extra analysis on tracks that already have it, but with
+    estimated bar lines (no beat_this at the time) or without vocals (no
+    Demucs). Beats and energy are kept, so existing plans still line up."""
+    done = {tid: t for tid, t in tracks.items() if t["extra"]}
+    if not done:
+        return
+    have_bt, have_dm = aa.beat_this_available(), aa.demucs_available()
+    no_bars = sorted(tid for tid, t in done.items() if not t["bars_model"])
+    no_vocals = sorted(tid for tid, t in done.items() if not t["has_vocals"])
+    st.divider()
+    st.markdown(f"**⬆️ Upgrade already-analysed tracks** — {len(no_bars)} with estimated bar lines, "
+                f"{len(no_vocals)} without vocals (of {len(done)})")
+    if not (have_bt or have_dm):
+        st.caption("Needs beat_this and/or Demucs installed on the server — see the server commands in "
+                   "the setup notes, then restart the app.")
+        return
+    if not no_bars and not no_vocals:
+        st.caption("Every analysed track already has the enhanced analysis. ✅")
+        return
+    st.caption("Keeps each track's beats and energy (plans still line up) and redoes bar lines, sections, "
+               "phrases and drops with beat_this — about 30–60 s a track on the server. Vocals use Demucs: "
+               "a few minutes a track. Runs in the background; you can leave the page and pause any time.")
+    c = st.columns(2)
+    bars_only = no_bars if have_bt else []
+    if c[0].button(f"🥁 Bar lines only — {len(bars_only)} track(s) (~{max(1, round(len(bars_only) * 0.75))} min)",
+                   key="aa_up_bars", disabled=not bars_only, use_container_width=True,
+                   help="Quick: beat_this bar lines and everything built on them. Vocals are kept as they are."):
+        n = aa.enqueue([{"track_id": tid, "kind": "extra", "vocals": False} for tid in bars_only])
+        aa.resume()
+        st.session_state["_aa_was_active"] = True
+        st.toast(f"Queued {n} track(s).")
+        st.rerun()
+    full = sorted(set(no_bars if have_bt else []) | set(no_vocals if have_dm else []))
+    if c[1].button(f"🎤 Bar lines + vocals — {len(full)} track(s) (~{max(1, len(full) * 4)} min)",
+                   key="aa_up_full", disabled=not full or not have_dm, use_container_width=True,
+                   help="Everything, including Demucs vocal separation (slow on the server's processor). "
+                        + ("" if have_dm else "Demucs isn't installed on the server.")):
+        n = aa.enqueue([{"track_id": tid, "kind": "extra", "vocals": True} for tid in full])
+        aa.resume()
+        st.session_state["_aa_was_active"] = True
+        st.toast(f"Queued {n} track(s).")
+        st.rerun()
+    if not have_bt:
+        st.caption("beat_this isn't installed on the server, so bar lines can't be upgraded here.")
 
 
 def render_audio():

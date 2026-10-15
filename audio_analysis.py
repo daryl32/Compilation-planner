@@ -720,7 +720,9 @@ def worker_running() -> bool:
 
 
 def enqueue(jobs: list) -> int:
-    """jobs: [{"track_id", "kind": "new"|"extra", "drive_rel": "Audio-Library/x.m4a"}].
+    """jobs: [{"track_id", "kind": "new"|"extra", "drive_rel": "Audio-Library/x.m4a",
+    "vocals": bool (optional, default True — False skips Demucs and keeps any vocals
+    the track already has)}].
     Skips tracks already queued or running. Returns how many were added."""
     p = _paths()
     queue = _read_json(p["queue"], [])
@@ -830,9 +832,17 @@ def _process(job: dict, say) -> None:
         err = download_source_video(rel, local)
         if err:
             raise RuntimeError(f"download failed: {err}")
-    result = analyse_file(local, existing=existing, progress=say)
+    with_vocals = job.get("vocals", True)
+    result = analyse_file(local, existing=existing, progress=say, with_vocals=with_vocals)
     if existing is not None:
         track = _read_json(json_path, existing)   # re-read: never clobber a newer edit
+        old = track.get("analysis") or {}
+        new = result["analysis"]
+        if new.get("vocals") is None and old.get("vocals") is not None:
+            # Vocals skipped (or Demucs failed) this time — keep the ones it had.
+            for k in ("vocals", "vocal_starts", "vocal_ends"):
+                new[k] = old.get(k)
+            new["methods"]["vocals"] = (old.get("methods") or {}).get("vocals") or "demucs"
         track.update(result)
     else:
         track = {"track_id": tid, "source_path": source_path, **result}
