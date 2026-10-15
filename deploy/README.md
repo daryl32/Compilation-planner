@@ -25,6 +25,9 @@ A push to `main` deploys production; a push to `dev` deploys the test copy
 - `setup_dev.sh` — one-time setup of the test copy (safe to re-run).
 - `refresh_dev_data.sh` — replace the test copy's data with a fresh copy of production's.
 - `install_timers.sh` — production's Drive sync and nightly preview-copy timers.
+- `setup_media.sh` — videos, music and pictures play straight from disk through nginx (signed,
+  expiring `/media/…` links) instead of being loaded into the app's memory; also sets
+  `MALLOC_ARENA_MAX=2` for both services. One-time; safe to re-run; restarts the app.
 
 ## Handy commands
 ```
@@ -37,8 +40,9 @@ sudo systemctl start mediaplanner-dev
 ## Memory
 - The sidebar shows the app's memory. Each copy logs it to `<data>/logs/memory.csv`
   (e.g. `tail -30 /root/data/logs/memory.csv`) — which page / Choreography block, and when.
-- Past `MEMORY_LIMIT_MB` (config.py, default 1800) the app clears its cached data
-  and hands the memory back, logged as "cleared caches".
+- Past `MEMORY_LIMIT_MB` (config.py, default 1800) the app quietly clears its cached data
+  and held media and hands the memory back (at most every 10 min), logged as "cleared caches".
+- Server page → 🧠 Memory: what's using it, release held media / clear caches, ♻️ Restart.
 - Unsaved planner work is autosaved per user to `<data>/…/projects/.autosave/`
   and offered back after a restart.
 

@@ -343,6 +343,9 @@ def safe_image(img, *args, **kwargs) -> bool:
         st.caption(f"🖼️ Picture unreadable: {Path(img).name}")
         return False
     try:
+        if isinstance(img, (str, Path)):
+            from media_links import image_source
+            img = image_source(img)        # an address when set up — not loaded into memory
         st.image(img, *args, **kwargs)
         return True
     except Exception:
@@ -527,6 +530,75 @@ def _log_memory(where: str, mb: float, note: str = "") -> None:
         pass
 
 
+def free_shared_memory(release_media: bool = True) -> dict:
+    """Clear what every page shares: cached data, the shared data caches, and
+    (release_media) the videos / pictures / music Streamlit is holding for
+    players on any page — a page that's still open simply loads its player
+    again next time it updates. Then hands freed memory back to the system.
+    Returns {"media_files", "media_mb"} released."""
+    media_files, media_mb = 0, 0.0
+    if release_media:
+        try:
+            from streamlit.runtime import Runtime
+            mgr = Runtime.instance().media_file_mgr
+            before = memory_breakdown().get("media", 0.0)
+            with mgr._lock:
+                sessions = list(mgr._files_by_session_and_coord.keys())
+                count_before = len(mgr._file_metadata)
+            for sid in sessions:
+                mgr.clear_session_refs(sid)
+            mgr.remove_orphaned_files()
+            media_files = max(0, count_before - len(mgr._file_metadata))
+            media_mb = max(0.0, before - memory_breakdown().get("media", 0.0))
+        except Exception:
+            pass
+    st.cache_data.clear()
+    clear_shared_data_caches()
+    _release_memory()
+    return {"media_files": media_files, "media_mb": media_mb}
+
+
+def memory_breakdown(include_sessions: bool = False) -> dict:
+    """MB held, by kind, from Streamlit's own accounting:
+      media     — videos / music / pictures loaded for players (st.video etc. given a file)
+      cache     — st.cache_data
+      shared    — st.cache_resource (catalogues, motion curves, …)
+      sessions  — every open page's working data (only when include_sessions:
+                  measuring it walks every session and can take a few seconds)
+    Kinds it can't see (libraries, Python itself, memory not yet handed back)
+    are the rest of app_memory_mb()."""
+    out = {"media": 0.0, "cache": 0.0, "shared": 0.0, "sessions": 0.0, "n_sessions": 0}
+    try:
+        from streamlit.runtime import Runtime
+        rt = Runtime.instance()
+        families = None if include_sessions else ["cache_memory_bytes"]
+        try:
+            raw = rt.stats_mgr.get_stats(families) if families else rt.stats_mgr.get_stats()
+        except TypeError:
+            raw = rt.stats_mgr.get_stats()
+        stats = []
+        for v in (raw.values() if isinstance(raw, dict) else [raw]):
+            stats.extend(v if isinstance(v, (list, tuple)) else [v])
+        for stat in stats:
+            name = getattr(stat, "category_name", "") or ""
+            size = float(getattr(stat, "byte_length", 0) or 0) / 2**20
+            if "media_file" in name:
+                out["media"] += size
+            elif "cache_data" in name:
+                out["cache"] += size
+            elif "cache_resource" in name:
+                out["shared"] += size
+            elif "session_state" in name and include_sessions:
+                out["sessions"] += size
+        try:
+            out["n_sessions"] = len(rt._session_mgr.list_active_sessions())
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return out
+
+
 def memory_check(where: str):
     """Log memory if it changed (or every 5 min); clear caches past the limit.
     Returns the app's memory in MB (None if unknown)."""
@@ -542,17 +614,14 @@ def memory_check(where: str):
     state = _memory_state()
     state["peak_mb"] = max(state["peak_mb"], mb)
     note = ""
-    if mb > MEMORY_LIMIT_MB:
-        st.cache_data.clear()
-        clear_shared_data_caches()
-        _release_memory()
+    # Past the limit: quietly clear cached data and hand memory back (no pop-up).
+    # At most once every 10 minutes — clearing again straight away gains little,
+    # and doing it on every click made pages slow without bringing memory down.
+    if mb > MEMORY_LIMIT_MB and _time.time() - state.get("last_clear", 0.0) > 600:
+        state["last_clear"] = _time.time()
+        freed = free_shared_memory()
         after = app_memory_mb() or mb
-        note = f"over {MEMORY_LIMIT_MB:.0f} MB: cleared caches -> {after:.0f} MB"
-        try:
-            st.toast(f"🧠 Memory was high ({mb:.0f} MB) — cleared cached data to stay safe. "
-                     f"Things may load a little slower for a moment.")
-        except Exception:
-            pass
+        note = f"over {MEMORY_LIMIT_MB:.0f} MB: cleared caches and {freed['media_files']} held media file(s) -> {after:.0f} MB"
         mb = after
     now = _time.time()
     if note or abs(mb - state["last_mb"]) >= 25 or now - state["last_time"] >= 300:
@@ -596,10 +665,12 @@ def render_range_picker(video_id: str, source_path: str, duration: float, curren
     local_path = colab_to_local(source_path)
     proxy = proxy_path(video_id)
     if proxy.exists():
-        st.video(str(proxy))
+        from media_links import play_video
+        play_video(proxy)
         st.caption("⚡ Fast preview copy")
     elif Path(local_path).exists():
-        st.video(local_path)
+        from media_links import play_video
+        play_video(local_path)
         if st.button("⚡ Make a fast preview copy", key=f"{key}_proxy_{video_id}",
                      help="Encodes a small 480p copy so this player loads and scrubs quickly. "
                           "Takes a few minutes for a long video."):
@@ -657,7 +728,8 @@ def show_render_player(meta: dict, height: int = 360) -> None:
     from renders import drive_preview_url
     path = Path(meta["path"])
     if path.exists():
-        st.video(str(path))
+        from media_links import play_video
+        play_video(path)
         return
     url = drive_preview_url(meta)
     if url:

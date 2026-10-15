@@ -220,12 +220,13 @@ def _server_panel(mb) -> None:
             st.caption(f"🧠 App memory: {mb:,.0f} MB")
         st.button("🧹 Free memory", key="reset_memory", on_click=_reset_memory,
                   use_container_width=True,
-                  help="Saves your work to the recovery file, then clears this session's "
-                       "working data and cached video data. Saved projects are untouched. "
-                       "The planner starts fresh (unsaved work is offered back).")
+                  help="Saves your work to the recovery file, then clears this page's working data, "
+                       "cached data, and the videos and pictures held in memory for players. Saved "
+                       "projects are untouched; unsaved planner work is offered back. For more "
+                       "control (or a full reset with ♻️ Restart), open the Server page.")
         _switch_panel()
         try:
-            st.page_link("pages/4_Server.py", label="💽 Disk space & clean-up →")
+            st.page_link("pages/4_Server.py", label="🧠 Memory, 💽 disk & clean-up →")
         except Exception:
             pass
 
@@ -347,9 +348,8 @@ def _reset_memory() -> None:
                 del st.session_state[k]
             except Exception:
                 pass
-    st.cache_data.clear()
-    clear_shared_data_caches()
-    _release_memory()
+    from library_common import free_shared_memory
+    free_shared_memory()          # cached data + videos/pictures held for players, then hand back
     after = app_memory_mb()
     st.session_state["_memory_reset_note"] = (before, after, saved)
 

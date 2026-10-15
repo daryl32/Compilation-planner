@@ -534,7 +534,8 @@ def split_dialog(sid, auto: bool = False):
 
     vids = video_paths()
     if vids:
-        st.video(str(vids[0]), start_time=int(start), end_time=int(math.ceil(end)))
+        from media_links import play_video
+        play_video(vids[0], start_time=int(start), end_time=int(math.ceil(end)))
         st.caption("Play the scene to find the moment, then move the slider there.")
 
     step10 = max(1, math.ceil((hi10 - lo10) / 20000))

@@ -659,7 +659,8 @@ def _render_audio_player(track_id: str, source_path: str):
     from render_preview import colab_to_local
     local_path = colab_to_local(source_path)
     if Path(local_path).exists():
-        st.audio(local_path)
+        from media_links import play_audio
+        play_audio(local_path)
         return
     st.warning(f"Audio file not found locally: {local_path}")
     try:
@@ -979,7 +980,8 @@ def _render_compare_panel(by_name: dict, picked: list, ranges: dict) -> None:
         if cmp_err:
             st.error(f"Couldn't build the side-by-side video: {cmp_err}")
         else:
-            st.video(str(cmp_path))
+            from media_links import play_video
+            play_video(cmp_path)
             st.caption("Both renders in one video — they play, pause and seek together. "
                        "Left is A, right is B" + ("; the music is the same track." if same_track else "."))
 
