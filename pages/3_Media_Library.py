@@ -100,16 +100,17 @@ def load_library(signature: tuple) -> dict:
     return videos
 
 
-def trim_intro_outro_range(video: dict) -> tuple:
-    """Range that drops leading intro/excluded scenes and trailing outro/excluded
-    scenes. The whole video if nothing is flagged at either end."""
+def trim_excluded_range(video: dict) -> tuple:
+    """Range that drops the excluded scenes at the start and end of the video
+    (intro/outro flags are ignored — only Exclude decides). The whole video if
+    neither end is excluded."""
     scenes = video["scenes"]
     if not scenes:
         return 0.0, video["duration"]
     first, last = 0, len(scenes) - 1
-    while first <= last and (scenes[first]["intro"] or scenes[first]["excluded"]):
+    while first <= last and scenes[first]["excluded"]:
         first += 1
-    while last >= first and (scenes[last]["outro"] or scenes[last]["excluded"]):
+    while last >= first and scenes[last]["excluded"]:
         last -= 1
     if first > last:
         return 0.0, video["duration"]
@@ -278,7 +279,7 @@ def render_videos():
                 action = render_range_picker(
                     vid, video["source_path"], video["duration"], rng,
                     key="lib",
-                    suggestions=[("✂️ Trim intro/outro", lambda v=video: trim_intro_outro_range(v))],
+                    suggestions=[("✂️ Trim excluded ends", lambda v=video: trim_excluded_range(v))],
                     apply_label="Save library range",
                     clear_label="Remove library range",
                     slider_label=f"Library range for {vid}",
