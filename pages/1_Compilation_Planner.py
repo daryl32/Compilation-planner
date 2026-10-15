@@ -24,6 +24,7 @@ from renders import (delete_render, load_render, render_files, upload_render, cl
                      auto_clear_enabled)
 import video_ranking as VR
 import catalogue_store as CStore
+import autofill as AF
 import similarity as SIM
 import cut_scoring as CS
 from audio_charts import add_analysis_overlays
@@ -299,6 +300,7 @@ def build_footage_queues(candidate_video_ids: tuple, tag_filter: tuple, video_ti
                 "thumbnail": str(resolve_thumbnail(scene["thumbnail_paths"][0], video_id))
                              if scene["thumbnail_paths"] else None,
                 "motion_norm": round((scene.get("motion_intensity", 0.0) - m_min) / m_span, 3),
+                "motion_raw": scene.get("motion_intensity"),   # for Improved auto-fill's motion scale
                 "scene_start_sec": scene_start_sec,
                 "offset_sec": eff_start - scene_start_sec,  # starts partway in if the range clipped the front
                 "remaining_sec": duration,
@@ -779,9 +781,16 @@ def rank_candidates_weighted(
        video gets a beginning, middle and end. 0 outside sequential mode.
 
     Returns candidates sorted by combined score, descending. Does not
-    mutate or reorder the input list itself."""
+    mutate or reorder the input list itself.
+
+    With "✨ Improved auto-fill" on (the default) the ranking is autofill.rank
+    instead — see autofill.py for what it changes and why."""
     if not candidates:
         return []
+    if st.session_state.get("autofill_v2", True):
+        return _rank_v2(candidates, current_block, segments, confirmed, queues, prev_block_videos,
+                        weight_shape, weight_random, avoid_repeat, weight_spread, weight_motion,
+                        random_seed, weight_position, sequential, videos_per_block)
 
     curr_duration = segments[current_block]["end"] - segments[current_block]["start"]
     block_intensity = segments[current_block].get("intensity", segments[current_block].get("energy", 0.5))
@@ -823,6 +832,45 @@ def rank_candidates_weighted(
     # Hard rule first (non-repeats before repeats), then the blended score.
     scored.sort(key=lambda t: (t[0], -t[1]))
     return [c for _, _, c in scored]
+
+
+WHY_KEY = "autofill_why"
+WHY_MAX = 5000
+
+
+def why_key(block: int, video_id: str, scene_id, start: float) -> tuple:
+    return (int(block), str(video_id), scene_id, round(float(start), 1))
+
+
+def _rank_v2(candidates, current_block, segments, confirmed, queues, prev_block_videos,
+             weight_shape, weight_random, avoid_repeat, weight_spread, weight_motion,
+             random_seed, weight_position, sequential, videos_per_block) -> list:
+    """autofill.rank with this page's helpers; remembers why each of the top
+    candidates scored as it did, for 🔎 Why these picks?."""
+    position_targets = (
+        compute_position_targets(current_block, len(segments), confirmed, queues, videos_per_block)
+        if sequential and weight_position > 0 else None
+    )
+    seg_dur = segments[current_block]["end"] - segments[current_block]["start"]
+    ranked, why = AF.rank(
+        candidates, current_block=current_block, segments=segments, confirmed=confirmed, queues=queues,
+        prev_block_videos=prev_block_videos or set(),
+        weights={"weight_shape": weight_shape, "weight_motion": weight_motion,
+                 "weight_spread": weight_spread, "weight_position": weight_position,
+                 "weight_random": weight_random},
+        avoid_repeat=avoid_repeat, seed=random_seed, position_targets=position_targets,
+        position_score=lambda c: position_closeness(c, position_targets or {}, seg_dur),
+        random_unit=_stable_random_unit, motion_scale=AF.MotionScale(queues),
+        window_motion_of=lambda vid, a, b: AF.window_motion(AF.summary_for(CATALOGUE_DIR, vid), a, b),
+    )
+    store = st.session_state.setdefault(WHY_KEY, {})
+    if len(store) > WHY_MAX:
+        store.clear()
+    for i, (c, w) in enumerate(zip(ranked[:8], why[:8])):
+        store[why_key(current_block, c["video_id"], c["scene_id"], w["start"])] = {
+            **w, "rank": i + 1, "of": len(ranked), "video_id": c["video_id"], "scene_id": c["scene_id"],
+        }
+    return ranked
 
 
 def repeat_fallback_videos(picks: list, prev_block_videos: set, avoid_repeat: bool) -> list:
@@ -3466,14 +3514,31 @@ def match_scenes_to_track(
     duration_shortfall_sec = 0.0
     confirmed_so_far: dict = {}  # seg_idx -> flat list of every chain-link pick made so far
 
-    for i, seg in enumerate(segments):
+    # Clip counts are drawn in track order whatever order blocks are filled in,
+    # so the same seed gives the same counts.
+    base_counts = [clips_for_intensity(seg.get("intensity", seg["energy"]), min_clips, max_clips,
+                                       ramp_start, ramp_end, vary_count, rng) for seg in segments]
+    # ✨ Improved auto-fill (not sequential mode, where each video must be used in
+    # order): fill intro/outro blocks, then the most intense blocks, first — so the
+    # scarce tagged and high-motion footage goes where it's needed most.
+    if st.session_state.get("autofill_v2", True) and not sequential:
+        order = AF.fill_order(len(segments), [s.get("intensity", s["energy"]) for s in segments],
+                              intro_blocks | outro_blocks)
+    else:
+        order = range(len(segments))
+    by_index = {}
+
+    for i in order:
+        seg = segments[i]
         seg_duration = seg["end"] - seg["start"]
         target = seg.get("intensity", seg["energy"])
-        base_n_picks = clips_for_intensity(target, min_clips, max_clips, ramp_start, ramp_end, vary_count, rng)
+        base_n_picks = base_counts[i]
         n_picks = max(0, base_n_picks - segment_clip_reduction.get(i, 0))
         excluded_here = segment_exclusions.get(i, set())
         role_filter = "intro_candidate" if i in intro_blocks else ("outro_candidate" if i in outro_blocks else None)
-        prev_block_videos = {p["video_id"] for p in confirmed_so_far.get(i - 1, [])} if i > 0 else set()
+        # Neighbours already filled (with out-of-order filling that can be the block after, too).
+        prev_block_videos = {p["video_id"] for j in (i - 1, i + 1) if 0 <= j < len(segments)
+                             for p in confirmed_so_far.get(j, [])}
         weighting = {
             "seg_idx": i, "segments": segments, "confirmed": confirmed_so_far,
             "prev_block_videos": prev_block_videos,
@@ -3517,7 +3582,7 @@ def match_scenes_to_track(
 
         confirmed_so_far[i] = [c for slot in slots for c in slot["chain"]]
 
-        timeline.append({
+        by_index[i] = {
             "segment_index": i,
             "track_time": [round(seg["start"], 2), round(seg["end"], 2)],
             "segment_energy": seg["energy"],
@@ -3526,8 +3591,9 @@ def match_scenes_to_track(
             "split_screen": len(slots) > 1,
             "manually_edited": i in segment_exclusions or i in segment_clip_reduction,
             "scenes": slots,
-        })
+        }
 
+    timeline = [by_index[i] for i in sorted(by_index)]
     return timeline, clip_count_shortfall, duration_shortfall_sec
 
 
@@ -3602,13 +3668,16 @@ DIAL_DEFAULTS = {
     "allow_same_video": False,
     "prefer_intro_outro": False,
     # Auto-fill weights (used in Matching & Export, stored here for persistence)
+    # Defaults = autofill.PRESETS["Balanced"] (projects keep the values they were saved with).
     "weight_shape": 2.0,
     "weight_random": 0.5,
     "avoid_repeat": True,
-    "weight_spread": 1.0,
-    "weight_motion": 1.0,
-    "weight_position": 0.0,
+    "weight_spread": 1.5,
+    "weight_motion": 2.0,
+    "weight_position": 1.0,
     "autofill_seed": 42,
+    "autofill_v2": True,          # ✨ Improved auto-fill (autofill.py); off = the original scoring
+    "autofill_preset": "Balanced",
 }
 
 # Weight keys that live on the Matching & Export page — Streamlit can purge
@@ -3619,6 +3688,7 @@ DIAL_DEFAULTS = {
 WEIGHT_KEYS = [
     "weight_shape", "weight_random", "avoid_repeat",
     "weight_spread", "weight_motion", "weight_position", "autofill_seed",
+    "autofill_v2", "autofill_preset",
 ]
 
 # Restore audio-settings keys from their shadow copy BEFORE the generic setdefault below
@@ -3660,7 +3730,7 @@ PROJECT_SIMPLE_KEYS = [
     "split_screen_enabled", "min_clips", "max_clips", "density_contrast",
     "vary_count", "count_seed", "min_clip_len_sec",
     "weight_shape", "weight_random", "avoid_repeat", "weight_spread", "weight_motion",
-    "weight_position", "autofill_seed",
+    "weight_position", "autofill_seed", "autofill_v2", "autofill_preset",
     "ranking_weights", "ranking_experimental", "random_top_seed",
     "committed_selected_videos", "committed_tag_filter", "known_extra_videos", "extra_videos",
     "adv_current_block", "chor_current_block",
@@ -4494,59 +4564,102 @@ if not selected_videos:
 _autofill_disabled = matching_mode not in ("Manual step-through", "Auto", "Choreography")
 _is_auto_mode = matching_mode == "Auto"
 _no_shape_score_mode = matching_mode in ("Auto", "Choreography")  # neither computes a per-frame shape score
+_PRESET_CUSTOM = "Custom"
+
+
+def _apply_preset() -> None:
+    """Preset picked: set its sliders (Custom leaves them as they are)."""
+    for k, v in AF.PRESETS.get(st.session_state.get("autofill_preset"), {}).items():
+        st.session_state[k] = v
+
+
+def _mark_custom() -> None:
+    st.session_state["autofill_preset"] = _PRESET_CUSTOM
+
+
+def _reroll() -> None:
+    st.session_state["autofill_seed"] = (int(st.session_state.get("autofill_seed", 42)) + 1) % 100000
+
+
+def _weight_shares(v2: bool) -> str:
+    """'Energy 40% · Shape 30% · …' — each slider's share of the decision."""
+    parts = []
+    for term, (key, label) in AF.TERMS.items():
+        if key == "weight_shape" and _no_shape_score_mode:
+            continue
+        if key == "weight_position" and not sequential_mode:
+            continue
+        parts.append((label, float(st.session_state.get(key, 0.0))))
+    total = sum(w for _, w in parts)
+    if not total:
+        return "All weights are at 0 — picks follow the variety draw only."
+    return "  ·  ".join(f"{label} **{100 * w / total:.0f}%**" for label, w in parts if w > 0)
+
+
+# The preset name only stays if the sliders still hold its values.
+_preset_vals = AF.PRESETS.get(st.session_state.get("autofill_preset"))
+if _preset_vals and any(abs(float(st.session_state.get(k, v)) - v) > 1e-6 for k, v in _preset_vals.items()):
+    st.session_state["autofill_preset"] = _PRESET_CUSTOM
+
 with st.expander("⚙️ Auto-fill weighting", expanded=False):
     if _is_auto_mode:
-        st.caption("In Auto mode these weights drive EVERY pick directly (there's no separate "
-                   "manual grid to Auto-fill here). On a marked intro/outro block, candidates whose "
-                   "clip is actually tagged are still preferred first; these weights rank among "
-                   "whichever pool (tagged or, failing that, untagged) ends up available.")
+        st.caption("In Auto mode these weights drive EVERY pick directly. On a marked intro/outro "
+                   "block, clips actually tagged are still preferred first.")
     elif matching_mode == "Choreography":
-        st.caption("Drives a column's '⭐ Auto pick' preview, Confirm & Next's Auto columns, and "
-                   "Auto-fill ALL — ticking a clip yourself always overrides these. On a marked "
-                   "intro/outro block, videos whose clip is actually tagged are still preferred over "
-                   "ones that fell back to untagged footage; these weights rank within each group.")
+        st.caption("Drives a column's '⭐ Auto pick', Confirm & Next's Auto columns and Auto-fill ALL — "
+                   "ticking a clip yourself always overrides these.")
     else:
-        st.caption("Controls Auto-fill's automatic picks only — the candidate grid always stays sorted by "
-                   "raw shape score for manual browsing, and these weights never restrict what you can pick yourself.")
+        st.caption("Controls Auto-fill's automatic picks only — the candidate grid stays sorted by raw "
+                   "shape score for manual browsing.")
+    _hc = st.columns([2, 3])
+    _v2 = _hc[0].toggle(
+        "✨ Improved auto-fill", key="autofill_v2", disabled=_autofill_disabled,
+        help="On: weights are compared on the same scale (each slider is a share of the decision), "
+             "motion is matched for the exact part of the scene used on a fairer scale, balance "
+             "uses each video's fair share, Variety picks among the best few, and Auto mode fills "
+             "intro/outro and the most intense blocks first (except in sequential mode). "
+             "Off: the original scoring, to compare.")
+    _hc[1].selectbox(
+        "Preset", list(AF.PRESETS) + [_PRESET_CUSTOM], key="autofill_preset", on_change=_apply_preset,
+        disabled=_autofill_disabled,
+        help="A starting point for the sliders below. Moving a slider switches this to Custom.")
+    st.caption("Share of each pick: " + _weight_shares(_v2))
+
     _wt_cols = st.columns(3)
     with _wt_cols[0]:
-        st.slider("A — Shape match", 0.0, 5.0, step=0.1, key="weight_shape",
-                  disabled=(_autofill_disabled or _no_shape_score_mode),
-                  help="How much the clip's frame-by-frame shape-match score drives the pick. Has no "
-                       "effect in Auto or Choreography mode — neither computes a per-frame curve "
-                       "comparison for this weight to act on." if _no_shape_score_mode else
-                       "How much the clip's frame-by-frame shape-match score drives the pick.")
-        st.slider("B — Randomness", 0.0, 5.0, step=0.1, key="weight_random",
-                  disabled=_autofill_disabled,
-                  help="Adds variety. Reproducible — same seed always gives same picks.")
+        if not _no_shape_score_mode:
+            st.slider("Match the music's shape", 0.0, 5.0, step=0.1, key="weight_shape",
+                      disabled=_autofill_disabled, on_change=_mark_custom,
+                      help="(A) How much the clip's frame-by-frame shape match with the music drives the pick.")
+        st.slider("Match the energy level", 0.0, 5.0, step=0.1, key="weight_motion",
+                  disabled=_autofill_disabled, on_change=_mark_custom,
+                  help="(E) Prefers clips whose motion suits this block's intensity — calm footage for "
+                       "quiet parts, busy footage for the drops.")
     with _wt_cols[1]:
-        st.toggle("C — Avoid repeating previous block", key="avoid_repeat", disabled=_autofill_disabled,
-                  help="On: a hard rule — automatic picks never reuse a video from the block just "
-                       "before, unless no other video has footage for that spot. Then it falls back "
-                       "to a repeat and warns you which blocks. The other weights only choose among "
-                       "the allowed clips. Off: repeats are treated like any other clip.")
-        st.slider("D — Balance use between videos", 0.0, 5.0, step=0.1, key="weight_spread",
-                  disabled=_autofill_disabled,
-                  help="Favors videos used least so far and those with the most footage left, "
-                       "so no single video dominates the plan.")
+        st.slider("Use all videos evenly", 0.0, 5.0, step=0.1, key="weight_spread",
+                  disabled=_autofill_disabled, on_change=_mark_custom,
+                  help="(D) Favours videos that are behind their fair share of the plan (by how much "
+                       "usable footage they have), so no single video dominates.")
+        st.toggle("Never repeat the previous block's videos", key="avoid_repeat", disabled=_autofill_disabled,
+                  help="(C) A hard rule: automatic picks never reuse a video from the neighbouring "
+                       "block unless no other video has footage for that spot (you'll be warned).")
     with _wt_cols[2]:
-        st.slider("E — Motion intensity match", 0.0, 5.0, step=0.1, key="weight_motion",
-                  disabled=_autofill_disabled,
-                  help="Prefers clips whose overall motion level matches this block's intensity. "
-                       "Complementary to A (shape pattern) — A rewards the same rises/falls; "
-                       "E rewards the right activity level.")
         if sequential_mode:
-            st.slider("F — Spread through each video", 0.0, 5.0, step=0.1, key="weight_position",
-                      disabled=_autofill_disabled,
-                      help="Sequential mode: gives each video a beginning, middle and end. Each video's "
-                           "usable range is split into as many parts as it's expected to be used, and "
-                           "each use prefers its own part — higher = stronger pull (other weights still "
-                           "count). Also sets how far a pick may skip ahead within a video: 0 stays at "
-                           "the front, higher skips further, never so far that the video could run "
-                           "short before the plan ends.")
-        st.number_input("Random seed", 0, 99999, key="autofill_seed",
-                        disabled=_autofill_disabled,
-                        help="Change to reroll randomness (B) without touching anything else.")
+            st.slider("Move through each video in order", 0.0, 5.0, step=0.1, key="weight_position",
+                      disabled=_autofill_disabled, on_change=_mark_custom,
+                      help="(F) Sequential mode: gives each video a beginning, middle and end — each use "
+                           "prefers its own part of the video. Also sets how far a pick may skip ahead "
+                           "within a video, never so far that it could run short before the plan ends.")
+        st.slider("Variety", 0.0, 5.0, step=0.1, key="weight_random",
+                  disabled=_autofill_disabled, on_change=_mark_custom,
+                  help="(B) 0 = always the top-scoring clip. Higher = picks more often from the next "
+                       "best few instead, for variety (Improved auto-fill), or adds random noise "
+                       "(original scoring). Reproducible — the same seed gives the same picks.")
+        _rc = st.columns([3, 2])
+        _rc[0].number_input("Seed", 0, 99999, key="autofill_seed", disabled=_autofill_disabled,
+                            help="Change to reroll Variety without touching anything else.")
+        _rc[1].button("🎲 Reroll", on_click=_reroll, disabled=_autofill_disabled, use_container_width=True,
+                      help="Next seed — a different draw with the same settings.")
 
 # Save weight values to their shadow copy every time this section renders —
 # mirrors audio_settings_shadow so values survive switching to another section.
@@ -5843,6 +5956,60 @@ if matching_mode == "Choreography" and chor_frontier < len(segments):
         f"Only {chor_frontier} of {len(segments)} blocks confirmed — exporting/rendering now will "
         f"leave the rest empty. Finish stepping through above first, or export anyway if intentional."
     )
+
+def render_why_panel(timeline: list, segments: list) -> None:
+    """🔎 Why these picks? — for one block: each automatic pick's score broken
+    down by slider, its motion against the block's, and the runners-up."""
+    if not st.session_state.get("autofill_v2", True):
+        return
+    store = st.session_state.get(WHY_KEY) or {}
+    filled = [e for e in timeline if e.get("scenes")]
+    if not filled or not store:
+        return
+    with st.expander("🔎 Why these picks?", expanded=False):
+        st.caption("How Improved auto-fill scored each automatic pick: each slider's part of the score "
+                   "(+ helped, − held it back, relative to the other candidates), the clip's motion "
+                   "against the block's intensity, and the clips it beat. Picks you made yourself "
+                   "aren't scored.")
+        idx = st.selectbox(
+            "Block", [e["segment_index"] for e in filled], key="why_block",
+            format_func=lambda i: f"Block {i + 1}  ·  intensity {segments[i].get('intensity', 0):.2f}")
+        entry = next(e for e in filled if e["segment_index"] == idx)
+        picks = [c for slot in entry["scenes"] for c in (slot.get("chain") or [slot])]
+        picked = set()
+        labels = {k: AF.TERMS[k][1] for k in AF.TERMS}
+
+        def bar(v: float) -> str:
+            n = min(10, int(round(abs(v) * 8)))
+            return ("🟩" if v >= 0 else "🟥") * max(n, 1)
+
+        for p in picks:
+            k = why_key(idx, p["video_id"], p["scene_id"], p.get("clip_start_sec", 0.0))
+            w = store.get(k)
+            picked.add(k)
+            head = (f"**{p['video_id']}** · scene {p['scene_id']} · "
+                    f"{format_mmss(p.get('clip_start_sec', 0.0))}")
+            if not w:
+                st.markdown(head + "  — picked by you (not scored)")
+                continue
+            st.markdown(head + f"  — ranked **{w['rank']} of {w['of']}**"
+                        + ("  ·  🔁 repeat (nothing else available)" if w.get("repeat") else ""))
+            lines = [f"{bar(v)} {labels[t]} {v:+.2f}" for t, v in
+                     sorted(w["shares"].items(), key=lambda kv: -abs(kv[1]))]
+            if abs(w.get("variety", 0)) > 1e-3:
+                lines.append(f"🎲 Variety {w['variety']:+.2f}")
+            lines.append(f"🏃 motion {w['motion_level']:.2f} for a block at {w['target']:.2f}")
+            st.caption("  \n".join(lines))
+        others = sorted((v for k, v in store.items() if k[0] == idx and k not in picked),
+                        key=lambda v: (v["rank"], -v["score"]))[:3]
+        if others:
+            st.markdown("**Runners-up**")
+            st.caption("  \n".join(
+                f"{o['video_id']} · scene {o['scene_id']} · {format_mmss(o['start'])} — score "
+                f"{o['score']:+.2f}, motion {o['motion_level']:.2f}" for o in others))
+
+
+render_why_panel(timeline, segments)
 
 st.subheader("Export")
 
