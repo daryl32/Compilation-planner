@@ -23,7 +23,7 @@ from pathlib import Path
 import streamlit as st
 
 from config import CATALOGUE_DIR
-from library_common import (mark_pending, master_thumbnail_scenes, set_master_thumbnail,
+from library_common import (safe_image, image_ok, mark_pending, master_thumbnail_scenes, set_master_thumbnail,
                             proxy_path, library_ranges, tc_to_seconds, format_mmss, overlap_with_range,
                             scene_tags)
 import catalogue_store as CS
@@ -281,7 +281,7 @@ with st.container(border=True):
            if master_sid in scene_by_id and scene_by_id[master_sid].get("thumbnail_paths") else None)
     with mt_cols[0]:
         if _mp and _mp.exists():
-            st.image(str(_mp), width=160)
+            safe_image(str(_mp), width=160)
     with mt_cols[1]:
         if _mp:
             st.markdown(f"**⭐ Video thumbnail:** scene {master_sid}")
@@ -436,6 +436,17 @@ def set_star(sid) -> None:
     st.rerun()
 
 
+def remake_thumbnail(scene: dict, dest: Path) -> None:
+    if SE.write_thumbnail(data, scene, dest, video_paths(), sprite_path):
+        mark_pending(f"thumb:{video_id}/{dest.name}")
+        st.session_state["rev_saved_msg"] = f"Thumbnail remade for scene {scene['scene_id']}."
+    else:
+        st.session_state["rev_saved_msg"] = None
+        st.error("Couldn't make a picture — no preview copy or timeline thumbnails for this video here.")
+        return
+    st.rerun()
+
+
 def back_to(sid) -> None:
     """After the full page reload this button causes, scroll back to this scene."""
     st.session_state["rev_scroll_to"] = sid
@@ -538,7 +549,7 @@ def split_dialog(sid, auto: bool = False):
     st.caption(f"{fmt_precise(pos)} in the video — {pos - start:.1f}s into the scene")
     img = frame_at(pos)
     if img is not None:
-        st.image(img, width=360, caption="Frame at the cut (first frame of the next part)")
+        safe_image(img, width=360, caption="Frame at the cut (first frame of the next part)")
     else:
         st.caption("No preview frame available (no video or timeline thumbnails here).")
 
@@ -726,10 +737,15 @@ def scene_card(sid, trimmed_to) -> None:
     with cols[0]:
         if scene.get("thumbnail_paths"):
             thumb_path = thumbs_dir / Path(scene["thumbnail_paths"][0]).name
-            if thumb_path.exists():
-                st.image(str(thumb_path), width=280)
+            if image_ok(thumb_path):
+                safe_image(str(thumb_path), width=280)
             else:
-                st.warning(f"Thumbnail not found: {thumb_path.name}")
+                st.warning(f"Thumbnail {'unreadable' if thumb_path.exists() else 'missing'}: {thumb_path.name}")
+                if st.button("🔄 Remake thumbnail", key=f"remake_thumb_{selected}_{sid}",
+                             help="Takes a new picture from the video (or the timeline thumbnails) "
+                                  "and queues it for Google Drive."):
+                    back_to(sid)
+                    remake_thumbnail(scene, thumb_path)
         if sid == master_sid:
             st.success("⭐ Video thumbnail")
         elif scene.get("thumbnail_paths"):

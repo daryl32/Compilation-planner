@@ -28,7 +28,7 @@ import similarity as SIM
 import cut_scoring as CS
 from audio_charts import add_analysis_overlays
 import preview_snippets
-from library_common import (scene_tags, render_range_picker, library_ranges, master_thumbnail_path, proxy_path,
+from library_common import (safe_image, scene_tags, render_range_picker, library_ranges, master_thumbnail_path, proxy_path,
                             refresh_caches_after_sync, show_render_player, shared_cache,
                             clear_shared_data_caches, memory_check)
 
@@ -1077,9 +1077,9 @@ def render_choreography_block(
                     clip_abs_start = display_clip["scene_start_sec"] + display_clip["offset_sec"]
                     nearest_thumb = get_nearest_thumbnail(catalogues, video_id, clip_abs_start)
                     if nearest_thumb is not None:
-                        st.image(nearest_thumb, width=180)
+                        safe_image(nearest_thumb, width=180)
                     elif display_clip.get("thumbnail") and Path(display_clip["thumbnail"]).exists():
-                        st.image(display_clip["thumbnail"], width=180)
+                        safe_image(display_clip["thumbnail"], width=180)
 
                 # Which trimmed clip (block-length window) this column uses: ⏪ ◀ ▶ ⏩ step
                 # back/forward 5 or 1 through this video's trimmed clips, the slider jumps
@@ -1388,9 +1388,9 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                 clip_start = c.get("scene_start_sec", 0.0) + c["window_offset_sec"]
                 nearest_thumb = get_nearest_thumbnail(catalogues or {}, c["video_id"], clip_start) if catalogues else None
                 if nearest_thumb is not None:
-                    st.image(nearest_thumb, width=200, caption="at the clip's start")
+                    safe_image(nearest_thumb, width=200, caption="at the clip's start")
                 elif c.get("thumbnail") and Path(c["thumbnail"]).exists():
-                    st.image(c["thumbnail"], width=200, caption="whole scene (run the timeline-thumbnail "
+                    safe_image(c["thumbnail"], width=200, caption="whole scene (run the timeline-thumbnail "
                              "backfill for a preview of just this clip)")
                 _score_rank = next((r + 1 for r, sc in enumerate(candidates) if sc["video_id"] == c["video_id"] and sc["scene_id"] == c["scene_id"]), "?")
                 st.caption(f"`{c['video_id']}` #{c['scene_id']}  ·  rank #{_score_rank}  ·  shape {c['score']:.2f}  ·  motion {c['motion_norm']:.2f}")
@@ -1736,7 +1736,7 @@ def render_swap_for_similar(mode: str, confirmed_map: dict, seg_idx: int, n_bloc
                 with col:
                     thumb = get_nearest_thumbnail(catalogues, span["video_id"], span["scene_start_sec"] + off)
                     if thumb is not None:
-                        st.image(thumb, width=180)
+                        safe_image(thumb, width=180)
                     st.caption(f"`{span['video_id']}` #{span['scene_id']} at "
                                f"{format_mmss(span['scene_start_sec'] + off)}  ·  **{int(round(100 * sim))}% similar**")
                     st.caption(reason)
@@ -2609,7 +2609,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
         with row_cols[1]:
             _thumb = video_list_thumbnail(catalogues, video_id, current_range)
             if _thumb is not None:
-                st.image(_thumb, width=120)
+                safe_image(_thumb, width=120)
         with row_cols[2]:
             rank_mark = "✅ " if recommended else ""
             title = f"{rank_mark}**{video_id}** · ⏱ {format_mmss(duration)}"
@@ -2650,7 +2650,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                     with sc[0]:
                         _t = video_list_thumbnail(catalogues, _vid, effective_time_ranges().get(_vid))
                         if _t is not None:
-                            st.image(_t, width=110)
+                            safe_image(_t, width=110)
                     with sc[1]:
                         st.markdown(f"**{_vid}** · ⏱ {format_mmss(get_video_duration(_vid))} · "
                                     f"**{int(round(100 * _sim))}% similar**")
@@ -5031,9 +5031,9 @@ if matching_mode == "Auto":
                     # offset_into_scene_sec entirely and can show the wrong moment.
                     nearest_thumb = get_nearest_thumbnail(catalogues, s["video_id"], s.get("clip_start_sec", 0.0))
                     if nearest_thumb is not None:
-                        st.image(nearest_thumb, width=180)
+                        safe_image(nearest_thumb, width=180)
                     elif s.get("thumbnail") and Path(s["thumbnail"]).exists():
-                        st.image(s["thumbnail"], width=180)
+                        safe_image(s["thumbnail"], width=180)
                     chain = s["chain"]
                     if len(chain) == 1:
                         st.caption(f"`{s['video_id']}` #{s['scene_id']}  (motion {s['motion_norm']:.2f})  "
@@ -5144,9 +5144,9 @@ elif matching_mode == "Choreography":
                     with col:
                         nearest_thumb = get_nearest_thumbnail(catalogues, s["video_id"], s["clip_start_sec"])
                         if nearest_thumb is not None:
-                            st.image(nearest_thumb, width=180)
+                            safe_image(nearest_thumb, width=180)
                         elif s.get("thumbnail") and Path(s["thumbnail"]).exists():
-                            st.image(s["thumbnail"], width=180)
+                            safe_image(s["thumbnail"], width=180)
                         st.caption(f"`{s['video_id']}` #{s['scene_id']}  — {s['clip_duration_sec']:.1f}s")
                         st.caption(", ".join(s.get("tags", [])))
                         if st.button("🔁 Swap for similar", key=f"swap_chor_{seg_idx}_{_j}",
@@ -5492,9 +5492,9 @@ else:
                     with col:
                         nearest_thumb = get_nearest_thumbnail(catalogues, s["video_id"], s["clip_start_sec"])
                         if nearest_thumb is not None:
-                            st.image(nearest_thumb, width=180)
+                            safe_image(nearest_thumb, width=180)
                         elif s.get("thumbnail") and Path(s["thumbnail"]).exists():
-                            st.image(s["thumbnail"], width=180)
+                            safe_image(s["thumbnail"], width=180)
                         st.caption(f"`{s['video_id']}` #{s['scene_id']}  — {s['clip_duration_sec']:.1f}s")
                         st.caption(", ".join(s.get("tags", [])))
                         if st.button("🔁 Swap for similar", key=f"swap_manual_{seg_idx}_{_j}",

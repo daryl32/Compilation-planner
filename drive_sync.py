@@ -177,6 +177,23 @@ def _local_is_newer(local_path: Path, drive_file: dict) -> bool:
         return False
 
 
+def _broken_picture(path: Path) -> bool:
+    """A local .jpg/.png that won't open (e.g. half-written by an interrupted
+    download before downloads went through a .part file) — fetch it again even
+    though its timestamp looks newer than Drive's."""
+    if path.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
+        return False
+    try:
+        if path.stat().st_size == 0:
+            return True
+        from PIL import Image
+        with Image.open(path) as im:
+            im.verify()
+        return False
+    except Exception:
+        return True
+
+
 def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None,
               proxy_dir: Path = None) -> dict:
     """
@@ -260,7 +277,7 @@ def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None,
             continue
         # Never overwrite a local file that is newer than the Drive copy — e.g. a
         # Reviewer edit (excluded / intro / outro / corrected tags) not yet pushed to Drive.
-        if local_path.exists() and _local_is_newer(local_path, drive_file):
+        if local_path.exists() and _local_is_newer(local_path, drive_file) and not _broken_picture(local_path):
             skipped += 1
             continue
         todo.append((drive_file, local_path))

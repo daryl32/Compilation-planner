@@ -380,14 +380,38 @@ def grab_frame(video_path: Path, at_sec: float, dest: Path, width: int = 640) ->
     if not Path(video_path).exists():
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.stem + ".part" + dest.suffix)   # never leave half a picture at dest
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
            "-ss", f"{max(0.0, at_sec):.3f}", "-i", str(video_path),
-           "-frames:v", "1", "-vf", f"scale={width}:-2", "-q:v", "3", str(dest)]
+           "-frames:v", "1", "-vf", f"scale={width}:-2", "-q:v", "3", str(tmp)]
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=60)
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        tmp.unlink(missing_ok=True)
         return False
-    return proc.returncode == 0 and dest.exists() and dest.stat().st_size > 0
+    if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+        tmp.replace(dest)
+        return True
+    tmp.unlink(missing_ok=True)
+    return False
+
+
+def write_thumbnail(catalogue: dict, scene: dict, dest: Path, video_paths: list, sprite_path: Path) -> bool:
+    """Write a thumbnail for scene to dest: a frame ~1 s in from the first video
+    in video_paths that works (preview copy, then source), else the nearest
+    timeline-sprite tile. True if one was written."""
+    start, end = scene_start_sec(scene), scene_end_sec(scene)
+    at = start + min(1.0, (end - start) / 2)
+    if any(grab_frame(Path(p), at, dest) for p in video_paths if p):
+        return True
+    tile = sprite_tile(catalogue, sprite_path, at)
+    if tile is None:
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.stem + ".part" + dest.suffix)
+    tile.convert("RGB").save(tmp, "JPEG", quality=88)
+    tmp.replace(dest)
+    return True
 
 
 def make_part_thumbnail(catalogue: dict, scene: dict, thumbs_dir: Path, video_paths: list,
@@ -395,16 +419,8 @@ def make_part_thumbnail(catalogue: dict, scene: dict, thumbs_dir: Path, video_pa
     """Make a thumbnail for a new scene part, from the first video in
     video_paths that exists (preview copy, then source), else from the
     timeline sprite. Sets scene["thumbnail_paths"]; returns the file or None."""
-    start, end = scene_start_sec(scene), scene_end_sec(scene)
-    at = start + min(1.0, (end - start) / 2)
     dest = thumbs_dir / f"scene_{int(scene['scene_id']):04d}_manual.jpg"
-    made = any(grab_frame(Path(p), at, dest) for p in video_paths if p)
-    if not made:
-        tile = sprite_tile(catalogue, sprite_path, at)
-        if tile is not None:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            tile.convert("RGB").save(dest, "JPEG", quality=88)
-            made = True
+    made = write_thumbnail(catalogue, scene, dest, video_paths, sprite_path)
     if made:
         scene["thumbnail_paths"] = [dest.name]
         return dest
