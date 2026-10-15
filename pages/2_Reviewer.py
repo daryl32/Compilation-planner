@@ -231,7 +231,18 @@ with st.container(border=True):
         st.stop()
     if len(names) < len(index):
         st.caption(f"{len(names)} of {len(index)} videos match.")
+    # The chosen video is kept outside the widget too (and in the address bar,
+    # ?video=…), so a full reload — a card button, a reconnect, an app restart —
+    # comes back to the same video instead of the first one in the list.
+    if st.session_state.get("rev_video") not in names:
+        for _cand in (st.session_state.get("_rev_video_keep"), st.query_params.get("video")):
+            if _cand in names:
+                st.session_state["rev_video"] = _cand
+                break
     selected = st.selectbox("Video", names, format_func=video_label, key="rev_video")
+    st.session_state["_rev_video_keep"] = selected
+    if st.query_params.get("video") != selected:
+        st.query_params["video"] = selected
 
 _saved_msg = st.session_state.pop("rev_saved_msg", None)
 if _saved_msg:
@@ -425,6 +436,11 @@ def set_star(sid) -> None:
     st.rerun()
 
 
+def back_to(sid) -> None:
+    """After the full page reload this button causes, scroll back to this scene."""
+    st.session_state["rev_scroll_to"] = sid
+
+
 def frame_at(t: float):
     """A picture of the video at t: an exact frame if a video is here, else the
     nearest timeline-sprite tile. None if neither is available."""
@@ -550,6 +566,7 @@ def split_dialog(sid, auto: bool = False):
                  type="primary", disabled=not cuts, use_container_width=True, key=f"{pos_key}_go"):
         st.session_state.pop(pos_key, None)
         st.session_state.pop(cuts_key, None)
+        back_to(sid)
         do_split(sid, cuts)
 
 
@@ -693,6 +710,7 @@ def merge_banner(grp: list) -> None:
                     f"{fmt_dur(total)} in total, each under {suggest_short_sec:g}s.")
         bc = st.columns([2, 1, 3])
         if bc[0].button(f"🔗 Combine these {len(grp)}", key=f"merge_run_{selected}_{grp[0]}", type="primary"):
+            back_to(grp[0])
             do_merge(grp)
         if bc[1].button("Dismiss", key=f"merge_dismiss_{selected}_{grp[0]}"):
             dismiss(SE.suggestion_key("merge", grp))
@@ -703,6 +721,7 @@ def scene_card(sid, trimmed_to) -> None:
     """One scene. Ticking a box or editing tags reruns just this card."""
     scene = scene_by_id[sid]
     current_tags = scene_tags(scene)
+    st.markdown(f'<div id="rev-scene-{sid}"></div>', unsafe_allow_html=True)
     cols = st.columns([1, 2])
     with cols[0]:
         if scene.get("thumbnail_paths"):
@@ -715,6 +734,7 @@ def scene_card(sid, trimmed_to) -> None:
             st.success("⭐ Video thumbnail")
         elif scene.get("thumbnail_paths"):
             if st.button("⭐ Use as video thumbnail", key=f"star_{selected}_{sid}"):
+                back_to(sid)
                 set_star(sid)
         if trimmed_to:
             st.warning(f"✂️ Trimmed by library range — uses {format_mmss(trimmed_to[0])}–{format_mmss(trimmed_to[1])}")
@@ -728,6 +748,7 @@ def scene_card(sid, trimmed_to) -> None:
             wc = st.columns([4, 1])
             wc[0].warning(f"✂️ {fmt_dur(dur)} long — consider splitting.")
             if wc[1].button("Dismiss", key=f"split_dismiss_{selected}_{sid}"):
+                back_to(sid)
                 dismiss(SE.suggestion_key("split", [sid]))
         st.multiselect("Tags", options=sorted(set(CANDIDATE_LABELS) | set(current_tags)),
                        default=current_tags, key=wkey("tags", sid))
@@ -745,22 +766,26 @@ def scene_card(sid, trimmed_to) -> None:
 
         bc = st.columns(4)
         if bc[0].button("✂️ Split…", key=f"split_{selected}_{sid}", use_container_width=True):
+            back_to(sid)
             st.session_state["rev_open_dialog"] = (selected, sid, False)
             st.rerun()
         if sid in auto_ids and bc[1].button("⚡ Auto split", key=f"auto_{selected}_{sid}", use_container_width=True,
                                             help=f"Cut into parts of about {auto_target_sec:g}s — "
                                                  "you'll see the cuts before anything changes."):
+            back_to(sid)
             st.session_state["rev_open_dialog"] = (selected, sid, True)
             st.rerun()
         nxt = next_of.get(sid)
         if nxt is not None and bc[2].button("🔗 Combine with next", key=f"merge_next_{selected}_{sid}",
                                             use_container_width=True,
                                             help=f"Join this scene and scene {nxt} into one."):
+            back_to(sid)
             do_merge([sid, nxt])
         edit = scene.get("edit") or {}
         if edit.get("kind") in ("merge", "split") or "split_from" in scene:
             label = "↩️ Undo combine" if edit.get("kind") == "merge" else "↩️ Undo split"
             if bc[3].button(label, key=f"undo_{selected}_{sid}", use_container_width=True):
+                back_to(sid)
                 do_undo(sid)
 
 
@@ -794,3 +819,20 @@ else:
 _dlg = st.session_state.pop("rev_open_dialog", None)
 if _dlg and _dlg[0] == selected and _dlg[1] in scene_by_id:
     split_dialog(_dlg[1], auto=_dlg[2])
+
+# Scroll back to the scene whose button reloaded the page (see back_to).
+_scroll = st.session_state.pop("rev_scroll_to", None)
+if _scroll is not None:
+    import streamlit.components.v1 as _components
+    _components.html(
+        "<script>(function () {"
+        f"  var id = 'rev-scene-{_scroll}', tries = 0;"
+        "  function go() {"
+        "    var el = window.parent.document.getElementById(id);"
+        "    if (el) { el.scrollIntoView({block: 'start'}); }"
+        "    else if (tries++ < 20) { setTimeout(go, 150); }"
+        "  }"
+        "  setTimeout(go, 200);"
+        "})();</script>",
+        height=0,
+    )
