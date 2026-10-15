@@ -110,17 +110,28 @@ def _slim_video(stem: str, cat: dict, mtime: float) -> dict:
 
 @shared_cache
 @st.cache_resource
-def _index_store() -> dict:
-    """Process-wide: {"files": {name: (mtime, slim or None)}, "lock": Lock}."""
-    return {"files": {}, "lock": threading.Lock()}
+def _store() -> dict:
+    """Process-wide: {"files": {name: (mtime, catalogue or None, slim or None)},
+    "catalogues": {video_id: catalogue} or None, "lock": Lock}."""
+    return {"files": {}, "catalogues": None, "lock": threading.Lock()}
 
 
-def video_index() -> dict:
-    """{stem: slim video} for every catalogue, re-reading only changed files."""
-    store = _index_store()
+def _strip(cat: dict) -> dict:
+    """The planner's working copy: no motion curves (big, per frame — loaded per
+    video by motion_curves()), and Reviewer-corrected tags as "tags"."""
+    for scene in cat["scenes"]:
+        scene.pop("motion_curve", None)
+        scene["tags"] = scene_tags(scene)
+    return cat
+
+
+def _refresh() -> dict:
+    """Re-read only the catalogue files that changed (or appeared) since last
+    time; drop ones that went. Returns the store. Call with no lock held."""
+    store = _store()
     with store["lock"]:
         files = store["files"]
-        seen = set()
+        seen, changed = set(), False
         for p in catalogue_paths():
             seen.add(p.name)
             try:
@@ -130,12 +141,55 @@ def video_index() -> dict:
             cached = files.get(p.name)
             if cached and cached[0] == mtime:
                 continue
+            changed = True
             try:
                 cat = json.loads(p.read_text())
             except (ValueError, OSError):
-                files[p.name] = (mtime, None)
+                files[p.name] = (mtime, None, None)
                 continue
-            files[p.name] = (mtime, _slim_video(p.stem, cat, mtime) if is_video_catalogue(cat) else None)
+            if not is_video_catalogue(cat):
+                files[p.name] = (mtime, None, None)
+                continue
+            slim = _slim_video(p.stem, cat, mtime)
+            files[p.name] = (mtime, _strip(cat), slim)
         for gone in set(files) - seen:
             files.pop(gone, None)
-        return {name[:-5]: v for name, (_, v) in sorted(files.items()) if v is not None}
+            changed = True
+        if changed or store["catalogues"] is None:
+            # A new dict each time something changed — callers may still be
+            # reading the previous one.
+            store["catalogues"] = {c["video_id"]: c for _, (_, c, _) in sorted(files.items()) if c}
+        return store
+
+
+def video_index() -> dict:
+    """{stem: slim video} for every catalogue (see _slim_video). Shared — read only."""
+    store = _refresh()
+    return {name[:-5]: slim for name, (_, _, slim) in sorted(store["files"].items()) if slim}
+
+
+def all_catalogues() -> dict:
+    """{video_id: catalogue} for every video — full catalogues WITHOUT motion
+    curves, tags already corrected. ONE SHARED COPY: read it, never change it.
+    Always current (Reviewer edits and syncs show up on the next call)."""
+    return _refresh()["catalogues"]
+
+
+@shared_cache
+@st.cache_resource(max_entries=20, ttl=1800, show_spinner=False)
+def _motion_curves(video_id: str, mtime: float) -> dict:
+    try:
+        cat = json.loads(catalogue_path(video_id).read_text())
+    except (ValueError, OSError):
+        return {}
+    return {s["scene_id"]: s["motion_curve"] for s in cat.get("scenes", []) if s.get("motion_curve")}
+
+
+def motion_curves(video_id: str) -> dict:
+    """{scene_id: motion_curve} for one video, reloaded when its file changes.
+    Shared — read only."""
+    try:
+        mtime = catalogue_path(video_id).stat().st_mtime
+    except OSError:
+        return {}
+    return _motion_curves(video_id, mtime)

@@ -8,7 +8,7 @@ cannot write to personal Drive storage).
 Credentials are stored in Streamlit session state only — cleared on page
 refresh, as intended for per-session auth.
 
-Usage in planner_app.py:
+Usage (see page_setup.py):
     from drive_oauth import (
         get_auth_url, exchange_code_for_token,
         push_file_with_oauth, is_authenticated

@@ -3,7 +3,7 @@
 A Streamlit app for building music-synced video compilations from a personal video library. Part of a three-stage pipeline:
 
 1. **Google Colab** — ML processing: scene detection, CLIP/Qwen2.5-VL tagging, audio analytics. Outputs catalogue JSONs and audio track JSONs to Google Drive.
-2. **This app (`planner_app.py`)** — interactive Compilation Planner. Matches video clips to a music track's beat/energy timeline and exports a plan JSON.
+2. **This app** (Streamlit, entry point `Home.py`) — Media Library, Reviewer, Compilation Planner and Server pages. The planner matches video clips to a music track's beat/energy timeline and exports a plan JSON.
 3. **Blender VSE add-on** (`vse_split_into_blocks.py`) — imports the plan and builds the edit in Blender's Video Sequence Editor.
 
 ---
@@ -33,7 +33,7 @@ Also update `render_preview.py` to import `DRIVE_ROOT` from `config` (see note i
 ### 3. Run the app
 
 ```bash
-streamlit run planner_app.py
+streamlit run Home.py
 ```
 
 ---
@@ -41,18 +41,40 @@ streamlit run planner_app.py
 ## Project structure
 
 ```
-planner_app.py                  # Main Streamlit app — Compilation Planner
-render_preview.py               # Renders a plan JSON to a video preview
-backfill_motion_curve.py        # Colab: backfills per-scene motion curves
-backfill_motion_curve_gpu.py    # Colab GPU-accelerated variant
-backfill_motion_curve_local.py  # Local Windows variant
-backfill_timeline_thumbnails.py # Colab: builds per-video sprite sheets
-backfill_timeline_thumbnails_local.py
-vse_split_into_blocks.py        # Blender VSE add-on
+Home.py                         # Entry point — links to the pages below
+pages/1_Compilation_Planner.py  # Match clips to a track, render previews, export plans
+pages/2_Reviewer.py             # Tags, exclude/intro/outro, ⭐ thumbnail, split / combine / ⚡ auto split
+pages/3_Media_Library.py        # Videos (library ranges), Audio, Renders, Analytics
+pages/4_Server.py               # Disk usage and clean-up
+
+page_setup.py                   # Sign-in, whitelist, and the sidebar every page shares
+catalogue_store.py              # THE way to read/write video catalogues (shared, refreshed per file)
+library_common.py               # Library meta (ranges, ⭐), Drive "pending" list, memory guard, helpers
+scene_edits.py                  # Split / combine / undo, suggestions, auto split, motion for new parts
+storage.py                      # What's on the server's disk; clearing temporary files
+auto_sync.py / drive_sync.py    # Drive → server sync (12-hourly timer + Sync now), then auto clean-up
+drive_oauth.py                  # Personal Drive writes (save plans, projects, edits)
+render_preview.py / renders.py  # Render a plan to MP4; saved renders and their details
+video_ranking.py, similarity.py, cut_scoring.py, audio_analysis.py, audio_charts.py, preview_snippets.py
+backfill *.py, make_proxies.py  # Colab / laptop processing scripts
+deploy/                         # Server scripts (see deploy/README.md)
 config.py                       # YOUR local config — gitignored, not committed
-config.example.py               # Template — copy to config.py and fill in
-requirements.txt
+config_example.py               # Template — copy to config.py and fill in
 ```
+
+### Data: what lives where
+
+| Data | Where | On the server |
+|---|---|---|
+| Video catalogues, thumbnails, timeline sprites, audio JSONs | Drive `scene-labeling/…` | Synced copy (small, read constantly) |
+| 480p preview copies (proxies) | Drive `scene-labeling/proxies` | Synced copy (fast scrubbing / frames) |
+| Original videos and music | Drive (`Videos-PH/`, `Audio-Library/`) | **Temporary** — streamed for renders; anything downloaded is cleared after `KEEP_DOWNLOADS_DAYS` unused (default 3) |
+| Renders | Drive `scene-labeling/previews` | Server copy can be cleared once uploaded |
+| Projects, plans, library meta | Drive | Copy, pushed with Save |
+
+Code that needs "something about every video" should use `catalogue_store.video_index()`
+(slim: times, tags, flags, motion score) or `all_catalogues()` (full, no motion curves) —
+never glob and json-load the catalogue folder itself.
 
 ---
 

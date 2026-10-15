@@ -23,6 +23,7 @@ from render_preview import render_plan_dict, colab_to_local
 from renders import (delete_render, load_render, render_files, upload_render, clear_local,
                      auto_clear_enabled)
 import video_ranking as VR
+import catalogue_store as CStore
 import similarity as SIM
 import cut_scoring as CS
 from audio_charts import add_analysis_overlays
@@ -132,59 +133,20 @@ def load_track(track_id: str) -> dict:
     return _load_track_file(track_id, mtime)
 
 
-@shared_cache
-@st.cache_resource(show_spinner=False)
 def load_all_catalogues() -> dict:
-    """video_id -> catalogue dict, WITHOUT motion_curve. ONE SHARED COPY — read
-    it, never change it (checked Oct 2026: nothing in the planner does; spans,
-    picks and timeline entries are all built as new dicts). It used to be
-    st.cache_data, which deep-copies the whole library on every call — and this
-    is called several times per click — which is what kept running the 4 GB
-    server out of memory during long Choreography sessions. Cleared after a
-    Drive sync (refresh_caches_after_sync / Sync now) like before.
-    Older note: st.cache_data
-    deep-copies its return value on every single call, and this function is
-    called many times per script rerun — and every widget interaction on the
-    page triggers a full rerun. motion_curve holds a frame-by-frame array per
-    scene (added by the motion-curve backfill) and can be large across a
-    whole library; keeping it out of the shared cache is what stops every
-    click, anywhere on the page, from re-copying tens of MB it doesn't need.
-    Advanced Shape Matching gets curve data separately, per video, from
-    load_motion_curves_for_video — so only an actual search pays that cost,
-    and only for the videos it's actually searching."""
-    catalogues = {}
-    for cat_file in CATALOGUE_DIR.glob("*.json"):
-        if cat_file.name in ("training_data.jsonl", "video_index.json", "labels.json"):
-            continue
-        with open(cat_file) as f:
-            cat = json.load(f)
-        if not (isinstance(cat, dict) and "video_id" in cat and "scenes" in cat):
-            continue  # not a video catalogue (e.g. library_meta.json)
-        for scene in cat["scenes"]:
-            scene.pop("motion_curve", None)
-            # Reviewer corrections win over the auto-generated tags everywhere below.
-            scene["tags"] = scene_tags(scene)
-        catalogues[cat["video_id"]] = cat
-    return catalogues
+    """video_id -> catalogue dict, WITHOUT motion_curve, tags corrected. ONE
+    SHARED COPY — read it, never change it. Comes from catalogue_store, which
+    re-reads only the files that changed, so Reviewer edits and Drive syncs
+    show up on the next click. (History: st.cache_data deep-copied the whole
+    library on every call and ran the 4 GB server out of memory; motion curves
+    stay out of it — Advanced Shape Matching loads them per video below.)"""
+    return CStore.all_catalogues()
 
 
-# cache_resource, not cache_data: ONE shared copy, handed out as-is. cache_data
-# deep-copies its value on every call, and this is called once per candidate clip
-# in the similar-clips search (thousands of times per click) — each call copied the
-# whole video's frame-by-frame curves, which is what ran the server out of memory.
-# Callers only read it. Bounded, and dropped after 30 min unused.
-@shared_cache
-@st.cache_resource(max_entries=20, ttl=1800, show_spinner=False)
 def load_motion_curves_for_video(video_id: str) -> dict:
-    """scene_id -> motion_curve, for ONE video, loaded and cached separately
-    from load_all_catalogues (see that function's docstring for why).
-    SHARED — read it, never change it."""
-    cat_file = CATALOGUE_DIR / f"{video_id}.json"
-    if not cat_file.exists():
-        return {}
-    with open(cat_file) as f:
-        cat = json.load(f)
-    return {s["scene_id"]: s["motion_curve"] for s in cat["scenes"] if s.get("motion_curve")}
+    """scene_id -> motion_curve, for ONE video — reloaded when that video's
+    catalogue changes (e.g. a Reviewer split). SHARED — read it, never change it."""
+    return CStore.motion_curves(video_id)
 
 
 def seconds_to_time(sec: float) -> datetime.time:
