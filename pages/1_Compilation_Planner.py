@@ -23,6 +23,7 @@ from render_preview import render_plan_dict, colab_to_local
 from renders import (delete_render, load_render, render_files, upload_render, clear_local,
                      auto_clear_enabled)
 import video_ranking as VR
+import catalogue_store as CStore
 import similarity as SIM
 import cut_scoring as CS
 from audio_charts import add_analysis_overlays
@@ -132,59 +133,20 @@ def load_track(track_id: str) -> dict:
     return _load_track_file(track_id, mtime)
 
 
-@shared_cache
-@st.cache_resource(show_spinner=False)
 def load_all_catalogues() -> dict:
-    """video_id -> catalogue dict, WITHOUT motion_curve. ONE SHARED COPY — read
-    it, never change it (checked Oct 2026: nothing in the planner does; spans,
-    picks and timeline entries are all built as new dicts). It used to be
-    st.cache_data, which deep-copies the whole library on every call — and this
-    is called several times per click — which is what kept running the 4 GB
-    server out of memory during long Choreography sessions. Cleared after a
-    Drive sync (refresh_caches_after_sync / Sync now) like before.
-    Older note: st.cache_data
-    deep-copies its return value on every single call, and this function is
-    called many times per script rerun — and every widget interaction on the
-    page triggers a full rerun. motion_curve holds a frame-by-frame array per
-    scene (added by the motion-curve backfill) and can be large across a
-    whole library; keeping it out of the shared cache is what stops every
-    click, anywhere on the page, from re-copying tens of MB it doesn't need.
-    Advanced Shape Matching gets curve data separately, per video, from
-    load_motion_curves_for_video — so only an actual search pays that cost,
-    and only for the videos it's actually searching."""
-    catalogues = {}
-    for cat_file in CATALOGUE_DIR.glob("*.json"):
-        if cat_file.name in ("training_data.jsonl", "video_index.json", "labels.json"):
-            continue
-        with open(cat_file) as f:
-            cat = json.load(f)
-        if not (isinstance(cat, dict) and "video_id" in cat and "scenes" in cat):
-            continue  # not a video catalogue (e.g. library_meta.json)
-        for scene in cat["scenes"]:
-            scene.pop("motion_curve", None)
-            # Reviewer corrections win over the auto-generated tags everywhere below.
-            scene["tags"] = scene_tags(scene)
-        catalogues[cat["video_id"]] = cat
-    return catalogues
+    """video_id -> catalogue dict, WITHOUT motion_curve, tags corrected. ONE
+    SHARED COPY — read it, never change it. Comes from catalogue_store, which
+    re-reads only the files that changed, so Reviewer edits and Drive syncs
+    show up on the next click. (History: st.cache_data deep-copied the whole
+    library on every call and ran the 4 GB server out of memory; motion curves
+    stay out of it — Advanced Shape Matching loads them per video below.)"""
+    return CStore.all_catalogues()
 
 
-# cache_resource, not cache_data: ONE shared copy, handed out as-is. cache_data
-# deep-copies its value on every call, and this is called once per candidate clip
-# in the similar-clips search (thousands of times per click) — each call copied the
-# whole video's frame-by-frame curves, which is what ran the server out of memory.
-# Callers only read it. Bounded, and dropped after 30 min unused.
-@shared_cache
-@st.cache_resource(max_entries=20, ttl=1800, show_spinner=False)
 def load_motion_curves_for_video(video_id: str) -> dict:
-    """scene_id -> motion_curve, for ONE video, loaded and cached separately
-    from load_all_catalogues (see that function's docstring for why).
-    SHARED — read it, never change it."""
-    cat_file = CATALOGUE_DIR / f"{video_id}.json"
-    if not cat_file.exists():
-        return {}
-    with open(cat_file) as f:
-        cat = json.load(f)
-    return {s["scene_id"]: s["motion_curve"] for s in cat["scenes"] if s.get("motion_curve")}
+    """scene_id -> motion_curve, for ONE video — reloaded when that video's
+    catalogue changes (e.g. a Reviewer split). SHARED — read it, never change it."""
+    return CStore.motion_curves(video_id)
 
 
 def seconds_to_time(sec: float) -> datetime.time:
@@ -4237,10 +4199,65 @@ if "_prefill_project_name" in st.session_state:   # set by a load/reopen — app
 
 autosave_now()
 
+
+def _new_project() -> None:
+    """🆕 New project: back to a blank planner (every setting at its default, no
+    track work, no project loaded). What was on screen is kept as a one-step
+    backup so it can be brought back."""
+    autosave_now()
+    try:
+        cur = _autosave_path()
+        if cur.exists():
+            cur.replace(_autosave_path(".before_new"))
+    except OSError:
+        pass
+    from page_setup import session_keep_keys
+    keep = session_keep_keys() | {"_autosave_started"}
+    name = (st.session_state.get("new_project_name") or "").strip()
+    for k in list(st.session_state.keys()):
+        if k not in keep:
+            try:
+                del st.session_state[k]
+            except Exception:
+                pass
+    st.cache_data.clear()
+    if name:
+        st.session_state["_prefill_project_name"] = sanitize_filename(name)
+    st.session_state["_new_project_notice"] = name or True
+
+
+def _undo_new_project() -> None:
+    backup = _autosave_path(".before_new")
+    try:
+        st.session_state["_restore_autosave"] = json.loads(backup.read_text())
+        backup.unlink()
+    except (OSError, ValueError):
+        st.session_state["_project_notices"] = [("error", "Couldn't find what you had before.")]
+
+
 st.sidebar.header("Project")
-_loaded = st.session_state.get("_loaded_project")
+_new_notice = st.session_state.pop("_new_project_notice", None)
+if _new_notice:
+    st.sidebar.success("🆕 New project started" + (f" — **{_new_notice}**" if isinstance(_new_notice, str) else "")
+                       + ". Pick a track and videos to begin.")
+    if _autosave_path(".before_new").exists():
+        st.sidebar.button("↩️ Bring back what I had", on_click=_undo_new_project, use_container_width=True,
+                          key="new_project_undo")
+_new_loaded = st.session_state.get("_loaded_project")
+_new_loaded_changes = _project_changes(_new_loaded) if _new_loaded else 0
+with st.sidebar.popover("🆕 New project", use_container_width=True):
+    st.caption("Start again from a blank planner — default settings, no track work, no project "
+               "loaded. Saved projects aren't touched, and you can bring back what's on screen "
+               "now straight afterwards.")
+    if _new_loaded and _new_loaded_changes:
+        st.warning(f"**{_new_loaded['name']}** has unsaved changes — save it first if you want to keep them.")
+    st.text_input("Name (optional)", key="new_project_name", placeholder="my-new-compilation",
+                  help="Filled in as the project name, ready for 💾 Save.")
+    st.button("🆕 Start new project", type="primary", on_click=_new_project, use_container_width=True,
+              key="new_project_go")
+_loaded = _new_loaded
 if _loaded:
-    _n_changed = _project_changes(_loaded)
+    _n_changed = _new_loaded_changes
     if _n_changed:
         st.sidebar.warning(f"📂 **{_loaded['name']}** — unsaved changes ({_n_changed} area"
                            f"{'' if _n_changed == 1 else 's'})")
@@ -4287,37 +4304,7 @@ if st.session_state.get("track_id") not in tracks:
         st.sidebar.warning("The loaded project's track is no longer available — defaulted to the first track.")
 
 
-if _DRIVE_SYNC_AVAILABLE:
-    with st.sidebar.expander("☁️ Sync from Google Drive", expanded=False):
-        st.caption("Catalogues, audio, thumbnails, sprites and preview copies sync from Drive "
-                   "automatically every 12 hours. Use this to pull straight away after processing in Colab.")
-        if st.button("🔄 Sync now", key="drive_sync_btn", use_container_width=True):
-            sync_progress = st.progress(0.0, text="Starting sync…")
-            sync_errors = []
-
-            def _sync_progress(idx, total, name):
-                sync_progress.progress(
-                    min(0.99, idx / max(total, 1)),
-                    text=f"Syncing {name}…"
-                )
-
-            from auto_sync import run_sync
-            result = run_sync(_sync_progress)
-            sync_progress.progress(1.0, text="Done.")
-            if result.get("busy"):
-                st.info("A background sync is running right now — try again in a minute.")
-            elif result["errors"]:
-                for err in result["errors"][:5]:
-                    st.error(err)
-                st.warning("Some files failed — check Drive sharing if errors persist.")
-            else:
-                st.success(f"Synced {result['synced']} file(s), "
-                           f"skipped {result['skipped']} unchanged.")
-                st.cache_data.clear()
-                clear_shared_data_caches()
-else:
-    with st.sidebar.expander("☁️ Drive sync unavailable", expanded=False):
-        st.caption("Service account credentials not found at /root/drive-credentials.json")
+# 🔄 Sync now lives in the shared sidebar (page_setup → ☁️ Google Drive).
 
 st.sidebar.header("Track")
 track_id = st.sidebar.selectbox("Track", tracks, key="track_id")

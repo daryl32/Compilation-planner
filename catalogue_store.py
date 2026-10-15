@@ -1,0 +1,195 @@
+"""
+One place to read and write the video catalogues (CATALOGUE_DIR/<video>.json).
+
+Every page used to glob CATALOGUE_DIR and json-load every file (motion curves
+and all) on its own. This module:
+
+  • video_index()   — a slim summary of every video and its scenes (times, tags,
+                      flags, motion score, thumbnail name — no motion curves),
+                      shared by every session. Only files whose modified-time
+                      changed since last time are re-read, so after a Reviewer
+                      save or a Drive sync just those files are parsed again.
+  • load_catalogue(stem) / save_catalogue(stem, data) — the full JSON of one
+                      video; saving is atomic and queues the file for Drive.
+  • catalogue_paths() — the catalogue files (labels.json, library_meta.json,
+                      dot-files etc. are skipped).
+
+New features that need "something about every video" should add a field to
+_slim_video() rather than loading catalogues themselves.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+from pathlib import Path
+
+import streamlit as st
+
+from config import CATALOGUE_DIR
+from library_common import mark_pending, scene_tags, shared_cache, tc_to_seconds
+
+# JSON files in CATALOGUE_DIR that are never video catalogues.
+NOT_CATALOGUES = {"labels.json", "library_meta.json", "video_index.json"}
+
+
+def catalogue_paths() -> list:
+    try:
+        return sorted(p for p in CATALOGUE_DIR.glob("*.json")
+                      if p.name not in NOT_CATALOGUES and not p.name.startswith("."))
+    except OSError:
+        return []
+
+
+def catalogue_path(stem: str) -> Path:
+    return CATALOGUE_DIR / f"{stem}.json"
+
+
+def is_video_catalogue(data) -> bool:
+    return isinstance(data, dict) and "video_id" in data and "scenes" in data
+
+
+def load_catalogue(stem: str) -> dict:
+    return json.loads(catalogue_path(stem).read_text())
+
+
+def save_catalogue(stem: str, data: dict) -> None:
+    """Write atomically (a crash mid-write can't leave half a file), queue the
+    file for the next Drive save, and let every page see the change."""
+    path = catalogue_path(stem)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    os.replace(tmp, path)
+    mark_pending(stem)
+
+
+# ---------------------------------------------------------------------------
+# The shared index
+# ---------------------------------------------------------------------------
+
+def _scene_order(s: dict) -> tuple:
+    """Time order — scene_id isn't chronological once the Reviewer has split a scene."""
+    try:
+        return (tc_to_seconds(s["start_tc"]), s["scene_id"])
+    except (KeyError, ValueError, TypeError):
+        return (float("inf"), s.get("scene_id", 0))
+
+
+def _slim_video(stem: str, cat: dict, mtime: float) -> dict:
+    scenes = []
+    for s in sorted(cat["scenes"], key=_scene_order):
+        try:
+            start, end = tc_to_seconds(s["start_tc"]), tc_to_seconds(s["end_tc"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        thumbs = s.get("thumbnail_paths") or []
+        scenes.append({
+            "scene_id": s["scene_id"],
+            "start_tc": s["start_tc"], "end_tc": s["end_tc"],
+            "start": start, "end": end,
+            "tags": scene_tags(s),
+            "excluded": bool(s.get("excluded")),
+            "intro": bool(s.get("intro_candidate")),
+            "outro": bool(s.get("outro_candidate")),
+            "reviewed": bool(s.get("reviewed")),
+            "thumb": Path(thumbs[0]).name if thumbs else None,
+            "motion": s.get("motion_intensity"),
+            "has_curve": bool((s.get("motion_curve") or {}).get("values")),
+        })
+    return {
+        "stem": stem,
+        "video_id": cat["video_id"],
+        "source_path": cat.get("source_path", ""),
+        "duration": scenes[-1]["end"] if scenes else 0.0,
+        "scenes": scenes,
+        "dismissed_edit_suggestions": list(cat.get("dismissed_edit_suggestions", [])),
+        "added": mtime,
+    }
+
+
+@shared_cache
+@st.cache_resource
+def _store() -> dict:
+    """Process-wide: {"files": {name: (mtime, catalogue or None, slim or None)},
+    "catalogues": {video_id: catalogue} or None, "lock": Lock}."""
+    return {"files": {}, "catalogues": None, "lock": threading.Lock()}
+
+
+def _strip(cat: dict) -> dict:
+    """The planner's working copy: no motion curves (big, per frame — loaded per
+    video by motion_curves()), and Reviewer-corrected tags as "tags"."""
+    for scene in cat["scenes"]:
+        scene.pop("motion_curve", None)
+        scene["tags"] = scene_tags(scene)
+    return cat
+
+
+def _refresh() -> dict:
+    """Re-read only the catalogue files that changed (or appeared) since last
+    time; drop ones that went. Returns the store. Call with no lock held."""
+    store = _store()
+    with store["lock"]:
+        files = store["files"]
+        seen, changed = set(), False
+        for p in catalogue_paths():
+            seen.add(p.name)
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            cached = files.get(p.name)
+            if cached and cached[0] == mtime:
+                continue
+            changed = True
+            try:
+                cat = json.loads(p.read_text())
+            except (ValueError, OSError):
+                files[p.name] = (mtime, None, None)
+                continue
+            if not is_video_catalogue(cat):
+                files[p.name] = (mtime, None, None)
+                continue
+            slim = _slim_video(p.stem, cat, mtime)
+            files[p.name] = (mtime, _strip(cat), slim)
+        for gone in set(files) - seen:
+            files.pop(gone, None)
+            changed = True
+        if changed or store["catalogues"] is None:
+            # A new dict each time something changed — callers may still be
+            # reading the previous one.
+            store["catalogues"] = {c["video_id"]: c for _, (_, c, _) in sorted(files.items()) if c}
+        return store
+
+
+def video_index() -> dict:
+    """{stem: slim video} for every catalogue (see _slim_video). Shared — read only."""
+    store = _refresh()
+    return {name[:-5]: slim for name, (_, _, slim) in sorted(store["files"].items()) if slim}
+
+
+def all_catalogues() -> dict:
+    """{video_id: catalogue} for every video — full catalogues WITHOUT motion
+    curves, tags already corrected. ONE SHARED COPY: read it, never change it.
+    Always current (Reviewer edits and syncs show up on the next call)."""
+    return _refresh()["catalogues"]
+
+
+@shared_cache
+@st.cache_resource(max_entries=20, ttl=1800, show_spinner=False)
+def _motion_curves(video_id: str, mtime: float) -> dict:
+    try:
+        cat = json.loads(catalogue_path(video_id).read_text())
+    except (ValueError, OSError):
+        return {}
+    return {s["scene_id"]: s["motion_curve"] for s in cat.get("scenes", []) if s.get("motion_curve")}
+
+
+def motion_curves(video_id: str) -> dict:
+    """{scene_id: motion_curve} for one video, reloaded when its file changes.
+    Shared — read only."""
+    try:
+        mtime = catalogue_path(video_id).stat().st_mtime
+    except OSError:
+        return {}
+    return _motion_curves(video_id, mtime)

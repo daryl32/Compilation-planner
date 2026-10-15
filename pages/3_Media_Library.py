@@ -30,6 +30,7 @@ from library_common import (
 )
 
 from page_setup import page_setup, drive_token
+import catalogue_store as CS
 
 PAGE_SIZE = 20
 
@@ -42,74 +43,23 @@ library_kind = st.radio("Library", ["🎬 Videos", "🎵 Audio", "🎞️ Render
 # Data
 # ---------------------------------------------------------------------------
 
-def _catalogue_signature() -> tuple:
-    """(name, mtime) of every catalogue file — the cache below reloads whenever
-    any file is added, removed or edited (e.g. by the Reviewer or a Drive sync)."""
-    sig = []
-    for f in sorted(CATALOGUE_DIR.glob("*.json")):
-        try:
-            sig.append((f.name, f.stat().st_mtime))
-        except OSError:
-            continue
-    return tuple(sig)
+def load_library() -> dict:
+    """video_id -> slim summary of its catalogue (no motion curves) — the shared
+    index in catalogue_store, refreshed file by file when catalogues change."""
+    return {v["video_id"]: v for v in CS.video_index().values()}
 
 
-def _scene_order(s: dict) -> tuple:
-    """Time order — scene_id isn't chronological once the Reviewer has split a scene."""
-    try:
-        return (tc_to_seconds(s["start_tc"]), s["scene_id"])
-    except (KeyError, ValueError):
-        return (float("inf"), s.get("scene_id", 0))
-
-
-@st.cache_data(max_entries=2)
-def load_library(signature: tuple) -> dict:
-    """video_id -> slim summary of its catalogue (no motion curves)."""
-    videos = {}
-    for name, mtime in signature:
-        try:
-            cat = json.loads((CATALOGUE_DIR / name).read_text())
-        except (ValueError, OSError):
-            continue
-        if not (isinstance(cat, dict) and "video_id" in cat and "scenes" in cat):
-            continue
-        scenes = []
-        for s in sorted(cat["scenes"], key=_scene_order):
-            try:
-                start, end = tc_to_seconds(s["start_tc"]), tc_to_seconds(s["end_tc"])
-            except (KeyError, ValueError):
-                continue
-            thumbs = s.get("thumbnail_paths") or []
-            scenes.append({
-                "scene_id": s["scene_id"], "start": start, "end": end,
-                "tags": scene_tags(s),
-                "excluded": bool(s.get("excluded")),
-                "intro": bool(s.get("intro_candidate")),
-                "outro": bool(s.get("outro_candidate")),
-                "reviewed": bool(s.get("reviewed")),
-                "thumb": Path(thumbs[0]).name if thumbs else None,
-            })
-        vid = cat["video_id"]
-        videos[vid] = {
-            "video_id": vid,
-            "source_path": cat.get("source_path", ""),
-            "duration": scenes[-1]["end"] if scenes else 0.0,
-            "scenes": scenes,
-            "added": mtime,
-        }
-    return videos
-
-
-def trim_intro_outro_range(video: dict) -> tuple:
-    """Range that drops leading intro/excluded scenes and trailing outro/excluded
-    scenes. The whole video if nothing is flagged at either end."""
+def trim_excluded_range(video: dict) -> tuple:
+    """Range that drops the excluded scenes at the start and end of the video
+    (intro/outro flags are ignored — only Exclude decides). The whole video if
+    neither end is excluded."""
     scenes = video["scenes"]
     if not scenes:
         return 0.0, video["duration"]
     first, last = 0, len(scenes) - 1
-    while first <= last and (scenes[first]["intro"] or scenes[first]["excluded"]):
+    while first <= last and scenes[first]["excluded"]:
         first += 1
-    while last >= first and (scenes[last]["outro"] or scenes[last]["excluded"]):
+    while last >= first and scenes[last]["excluded"]:
         last -= 1
     if first > last:
         return 0.0, video["duration"]
@@ -155,7 +105,7 @@ def video_stats(video: dict, time_range, wanted: set, match_all: bool) -> dict:
 # ---------------------------------------------------------------------------
 
 def render_videos():
-    library = load_library(_catalogue_signature())
+    library = load_library()
     ranges = library_ranges()
     masters = master_thumbnail_scenes()
     vid_use, _ = render_usage()
@@ -278,7 +228,7 @@ def render_videos():
                 action = render_range_picker(
                     vid, video["source_path"], video["duration"], rng,
                     key="lib",
-                    suggestions=[("✂️ Trim intro/outro", lambda v=video: trim_intro_outro_range(v))],
+                    suggestions=[("✂️ Trim excluded ends", lambda v=video: trim_excluded_range(v))],
                     apply_label="Save library range",
                     clear_label="Remove library range",
                     slider_label=f"Library range for {vid}",
@@ -1148,7 +1098,7 @@ def _render_usage_panel(renders: list, vid_use, track_use) -> None:
             st.markdown("**Most-rendered tracks**")
             st.dataframe([{"Track": t, "Renders": n} for t, n in track_use.most_common(15)],
                          hide_index=True, use_container_width=True)
-        all_videos = set(load_library(_catalogue_signature()))
+        all_videos = set(load_library())
         unused = sorted(all_videos - set(vid_use), key=str.lower)
         if all_videos:
             st.caption(f"🆕 {len(unused)} of {len(all_videos)} library videos haven't been in a render yet"

@@ -79,6 +79,14 @@ def run_sync(progress_callback=None) -> dict:
         except Exception as e:
             result["errors"].append(f"Renders: {e}")
 
+        # Downloaded originals unused for a few days, stale temp files (storage.py).
+        cleanup = None
+        try:
+            from storage import auto_cleanup
+            cleanup = auto_cleanup()
+        except Exception as e:
+            result["errors"].append(f"Clean-up: {e}")
+
         finished = _now_iso()
         _write_status({
             "finished_at": finished,
@@ -86,6 +94,7 @@ def run_sync(progress_callback=None) -> dict:
             "skipped": result["skipped"],
             "errors": result["errors"][:10],
             "changed_at": finished if result["synced"] else previous.get("changed_at"),
+            "cleanup": cleanup,
         })
         return result
     finally:
@@ -98,6 +107,8 @@ if __name__ == "__main__":
         print("Another sync is already running — skipped.")
         sys.exit(0)
     print(f"Synced {res['synced']}, skipped {res['skipped']}, errors {len(res['errors'])}")
+    if read_sync_status().get("cleanup"):
+        print("Clean-up:", read_sync_status()["cleanup"])
     for err in res["errors"][:10]:
         print("  ", err)
     sys.exit(1 if res["errors"] else 0)

@@ -1,7 +1,7 @@
 """
 Home — entry point for the Media Planner webapp.
 
-Navigation to the three apps. Sign-in, the whitelist gate and Google Drive
+Navigation to the apps. Sign-in, the whitelist gate and Google Drive
 connect are handled by page_setup (page_setup.py), shared by every page.
 
 Run with:
@@ -16,7 +16,7 @@ page_setup("Media Planner", "Home.py")
 
 st.divider()
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
     st.subheader("📁 Media Library")
@@ -32,3 +32,8 @@ with col3:
     st.subheader("🎬 Compilation Planner")
     st.write("Match clips to a music track and build a compilation plan.")
     st.page_link("pages/1_Compilation_Planner.py", label="Open Compilation Planner →")
+
+with col4:
+    st.subheader("🖥️ Server")
+    st.write("See what's using the server's disk and clear temporary files.")
+    st.page_link("pages/4_Server.py", label="Open Server →")

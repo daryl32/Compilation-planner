@@ -453,3 +453,160 @@ def cut_suggestions_from_sprite(catalogue: dict, sprite_path: Path, scene: dict,
         return sorted(chosen)
     except Exception:
         return []
+
+
+# ---------------------------------------------------------------------------
+# Auto split: cut long scenes into parts of roughly a target length
+# ---------------------------------------------------------------------------
+
+def auto_split_points(scene: dict, target_sec: float, min_part_sec: float = 1.0) -> list:
+    """Cut times (seconds into the video) that split `scene` into parts close to
+    target_sec long, adapted to the scene's length: a 95s scene with a 30s
+    target becomes 3 parts of ~32s rather than 30+30+30+5.
+
+    Each evenly spaced cut is nudged (up to a quarter of a part either way) to
+    the sharpest picture change nearby, taken from the scene's motion curve
+    when it has one — so cuts land on a camera move or a flash rather than
+    mid-shot. [] when the scene is already short enough."""
+    start, end = scene_start_sec(scene), scene_end_sec(scene)
+    length = end - start
+    target = max(float(target_sec), min_part_sec)
+    n_parts = max(1, int(round(length / target)))
+    if n_parts < 2:
+        return []
+    part = length / n_parts
+    even = [start + part * k for k in range(1, n_parts)]
+
+    curve = scene.get("motion_curve") or {}
+    vals, fps = curve.get("values") or [], float(curve.get("fps") or 0)
+    if not vals or fps <= 0:
+        return [round(t, 1) for t in even]
+
+    import statistics
+    typical = statistics.median(vals) or 1e-6
+    window = part / 4
+    cuts, prev = [], start
+    for t in even:
+        lo = max(prev + min_part_sec, t - window)
+        hi = min(end - min_part_sec, t + window)
+        a, b = int((lo - start) * fps), int((hi - start) * fps)
+        best = t
+        if b > a:
+            seg = vals[a:b]
+            i = max(range(len(seg)), key=seg.__getitem__)
+            # Only move to a real spike — otherwise keep the even spacing.
+            if seg[i] >= 3 * typical:
+                best = start + (a + i) / fps
+        best = round(best, 1)
+        if best - prev >= min_part_sec and end - best >= min_part_sec:
+            cuts.append(best)
+            prev = best
+    return cuts
+
+
+def auto_split_candidates(scenes: list, target_sec: float, factor: float = 1.5) -> list:
+    """Scenes (time order) long enough to auto-split: over factor × target and
+    not excluded."""
+    return [s for s in sorted_scenes(scenes)
+            if not s.get("excluded") and scene_duration(s) > factor * target_sec
+            and auto_split_points(s, target_sec)]
+
+
+# ---------------------------------------------------------------------------
+# Motion score for parts made here
+# ---------------------------------------------------------------------------
+# Same measure as the Colab / laptop backfill ("backfill motion curve*.py"):
+# per frame, the mean absolute difference from the previous frame, in
+# greyscale at 160×90. motion_intensity is the average of that curve — the
+# split code above already uses it that way when slicing an existing curve.
+
+MOTION_W, MOTION_H = 160, 90
+
+
+def _video_fps(video_path: Path) -> float | None:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=r_frame_rate", "-of", "default=nw=1:nk=1", str(video_path)],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        num, _, den = out.partition("/")
+        fps = float(num) / float(den or 1)
+        return fps if fps > 0 else None
+    except Exception:
+        return None
+
+
+def scene_fps(catalogue: dict, scene: dict) -> float | None:
+    """The frame rate the catalogue's frame numbers use, if it can tell."""
+    for s in [scene] + list(catalogue.get("scenes", [])):
+        c = s.get("motion_curve") or {}
+        if c.get("fps"):
+            return float(c["fps"])
+    for key in ("fps", "frame_rate"):
+        if isinstance(catalogue.get(key), (int, float)) and catalogue[key] > 0:
+            return float(catalogue[key])
+    for s in [scene] + list(catalogue.get("scenes", [])):
+        try:
+            frames = s["end_frame"] - s["start_frame"]
+            secs = scene_end_sec(s) - scene_start_sec(s)
+            if frames > 0 and secs > 1:
+                return frames / secs
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
+def compute_motion_curve(video_path: Path, start: float, end: float, fps: float | None = None) -> dict | None:
+    """{"fps", "values"} for start..end of video_path (decoded with ffmpeg at
+    160×90 grey, so it's quick on the 480p preview copy). None on failure."""
+    import numpy as np
+    video_path = Path(video_path)
+    if not video_path.exists() or end - start <= 0:
+        return None
+    fps = fps or _video_fps(video_path) or 25.0
+    pre = 1.0 / fps                      # one frame before the scene, for its first difference
+    ss = max(0.0, start - pre)
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{ss:.3f}", "-i", str(video_path),
+           "-t", f"{end - ss:.3f}", "-an",
+           "-vf", f"fps={fps:.6f},scale={MOTION_W}:{MOTION_H}:flags=bilinear,format=gray",
+           "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=max(60, (end - start) * 4))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    frame_bytes = MOTION_W * MOTION_H
+    n = len(proc.stdout) // frame_bytes
+    if proc.returncode != 0 or n < 2:
+        return None
+    frames = np.frombuffer(proc.stdout[:n * frame_bytes], dtype=np.uint8).reshape(n, MOTION_H, MOTION_W)
+    diffs = np.abs(np.diff(frames.astype(np.float32), axis=0)).mean(axis=(1, 2))
+    if ss == start:                      # scene starts at 0:00 — no frame before it
+        diffs = np.concatenate([[0.0], diffs])
+    want = max(1, int(round((end - start) * fps)))
+    diffs = diffs[:want]
+    return {"fps": round(float(fps), 3), "values": [round(float(v), 2) for v in diffs]}
+
+
+def fill_motion(catalogue: dict, scene_ids, video_paths: list) -> int:
+    """Give each listed scene a motion curve + motion_intensity measured from the
+    video, if it has no curve of its own (e.g. a part of a scene that had no
+    curve, so the split could only copy the old scene's single score). Uses
+    the first video in video_paths that works. Returns how many were filled."""
+    wanted = set(scene_ids)
+    paths = [Path(p) for p in video_paths if p and Path(p).exists()]
+    if not paths:
+        return 0
+    filled = 0
+    for s in catalogue["scenes"]:
+        if s["scene_id"] not in wanted or (s.get("motion_curve") or {}).get("values"):
+            continue
+        fps = scene_fps(catalogue, s)
+        for p in paths:
+            curve = compute_motion_curve(p, scene_start_sec(s), scene_end_sec(s), fps)
+            if curve and curve["values"]:
+                s["motion_curve"] = curve
+                s["motion_intensity"] = round(_mean(curve["values"]), 6)
+                s["motion_measured"] = "reviewer"
+                filled += 1
+                break
+    return filled

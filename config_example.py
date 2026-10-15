@@ -47,3 +47,9 @@ WHITELISTED_EMAILS = [
 # "Check for new tracks" lists it; must be shared with the service account)
 # ---------------------------------------------------------------------------
 # AUDIO_LIBRARY_DRIVE_FOLDER = "Audio-Library"
+
+# ---------------------------------------------------------------------------
+# Optional (server): original videos / music downloaded from Drive are temporary —
+# cleared after this many days unused by the 12-hourly sync (0 = never automatically).
+# ---------------------------------------------------------------------------
+# KEEP_DOWNLOADS_DAYS = 3

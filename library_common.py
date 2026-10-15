@@ -319,9 +319,11 @@ def _ago(iso: str) -> tuple:
     return text, mins
 
 
-def render_sync_status() -> None:
-    """One sidebar line: when Drive was last synced, and whether it had errors."""
+def render_sync_status(where=None) -> None:
+    """One line: when Drive was last synced, and whether it had errors.
+    where: the container to draw in (default the sidebar)."""
     from auto_sync import read_sync_status
+    where = where or st.sidebar
     status = read_sync_status()
     if not status.get("finished_at"):
         return
@@ -331,11 +333,11 @@ def render_sync_status() -> None:
         return
     errors = status.get("errors") or []
     if errors:
-        st.sidebar.warning(f"☁️ Drive sync {text} had {len(errors)} error(s): {errors[0]}")
+        where.warning(f"☁️ Drive sync {text} had {len(errors)} error(s): {errors[0]}")
     elif mins > 13 * 60:  # timer runs every 12 h
-        st.sidebar.warning(f"☁️ Drive last synced {text} — is the sync timer running?")
+        where.warning(f"☁️ Drive last synced {text} — is the sync timer running?")
     else:
-        st.sidebar.caption(f"☁️ Drive synced {text}")
+        where.caption(f"☁️ Drive synced {text}")
 
 
 @st.cache_resource
