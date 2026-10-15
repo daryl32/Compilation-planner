@@ -4342,37 +4342,7 @@ if st.session_state.get("track_id") not in tracks:
         st.sidebar.warning("The loaded project's track is no longer available — defaulted to the first track.")
 
 
-if _DRIVE_SYNC_AVAILABLE:
-    with st.sidebar.expander("☁️ Sync from Google Drive", expanded=False):
-        st.caption("Catalogues, audio, thumbnails, sprites and preview copies sync from Drive "
-                   "automatically every 12 hours. Use this to pull straight away after processing in Colab.")
-        if st.button("🔄 Sync now", key="drive_sync_btn", use_container_width=True):
-            sync_progress = st.progress(0.0, text="Starting sync…")
-            sync_errors = []
-
-            def _sync_progress(idx, total, name):
-                sync_progress.progress(
-                    min(0.99, idx / max(total, 1)),
-                    text=f"Syncing {name}…"
-                )
-
-            from auto_sync import run_sync
-            result = run_sync(_sync_progress)
-            sync_progress.progress(1.0, text="Done.")
-            if result.get("busy"):
-                st.info("A background sync is running right now — try again in a minute.")
-            elif result["errors"]:
-                for err in result["errors"][:5]:
-                    st.error(err)
-                st.warning("Some files failed — check Drive sharing if errors persist.")
-            else:
-                st.success(f"Synced {result['synced']} file(s), "
-                           f"skipped {result['skipped']} unchanged.")
-                st.cache_data.clear()
-                clear_shared_data_caches()
-else:
-    with st.sidebar.expander("☁️ Drive sync unavailable", expanded=False):
-        st.caption("Service account credentials not found at /root/drive-credentials.json")
+# 🔄 Sync now lives in the shared sidebar (page_setup → ☁️ Google Drive).
 
 st.sidebar.header("Track")
 track_id = st.sidebar.selectbox("Track", tracks, key="track_id")

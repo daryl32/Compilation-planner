@@ -5,9 +5,12 @@ Does, in order:
   • page config (wide layout; tab title marked 🧪 TEST in the test copy) + test banner
   • Google sign-in screen if not signed in, then the email whitelist gate
   • Google Drive connect callback (?code=...), returning to the page that asked
-  • page title + "v<version> · <name>" caption
-  • sidebar: Drive sync status, a "☁️ Google Drive" connect/disconnect panel,
-    "edits not yet saved to Drive" + Save button, and Sign out
+  • page title
+  • the same sidebar top on every page (page controls go below its divider):
+      👤 account box — name, email, version, Drive sync status, "edits not yet
+         saved to Drive" + Save, memory-freed note, Sign out
+      ☁️ Google Drive — connect / disconnect, 🔄 Sync now
+      🖥️ Server — app memory, 🧹 Free memory, 🔀 live / test switch, 💽 disk page
 
 Pages keep only their own content. Fix sign-in / Drive behaviour here, once.
 """
@@ -86,19 +89,52 @@ def _handle_drive_callback(page_path: str) -> None:
     st.rerun()
 
 
-def _sidebar(page_path: str) -> None:
+def _account_box(mb) -> None:
+    """👤 Who's signed in, version, Drive sync status, unsaved Drive edits, Sign out —
+    the same block, in the same place, on every page."""
+    box = st.sidebar.container(border=True)
+    box.markdown(f"👤 **{st.user.name}**")
+    box.caption(f"{st.user.email}  ·  v{APP_VERSION}" + ("  ·  🧪 test copy" if IS_TEST else ""))
     try:
-        render_sync_status()
+        render_sync_status(box)
     except Exception:
         pass  # status line is informational only
 
-    if OAUTH_AVAILABLE:
-        with st.sidebar.expander("☁️ Google Drive", expanded=False):
+    pending = read_pending()
+    if pending and not IS_TEST:
+        box.warning(f"{len(pending)} file(s) have edits not yet saved to Google Drive.")
+        if not drive_token():
+            box.caption("Connect Google Drive (below) to save them.")
+        elif box.button("☁️ Save edits to Drive", key="drive_save_pending", use_container_width=True):
+            failed = push_pending(drive_token())
+            if failed:
+                for item, err in failed.items():
+                    box.error(f"{item}: {err}")
+            else:
+                box.success("Saved to Google Drive.")
+                st.rerun()
+
+    note = st.session_state.pop("_memory_reset_note", None)
+    if note:
+        before, after, saved = note
+        box.success(f"🧹 Memory freed: {before:,.0f} → {after:,.0f} MB." if before and after
+                    else "🧹 Memory freed.")
+        if saved:
+            box.caption("Anything unsaved was kept and will be offered back in the planner.")
+
+    if box.button("Sign out", key="signout_btn", use_container_width=True):
+        st.logout()
+
+
+def _drive_panel(page_path: str) -> None:
+    """☁️ Google Drive: connect / disconnect, and pull from Drive now."""
+    with st.sidebar.expander("☁️ Google Drive", expanded=False):
+        if OAUTH_AVAILABLE:
             if IS_TEST:
                 st.caption("Saving to Google Drive is switched off in the test copy.")
             elif drive_token():
                 st.success("Connected — saves upload to your Drive.")
-                if st.button("Disconnect Drive", key="drive_disconnect"):
+                if st.button("Disconnect Drive", key="drive_disconnect", use_container_width=True):
                     st.session_state.pop(DRIVE_SESSION_KEY, None)
                     st.rerun()
             else:
@@ -109,25 +145,64 @@ def _sidebar(page_path: str) -> None:
                 auth_url = get_auth_url(state=page_path)
                 st.markdown(f'<a href="{auth_url}" target="_self">🔗 Connect Google Drive</a>',
                             unsafe_allow_html=True)
+            st.divider()
+        _sync_now()
 
-    pending = read_pending()
-    if pending and not IS_TEST:
-        st.sidebar.warning(f"{len(pending)} file(s) have edits not yet saved to Google Drive.")
-        if not drive_token():
-            st.sidebar.caption("Connect Google Drive (above) to save them.")
-        elif st.sidebar.button("☁️ Save edits to Drive", key="drive_save_pending"):
-            failed = push_pending(drive_token())
-            if failed:
-                for item, err in failed.items():
-                    st.sidebar.error(f"{item}: {err}")
-            else:
-                st.sidebar.success("Saved to Google Drive.")
-                st.rerun()
 
-    _switch_panel()
+def _sync_now() -> None:
+    try:
+        from drive_sync import credentials_available
+        available = credentials_available()
+    except Exception:
+        available = False
+    if not available:
+        st.caption("Drive sync unavailable — no service account credentials on this machine.")
+        return
+    st.caption("Catalogues, audio, thumbnails, sprites and preview copies sync from Drive "
+               "automatically every 12 hours. Sync now to pull straight away after processing in Colab.")
+    if st.button("🔄 Sync now", key="drive_sync_btn", use_container_width=True):
+        bar = st.progress(0.0, text="Starting sync…")
 
-    if st.sidebar.button("Sign out", key="signout_btn"):
-        st.logout()
+        def _progress(idx, total, name):
+            bar.progress(min(0.99, idx / max(total, 1)), text=f"Syncing {name}…")
+
+        from auto_sync import run_sync
+        result = run_sync(_progress)
+        bar.progress(1.0, text="Done.")
+        if result.get("busy"):
+            st.info("A background sync is running right now — try again in a minute.")
+        elif result["errors"]:
+            for err in result["errors"][:5]:
+                st.error(err)
+            st.warning("Some files failed — check Drive sharing if errors persist.")
+        else:
+            st.success(f"Synced {result['synced']} file(s), skipped {result['skipped']} unchanged.")
+            st.cache_data.clear()
+            clear_shared_data_caches()
+
+
+def _server_panel(mb) -> None:
+    """🖥️ Server: memory, 🧹 Free memory, the live / test switch, and the Server page."""
+    done = st.session_state.get("_switch_done")
+    with st.sidebar.expander("🖥️ Server", expanded=bool(done)):
+        if mb is not None:
+            st.caption(f"🧠 App memory: {mb:,.0f} MB")
+        st.button("🧹 Free memory", key="reset_memory", on_click=_reset_memory,
+                  use_container_width=True,
+                  help="Saves your work to the recovery file, then clears this session's "
+                       "working data and cached video data. Saved projects are untouched. "
+                       "The planner starts fresh (unsaved work is offered back).")
+        _switch_panel()
+        try:
+            st.page_link("pages/4_Server.py", label="💽 Disk space & clean-up →")
+        except Exception:
+            pass
+
+
+def _sidebar(page_path: str, mb) -> None:
+    _account_box(mb)
+    _drive_panel(page_path)
+    _server_panel(mb)
     st.sidebar.divider()
 
 
@@ -175,40 +250,40 @@ def _switch_panel() -> None:
     me, other = AS.this_copy(), AS.other_copy()
     o = AS.COPIES[other]
     done = st.session_state.get("_switch_done")
-    with st.sidebar.expander("🔀 Live / test copy", expanded=bool(done)):
-        if done:
-            st.success(f"The {o['name']} is running — this one switches off in a few seconds.")
-            st.link_button(f"Open the {o['name']} →", o["url"], type="primary", use_container_width=True)
-            st.caption("Unsaved work here is kept and offered to you when you come back.")
+    st.markdown("**🔀 Live / test copy**")
+    if done:
+        st.success(f"The {o['name']} is running — this one switches off in a few seconds.")
+        st.link_button(f"Open the {o['name']} →", o["url"], type="primary", use_container_width=True)
+        st.caption("Unsaved work here is kept and offered to you when you come back.")
+        return
+    running = AS.is_running(other)
+    st.caption(f"You're on the **{AS.COPIES[me]['name']}**. The {o['name']} is "
+               f"**{'running' if running else 'off'}**."
+               + (" Only one runs at a time to save the server's memory." if not running else ""))
+    if st.button(f"🔀 Switch to the {o['name']}", key="switch_copy", use_container_width=True,
+                 help=f"Starts the {o['name']}, takes you there, then switches this one off."):
+        bar = st.progress(0.0, text=f"Starting the {o['name']}…")
+        err = AS.start(other, progress=lambda f: bar.progress(min(max(f, 0.0), 1.0),
+                                                              text=f"Starting the {o['name']}…"))
+        bar.empty()
+        if err:
+            st.error(f"Couldn't start the {o['name']}: {err}. This copy stays on.")
             return
-        running = AS.is_running(other)
-        st.caption(f"You're on the **{AS.COPIES[me]['name']}**. The {o['name']} is "
-                   f"**{'running' if running else 'off'}**."
-                   + (" Only one runs at a time to save the server's memory." if not running else ""))
-        if st.button(f"🔀 Switch to the {o['name']}", key="switch_copy", use_container_width=True,
-                     help=f"Starts the {o['name']}, takes you there, then switches this one off."):
-            bar = st.progress(0.0, text=f"Starting the {o['name']}…")
-            err = AS.start(other, progress=lambda f: bar.progress(min(max(f, 0.0), 1.0),
-                                                                  text=f"Starting the {o['name']}…"))
-            bar.empty()
+        err = AS.stop_later(me)
+        if err:
+            st.warning(f"The {o['name']} is on, but this copy couldn't switch itself off ({err}) — "
+                       f"both are running.")
+        st.session_state["_switch_done"] = True
+        st.rerun()
+    if running:
+        st.link_button(f"Open the {o['name']} →", o["url"], use_container_width=True)
+        if st.button(f"⏹ Switch the {o['name']} off", key="switch_stop_other", use_container_width=True,
+                     help="Frees its memory. Live comes back on its own whenever the test copy stops."):
+            err = AS.stop_now(other)
             if err:
-                st.error(f"Couldn't start the {o['name']}: {err}. This copy stays on.")
-                return
-            err = AS.stop_later(me)
-            if err:
-                st.warning(f"The {o['name']} is on, but this copy couldn't switch itself off ({err}) — "
-                           f"both are running.")
-            st.session_state["_switch_done"] = True
-            st.rerun()
-        if running:
-            st.link_button(f"Open the {o['name']} →", o["url"], use_container_width=True)
-            if st.button(f"⏹ Switch the {o['name']} off", key="switch_stop_other", use_container_width=True,
-                         help="Frees its memory. Live comes back on its own whenever the test copy stops."):
-                err = AS.stop_now(other)
-                if err:
-                    st.error(err)
-                else:
-                    st.rerun()
+                st.error(err)
+            else:
+                st.rerun()
 
 
 # Session keys that survive a memory reset (everything else is this session's working data).
@@ -247,23 +322,6 @@ def _reset_memory() -> None:
     st.session_state["_memory_reset_note"] = (before, after, saved)
 
 
-def _memory_panel() -> None:
-    note = st.session_state.pop("_memory_reset_note", None)
-    if note:
-        before, after, saved = note
-        if before and after:
-            st.sidebar.success(f"🧹 Memory freed: {before:,.0f} → {after:,.0f} MB.")
-        else:
-            st.sidebar.success("🧹 Memory freed.")
-        if saved:
-            st.sidebar.caption("Anything unsaved was kept and will be offered back in the planner.")
-    st.sidebar.button("🧹 Free memory", key="reset_memory", on_click=_reset_memory,
-                      use_container_width=True,
-                      help="Saves your work to the recovery file, then clears this session's "
-                           "working data and cached video data. Saved projects are untouched. "
-                           "The planner starts fresh (unsaved work is offered back).")
-
-
 def _lock_dropdown_typing() -> None:
     try:
         import streamlit.components.v1 as components
@@ -289,9 +347,5 @@ def page_setup(name: str, page_path: str, *, title: str = None, anchor: str = No
         _access_denied()
     _handle_drive_callback(page_path)
     st.title(title or name, anchor=anchor)
-    st.caption(f"v{APP_VERSION}  ·  {st.user.name}")
     mb = memory_check(name)
-    _sidebar(page_path)
-    if mb is not None:
-        st.sidebar.caption(f"🧠 App memory: {mb:,.0f} MB")
-    _memory_panel()
+    _sidebar(page_path, mb)
