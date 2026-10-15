@@ -7,9 +7,10 @@ Does, in order:
   • Google Drive connect callback (?code=...), returning to the page that asked
   • page title
   • the same sidebar top on every page (page controls go below its divider):
-      👤 account box — name, email, version, Drive sync status, "edits not yet
-         saved to Drive" + Save, memory-freed note, Sign out
-      ☁️ Google Drive — connect / disconnect, 🔄 Sync now
+      👤 account box — name, email, version, ☁️ Drive connected / not (+ Connect),
+         Drive sync status, "edits not yet saved to Drive" + Save (progress and
+         time left), memory-freed note, Sign out
+      ☁️ Google Drive sync — disconnect, 🔄 Sync now
       🖥️ Server — app memory, 🧹 Free memory, 🔀 live / test switch, 💽 disk page
 
 Pages keep only their own content. Fix sign-in / Drive behaviour here, once.
@@ -95,24 +96,35 @@ def _account_box(mb) -> None:
     box = st.sidebar.container(border=True)
     box.markdown(f"👤 **{st.user.name}**")
     box.caption(f"{st.user.email}  ·  v{APP_VERSION}" + ("  ·  🧪 test copy" if IS_TEST else ""))
+    # Google Drive connection — always visible.
+    if not OAUTH_AVAILABLE:
+        box.caption("☁️ Google Drive saving isn't set up on this copy.")
+    elif IS_TEST:
+        box.caption("☁️ Google Drive: saving switched off in the test copy.")
+    elif drive_token():
+        box.markdown("☁️ Google Drive: **:green[● Connected]**")
+    else:
+        if st.session_state.pop("_drive_expired_note", False):
+            box.warning("Your Google Drive connection expired — please connect again.")
+        box.markdown("☁️ Google Drive: **:red[● Not connected]**")
+        box.markdown(f'<a href="{get_auth_url(state=_PAGE_PATH.get("p", ""))}" target="_self">'
+                     f'🔗 Connect Google Drive</a>', unsafe_allow_html=True)
     try:
         render_sync_status(box)
     except Exception:
         pass  # status line is informational only
 
+    saved = st.session_state.pop("_drive_saved_note", None)
+    if saved:
+        box.success(saved)
     pending = read_pending()
     if pending and not IS_TEST:
         box.warning(f"{len(pending)} file(s) have edits not yet saved to Google Drive.")
         if not drive_token():
-            box.caption("Connect Google Drive (below) to save them.")
-        elif box.button("☁️ Save edits to Drive", key="drive_save_pending", use_container_width=True):
-            failed = push_pending(drive_token())
-            if failed:
-                for item, err in failed.items():
-                    box.error(f"{item}: {err}")
-            else:
-                box.success("Saved to Google Drive.")
-                st.rerun()
+            box.caption("Connect Google Drive (above) to save them.")
+        elif box.button(f"☁️ Save {len(pending)} edit(s) to Drive", key="drive_save_pending",
+                        use_container_width=True):
+            _save_pending(box, len(pending))
 
     note = st.session_state.pop("_memory_reset_note", None)
     if note:
@@ -126,25 +138,44 @@ def _account_box(mb) -> None:
         st.logout()
 
 
+_PAGE_PATH = {}   # this run's page, for the Connect link (set by page_setup)
+
+
+def _save_pending(box, n: int) -> None:
+    """Upload the pending edits with a progress bar and time left."""
+    import time as _t
+    bar = box.progress(0.0, text=f"Saving {n} file(s) to Google Drive…")
+    started = _t.time()
+
+    def progress(done, total):
+        left = (_t.time() - started) / max(done, 1) * (total - done)
+        eta = (f"about {left / 60:.0f} min left" if left >= 90 else f"about {left:.0f} s left") if done else ""
+        bar.progress(min(done / max(total, 1), 1.0), text=f"Saved {done} of {total}  ·  {eta}")
+
+    failed = push_pending(drive_token(), progress=progress)
+    bar.empty()
+    if failed:
+        box.error(f"{len(failed)} file(s) couldn't be saved — they stay on the list to try again.")
+        for item, err in list(failed.items())[:5]:
+            box.caption(f"{item}: {err}")
+    else:
+        st.session_state["_drive_saved_note"] = (f"Saved {n} file(s) to Google Drive in "
+                                                 f"{_t.time() - started:.0f} s.")
+        st.rerun()
+
+
 def _drive_panel(page_path: str) -> None:
     """☁️ Google Drive: connect / disconnect, and pull from Drive now."""
-    with st.sidebar.expander("☁️ Google Drive", expanded=False):
-        if OAUTH_AVAILABLE:
-            if IS_TEST:
-                st.caption("Saving to Google Drive is switched off in the test copy.")
-            elif drive_token():
-                st.success("Connected — saves upload to your Drive.")
+    with st.sidebar.expander("☁️ Google Drive sync", expanded=False):
+        if OAUTH_AVAILABLE and not IS_TEST:
+            if drive_token():
+                st.caption("Connected — saves upload to your Drive.")
                 if st.button("Disconnect Drive", key="drive_disconnect", use_container_width=True):
                     st.session_state.pop(DRIVE_SESSION_KEY, None)
                     st.rerun()
             else:
-                if st.session_state.pop("_drive_expired_note", False):
-                    st.warning("Your Google Drive connection expired — please connect again.")
-                st.caption("Connect to save plans, projects, previews, tag corrections, labels "
-                           "and library ranges to your Google Drive.")
-                auth_url = get_auth_url(state=page_path)
-                st.markdown(f'<a href="{auth_url}" target="_self">🔗 Connect Google Drive</a>',
-                            unsafe_allow_html=True)
+                st.caption("Connect (link above) to save plans, projects, previews, tag corrections, "
+                           "labels and library ranges to your Google Drive.")
             st.divider()
         _sync_now()
 
@@ -200,6 +231,7 @@ def _server_panel(mb) -> None:
 
 
 def _sidebar(page_path: str, mb) -> None:
+    _PAGE_PATH["p"] = page_path
     _account_box(mb)
     _drive_panel(page_path)
     _server_panel(mb)

@@ -223,7 +223,22 @@ def mark_pending(stem: str) -> None:
     write_pending(read_pending() | {stem})
 
 
-def push_pending(token: dict) -> dict:
+def _pending_target(stem: str):
+    """(local path, Drive folder) for a pending entry, or None for a render
+    entry / a file that's gone."""
+    if stem.startswith("audio:"):
+        path, folder = AUDIO_DIR / f"{stem[6:]}.json", "scene-labeling/audio_catalogue"
+    elif stem.startswith("thumb:"):
+        # "thumb:<video_id>/<file>" — a thumbnail the Reviewer made for a split scene.
+        vid, _, name = stem[6:].partition("/")
+        path = CATALOGUE_DIR / "thumbnails" / vid / name
+        folder = f"scene-labeling/catalogue/thumbnails/{vid}"
+    else:
+        path, folder = CATALOGUE_DIR / f"{stem}.json", "scene-labeling/catalogue"
+    return (path, folder) if path.exists() else None
+
+
+def push_pending(token: dict, progress=None) -> dict:
     """Upload every pending file to Drive: plain stems are video catalogues
     (CATALOGUE_DIR → scene-labeling/catalogue); "audio:<stem>" entries are
     track catalogues (AUDIO_DIR → scene-labeling/audio_catalogue), e.g. ones
@@ -231,36 +246,62 @@ def push_pending(token: dict) -> dict:
     (CATALOGUE_DIR/thumbnails → scene-labeling/catalogue/thumbnails);
     "render:<file>.mp4" entries are a render's details (rating, notes, keep)
     edited while Drive wasn't connected (PREVIEW_DIR → scene-labeling/previews).
+
+    Files go up several at a time (drive_oauth.upload_many). Each one is taken
+    off the pending list as soon as it's uploaded, so stopping part-way only
+    leaves the rest to do. progress(done, total) is called as files finish.
     Returns {entry: error} for any that failed (those stay pending)."""
-    from drive_oauth import push_file_with_oauth
-    failed = {}
-    for stem in sorted(read_pending()):
+    from drive_oauth import upload_many
+    pending = sorted(read_pending())
+    failed, items, gone, mtimes = {}, [], set(), {}
+    for stem in pending:
         if stem.startswith("render:"):
-            from config import PREVIEW_DIR
-            from renders import sync_sidecar, load_render, on_drive
-            mp4 = PREVIEW_DIR / stem[7:]
-            meta = load_render(mp4)
-            if meta is None or not on_drive(meta):
-                continue  # deleted, or not on Drive — its details go up with its upload
-            err = sync_sidecar(mp4, token)
-            if err:
-                failed[stem] = err
             continue
-        if stem.startswith("audio:"):
-            path, folder = AUDIO_DIR / f"{stem[6:]}.json", "scene-labeling/audio_catalogue"
-        elif stem.startswith("thumb:"):
-            # "thumb:<video_id>/<file>" — a thumbnail the Reviewer made for a split scene.
-            vid, _, name = stem[6:].partition("/")
-            path = CATALOGUE_DIR / "thumbnails" / vid / name
-            folder = f"scene-labeling/catalogue/thumbnails/{vid}"
+        target = _pending_target(stem)
+        if target is None:
+            gone.add(stem)          # nothing to push any more
         else:
-            path, folder = CATALOGUE_DIR / f"{stem}.json", "scene-labeling/catalogue"
-        if not path.exists():
-            continue  # nothing to push any more
-        err = push_file_with_oauth(token, path, folder)
+            items.append((stem, target[0], target[1]))
+            mtimes[stem] = target[0].stat().st_mtime
+    renders = [s for s in pending if s.startswith("render:")]
+    total = len(items) + len(renders)
+    if gone:
+        write_pending(read_pending() - gone)
+
+    finished = set()
+    items_by_key = [(k, path) for k, path, _ in items]
+
+    def on_done(done, _total, key, err):
+        # Edited again while it was uploading? Then it stays pending for next time.
+        try:
+            unchanged = dict(items_by_key)[key].stat().st_mtime == mtimes[key]
+        except (KeyError, OSError):
+            unchanged = False
+        if not err and unchanged:
+            finished.add(key)
+        # Write progress to the pending list every few files (and at the end).
+        if finished and (len(finished) % 10 == 0 or done == _total):
+            write_pending(read_pending() - finished)
+        if progress:
+            progress(done, total)
+
+    failed.update(upload_many(token, items, progress=on_done))
+    write_pending(read_pending() - finished)
+
+    for i, stem in enumerate(renders, 1):
+        from config import PREVIEW_DIR
+        from renders import sync_sidecar, load_render, on_drive
+        mp4 = PREVIEW_DIR / stem[7:]
+        meta = load_render(mp4)
+        err = None
+        if meta is not None and on_drive(meta):
+            err = sync_sidecar(mp4, token)
         if err:
             failed[stem] = err
-    write_pending(set(failed))
+        else:
+            write_pending(read_pending() - {stem})   # done, or deleted / not on Drive
+        if progress:
+            progress(len(items) + i, total)
     return failed
 
 

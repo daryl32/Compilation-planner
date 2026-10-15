@@ -269,3 +269,148 @@ def trash_file_with_oauth(token_dict: dict, file_id: str) -> str | None:
 def is_authenticated(session_state) -> bool:
     """Check if the session has a valid OAuth token."""
     return bool(session_state.get(SESSION_KEY))
+
+
+# ---------------------------------------------------------------------------
+# Many files at once (☁️ Save edits to Drive)
+# ---------------------------------------------------------------------------
+# One file at a time cost ~6 round trips each (folder lookups, a file lookup, a
+# two-step upload): 247 files took over 10 minutes. Here each folder is looked
+# up ONCE and its files listed ONCE, then each file is a single upload request,
+# several in parallel.
+
+SMALL_FILE_BYTES = 5 * 2**20   # below this, a one-request (non-resumable) upload
+
+
+def _resolve_folder(service, sa, parts: list) -> str:
+    """The id of the folder at parts (created with the user's login if missing)."""
+    if sa is None:
+        parent_id = None
+        for part in parts:
+            parent_id = _find_or_create_folder(service, part, parent_id)
+        return parent_id
+    from drive_sync import _find_folders
+    parent_id = None
+    for part in parts:
+        if part == "scene-labeling" and parent_id is None:
+            parent_id = SCENE_LABELING_FOLDER_ID
+            continue
+        if part == "catalogue" and parent_id == SCENE_LABELING_FOLDER_ID:
+            parent_id = CATALOGUE_FOLDER_ID
+            continue
+        found = _find_folders(sa, part, parent_id)
+        if found:
+            parent_id = found[0]["id"]
+        else:
+            body = {"name": part, "mimeType": "application/vnd.google-apps.folder"}
+            if parent_id:
+                body["parents"] = [parent_id]
+            parent_id = service.files().create(body=body, fields="id").execute()["id"]
+    return parent_id
+
+
+def _names_in(client, folder_id: str) -> dict:
+    """{file name: id} in a folder — the newest file when a name appears twice."""
+    out, page_token = {}, None
+    while True:
+        resp = client.files().list(
+            q=f"'{folder_id}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'",
+            fields="nextPageToken, files(id, name, modifiedTime)", orderBy="modifiedTime desc",
+            pageSize=1000, pageToken=page_token).execute()
+        for f in resp.get("files", []):
+            out.setdefault(f["name"], f["id"])
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            return out
+
+
+def _friendly(e: Exception) -> str:
+    s = str(e)
+    if "refresh" in s.lower() and ("token" in s.lower() or "credentials" in s.lower()):
+        return EXPIRED_MESSAGE
+    return s
+
+
+def upload_many(token_dict: dict, items: list, progress=None, workers: int = 6) -> dict:
+    """Upload many files. items: [(key, local_path, drive_path)]. progress(done,
+    total, key, error_or_None) is called from THIS thread as each one finishes.
+    Returns {key: error} for the ones that failed."""
+    import mimetypes
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from drive_sync import drive_writes_blocked
+
+    if not items:
+        return {}
+    blocked = drive_writes_blocked()
+    if blocked:
+        return {k: blocked for k, _, _ in items}
+    if token_expired(token_dict):
+        return {k: EXPIRED_MESSAGE for k, _, _ in items}
+
+    failed, done, total = {}, 0, len(items)
+
+    def report(key, err):
+        nonlocal done
+        done += 1
+        if err:
+            failed[key] = err
+        if progress:
+            progress(done, total, key, err)
+
+    # 1. Each folder once: its id and the files already in it.
+    try:
+        service, sa = _get_service(token_dict), _service_account()
+    except Exception as e:
+        return {k: _friendly(e) for k, _, _ in items}
+    folders = {}
+    for dp in sorted({dp for _, _, dp in items}):
+        try:
+            fid = _resolve_folder(service, sa, [p for p in dp.split("/") if p])
+            folders[dp] = (fid, _names_in(sa or service, fid))
+        except Exception as e:
+            folders[dp] = (None, _friendly(e))
+
+    # 2. One request per file, several at a time (each thread its own clients —
+    #    the Google client isn't safe to share between threads).
+    local = threading.local()
+
+    def clients():
+        if not hasattr(local, "service"):
+            local.service, local.sa = _get_service(token_dict), _service_account()
+        return local.service, local.sa
+
+    def one(path: Path, dp: str):
+        fid, names = folders[dp]
+        if fid is None:
+            raise RuntimeError(names)
+        svc, sac = clients()
+        mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        resumable = path.stat().st_size > SMALL_FILE_BYTES
+        file_id = names.get(path.name)
+        if file_id:
+            last = None
+            for client in (svc, sac):
+                if client is None:
+                    continue
+                try:
+                    media = MediaFileUpload(str(path), mimetype=mime, resumable=resumable)
+                    return client.files().update(fileId=file_id, media_body=media, fields="id").execute()
+                except Exception as e:
+                    last = e
+                    if not any(x in str(e) for x in ("404", "403", "notFound", "insufficient")):
+                        raise
+            # Neither login can write that copy: add a new one (the sync takes the newest).
+        media = MediaFileUpload(str(path), mimetype=mime, resumable=resumable)
+        return svc.files().create(body={"name": path.name, "parents": [fid]},
+                                  media_body=media, fields="id").execute()
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futs = {pool.submit(one, Path(path), dp): key for key, path, dp in items}
+        for fut in as_completed(futs):
+            try:
+                fut.result()
+                report(futs[fut], None)
+            except Exception as e:
+                report(futs[fut], _friendly(e))
+    return failed
