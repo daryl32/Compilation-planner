@@ -105,14 +105,50 @@ def video_stats(video: dict, time_range, wanted: set, match_all: bool) -> dict:
 # Videos
 # ---------------------------------------------------------------------------
 
+ADDED_CHOICES = {          # "Added" filter: key -> (label, days back; None = any time / own date)
+    "any": ("Any time", None),
+    "new": (f"🆕 Newly added (last {CS.NEW_VIDEO_DAYS} days)", CS.NEW_VIDEO_DAYS),
+    "today": ("Today", 0),
+    "3d": ("Last 3 days", 3),
+    "30d": ("Last 30 days", 30),
+    "since": ("Since a date…", None),
+}
+
+
+def _show_new_videos():
+    """🆕 banner button: just the new videos, newest first."""
+    st.session_state["lib_added"] = "new"
+    st.session_state["lib_sort"] = "Date added"
+    st.session_state["lib_desc"] = True
+    st.session_state["lib_desc_for"] = "Date added"
+    st.session_state["lib_name_query"] = ""
+
+
 def render_videos():
     library = load_library()
     ranges = library_ranges()
     masters = master_thumbnail_scenes()
     vid_use, _ = render_usage()
+    added = CS.added_times()
+    new_ids = sorted((vid for vid, ts in added.items() if CS.is_new_video(ts)), key=lambda v: -added[v])
 
     st.sidebar.header("Filter")
-    name_query = st.sidebar.text_input("Search name", placeholder="part of a video name")
+    name_query = st.sidebar.text_input("Search name", placeholder="part of a video name", key="lib_name_query")
+    added_choice = st.sidebar.selectbox(
+        "Added", list(ADDED_CHOICES), key="lib_added",
+        format_func=lambda k: ADDED_CHOICES[k][0] + (f" · {len(new_ids)}" if k == "new" else ""),
+        help="When the video was added — the date its catalogue first appeared in Google Drive.",
+    )
+    added_since = None
+    if added_choice == "since":
+        since_day = st.sidebar.date_input("Added on or after",
+                                          value=datetime.date.today() - datetime.timedelta(days=7),
+                                          key="lib_added_since", format="DD/MM/YYYY")
+        added_since = datetime.datetime.combine(since_day, datetime.time.min).timestamp()
+    elif ADDED_CHOICES[added_choice][1] is not None:
+        days = ADDED_CHOICES[added_choice][1]
+        added_since = datetime.datetime.combine(
+            datetime.date.today() - datetime.timedelta(days=days), datetime.time.min).timestamp()
     all_tags = sorted({t for v in library.values() for s in v["scenes"] for t in s["tags"]}, key=str.lower)
     tag_filter = st.sidebar.multiselect("Tags", all_tags)
     match_all = st.sidebar.radio(
@@ -132,13 +168,21 @@ def render_videos():
         "Usable duration": lambda r: r["stats"]["usable"],
         "Scene count": lambda r: len(r["video"]["scenes"]),
         "% reviewed": lambda r: r["stats"]["reviewed_pct"],
-        "Date added": lambda r: r["video"]["added"],
+        "Date added": lambda r: added.get(r["video"]["video_id"], 0),
         "Times rendered": lambda r: vid_use.get(r["video"]["video_id"], 0),
     }
     sort_options = list(SORTS) if tag_filter else [k for k in SORTS if k != "Tagged footage"]
-    sort_by = st.sidebar.selectbox("Sort by", sort_options,
-                                   help="Tagged footage = seconds of usable footage whose scenes match the tag filter.")
-    descending = st.sidebar.toggle("Descending", value=(sort_by != "Name"))
+    if st.session_state.get("lib_sort") not in sort_options:
+        # First visit (or the tag filter that allowed "Tagged footage" was cleared):
+        # newest first while an "Added" filter is on, else the first option.
+        st.session_state["lib_sort"] = "Date added" if added_choice != "any" else sort_options[0]
+    sort_by = st.sidebar.selectbox("Sort by", sort_options, key="lib_sort",
+                                   help="Tagged footage = seconds of usable footage whose scenes match the tag filter. "
+                                        "Date added = when the video's catalogue first appeared in Google Drive.")
+    if st.session_state.get("lib_desc_for") != sort_by:
+        st.session_state["lib_desc"] = sort_by != "Name"   # sensible default per sort, still switchable
+        st.session_state["lib_desc_for"] = sort_by
+    descending = st.sidebar.toggle("Descending", key="lib_desc")
 
     # ---------------------------------------------------------------------------
     # Apply filters
@@ -147,6 +191,8 @@ def render_videos():
     rows = []
     for vid, video in library.items():
         if name_query and name_query.lower() not in vid.lower():
+            continue
+        if added_since is not None and added.get(vid, 0) < added_since:
             continue
         rng = ranges.get(vid)
         if range_filter == "Has a range" and not rng:
@@ -170,6 +216,12 @@ def render_videos():
         st.info("No video catalogues found. Process a video in Colab, then sync from Google Drive.")
         st.stop()
 
+    if new_ids and added_choice == "any":
+        _nc = st.columns([5, 2])
+        _names = ", ".join(new_ids[:4]) + ("…" if len(new_ids) > 4 else "")
+        _nc[0].info(f"🆕 **{len(new_ids)} video(s) added in the last {CS.NEW_VIDEO_DAYS} days:** {_names}")
+        _nc[1].button("🆕 Show new videos", on_click=_show_new_videos, use_container_width=True)
+
     metric_cols = st.columns(3)
     metric_cols[0].metric("Videos shown", f"{len(rows)} / {len(library)}")
     metric_cols[1].metric("Usable footage", format_mmss(sum(r["stats"]["usable"] for r in rows)))
@@ -179,7 +231,11 @@ def render_videos():
         metric_cols[2].metric("With library range", sum(1 for r in rows if r["range"]))
 
     if not rows:
-        st.info("No videos match these filters.")
+        if added_choice != "any":
+            st.info("No videos match these filters in that period — try a longer one under **Added** in the "
+                    "sidebar. (Dates come from Google Drive: press ☁️ Sync if you've just added some.)")
+        else:
+            st.info("No videos match these filters.")
         st.stop()
 
     # ---------------------------------------------------------------------------
@@ -205,13 +261,17 @@ def render_videos():
                     if thumb_path.exists():
                         safe_image(str(thumb_path), width=220)
             with cols[1]:
-                st.markdown(f"**{vid}**")
+                _added_ts = added.get(vid)
+                _badge = "  🆕" if _added_ts and CS.is_new_video(_added_ts) else ""
+                st.markdown(f"**{vid}**{_badge}")
                 line = (f"⏱ {format_mmss(video['duration'])}  ·  usable {format_mmss(stats['usable'])}"
                         f"  ·  {len(video['scenes'])} scenes  ·  {stats['reviewed_pct']:.0f}% reviewed")
                 if tag_filter:
                     line += f"  ·  🏷️ {format_mmss(stats['tagged'])} tagged"
                 if vid_use.get(vid):
                     line += f"  ·  🎞️ in {vid_use[vid]} render(s)"
+                if _added_ts:
+                    line += f"  ·  🗓 added {CS.added_ago(_added_ts)}"
                 st.caption(line)
                 if rng:
                     st.caption(f"📚 Library range {format_mmss(rng[0])}–{format_mmss(rng[1])}")

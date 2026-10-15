@@ -2550,6 +2550,12 @@ def _back_to_best_matches():
     st.session_state["random_top_seed"] = None
 
 
+def _add_new_videos(video_ids: list) -> None:
+    """🆕 Add new videos — tick every recently added video (adding it to the list if needed)."""
+    for vid in video_ids:
+        _add_video_to_selection(vid)
+
+
 def _clear_video_selection():
     for key in [k for k in st.session_state if k.startswith("select_video_")]:
         st.session_state[key] = False
@@ -2633,6 +2639,9 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
         "set here, which overrides the library range for this project only."
     )
     _lib_ranges = library_ranges()
+    _added = CStore.added_times()
+    _new_ids = sorted((v for v in all_video_ids if v in _added and CStore.is_new_video(_added[v])),
+                      key=lambda v: -_added[v])
 
     def render_video_row(video_id: str, recommended: bool, default_checked: bool):
         match = info["match_by_id"].get(video_id)
@@ -2660,7 +2669,8 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                 safe_image(_thumb, width=120)
         with row_cols[2]:
             rank_mark = "✅ " if recommended else ""
-            title = f"{rank_mark}**{video_id}** · ⏱ {format_mmss(duration)}"
+            new_mark = f" · 🆕 added {CStore.added_ago(_added[video_id])}" if video_id in _new_ids else ""
+            title = f"{rank_mark}**{video_id}** · ⏱ {format_mmss(duration)}{new_mark}"
             if match:
                 st.write(f"{title} — match **{match['score']:.0f}%**  |  "
                          f"{match['matching_scene_count']} scenes · {format_mmss(match['usable_sec'])} usable{range_tag}")
@@ -2744,10 +2754,22 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
         render_video_row(_v["video_id"], recommended=True,
                          default_checked=(_v["video_id"] in _committed))
 
+    if _new_ids:
+        _not_ticked = [v for v in _new_ids if not st.session_state.get(f"select_video_{v}", False)]
+        _nc = st.columns([6, 2])
+        _nc[0].caption(f"🆕 **{len(_new_ids)} video(s) added in the last {CStore.NEW_VIDEO_DAYS} days:** "
+                       + ", ".join(_new_ids[:6]) + ("…" if len(_new_ids) > 6 else "")
+                       + ("  — all selected" if not _not_ticked else ""))
+        _nc[1].button(f"🆕 Add new videos ({len(_not_ticked)})", on_click=_add_new_videos, args=(_not_ticked,),
+                      disabled=not _not_ticked, use_container_width=True, key="add_new_videos",
+                      help="Tick every video added recently, adding any that aren't in the top list. "
+                           "New videos are also listed first, marked 🆕, in the dropdown below.")
+
     st.session_state["extra_videos"] = info["extra_rows"]
+    _other_options = sorted(info["other_options"], key=lambda v: v not in _new_ids)   # 🆕 first, order kept
     st.multiselect(
-        "➕ Add other videos from the library", info["other_options"], key="extra_videos",
-        format_func=lambda vid: f"{vid}  ·  {format_mmss(get_video_duration(vid))}",
+        "➕ Add other videos from the library", _other_options, key="extra_videos",
+        format_func=lambda vid: (f"🆕 " if vid in _new_ids else "") + f"{vid}  ·  {format_mmss(get_video_duration(vid))}",
         placeholder="Choose a video to add it to the list above…",
         help="Everything in your video folder that isn't in the top list. Picking one adds it below, ticked.",
     )

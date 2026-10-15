@@ -211,6 +211,15 @@ with st.container(border=True):
         return all(checks[flag] for flag in find_flags)
 
     names = [stem for stem in index if matches(stem)]
+    # A split / combine / review can make the video you're working on stop
+    # matching "Only videos that…" (e.g. its last long clip was just split).
+    # Keep it in the list until you change the search yourself, rather than
+    # dropping you onto the first video.
+    _find_sig = (name_query, tuple(find_flags))
+    _keep = st.session_state.get("_rev_video_keep")
+    if (st.session_state.get("_rev_find_sig") == _find_sig and _keep in index and _keep not in names):
+        names = [stem for stem in index if stem in names or stem == _keep]
+    st.session_state["_rev_find_sig"] = _find_sig
 
     def video_label(stem: str) -> str:
         f = facts[stem]
@@ -448,8 +457,11 @@ def remake_thumbnail(scene: dict, dest: Path) -> None:
 
 
 def back_to(sid) -> None:
-    """After the full page reload this button causes, scroll back to this scene."""
-    st.session_state["rev_scroll_to"] = sid
+    """After the full page reload this button causes, scroll back to this scene —
+    or, if it's no longer shown (a filter hides it now, or it was combined away),
+    to the nearest shown scene at or after its start time."""
+    scene = scene_by_id.get(sid)
+    st.session_state["rev_scroll_to"] = (selected, sid, SE.scene_start_sec(scene) if scene else None)
 
 
 def frame_at(t: float):
@@ -837,7 +849,15 @@ if _dlg and _dlg[0] == selected and _dlg[1] in scene_by_id:
     split_dialog(_dlg[1], auto=_dlg[2])
 
 # Scroll back to the scene whose button reloaded the page (see back_to).
-_scroll = st.session_state.pop("rev_scroll_to", None)
+_scroll = None
+_want = st.session_state.pop("rev_scroll_to", None)
+if _want and _want[0] == selected and shown:
+    _shown_ids = [sc["scene_id"] for sc, _ in shown]
+    if _want[1] in _shown_ids:
+        _scroll = _want[1]
+    elif _want[2] is not None:
+        _after = [sc["scene_id"] for sc, _ in shown if SE.scene_start_sec(sc) >= _want[2] - 0.05]
+        _scroll = _after[0] if _after else _shown_ids[-1]
 if _scroll is not None:
     import streamlit.components.v1 as _components
     _components.html(

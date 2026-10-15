@@ -11,6 +11,9 @@ and all) on its own. This module:
                       save or a Drive sync just those files are parsed again.
   • load_catalogue(stem) / save_catalogue(stem, data) — the full JSON of one
                       video; saving is atomic and queues the file for Drive.
+  • added_times()   — when each video was added (Drive's creation date of its
+                      catalogue, recorded by drive_sync), for "Date added"
+                      sorting and the 🆕 newly-added filters.
   • catalogue_paths() — the catalogue files (labels.json, library_meta.json,
                       dot-files etc. are skipped).
 
@@ -193,3 +196,58 @@ def motion_curves(video_id: str) -> dict:
     except OSError:
         return {}
     return _motion_curves(video_id, mtime)
+
+
+# ---------------------------------------------------------------------------
+# When each video was added
+# ---------------------------------------------------------------------------
+# drive_sync writes CATALOGUE_DIR/.added_dates.json ({stem: Drive createdTime})
+# on every sync. A catalogue's own modified-time is NOT its added date — every
+# Reviewer edit or re-download changes it — so it's only the fallback for videos
+# the file doesn't know yet (e.g. on the laptop, which never runs a sync).
+ADDED_DATES_FILE = CATALOGUE_DIR / ".added_dates.json"
+NEW_VIDEO_DAYS = 7   # "🆕 new" badge / default "newly added" window
+
+
+@st.cache_resource(max_entries=2, show_spinner=False)
+def _added_dates(mtime: float) -> dict:
+    from datetime import datetime
+    try:
+        raw = json.loads(ADDED_DATES_FILE.read_text())
+    except (ValueError, OSError):
+        return {}
+    out = {}
+    for stem, iso in (raw.items() if isinstance(raw, dict) else []):
+        try:
+            out[stem] = datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+    return out
+
+
+def added_times() -> dict:
+    """{video_id: unix time the video was added} for every video."""
+    try:
+        known = _added_dates(ADDED_DATES_FILE.stat().st_mtime)
+    except OSError:
+        known = {}
+    return {v["video_id"]: known.get(stem, v["added"]) for stem, v in video_index().items()}
+
+
+def added_ago(ts: float) -> str:
+    """'today', 'yesterday', '3 days ago', else the date — for a video's added time."""
+    from datetime import date, datetime
+    when = datetime.fromtimestamp(ts).date()
+    days = (date.today() - when).days
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < 14:
+        return f"{days} days ago"
+    return when.strftime("%d %b %Y")
+
+
+def is_new_video(ts: float, days: int = NEW_VIDEO_DAYS) -> bool:
+    import time
+    return ts >= time.time() - days * 86400

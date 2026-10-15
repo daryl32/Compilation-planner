@@ -100,7 +100,7 @@ def _list_files(service, folder_id: str) -> list[dict]:
     while True:
         resp = service.files().list(
             q=f"'{folder_id}' in parents and mimeType!='application/vnd.google-apps.folder' and trashed=false",
-            fields="nextPageToken, files(id, name, modifiedTime, size)",
+            fields="nextPageToken, files(id, name, modifiedTime, createdTime, size)",
             pageSize=1000,
             pageToken=page_token,
         ).execute()
@@ -194,6 +194,42 @@ def _broken_picture(path: Path) -> bool:
         return True
 
 
+# When each video was added: {catalogue stem: Drive createdTime of its catalogue
+# JSON, ISO}. A file's local modified-time changes on every Reviewer edit or
+# re-download, but Drive's createdTime never does (edits update the file in
+# place), so this is what "Date added" / "Newly added" go by. Dot-file, so it's
+# never mistaken for a catalogue; read by catalogue_store.added_dates().
+ADDED_DATES_NAME = ".added_dates.json"
+
+
+def _record_added_dates(catalogue_dir: Path, created: dict) -> None:
+    """Merge Drive createdTimes into catalogue_dir/.added_dates.json, keeping the
+    earliest date ever seen for each video (a catalogue deleted and re-uploaded
+    doesn't count as new). Never fails the sync."""
+    if not created:
+        return
+    path = Path(catalogue_dir) / ADDED_DATES_NAME
+    try:
+        known = json.loads(path.read_text())
+        if not isinstance(known, dict):
+            known = {}
+    except (FileNotFoundError, ValueError, OSError):
+        known = {}
+    merged = dict(known)
+    for stem, iso in created.items():
+        if stem not in merged or iso < merged[stem]:
+            merged[stem] = iso
+    if merged == known:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(merged, indent=1, sort_keys=True))
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None,
               proxy_dir: Path = None) -> dict:
     """
@@ -212,10 +248,15 @@ def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None,
     def ids(name, parent_id):
         return [f["id"] for f in _find_folders(service, name, parent_id)]
 
+    created = {}   # catalogue stem -> earliest Drive createdTime (when the video was added)
     for cat_folder_id in ids("catalogue", scene_id):
         # catalogue JSONs
         for f in _list_files(service, cat_folder_id):
             tasks.append((f, catalogue_dir / f["name"]))
+            if f["name"].endswith(".json") and f.get("createdTime"):
+                stem = f["name"][:-5]
+                if stem not in created or f["createdTime"] < created[stem]:
+                    created[stem] = f["createdTime"]
 
         # thumbnails (subfolder of catalogue), in per-video subfolders
         for thumb_id in ids("thumbnails", cat_folder_id):
@@ -227,6 +268,8 @@ def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None,
         for sprite_id in ids("timeline_sprites", cat_folder_id):
             for f in _list_files(service, sprite_id):
                 tasks.append((f, catalogue_dir / "timeline_sprites" / f["name"]))
+
+    _record_added_dates(catalogue_dir, created)
 
     # preview copies (proxies)
     if proxy_dir is not None:
