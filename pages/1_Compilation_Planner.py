@@ -2241,7 +2241,7 @@ def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list)
 
 
 AUDIO_SETTINGS_KEYS = [
-    "segmentation_method", "beats_per_bar",
+    "segmentation_method", "beats_per_bar", "audio_style", "sc_focus",
     "change_window_secs", "change_threshold", "min_segment_sec", "max_segment_sec",
     "react_to_hits", "hit_threshold", "snap_secs",
     "fast_energy_thresh", "fast_max_bars", "fast_cooldown_bars",
@@ -2294,45 +2294,87 @@ def build_segments(track: dict, cfg: dict) -> list:
         float(cfg["snap_secs"]), float(cfg["max_segment_sec"]), bpb)
 
 
+SEG_LABELS = {
+    SEG_SCORED: "🎯 Best musical moments (recommended)",
+    SEG_ADAPTIVE: "⚡ Energy changes & big hits",
+    SEG_RHYTHM: "🎬 Bar styles — cinematic / fast",
+}
+
+# "What to cut on" mixes for the Scored method's reason weights.
+CUT_FOCUS = {
+    "Balanced": {},   # = cut_scoring.DEFAULTS
+    "Song structure": {"sc_w_bar": 1.5, "sc_w_phrase": 2.5, "sc_w_section": 4.0, "sc_w_drop": 4.0,
+                       "sc_w_hit": 0.5, "sc_w_kick": 0.5, "sc_w_snare": 0.3, "sc_w_harmony": 1.0},
+    "Drums & hits": {"sc_w_hit": 2.0, "sc_w_kick": 2.0, "sc_w_snare": 1.5, "sc_w_bar": 0.7,
+                     "sc_w_phrase": 1.0, "sc_w_harmony": 0.4},
+    "Vocals": {"sc_w_vocal": 3.0, "sc_w_vocal_mid": 2.5, "sc_w_harmony": 1.0},
+}
+
+
+def _mark_audio_custom() -> None:
+    """A dial was moved by hand: stop auto-tuning over it."""
+    st.session_state["audio_style"] = AUDIO_STYLE_CUSTOM
+
+
+def _audio_retune_if_paced() -> None:
+    """Method, pace or beats per bar changed: re-tune now (unless Custom)."""
+    if st.session_state.get("audio_style") in AUDIO_STYLES:
+        apply_audio_profile(load_track(st.session_state["track_id"]), st.session_state["track_id"], report=True)
+
+
+def _apply_cut_focus() -> None:
+    mix = {**{k: CS.DEFAULTS[k] for k in CS.REASONS}, "sc_w_vocal_mid": CS.DEFAULTS["sc_w_vocal_mid"],
+           **CUT_FOCUS.get(st.session_state.get("sc_focus"), {})}
+    for k, v in mix.items():
+        st.session_state[k] = v   # the cutting pace doesn't touch these, so it stays as it is
+
+
 def _render_scored_cut_settings(track: dict, _v) -> None:
-    """Dials for the Scored cuts method."""
+    """Dials for the Best musical moments (Scored cuts) method."""
     a = track.get("analysis") or {}
     if not a:
         st.info("This track only has the basic analysis, so cuts are scored from hits and beats alone. "
-                "Add the extra analysis (bars, drums, sections, drops, vocals) from the **Media Library → "
-                "Audio → 🔬 Audio analysis** panel for the full set of signals.")
-    elif a.get("vocals") is None:
-        st.caption("No vocal analysis for this track (Demucs isn't installed on the server) — the vocal "
-                   "weights have no effect.")
+                "Add the extra analysis (bars, drums, sections, drops, vocals) from **Media Library → "
+                "Audio → 🔬 Audio analysis** for the full set of signals.")
+    _custom = dict(on_change=_mark_audio_custom)
     col1, col2 = st.columns(2)
     with col1:
-        st.slider("Min segment length (s)", 0.3, 8.0, value=float(_v("sc_min_sec")), step=0.1, key="sc_min_sec",
-                  help="No two cuts closer than this.")
-        st.slider("Max segment length (s)", 0.0, 30.0, value=float(_v("sc_max_sec")), step=0.5, key="sc_max_sec",
-                  help="No segment longer than this, if there's any reasonable cut in range. 0 = no limit.")
-    with col2:
         st.slider("Average bars per cut", 0.5, 8.0, value=float(_v("sc_bars_per_cut")), step=0.25,
-                  key="sc_bars_per_cut", help="Overall cut rate: 1 = about one cut per bar, 4 = one per 4 bars.")
+                  key="sc_bars_per_cut", **_custom,
+                  help="Overall cut rate: 1 = about one cut per bar, 4 = one per 4 bars.")
         st.slider("Follow the energy", 0.0, 1.0, value=float(_v("sc_follow_energy")), step=0.05,
-                  key="sc_follow_energy",
-                  help="How much faster loud, busy passages cut than quiet ones. 0 = same rate everywhere.")
-    st.markdown("**What makes a good cut** — weight of each reason (0 = ignore)")
-    wcols = st.columns(3)
-    weight_help = {
-        "sc_w_hit": ("Big hit", "Any sharp new sound (onset strength)."),
-        "sc_w_kick": ("Kick", "Low-frequency drum hits."),
-        "sc_w_snare": ("Snare / clap", "Mid-frequency drum hits."),
-        "sc_w_harmony": ("Chord change", "The notes / chords change."),
-        "sc_w_bar": ("Bar line", "The first beat of a bar."),
-        "sc_w_phrase": ("Phrase line", "Every 4 / 8 / 16 bars from a section start — 16 counts most."),
-        "sc_w_section": ("Section change", "Verse → chorus etc., found from a change in the sound."),
-        "sc_w_drop": ("Drop", "The moment a build-up lands."),
-        "sc_w_vocal": ("Vocal line start / end", "Where a sung phrase begins or ends."),
-        "sc_w_vocal_mid": ("Avoid cutting mid-vocal", "Penalty for cutting while a vocal line is being sung."),
-    }
-    for i, (key, (label, hlp)) in enumerate(weight_help.items()):
-        with wcols[i % 3]:
-            st.slider(label, 0.0, 5.0, value=float(_v(key)), step=0.1, key=key, help=hlp)
+                  key="sc_follow_energy", **_custom,
+                  help="How much faster loud, busy passages cut than quiet ones. 0 = the same rate everywhere.")
+    with col2:
+        st.slider("Shortest segment (s)", 0.3, 8.0, value=float(_v("sc_min_sec")), step=0.1, key="sc_min_sec",
+                  **_custom, help="No two cuts closer than this.")
+        st.slider("Longest segment (s)", 0.0, 30.0, value=float(_v("sc_max_sec")), step=0.5, key="sc_max_sec",
+                  **_custom, help="No segment longer than this, if there's any reasonable cut in range. 0 = no limit.")
+    with st.expander("What to cut on", expanded=False):
+        _fl = list(CUT_FOCUS)
+        st.selectbox("Mix", _fl, index=_fl.index(_v("sc_focus")) if _v("sc_focus") in _fl else 0,
+                     key="sc_focus", on_change=_apply_cut_focus,
+                     help="Sets the weights below: Song structure favours bar lines, phrases, sections and "
+                          "drops; Drums & hits favours kicks, snares and big hits; Vocals cuts between sung "
+                          "lines and avoids cutting through them.")
+        if a and a.get("vocals") is None:
+            st.caption("No vocal analysis for this track — the vocal weights have no effect.")
+        wcols = st.columns(3)
+        weight_help = {
+            "sc_w_bar": ("Bar line", "The first beat of a bar."),
+            "sc_w_phrase": ("Phrase line", "Every 4 / 8 / 16 bars from a section start — 16 counts most."),
+            "sc_w_section": ("Section change", "Verse → chorus etc., found from a change in the sound."),
+            "sc_w_drop": ("Drop", "The moment a build-up lands."),
+            "sc_w_hit": ("Big hit", "Any sharp new sound (onset strength)."),
+            "sc_w_kick": ("Kick", "Low-frequency drum hits."),
+            "sc_w_snare": ("Snare / clap", "Mid-frequency drum hits."),
+            "sc_w_harmony": ("Chord change", "The notes / chords change."),
+            "sc_w_vocal": ("Vocal line start / end", "Where a sung phrase begins or ends."),
+            "sc_w_vocal_mid": ("Avoid cutting mid-vocal", "Penalty for cutting while a vocal line is being sung."),
+        }
+        for i, (key, (label, hlp)) in enumerate(weight_help.items()):
+            with wcols[i % 3]:
+                st.slider(label, 0.0, 5.0, value=float(_v(key)), step=0.1, key=key, help=hlp)
 
 
 CUT_KIND_STYLES = (
@@ -2391,80 +2433,106 @@ def render_audio_settings_section(track: dict) -> None:
     def _v(key):
         return st.session_state.get(key, _shadow.get(key, DIAL_DEFAULTS.get(key)))
 
-    st.subheader("Segmentation method")
-    _seg_options = [SEG_ADAPTIVE, SEG_RHYTHM, SEG_SCORED]
+    st.subheader("How the music is cut")
+    _seg_options = [SEG_SCORED, SEG_ADAPTIVE, SEG_RHYTHM]
     _seg_default = _v("segmentation_method")
     segmentation_method = st.radio(
         "Method", _seg_options,
         index=_seg_options.index(_seg_default) if _seg_default in _seg_options else 0,
-        key="segmentation_method",
-        help="Adaptive: detects individual cut points from energy changes and hits, ported from the VSE "
-             "add-on's block detector. Rhythm Engine: assigns a named cutting STYLE to each bar based on its "
-             "energy — CINEMATIC (slow, multi-bar) or FAST (one segment per bar) — a different feel driven "
-             "by musical structure rather than individual events. Scored cuts: scores every beat for how "
-             "good a cut it would be (hits, drums, chord changes, bars, phrases, sections, drops, vocals — "
-             "weights below) and picks the best set of cuts together, within your min/max lengths.",
+        key="segmentation_method", format_func=lambda m: SEG_LABELS.get(m, m), horizontal=True,
+        on_change=_audio_retune_if_paced,
+        help="🎯 Best musical moments: scores every beat for how good a cut it would be (bar lines, "
+             "phrases, section changes, drops, drums, chords, vocals) and picks the best set together. "
+             "⚡ Energy changes & big hits: cuts where the loudness shifts and on the strongest hits, "
+             "wherever they fall. 🎬 Bar styles: each stretch of bars is either CINEMATIC (a cut every "
+             "few bars) or FAST (a cut every bar), from how loud it is.",
     )
-    beats_per_bar = st.number_input(
+    _pc = st.columns([2, 2, 1])
+    _styles = list(AUDIO_STYLES) + [AUDIO_STYLE_CUSTOM]
+    _style_now = _v("audio_style") if _v("audio_style") in _styles else AUDIO_STYLE_CUSTOM
+    _pc[0].selectbox(
+        "Cutting pace", _styles, index=_styles.index(_style_now), key="audio_style",
+        on_change=_audio_retune_if_paced,
+        format_func=lambda x: {"Calm": "🌊 Calm — a cut every ~4 bars",
+                               "Balanced": "⚖️ Balanced — every ~2 bars",
+                               "Energetic": "🔥 Energetic — every bar",
+                               AUDIO_STYLE_CUSTOM: "✏️ Custom — your own settings"}.get(x, x),
+        help="Sets every dial below for THIS track — its tempo, loudness and hits — and keeps them "
+             "tuned if you change the track or method. Moving any dial switches to Custom.")
+    _pc[1].button("🎯 Re-tune for this track", on_click=_run_auto_tune, use_container_width=True,
+                  help="Re-runs auto-detect for the current method at the chosen pace (Balanced if Custom). "
+                       "Same as the sidebar's Auto-detect.")
+    _pc[2].number_input(
         "Beats per bar", min_value=2, max_value=12, value=int(_v("beats_per_bar")), key="beats_per_bar",
+        on_change=_audio_retune_if_paced,
         help="4 = common time (most pop/rock/EDM). Use 3 for a waltz, 6 for 6/8, etc.",
     )
+    if st.session_state.get("auto_tune_report"):
+        with st.expander("What auto-detect chose, and why", expanded=False):
+            for line in st.session_state["auto_tune_report"]:
+                st.caption(line)
 
+    _custom = dict(on_change=_mark_audio_custom)
     if segmentation_method == SEG_SCORED:
         _render_scored_cut_settings(track, _v)
     elif segmentation_method == SEG_ADAPTIVE:
         col1, col2 = st.columns(2)
         with col1:
-            st.slider("Energy-change window (s)", 0.5, 6.0, value=float(_v("change_window_secs")), step=0.1,
-                      key="change_window_secs",
-                      help="Compares average energy over this long just after each moment with just before it.")
-            st.slider("Energy-change threshold", 0.02, 0.5, value=float(_v("change_threshold")), step=0.01,
-                      key="change_threshold",
-                      help="How big a jump in average energy counts as a structural change. Lower = more cuts.")
-            st.slider("Min segment length (s)", 0.3, 8.0, value=float(_v("min_segment_sec")), step=0.1,
-                      key="min_segment_sec",
-                      help="No two cuts can be closer than this.")
-            st.slider("Max segment length (s)", 0.0, 30.0, value=float(_v("max_segment_sec")), step=0.5,
-                      key="max_segment_sec",
-                      help="Segments longer than this are split at their strongest beat. 0 = no limit.")
-        with col2:
-            react = st.checkbox("Cut on big hits", value=bool(_v("react_to_hits")), key="react_to_hits",
-                                help="Adds segment boundaries at the strongest onsets.")
+            st.slider("Cut at energy changes — threshold", 0.02, 0.5, value=float(_v("change_threshold")),
+                      step=0.01, key="change_threshold", **_custom,
+                      help="How big a jump in loudness counts as a change worth cutting on. Lower = more cuts.")
+            react = st.toggle("Cut on big hits", value=bool(_v("react_to_hits")), key="react_to_hits", **_custom,
+                              help="Also cut exactly on the strongest hits, wherever they fall.")
             st.slider("Big-hit threshold", 0.5, 1.0, value=float(_v("hit_threshold")), step=0.01,
-                      key="hit_threshold", disabled=not react,
-                      help="Onset strength (0-1) a hit needs to become a cut.")
-            st.slider("Snap radius (s)", 0.0, 1.0, value=float(_v("snap_secs")), step=0.05, key="snap_secs",
-                      help="Energy-change cuts move onto the strongest hit within this distance.")
+                      key="hit_threshold", disabled=not react, **_custom,
+                      help="How strong a hit must be (0–1) to become a cut. Lower = more cuts.")
+        with col2:
+            st.slider("Shortest segment (s)", 0.3, 8.0, value=float(_v("min_segment_sec")), step=0.1,
+                      key="min_segment_sec", **_custom, help="No two cuts closer than this.")
+            st.slider("Longest segment (s)", 0.0, 30.0, value=float(_v("max_segment_sec")), step=0.5,
+                      key="max_segment_sec", **_custom,
+                      help="Longer segments are split at their strongest beat. 0 = no limit.")
+        with st.expander("Advanced", expanded=False):
+            ac = st.columns(2)
+            ac[0].slider("Energy-change window (s)", 0.5, 6.0, value=float(_v("change_window_secs")), step=0.1,
+                         key="change_window_secs", **_custom,
+                         help="Compares the loudness this long after each moment with this long before it.")
+            ac[1].slider("Snap radius (s)", 0.0, 1.0, value=float(_v("snap_secs")), step=0.05, key="snap_secs",
+                         **_custom, help="Energy-change cuts move onto the strongest hit within this distance.")
     else:
         col1, col2 = st.columns(2)
         with col1:
-            st.slider("Fast energy threshold", 0.1, 1.0, value=float(_v("fast_energy_thresh")), step=0.01,
-                      key="fast_energy_thresh",
-                      help="Bars louder than this become FAST (one cut per bar) instead of CINEMATIC.")
-            st.number_input("FAST max run (bars)", min_value=0, max_value=64,
-                            value=int(_v("fast_max_bars")), key="fast_max_bars",
-                            help="After this many FAST bars in a row, FAST is forced to stop. 0 = no limit.")
-            st.number_input("FAST cooldown (bars)", min_value=0, max_value=32,
-                            value=int(_v("fast_cooldown_bars")), key="fast_cooldown_bars",
-                            help="Once a FAST run ends (forced or not), this many bars must pass before "
-                                 "FAST can start again.")
-        with col2:
-            st.number_input("Phrase lock (bars)", min_value=1, max_value=8,
-                            value=int(_v("phrase_lock_bars")), key="phrase_lock_bars",
-                            help="FAST or CINEMATIC is held for this many bars before re-evaluating.")
+            st.slider("Fast-cutting threshold", 0.1, 1.0, value=float(_v("fast_energy_thresh")), step=0.01,
+                      key="fast_energy_thresh", **_custom,
+                      help="Bars louder than this (0–1 of the loudest) cut every bar (FAST); quieter bars "
+                           "are CINEMATIC. Lower = more fast cutting.")
             st.number_input("Cinematic segment length (bars)", min_value=1, max_value=8,
-                            value=int(_v("cinematic_bars")), key="cinematic_bars",
-                            help="How many bars a CINEMATIC segment spans.")
-            dpo = st.checkbox("Dynamic Priority Override", value=bool(_v("dynamic_priority_override")),
-                              key="dynamic_priority_override",
-                              help="Adds extra cuts at instantaneous RMS jumps the bar-averaged state machine smooths away.")
-            st.slider("Override sensitivity", 0.02, 1.0, value=float(_v("override_delta_thresh")), step=0.01,
-                      key="override_delta_thresh", disabled=not dpo,
-                      help="How large a single-frame RMS jump triggers a forced cut.")
-            st.slider("Clear zone (s)", 0.0, 4.0, value=float(_v("override_clear_secs")), step=0.1,
-                      key="override_clear_secs", disabled=not dpo,
-                      help="A dynamic cut takes priority: any other cut closer than this, before or after "
-                           "it, is removed — and two dynamic cuts closer than this keep only the stronger.")
+                            value=int(_v("cinematic_bars")), key="cinematic_bars", **_custom,
+                            help="How many bars a CINEMATIC segment spans. 2, 4 or 8 follow musical phrases.")
+        with col2:
+            dpo = st.toggle("Extra cuts at sudden jumps", value=bool(_v("dynamic_priority_override")),
+                            key="dynamic_priority_override", **_custom,
+                            help="Adds a cut at a sudden mid-bar jump in loudness (a hit or drop) that the "
+                                 "bar-by-bar styles would smooth away.")
+            st.slider("Sudden-jump sensitivity", 0.02, 1.0, value=float(_v("override_delta_thresh")), step=0.01,
+                      key="override_delta_thresh", disabled=not dpo, **_custom,
+                      help="How large a jump triggers an extra cut. Lower = more extra cuts.")
+        with st.expander("Advanced", expanded=False):
+            ac = st.columns(2)
+            with ac[0]:
+                st.number_input("FAST max run (bars)", min_value=0, max_value=64,
+                                value=int(_v("fast_max_bars")), key="fast_max_bars", **_custom,
+                                help="After this many FAST bars in a row, FAST stops for a while. 0 = no limit.")
+                st.number_input("FAST pause after a run (bars)", min_value=0, max_value=32,
+                                value=int(_v("fast_cooldown_bars")), key="fast_cooldown_bars", **_custom,
+                                help="Bars that must pass after a FAST run before FAST can start again.")
+            with ac[1]:
+                st.number_input("Hold a style for (bars)", min_value=1, max_value=8,
+                                value=int(_v("phrase_lock_bars")), key="phrase_lock_bars", **_custom,
+                                help="FAST or CINEMATIC is kept this many bars before it's re-decided.")
+                st.slider("Clear zone around a jump cut (s)", 0.0, 4.0, value=float(_v("override_clear_secs")),
+                          step=0.1, key="override_clear_secs", disabled=not dpo, **_custom,
+                          help="Other cuts closer than this to a jump cut are removed.")
 
     # ---- Live preview chart ------------------------------------------------
     st.divider()
@@ -2523,8 +2591,13 @@ def render_audio_settings_section(track: dict) -> None:
         legend=dict(orientation="h", y=-0.28),
     )
     st.plotly_chart(afig, use_container_width=True)
-    st.caption(f"{len(_segs)} segments from {format_mmss(0.0)} – {format_mmss(track['duration_sec'])}  "
-               f"|  {track.get('bpm', '?')} BPM  |  switch to **Videos & Time Ranges** when happy with the cuts.")
+    _bar = CS.bar_sec(track, int(st.session_state.get("beats_per_bar", 4)))
+    _bars = np.asarray(CS.bar_lines(track, int(st.session_state.get("beats_per_bar", 4))), dtype=float)
+    _cuts = [sg["start"] for sg in _segs[1:]]
+    _on_bar = (sum(1 for c in _cuts if len(_bars) and np.min(np.abs(_bars - c)) < 0.12) / len(_cuts)) if _cuts else 0.0
+    st.caption(f"**{len(_segs)} segments** · a cut every {track['duration_sec'] / max(len(_segs), 1) / _bar:.1f} bars "
+               f"on average ({track['duration_sec'] / max(len(_segs), 1):.1f}s) · {_on_bar:.0%} of cuts on a bar line  "
+               f"|  {CS.beat_grid(track)[1]:.0f} BPM  |  switch to **Videos & Time Ranges** when happy with the cuts.")
 
     # Save the shadow copy every call — this is what actually survives the round trip to
     # another section (plain session_state, not tied to any widget), and is what the explicit
@@ -3022,6 +3095,13 @@ def build_rhythm_engine_segments(
         i = j
 
     raw_segments.sort()
+    # A sliver after the last whole bar (e.g. a fade-out) joins the segment before it.
+    if len(raw_segments) > 1 and len(bar_times) > 1:
+        half_bar = 0.5 * float(np.median(np.diff(bar_times)))
+        s0, e0, k0 = raw_segments[-1]
+        if e0 - s0 < half_bar:
+            ps, _, pk = raw_segments[-2]
+            raw_segments[-2:] = [(ps, e0, pk)]
     if dynamic_priority_override:
         overrides = find_dynamic_priority_cuts(track, bar_times, override_delta_thresh)
         raw_segments = apply_dynamic_priority_overrides(raw_segments, overrides, override_clear_secs, duration)
@@ -3655,7 +3735,9 @@ MAX_SIMULTANEOUS_CLIPS = 8   # matches the VSE add-on's layouts (up to SEVEN_UP 
 
 DIAL_DEFAULTS = {
     # Segmentation — Adaptive
-    "segmentation_method": "Adaptive (energy-change + hits)",
+    "segmentation_method": "Scored cuts (all signals)",   # = SEG_SCORED; best on measured tracks
+    "audio_style": "Balanced",    # cutting pace preset; dials follow the track unless Custom
+    "sc_focus": "Balanced",       # Scored cuts: "What to cut on" mix
     "beats_per_bar": 4,
     "change_window_secs": 2.0,
     "change_threshold": 0.12,
@@ -3830,6 +3912,10 @@ def _apply_project_load_dict(data: dict) -> list:
     for k in PROJECT_SIMPLE_KEYS:
         if k in data:
             st.session_state[k] = data[k]
+    # Projects saved before cutting paces existed keep their exact dials.
+    if "audio_style" not in data:
+        st.session_state["audio_style"] = AUDIO_STYLE_CUSTOM
+    st.session_state["_audio_profile_for"] = _audio_profile_key(st.session_state.get("track_id"))
 
     if "ramp_range" in data:
         try:
@@ -4021,44 +4107,48 @@ def _weighted_percentile(values, weights, q):
     return float(v[min(len(v) - 1, int(np.searchsorted(cum, q)))])
 
 
-def auto_tune_parameters(track: dict, min_clips: int, max_clips: int) -> tuple:
-    """Pick segmentation + split-screen dials from the track's own tempo,
-    energy and onset signals. Returns (settings dict, list of explanation lines)."""
-    bpm = float(track.get("bpm") or 120.0)
-    while bpm > 190:
-        bpm /= 2        # librosa sometimes reports double-time
-    while bpm < 70:
-        bpm *= 2        # ... or half-time
-    beat = 60.0 / bpm
-    bar = 4 * beat
-    duration = float(track["duration_sec"])
-    why = [f"Tempo {bpm:.0f} BPM → 1 beat = {beat:.2f}s, 1 bar = {bar:.2f}s"]
+# Cutting pace presets. pace = average bars per cut; follow = how much faster
+# loud passages cut than quiet ones; fast_share = share of bars the Rhythm
+# Engine cuts every bar.
+AUDIO_STYLES = {
+    "Calm":      {"pace": 4.0, "follow": 0.3, "fast_share": 0.15, "cooldown": 8, "lock": 4},
+    "Balanced":  {"pace": 2.0, "follow": 0.5, "fast_share": 0.30, "cooldown": 4, "lock": 4},
+    "Energetic": {"pace": 1.0, "follow": 0.7, "fast_share": 0.50, "cooldown": 2, "lock": 2},
+}
+AUDIO_STYLE_CUSTOM = "Custom"
+
+
+def _method_cfg(method: str, settings: dict, bpb: int) -> dict:
+    """A segmentation_settings()-style dict from explicit values (falling back to
+    the current ones), so auto-detect can try settings before applying them."""
+    cfg = {"method": method, "beats_per_bar": int(bpb)}
+    for k in SEG_METHOD_KEYS[method]:
+        cfg[k] = settings.get(k, st.session_state.get(k, DIAL_DEFAULTS.get(k)))
+    return cfg
+
+
+def _tune_adaptive(track: dict, style: dict, bar: float, beat: float, why: list) -> dict:
     s = {}
-
-    # Timing grid: one bar is the natural minimum phrase length; snap by half a beat.
-    s["min_segment_sec"] = round(min(4.0, max(1.0, bar)), 1)
+    pace = style["pace"]
+    duration = float(track["duration_sec"])
     s["change_window_secs"] = round(min(4.0, max(1.0, bar)), 1)
+    s["min_segment_sec"] = round(min(8.0, max(0.5, 0.9 * beat * 2, 0.9 * 0.5 * pace * bar)), 2)
+    s["max_segment_sec"] = round(min(30.0, max(2 * s["min_segment_sec"], 1.1 * 2 * pace * bar)), 1)
     s["snap_secs"] = round(min(0.5, max(0.1, beat / 2)), 2)
-    s["max_segment_sec"] = round(min(16.0, max(4.0, 4 * bar)), 1)
     s["react_to_hits"] = True
-    why.append(f"Min segment & energy-change window = 1 bar ({s['min_segment_sec']}s); "
-               f"max segment = 4 bars ({s['max_segment_sec']}s); snap radius = ½ beat ({s['snap_secs']}s)")
-
+    why.append(f"Min segment {s['min_segment_sec']}s, max {s['max_segment_sec']}s "
+               f"(≈{0.5 * pace:g}–{2 * pace:g} bars); energy window 1 bar; snap ½ beat")
     hires = track.get("hires")
     if not hires:
-        why.append("⚠️ No 30 Hz signals for this track — thresholds left unchanged. "
-                   "Re-run audio_pipeline.py in Colab for full auto-detect.")
-        return s, why
-
+        why.append("⚠️ No detailed (30 Hz) signals for this track — thresholds left as they were.")
+        return s
     rate = float(hires["rate"])
     rms = np.asarray(hires["rms"], dtype=float)
     onset = np.asarray(hires["onset"], dtype=float)
     n = min(len(rms), len(onset))
     rms, onset = rms[:n], onset[:n]
     min_len = max(1, round(rate * s["min_segment_sec"]))
-
-    # Energy-change threshold: aim for roughly one structural change per 8 bars
-    # (a typical phrase), but never below 3x the typical ripple (noise floor).
+    # Energy changes: about one structural change per 8 bars, never below 3× the ripple.
     w = max(1, round(rate * s["change_window_secs"]))
     c = np.concatenate([[0.0], np.cumsum(rms)])
     idx = np.arange(n)
@@ -4066,31 +4156,101 @@ def auto_tune_parameters(track: dict, min_clips: int, max_clips: int) -> tuple:
     change = np.abs((c[a_hi] - c[idx]) / np.maximum(1, a_hi - idx) - (c[idx] - c[b_lo]) / np.maximum(1, idx - b_lo))
     cp = np.flatnonzero((change[1:-1] >= change[:-2]) & (change[1:-1] > change[2:])) + 1
     target_changes = max(2, int(duration / (8 * bar)))
-    noise_floor = 3.0 * float(np.median(change))
     peak_vals = np.sort(change[cp])[::-1] if len(cp) else np.array([0.12])
     thr = peak_vals[min(len(peak_vals) - 1, target_changes - 1)]
-    s["change_threshold"] = round(float(np.clip(max(thr, noise_floor), 0.02, 0.5)), 2)
-    why.append(f"Energy-change threshold {s['change_threshold']} → aims for ~{target_changes} "
-               f"structural changes (1 per 8 bars)")
-
-    # Big-hit threshold: aim for an average of one cut per 2 bars overall, taking the
-    # strongest hits first with the same minimum spacing the segmenter uses.
+    s["change_threshold"] = round(float(np.clip(max(thr, 3.0 * float(np.median(change))), 0.02, 0.5)), 2)
+    # Big hits: fill up to the pace's overall cut rate with the strongest hits.
     op = np.flatnonzero((onset[1:-1] >= onset[:-2]) & (onset[1:-1] > onset[2:])) + 1
     accepted = []
     for pos in sorted(op, key=lambda i: -onset[i]):
-        if pos >= min_len and n - pos >= min_len and all(abs(pos - a) >= min_len for a in accepted):
+        if pos >= min_len and n - pos >= min_len and all(abs(pos - x) >= min_len for x in accepted):
             accepted.append(pos)
-    target_hits = max(1, int(duration / (2 * bar)) - target_changes)
+    target_hits = max(1, int(duration / (pace * bar)) - target_changes)
     if accepted:
         hit_thr = onset[accepted[min(len(accepted) - 1, target_hits - 1)]]
         typical = float(np.percentile(onset[op], 75)) if len(op) else 0.5
         s["hit_threshold"] = round(float(np.clip(max(hit_thr, typical), 0.5, 0.99)), 2)
-    why.append(f"Big-hit threshold {s.get('hit_threshold', st.session_state['hit_threshold'])} → aims for "
-               f"~{target_hits} hit cuts (≈1 cut per 2 bars overall), never below the typical beat level")
+    why.append(f"Energy-change threshold {s['change_threshold']} (≈1 structural cut per 8 bars); "
+               f"big-hit threshold {s.get('hit_threshold', '—')} (≈1 cut per {pace:g} bars overall)")
+    return s
 
-    # Split screen: run the segmenter with these settings, then shape intensity.
-    segs = build_track_segments(track, s["change_window_secs"], s["change_threshold"], s["min_segment_sec"],
-                                True, s.get("hit_threshold", 0.9), s["snap_secs"], s["max_segment_sec"])
+
+def _tune_rhythm(track: dict, style: dict, bpb: int, bar: float, beat: float, why: list) -> dict:
+    # Music moves in 2 / 4 / 8-bar phrases — CINEMATIC chunks of 2× the pace stay on them.
+    s = {"cinematic_bars": int(min(8, max(1, 2 * style["pace"]))),
+         "phrase_lock_bars": int(style["lock"]), "fast_max_bars": 8,
+         "fast_cooldown_bars": int(style["cooldown"]),
+         "override_clear_secs": round(min(4.0, max(0.2, 2 * beat)), 1)}
+    bars = compute_bar_times(track, bpb)
+    hires = track.get("hires")
+    if len(bars) >= 4 and hires:
+        rate = float(hires["rate"])
+        rms = np.asarray(hires["rms"], dtype=float)
+        frames = [round(t * rate) for t in bars] + [len(rms)]
+        e = np.array([float(rms[frames[i]:frames[i + 1]].mean()) if frames[i + 1] > frames[i] else 0.0
+                      for i in range(len(bars))])
+        norm = e / (e.max() or 1.0)
+        smooth = np.convolve(norm, np.ones(2) / 2, mode="same")
+        s["fast_energy_thresh"] = round(float(np.clip(np.quantile(smooth, 1 - style["fast_share"]), 0.1, 1.0)), 2)
+        deltas = np.abs(np.diff(rms, prepend=rms[0]))
+        per_bar = np.sort([float(deltas[frames[i]:frames[i + 1]].max()) for i in range(len(bars))
+                           if frames[i + 1] > frames[i]])[::-1]
+        if len(per_bar):
+            k = max(1, len(bars) // 8)          # about one dynamic cut per 8 bars
+            s["override_delta_thresh"] = round(float(np.clip(per_bar[min(k, len(per_bar) - 1)], 0.02, 1.0)), 2)
+        s["dynamic_priority_override"] = style is AUDIO_STYLES["Energetic"]
+        why.append(f"FAST (a cut every bar) on the loudest {style['fast_share']:.0%} of bars → threshold "
+                   f"{s['fast_energy_thresh']}; CINEMATIC segments {s['cinematic_bars']} bars; style held "
+                   f"{s['phrase_lock_bars']} bars; FAST pause {s['fast_cooldown_bars']} bars after a run")
+        if s["dynamic_priority_override"]:
+            why.append(f"Dynamic override on (≈1 extra cut per 8 bars at sudden jumps, sensitivity "
+                       f"{s.get('override_delta_thresh')})")
+    else:
+        why.append("⚠️ Not enough beat / energy data for bar styles — only the bar counts were set.")
+    return s
+
+
+def _tune_scored(track: dict, style: dict, bar: float, beat: float, why: list) -> dict:
+    pace = style["pace"]
+    s = {"sc_bars_per_cut": pace, "sc_follow_energy": style["follow"]}
+    # 10% under / over whole bars, so cuts a bar (or phrase) apart are always allowed
+    # despite tiny tempo wobble.
+    s["sc_min_sec"] = round(min(8.0, max(0.3, 0.9 * beat, 0.9 * 0.5 * pace * bar)), 2)
+    s["sc_max_sec"] = round(min(30.0, max(2 * s["sc_min_sec"], 1.1 * 2.5 * pace * bar)), 1)
+    a = track.get("analysis") or {}
+    why.append(f"≈1 cut per {pace:g} bars; segments {s['sc_min_sec']}–{s['sc_max_sec']}s; "
+               f"follow the energy {style['follow']:g}")
+    if not a:
+        why.append("Only the basic analysis — cuts are scored from hits and beats. Add the extra analysis "
+                   "in Media Library → Audio for drums, chords, sections, drops and vocals.")
+    return s
+
+
+def auto_tune_parameters(track: dict, min_clips: int, max_clips: int, method: str = None,
+                         style_name: str = "Balanced", beats_per_bar: int = None) -> tuple:
+    """Settings for THIS track and the chosen segmentation method at a cutting
+    pace (Calm / Balanced / Energetic), plus split screen calibrated on the
+    resulting cuts. Returns (settings dict, list of explanation lines)."""
+    method = method or st.session_state.get("segmentation_method", SEG_ADAPTIVE)
+    if method not in SEG_METHOD_KEYS:
+        method = SEG_ADAPTIVE
+    bpb = int(beats_per_bar or st.session_state.get("beats_per_bar", 4))
+    style = AUDIO_STYLES.get(style_name) or AUDIO_STYLES["Balanced"]
+    bar = CS.bar_sec(track, bpb)
+    beat = bar / bpb
+    _, grid_bpm, fix = CS.beat_grid(track)
+    why = [f"Tempo {grid_bpm:.0f} BPM → 1 bar = {bar:.2f}s"
+           + {"doubled": " (the analysis found every other beat — corrected)",
+              "halved": " (the analysis found twice the beats — corrected)"}.get(fix, "")]
+    if method == SEG_RHYTHM:
+        s = _tune_rhythm(track, style, bpb, bar, beat, why)
+    elif method == SEG_SCORED:
+        s = _tune_scored(track, style, bar, beat, why)
+    else:
+        s = _tune_adaptive(track, style, bar, beat, why)
+
+    # Split screen: shape intensity on the cuts this method will actually make.
+    segs = build_segments(track, _method_cfg(method, s, bpb))
     apply_segment_intensity(segs, track, 1.0)
     base = np.array([sg["intensity"] for sg in segs])
     lengths = np.array([sg["end"] - sg["start"] for sg in segs])
@@ -4103,24 +4263,59 @@ def auto_tune_parameters(track: dict, min_clips: int, max_clips: int) -> tuple:
     if hi - lo < 0.2:
         lo, hi = max(0.0, (lo + hi) / 2 - 0.1), min(1.0, (lo + hi) / 2 + 0.1)
     s["ramp_range"] = (round(lo * 20) / 20, round(max(hi, lo + 0.1) * 20) / 20)
-    s["split_screen_enabled"] = True
     s["vary_count"] = False
-    why.append(f"Density contrast {s['density_contrast']} → the typical (median) moment sits at mid intensity")
-    why.append(f"Intensity range {s['ramp_range'][0]:.2f}–{s['ramp_range'][1]:.2f} → quietest 20% of the track "
-               f"gets {min_clips} clip(s), loudest 10% gets {max_clips}")
-    why.append(f"Result: {len(segs)} segments")
+    why.append(f"Split screen: quietest 20% of the track gets {min_clips} clip(s), loudest 10% gets {max_clips}")
+    why.append(f"Result: {len(segs)} segments, about {np.mean(lengths) / bar:.1f} bars each")
     return s, why
 
 
-def _run_auto_tune():
-    t = load_track(st.session_state["track_id"])
+def _audio_profile_key(track_id) -> tuple:
+    return (track_id, st.session_state.get("segmentation_method"), st.session_state.get("audio_style"),
+            int(st.session_state.get("beats_per_bar", 4)))
+
+
+def apply_audio_profile(track: dict, track_id: str, report: bool = False) -> None:
+    """Set this track's segmentation dials for the current method and cutting
+    pace (and split-screen shape). Keeps the app-scope copy in step."""
+    style = st.session_state.get("audio_style", "Balanced")
+    if style not in AUDIO_STYLES:
+        style = "Balanced"
     mn = int(st.session_state.get("min_clips", 1))
     mx = max(int(st.session_state.get("max_clips", 4)), mn + 1, 2)
-    settings, why = auto_tune_parameters(t, mn, mx)
+    settings, why = auto_tune_parameters(track, mn, mx, style_name=style)
     for k, v in settings.items():
-        st.session_state[k] = v
-    st.session_state["max_clips"] = min(MAX_SIMULTANEOUS_CLIPS, mx)
-    st.session_state["auto_tune_report"] = why
+        try:
+            st.session_state[k] = v
+        except Exception:
+            pass   # a widget already drawn this run keeps its value until the next run
+    appscope = st.session_state.get("_audio_appscope", {})
+    appscope.update({k: v for k, v in settings.items() if k in AUDIO_SETTINGS_KEYS})
+    appscope["audio_style"] = st.session_state.get("audio_style")
+    st.session_state["_audio_appscope"] = appscope
+    st.session_state["_audio_profile_for"] = _audio_profile_key(track_id)
+    if report:
+        st.session_state["auto_tune_report"] = why
+
+
+def ensure_audio_profile(track: dict, track_id: str) -> None:
+    """With a cutting pace chosen (not Custom), the dials follow the track,
+    method and beats per bar: re-tuned whenever any of them changes."""
+    if st.session_state.get("audio_style", "Balanced") == AUDIO_STYLE_CUSTOM:
+        return
+    if st.session_state.get("_audio_profile_for") != _audio_profile_key(track_id):
+        apply_audio_profile(track, track_id)
+
+
+def _run_auto_tune():
+    """🎯 Auto-detect: re-tune the current method for this track at the chosen
+    pace (Balanced if the pace is Custom)."""
+    if st.session_state.get("audio_style") not in AUDIO_STYLES:
+        st.session_state["audio_style"] = "Balanced"
+    t = load_track(st.session_state["track_id"])
+    st.session_state["split_screen_enabled"] = True
+    st.session_state["max_clips"] = min(MAX_SIMULTANEOUS_CLIPS, max(int(st.session_state.get("max_clips", 4)),
+                                                                   int(st.session_state.get("min_clips", 1)) + 1, 2))
+    apply_audio_profile(t, st.session_state["track_id"], report=True)
 
 
 # ---------------------------------------------------------------------------
@@ -4400,6 +4595,9 @@ if st.session_state.get("track_id") not in tracks:
 
 st.sidebar.header("Track")
 track_id = st.sidebar.selectbox("Track", tracks, key="track_id")
+# A chosen cutting pace keeps the dials tuned to this track (see ensure_audio_profile) —
+# done here, before the split-screen widgets below are drawn, so it may set them.
+ensure_audio_profile(load_track(track_id), track_id)
 
 st.sidebar.button("🎯 Auto-detect settings for this track", on_click=_run_auto_tune, type="primary",
                   help="Analyses this track's tempo, energy and hits, then sets the segmentation and "
