@@ -165,6 +165,9 @@ FIND_MERGE = "🔗 Has combine suggestions"
 FIND_NO_OUTRO = "🎬 No outro clip"
 FIND_NO_INTRO = "🎬 No intro clip"
 FIND_UNREVIEWED = "📝 Not fully reviewed"
+FIND_NEW = f"🆕 Added in the last {CS.NEW_VIDEO_DAYS} days"
+
+_added = CS.added_times()   # {video_id: unix time added}
 
 
 def video_facts(v: dict) -> dict:
@@ -180,6 +183,7 @@ def video_facts(v: dict) -> dict:
         "has_intro": any(s["intro"] for s in v["scenes"]),
         "reviewed": sum(s["reviewed"] for s in v["scenes"]),
         "n": len(v["scenes"]),
+        "added": _added.get(v["video_id"], v["added"]),
     }
 
 
@@ -190,7 +194,7 @@ with st.container(border=True):
     name_query = fc[0].text_input("Find a video", placeholder="part of a video name", key="rev_find_name")
     find_flags = fc[1].multiselect(
         "Only videos that…",
-        [FIND_NO_THUMB, FIND_SPLIT, FIND_MERGE, FIND_NO_OUTRO, FIND_NO_INTRO, FIND_UNREVIEWED],
+        [FIND_NEW, FIND_NO_THUMB, FIND_SPLIT, FIND_MERGE, FIND_NO_OUTRO, FIND_NO_INTRO, FIND_UNREVIEWED],
         key="rev_find_flags", placeholder="any video",
         help="Pick several to narrow it down further (a video must match all of them). "
              "Split/combine suggestions use the sidebar settings and the library range.",
@@ -207,10 +211,13 @@ with st.container(border=True):
             FIND_NO_OUTRO: not f["has_outro"],
             FIND_NO_INTRO: not f["has_intro"],
             FIND_UNREVIEWED: f["reviewed"] < f["n"],
+            FIND_NEW: CS.is_new_video(f["added"]),
         }
         return all(checks[flag] for flag in find_flags)
 
     names = [stem for stem in index if matches(stem)]
+    if FIND_NEW in find_flags:
+        names.sort(key=lambda stem: -facts[stem]["added"])   # newest first
     # A split / combine / review can make the video you're working on stop
     # matching "Only videos that…" (e.g. its last long clip was just split).
     # Keep it in the list until you change the search yourself, rather than
@@ -218,12 +225,14 @@ with st.container(border=True):
     _find_sig = (name_query, tuple(find_flags))
     _keep = st.session_state.get("_rev_video_keep")
     if (st.session_state.get("_rev_find_sig") == _find_sig and _keep in index and _keep not in names):
-        names = [stem for stem in index if stem in names or stem == _keep]
+        names = names + [_keep]
     st.session_state["_rev_find_sig"] = _find_sig
 
     def video_label(stem: str) -> str:
         f = facts[stem]
         bits = [stem]
+        if CS.is_new_video(f["added"]):
+            bits.append(f"🆕 added {CS.added_ago(f['added'])}")
         if f["n_split"]:
             bits.append(f"✂️{f['n_split']}")
         if f["n_merge"]:
