@@ -1,5 +1,6 @@
 """
-Server — disk space, and clearing what can be fetched again (see storage.py).
+Server — the app's memory (what's using it, and clearing it), disk space, and
+clearing what can be fetched again (see storage.py).
 """
 
 import datetime
@@ -30,6 +31,104 @@ def done(msg: str) -> None:
 _msg = st.session_state.pop("srv_msg", None)
 if _msg:
     st.success(_msg)
+
+# ---------------------------------------------------------------------------
+# Memory
+# ---------------------------------------------------------------------------
+import library_common as LC
+
+
+def mem_done(before, label: str) -> None:
+    after = LC.app_memory_mb()
+    if before and after:
+        st.session_state["srv_msg"] = f"{label}: {before:,.0f} → {after:,.0f} MB."
+    else:
+        st.session_state["srv_msg"] = f"{label}."
+    st.rerun()
+
+
+st.subheader("🧠 Memory")
+mb = LC.app_memory_mb()
+deep = st.session_state.pop("srv_mem_deep", False)
+br = LC.memory_breakdown(include_sessions=deep)
+with st.container(border=True):
+    if mb is None:
+        st.caption("Memory figures are only available on the server.")
+    else:
+        limit = LC.MEMORY_LIMIT_MB
+        top = st.columns([3, 1, 1])
+        top[0].markdown(f"**This copy of the app: {mb:,.0f} MB**  ·  {br['n_sessions']} open page(s)")
+        top[0].progress(min(mb / max(limit, 1), 1.0),
+                        text=f"Clears cached data by itself above {limit:,.0f} MB (quietly)")
+        rows = [
+            ("🎞️ Videos, music & pictures held for players", br["media"],
+             "Each player loads its whole file into memory and keeps it while a page shows it — "
+             "usually the biggest part. 🎞️ Release videos & pictures clears it."),
+            ("🗂️ Cached data", br["cache"], "Track analyses, rankings, page data — rebuilt when needed."),
+            ("📚 Shared data", br["shared"], "Video catalogues, motion curves — reloaded when needed."),
+        ]
+        if deep:
+            rows.append(("📝 Open pages' working data", br["sessions"],
+                         "Everything each open page (yours and other tabs) is holding — planner progress etc."))
+        known = sum(r[1] for r in rows)
+        rows.append(("⚙️ The app itself & memory not yet handed back", max(mb - known, 0.0),
+                     "Python, its libraries, and memory freed but not yet returned to the server. "
+                     "Only ♻️ Restart brings this right down."))
+        for label, size, note in rows:
+            rc = st.columns([3, 1, 4])
+            rc[0].markdown(f"**{label}**")
+            rc[1].markdown(f"{size:,.0f} MB")
+            rc[2].caption(note)
+        if not deep and st.button("📏 Also measure the open pages' working data",
+                                  help="Walks every open page's data — can take a few seconds."):
+            st.session_state["srv_mem_deep"] = True
+            st.rerun()
+
+    bc = st.columns(4)
+    if bc[0].button("🎞️ Release videos & pictures", use_container_width=True,
+                    help="Drops every video, music file and picture held for a player. Pages still open "
+                         "load their players again next time they update."):
+        b = LC.app_memory_mb()
+        r = LC.free_shared_memory(release_media=True)
+        mem_done(b, f"Released {r['media_files']} file(s) ({r['media_mb']:,.0f} MB) and cached data")
+    if bc[1].button("🗂️ Clear cached data", use_container_width=True,
+                    help="Cached and shared data only — rebuilt the next time a page needs it."):
+        b = LC.app_memory_mb()
+        LC.free_shared_memory(release_media=False)
+        mem_done(b, "Cleared cached data")
+    if bc[2].button("🧹 Also clear this page's data", use_container_width=True,
+                    help="Everything above, plus this browser tab's own working data (unsaved planner "
+                         "work is saved to its recovery file first and offered back)."):
+        b = LC.app_memory_mb()
+        from page_setup import _reset_memory
+        _reset_memory()
+        mem_done(b, "Cleared")
+    restart_ok = st.session_state.get("srv_restart_ok", False)
+    if bc[3].button("♻️ Restart the app", use_container_width=True, type="primary" if restart_ok else "secondary",
+                    help="The only way to get ALL memory back. Takes ~20 seconds; every open page "
+                         "reconnects by itself. Unsaved planner work is offered back afterwards."):
+        if not restart_ok:
+            st.session_state["srv_restart_ok"] = True
+            st.rerun()
+        st.session_state.pop("srv_restart_ok", None)
+        hook = st.session_state.get("_before_reset")
+        if callable(hook):
+            try:
+                hook()
+            except Exception:
+                pass
+        import app_switch as AS
+        err = AS.restart_later()
+        if err:
+            st.error(f"Couldn't restart: {err}")
+        else:
+            st.info("♻️ Restarting in a few seconds — this page will reconnect by itself.")
+    if restart_ok:
+        st.warning("Press ♻️ Restart the app again to confirm. Anyone else using the app will see it "
+                   "reconnect; unsaved planner work is offered back afterwards.")
+    st.caption("Cleared memory isn't always handed straight back to the server — Python keeps some "
+               "for reuse, so the total can drop less than what was cleared. That's normal; "
+               "♻️ Restart is the full reset.")
 
 # ---------------------------------------------------------------------------
 # Disk

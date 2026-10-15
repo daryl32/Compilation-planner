@@ -128,3 +128,17 @@ def stop_later(copy: str, delay_sec: int = 8) -> str | None:
 def stop_now(copy: str) -> str | None:
     proc = subprocess.run(["systemctl", "stop", COPIES[copy]["service"]], capture_output=True, text=True)
     return None if proc.returncode == 0 else (proc.stderr or "systemctl failed").strip()
+
+
+def restart_later(copy: str = None, delay_sec: int = 3) -> str | None:
+    """Restart a copy's service a few seconds from now (so this page can answer
+    first). Works without the live/test switch being set up. None on success."""
+    copy = copy or this_copy()
+    if shutil.which("systemd-run") is None:
+        return "Restarting from the app only works on the server."
+    svc = COPIES[copy]["service"]
+    proc = subprocess.run(
+        ["systemd-run", f"--on-active={delay_sec}", "--timer-property=AccuracySec=1s",
+         f"--unit=mediaplanner-restart-{int(time.time())}", "/bin/systemctl", "restart", svc],
+        capture_output=True, text=True)
+    return None if proc.returncode == 0 else (proc.stderr or proc.stdout or "systemd-run failed").strip()
