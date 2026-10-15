@@ -306,6 +306,51 @@ def push_pending(token: dict, progress=None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Pictures that might be broken
+# ---------------------------------------------------------------------------
+_IMAGE_OK = {}   # (path, mtime, size) -> bool
+
+
+def image_ok(path) -> bool:
+    """True if the file exists and is a readable picture. A thumbnail can be
+    empty or half-written (e.g. a download cut off part-way)."""
+    try:
+        p = Path(path)
+        st_ = p.stat()
+    except (OSError, TypeError):
+        return False
+    key = (str(p), st_.st_mtime, st_.st_size)
+    if key not in _IMAGE_OK:
+        ok = st_.st_size > 0
+        if ok:
+            try:
+                from PIL import Image
+                with Image.open(p) as im:
+                    im.verify()
+            except Exception:
+                ok = False
+        if len(_IMAGE_OK) > 50_000:
+            _IMAGE_OK.clear()
+        _IMAGE_OK[key] = ok
+    return _IMAGE_OK[key]
+
+
+def safe_image(img, *args, **kwargs) -> bool:
+    """st.image that never breaks the page: a file that isn't a readable picture
+    shows a small note instead. Images that aren't files (PIL images, arrays)
+    are passed straight through. Returns True if a picture was shown."""
+    if isinstance(img, (str, Path)) and not image_ok(img):
+        st.caption(f"🖼️ Picture unreadable: {Path(img).name}")
+        return False
+    try:
+        st.image(img, *args, **kwargs)
+        return True
+    except Exception:
+        st.caption("🖼️ Picture unreadable")
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Fast preview copies (proxies)
 # ---------------------------------------------------------------------------
 

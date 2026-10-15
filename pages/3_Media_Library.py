@@ -24,6 +24,7 @@ import streamlit as st
 import config
 from config import CATALOGUE_DIR, AUDIO_DIR, PREVIEW_DIR
 from library_common import (
+    safe_image, image_ok,
     scene_tags, tc_to_seconds, format_mmss, overlap_with_range,
     library_ranges, set_library_range, master_thumbnail_scenes,
     render_range_picker, show_render_player,
@@ -202,7 +203,7 @@ def render_videos():
                 if _thumb_name:
                     thumb_path = CATALOGUE_DIR / "thumbnails" / vid / _thumb_name
                     if thumb_path.exists():
-                        st.image(str(thumb_path), width=220)
+                        safe_image(str(thumb_path), width=220)
             with cols[1]:
                 st.markdown(f"**{vid}**")
                 line = (f"⏱ {format_mmss(video['duration'])}  ·  usable {format_mmss(stats['usable'])}"
@@ -752,7 +753,7 @@ def render_renders():
             with cols[0]:
                 thumb = make_thumbnail(path)
                 if thumb:
-                    st.image(str(thumb), width=220)
+                    safe_image(str(thumb), width=220)
             with cols[1]:
                 title = f"**{track.get('track_id') or 'Unknown track'}**"
                 if user["keep"]:
