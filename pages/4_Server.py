@@ -36,7 +36,6 @@ if _msg:
 # Memory
 # ---------------------------------------------------------------------------
 import library_common as LC
-import media_links as ML
 
 
 def mem_done(before, label: str) -> None:
@@ -63,10 +62,8 @@ with st.container(border=True):
                         text=f"Clears cached data by itself above {limit:,.0f} MB (quietly)")
         rows = [
             ("🎞️ Videos, music & pictures held for players", br["media"],
-             "Loaded whole into memory whenever a page shows a player for a file. "
-             + ("Players now stream from disk instead (media links are set up), so this should stay small."
-                if ML.enabled() else
-                "Run deploy/setup_media.sh once to stream them from disk instead — the biggest saving.")),
+             "Each player loads its whole file into memory and keeps it while a page shows it — "
+             "usually the biggest part. 🎞️ Release videos & pictures clears it."),
             ("🗂️ Cached data", br["cache"], "Track analyses, rankings, page data — rebuilt when needed."),
             ("📚 Shared data", br["shared"], "Video catalogues, motion curves — reloaded when needed."),
         ]

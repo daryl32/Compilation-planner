@@ -343,9 +343,6 @@ def safe_image(img, *args, **kwargs) -> bool:
         st.caption(f"🖼️ Picture unreadable: {Path(img).name}")
         return False
     try:
-        if isinstance(img, (str, Path)):
-            from media_links import image_source
-            img = image_source(img)        # an address when set up — not loaded into memory
         st.image(img, *args, **kwargs)
         return True
     except Exception:
@@ -665,12 +662,10 @@ def render_range_picker(video_id: str, source_path: str, duration: float, curren
     local_path = colab_to_local(source_path)
     proxy = proxy_path(video_id)
     if proxy.exists():
-        from media_links import play_video
-        play_video(proxy)
+        st.video(str(proxy))
         st.caption("⚡ Fast preview copy")
     elif Path(local_path).exists():
-        from media_links import play_video
-        play_video(local_path)
+        st.video(local_path)
         if st.button("⚡ Make a fast preview copy", key=f"{key}_proxy_{video_id}",
                      help="Encodes a small 480p copy so this player loads and scrubs quickly. "
                           "Takes a few minutes for a long video."):
@@ -728,8 +723,7 @@ def show_render_player(meta: dict, height: int = 360) -> None:
     from renders import drive_preview_url
     path = Path(meta["path"])
     if path.exists():
-        from media_links import play_video
-        play_video(path)
+        st.video(str(path))
         return
     url = drive_preview_url(meta)
     if url:

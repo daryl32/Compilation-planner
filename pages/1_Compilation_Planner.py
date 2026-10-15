@@ -1274,8 +1274,7 @@ def _render_chor_preview_panel(seg_idx: int, seg: dict, video_id: str, shown: tu
                 st.error(f"Couldn't make the preview: {err}")
             else:
                 _video_kwargs = {"loop": True} if "loop" in inspect.signature(st.video).parameters else {}
-                from media_links import play_video
-                play_video(snippet, **_video_kwargs)
+                st.video(str(snippet), **_video_kwargs)
 
         pos = f"{idx + 1} of {len(clips)}" if idx is not None else "—"
         if clip is not None:
