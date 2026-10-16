@@ -64,6 +64,21 @@ sys.path.insert(0, str(HERE))
 import config  # noqa: E402
 from config import AUDIO_DIR  # noqa: E402
 
+def _quiet_dll_errors() -> None:
+    """Windows: a broken package (e.g. torchaudio built for another torch) makes
+    Windows pop up an "Entry Point Not Found" box that blocks until OK is
+    clicked. Turn those boxes off — the import then just fails, which the checks
+    report and fix. Child processes inherit this setting."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
+        except Exception:
+            pass
+
+
+_quiet_dll_errors()
+
 LOCAL_TEMP_DIR = HERE / "_tmp_audio"   # genuine local disk, next to this script
 LIBRARY_FOLDER = getattr(config, "AUDIO_LIBRARY_DRIVE_FOLDER", "Audio-Library")
 
@@ -254,7 +269,9 @@ DEFAULT_CUDA_TAG = "cu126"   # GPU build used when torch isn't installed yet
 
 def _py(code: str) -> tuple:
     import subprocess
-    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    pre = ("import os\nif os.name == 'nt':\n    import ctypes; "
+           "ctypes.windll.kernel32.SetErrorMode(0x8003)\n")
+    r = subprocess.run([sys.executable, "-c", pre + code], capture_output=True, text=True)
     return r.returncode == 0, (r.stdout or "").strip(), (r.stderr or "").strip().splitlines()[-1:] or [""]
 
 
