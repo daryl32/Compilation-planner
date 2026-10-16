@@ -745,6 +745,15 @@ def show_render_player(meta: dict, height: int = 360) -> None:
         return
     url = drive_preview_url(meta)
     if url:
+        if st.button("💾 Copy to the server for smooth playback", key=f"fetch_play_{path.name}",
+                     help="Streaming from Google Drive can buffer. This downloads it onto the server once."):
+            from renders import fetch_to_server
+            with st.spinner("Copying from Google Drive…"):
+                err = fetch_to_server(meta)
+            if err:
+                st.error(err)
+            else:
+                st.rerun()
         import streamlit.components.v1 as components
         components.iframe(url, height=height)
         st.caption("☁️ Playing from Google Drive. A video uploaded in the last minute or two may still be "

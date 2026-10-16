@@ -842,6 +842,18 @@ def render_renders():
     if not rows:
         st.info("No renders match these filters.")
         return
+    _msg = st.session_state.pop("ren_fetch_msg", None)
+    if _msg:
+        st.success(_msg)
+    _drive_only = [r for r in rows if not r.get("local") and on_drive(r)]
+    if _drive_only:
+        _sz = sum(int((r.get("drive") or {}).get("size") or 0) for r in _drive_only)
+        fc = st.columns([3, 2])
+        fc[0].caption(f"☁️ {len(_drive_only)} of the renders shown are only on Google Drive — they stream from "
+                      f"Drive, which can buffer.")
+        if fc[1].button(f"💾 Copy those {len(_drive_only)} to the server ({format_size(_sz)})",
+                        key="ren_fetch_all", use_container_width=True):
+            _fetch_renders(_drive_only)
 
     by_name = {Path(r["path"]).name: r for r in renders}
     st.session_state.setdefault("ren_compare", [])
@@ -908,8 +920,10 @@ def render_renders():
                     st.session_state["ren_open_player"] = None if st.session_state["ren_open_player"] == name else name
                     st.rerun()
             with cols[8]:
-                if st.button("⬇️", key=f"ren_dl_{name}", help="Download this render to play it on your own "
-                                                              "device — smooth playback, no buffering"):
+                if st.button("💾" if not r.get("local") and on_drive(r) else "⬇️", key=f"ren_dl_{name}",
+                             help="Only on Google Drive — copy it back to the server for smooth playback, or "
+                                  "download it" if not r.get("local") and on_drive(r)
+                             else "Download it to this device"):
                     st.session_state["ren_open_download"] = (
                         None if st.session_state.get("ren_open_download") == name else name)
                     st.rerun()
@@ -978,22 +992,47 @@ def _toggle_compare(name: str) -> None:
     st.session_state["ren_compare"] = picked
 
 
+def _fetch_renders(metas: list) -> None:
+    """💾 Copy Drive-only renders back onto the server, with progress."""
+    from renders import fetch_to_server
+    bar = st.progress(0.0, text=f"Copying {len(metas)} render(s) to the server…")
+    errors = []
+    for i, m in enumerate(metas, 1):
+        err = fetch_to_server(m)
+        if err:
+            errors.append(f"{Path(m['path']).name}: {err}")
+        bar.progress(i / len(metas), text=f"Copied {i} of {len(metas)}…")
+    bar.empty()
+    for e in errors[:5]:
+        st.error(e)
+    if not errors:
+        st.session_state["ren_fetch_msg"] = f"💾 {len(metas)} render(s) are back on the server — they play smoothly now."
+        st.rerun()
+
+
 def _render_download_row(r: dict) -> None:
-    """⬇️ The server's copy (if it's still here) and/or the Google Drive copy."""
+    """💾 Bring a Drive-only render back to the server; ⬇️ download to this device."""
     from renders import on_drive, format_size
     path = Path(r["path"])
     dc = st.columns([2, 2, 3])
     if path.exists():
-        with dc[0]:
-            file_download_button(path, f"⬇️ Download ({format_size(path.stat().st_size)})",
+        dc[0].success("💾 On the server")
+        with dc[1]:
+            file_download_button(path, f"⬇️ Download to this device ({format_size(path.stat().st_size)})",
                                  key=f"ren_dl_file_{path.name}", use_container_width=True)
-    if on_drive(r):
+        dc[2].caption("Plays from the server. Download to watch it on this device.")
+    elif on_drive(r):
+        size = (r.get("drive") or {}).get("size")
+        if dc[0].button(f"💾 Copy to the server" + (f" ({format_size(int(size))})" if size else ""),
+                        key=f"ren_fetch_{path.name}", type="primary", use_container_width=True,
+                        help="Downloads it from Google Drive onto the server, so it plays from the server "
+                             "instead of streaming from Drive."):
+            _fetch_renders([r])
         fid = r["drive"]["file_id"]
-        dc[1].link_button("⬇️ Download from Google Drive", f"https://drive.google.com/uc?export=download&id={fid}",
+        dc[1].link_button("⬇️ Download to this device", f"https://drive.google.com/uc?export=download&id={fid}",
                           use_container_width=True)
-    dc[2].caption("Plays smoothly on your own device. "
-                  + ("" if path.exists() else "Cleared from the server — the Google Drive copy is the one to get. ")
-                  + ("The Drive link works in a browser signed in to your Google account." if on_drive(r) else ""))
+        dc[2].caption("Only on Google Drive (cleared from the server), so it streams from Drive. Copy it to the "
+                      "server for smooth playback. The download link needs a browser signed in to your Google account.")
 
 
 def _toggle_playlist(name: str) -> None:

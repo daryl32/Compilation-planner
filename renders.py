@@ -461,6 +461,31 @@ def _input_args(meta: dict) -> list:
             "-i", stream_url(meta["drive"]["file_id"])]
 
 
+def fetch_to_server(meta: dict) -> str | None:
+    """Copy a render that's only on Google Drive back onto the server, so it
+    plays from the server (smoothly) again. None on success, else an error."""
+    mp4 = Path(meta["path"])
+    if mp4.exists():
+        return None
+    if not on_drive(meta):
+        return "This render isn't on Google Drive."
+    from drive_sync import download_drive_file
+    tmp = mp4.with_name(mp4.stem + ".part.mp4")
+    try:
+        mp4.parent.mkdir(parents=True, exist_ok=True)
+        download_drive_file(meta["drive"]["file_id"], tmp)
+        want = (meta.get("drive") or {}).get("size")
+        if want and tmp.stat().st_size != int(want):
+            tmp.unlink(missing_ok=True)
+            return "The download was incomplete — try again."
+        tmp.replace(mp4)
+    except Exception as e:
+        tmp.unlink(missing_ok=True)
+        return str(e)
+    make_thumbnail(mp4)
+    return None
+
+
 def make_thumbnail(mp4: Path, at_fraction: float = 0.3) -> Path | None:
     """A JPEG frame from the render (cached in PREVIEW_DIR/.thumbs; read from
     Drive if the server copy has been cleared). None on failure."""
