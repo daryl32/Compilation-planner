@@ -473,7 +473,10 @@ def plan_cuts(track: dict, cfg: dict) -> tuple:
                      "cut_strength": round(strength, 3)})
     report = {"tempo": round(bpm, 1), "bar_sec": round(bar_len, 3), "middle": _fmt_level(LEVEL_BARS[middle]),
               "range": (swing_fast, swing_slow), "sections": report_secs, "notes": notes,
-              "features": sorted(feats)}
+              "features": sorted(feats),
+              # for the story map wizard (story_map.py)
+              "builds": [(round(float(b0), 3), round(float(b1), 3)) for b0, b1 in builds],
+              "drops": sorted(round(float(d), 3) for d in drops)}
     return segs, report
 
 
