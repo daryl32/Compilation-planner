@@ -27,7 +27,7 @@ from library_common import (
     safe_image, image_ok,
     scene_tags, tc_to_seconds, format_mmss, overlap_with_range,
     library_ranges, set_library_range, master_thumbnail_scenes,
-    render_range_picker, show_render_player,
+    render_range_picker, show_render_player, file_download_button,
 )
 
 from page_setup import page_setup, drive_token
@@ -863,7 +863,7 @@ def render_renders():
         track = r.get("track") or {}
         user = r["user"]
         with st.container(border=True):
-            cols = st.columns([2, 6, 1, 1, 1, 1, 1, 1])
+            cols = st.columns([2, 6, 1, 1, 1, 1, 1, 1, 1])
             with cols[0]:
                 thumb = make_thumbnail(path)
                 if thumb:
@@ -906,6 +906,12 @@ def render_renders():
             with cols[2]:
                 if st.button("▶️", key=f"ren_play_{name}", help="Play this render"):
                     st.session_state["ren_open_player"] = None if st.session_state["ren_open_player"] == name else name
+                    st.rerun()
+            with cols[8]:
+                if st.button("⬇️", key=f"ren_dl_{name}", help="Download this render to play it on your own "
+                                                              "device — smooth playback, no buffering"):
+                    st.session_state["ren_open_download"] = (
+                        None if st.session_state.get("ren_open_download") == name else name)
                     st.rerun()
             with cols[3]:
                 if st.button("ℹ️", key=f"ren_detail_{name}",
@@ -954,6 +960,8 @@ def render_renders():
                 if c[2].button("Cancel", key=f"ren_del_no_{name}"):
                     st.session_state["ren_confirm_delete"] = None
                     st.rerun()
+            if st.session_state.get("ren_open_download") == name:
+                _render_download_row(r)
             if st.session_state["ren_open_player"] == name:
                 show_render_player(r, height=420)
             if st.session_state["ren_open_detail"] == name:
@@ -968,6 +976,24 @@ def _toggle_compare(name: str) -> None:
     else:
         picked = (picked + [name])[-2:]
     st.session_state["ren_compare"] = picked
+
+
+def _render_download_row(r: dict) -> None:
+    """⬇️ The server's copy (if it's still here) and/or the Google Drive copy."""
+    from renders import on_drive, format_size
+    path = Path(r["path"])
+    dc = st.columns([2, 2, 3])
+    if path.exists():
+        with dc[0]:
+            file_download_button(path, f"⬇️ Download ({format_size(path.stat().st_size)})",
+                                 key=f"ren_dl_file_{path.name}", use_container_width=True)
+    if on_drive(r):
+        fid = r["drive"]["file_id"]
+        dc[1].link_button("⬇️ Download from Google Drive", f"https://drive.google.com/uc?export=download&id={fid}",
+                          use_container_width=True)
+    dc[2].caption("Plays smoothly on your own device. "
+                  + ("" if path.exists() else "Cleared from the server — the Google Drive copy is the one to get. ")
+                  + ("The Drive link works in a browser signed in to your Google account." if on_drive(r) else ""))
 
 
 def _toggle_playlist(name: str) -> None:
@@ -1057,7 +1083,9 @@ def _render_playlist_panel(by_name: dict, rows: list) -> None:
             if ccols[i % len(ccols)].button(label, key=f"ren_pl_ch_{i}", use_container_width=True):
                 built["start"], built["autoplay"] = t, True
                 st.rerun()
-        bc = st.columns([1, 4])
+        bc = st.columns([1, 1, 3])
+        with bc[1]:
+            file_download_button(built["path"], "⬇️ Download playlist", key="ren_pl_dl", use_container_width=True)
         if bc[0].button("⏹ Close player", key="ren_pl_close"):
             st.session_state.pop("ren_playlist_built", None)
             st.rerun()

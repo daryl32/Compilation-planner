@@ -537,6 +537,31 @@ def make_compare_video(a: dict, b: dict, audio_from: str = "A") -> tuple:
     return out, None
 
 
+def _join_signature(mp4: Path):
+    """What has to match for renders to be joined without re-encoding: video
+    size / frame rate / codec, audio codec / sample rate / channels — and the
+    sound has to run the full length of the picture. None if it can't be read."""
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "stream=codec_type,codec_name,width,height,r_frame_rate,sample_rate,channels,duration",
+             "-of", "json", str(mp4)], capture_output=True, text=True, timeout=30)
+        streams = json.loads(proc.stdout or "{}").get("streams") or []
+    except (subprocess.SubprocessError, ValueError, OSError):
+        return None
+    v = next((x for x in streams if x.get("codec_type") == "video"), None)
+    a = next((x for x in streams if x.get("codec_type") == "audio"), None)
+    if not v or not a:
+        return None
+    try:
+        if abs(float(v.get("duration") or 0) - float(a.get("duration") or 0)) > 0.15:
+            return None   # sound shorter than the picture: joined copies would drift / go silent
+    except (TypeError, ValueError):
+        return None
+    return (v.get("codec_name"), v.get("width"), v.get("height"), v.get("r_frame_rate"),
+            a.get("codec_name"), a.get("sample_rate"), a.get("channels"))
+
+
 def make_playlist_video(metas: list, progress=None) -> tuple:
     """One video that plays the given renders back to back, in order. Returns
     (path, chapters, None) — chapters = [(start_sec, meta)] — or (None, [], error).
@@ -553,7 +578,7 @@ def make_playlist_video(metas: list, progress=None) -> tuple:
     out_dir = PREVIEW_DIR / PLAYLIST_DIR_NAME
     out_dir.mkdir(parents=True, exist_ok=True)
     sig = "|".join(f"{Path(m['path']).name}:{m.get('size_bytes') or 0}" for m in metas)
-    out = out_dir / f"playlist_{hashlib.sha1(sig.encode()).hexdigest()[:16]}.mp4"
+    out = out_dir / f"playlist2_{hashlib.sha1(sig.encode()).hexdigest()[:16]}.mp4"
 
     chapters, t = [], 0.0
     for m in metas:
@@ -565,10 +590,12 @@ def make_playlist_video(metas: list, progress=None) -> tuple:
 
     tmp = out.with_name(out.stem + ".part.mp4")
     local = all(Path(m["path"]).exists() for m in metas)
-    sizes = {(m.get("width"), m.get("height")) for m in metas}
+    sigs = {_join_signature(Path(m["path"])) for m in metas} if local else {None}
     done = False
-    if local and len(sizes) == 1:
-        # Same size, all here: join without re-encoding.
+    if local and len(sigs) == 1 and None not in sigs:
+        # Identical picture and sound settings, all here: join without re-encoding.
+        # (Renders whose music differs in sample rate or channels can't be — the
+        # sound stops after the first one — so those are re-encoded below.)
         lst = out_dir / (out.stem + ".txt")
         lst.write_text("".join(f"file '{Path(m['path']).as_posix()}'\n" for m in metas))
         proc = subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(lst),
@@ -586,8 +613,13 @@ def make_playlist_video(metas: list, progress=None) -> tuple:
         w, h = 640, 360
         fit = (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=25")
-        parts = "".join(f"[{i}:v]{fit}[v{i}];[{i}:a:0]aresample=44100,"
-                        f"aformat=channel_layouts=stereo[a{i}];" for i in range(len(metas)))
+        # Each render's sound is padded with silence / cut to its picture's length,
+        # so a render whose music ends early can't knock the rest out of sync.
+        durs = [float(m.get("duration_sec") or 0) for m in metas]
+        parts = "".join(f"[{i}:v]{fit}[v{i}];[{i}:a:0]aresample=44100:async=1,"
+                        f"aformat=sample_rates=44100:channel_layouts=stereo,apad"
+                        + (f",atrim=0:{durs[i]:.3f}" if durs[i] > 0 else "")
+                        + f",asetpts=N/SR/TB[a{i}];" for i in range(len(metas)))
         joined = "".join(f"[v{i}][a{i}]" for i in range(len(metas)))
         cmd = ["ffmpeg", "-y", "-v", "error", *args,
                "-filter_complex", f"{parts}{joined}concat=n={len(metas)}:v=1:a=1[v][a]",
@@ -604,7 +636,9 @@ def make_playlist_video(metas: list, progress=None) -> tuple:
             return None, [], _re.sub(r"Bearer [A-Za-z0-9._\-]+", "Bearer ***",
                                      (proc.stderr or "ffmpeg failed")[-400:])
     tmp.replace(out)
-    olds = sorted((p for p in out_dir.glob("playlist_*.mp4") if not p.name.endswith(".part.mp4")),
+    for p in out_dir.glob("playlist_*.mp4"):      # made before the sound fix
+        p.unlink(missing_ok=True)
+    olds = sorted((p for p in out_dir.glob("playlist2_*.mp4") if not p.name.endswith(".part.mp4")),
                   key=lambda p: p.stat().st_mtime, reverse=True)
     for p in olds[3:]:
         p.unlink(missing_ok=True)
