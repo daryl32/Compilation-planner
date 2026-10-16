@@ -512,6 +512,11 @@ def finish_new_parts(ids, progress=None) -> list:
             p = SE.make_part_thumbnail(data, s, thumbs_dir, vids, sprite_path)
             if p:
                 new_thumbs.append(p)
+            else:
+                # No picture could be made — the first part keeps the original's.
+                orig = ((s.get("edit") or {}).get("original") or {}).get("thumbnail_paths")
+                if orig:
+                    s["thumbnail_paths"] = list(orig)
     SE.fill_motion(data, ids, vids)
     return new_thumbs
 

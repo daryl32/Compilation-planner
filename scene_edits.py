@@ -191,8 +191,11 @@ def split_scene(data: dict, scene_id: int, cut_secs: list) -> list:
                 part["motion_intensity"] = round(m, 6)
         elif "motion_curve" in part:
             part.pop("motion_curve")
-        if i > 0:
-            part["thumbnail_paths"] = []  # filled in by the caller (make_part_thumbnail)
+        # Every part gets a fresh picture from its own footage — the first part too,
+        # as the original's picture may come from later in the scene. (The original
+        # picture file is left alone, so undo gets it back.) Filled in by the caller
+        # (make_part_thumbnail).
+        part["thumbnail_paths"] = []
         part["reviewed"] = False
         part["split_from"] = scene_id
         parts.append(part)
@@ -422,7 +425,9 @@ def make_part_thumbnail(catalogue: dict, scene: dict, thumbs_dir: Path, video_pa
     """Make a thumbnail for a new scene part, from the first video in
     video_paths that exists (preview copy, then source), else from the
     timeline sprite. Sets scene["thumbnail_paths"]; returns the file or None."""
-    dest = thumbs_dir / f"scene_{int(scene['scene_id']):04d}_manual.jpg"
+    # Named by the part's start too, so a re-split never overwrites a picture an
+    # undo record still points at.
+    dest = thumbs_dir / f"scene_{int(scene['scene_id']):04d}_{int(round(scene_start_sec(scene) * 10)):06d}.jpg"
     made = write_thumbnail(catalogue, scene, dest, video_paths, sprite_path)
     if made:
         scene["thumbnail_paths"] = [dest.name]
