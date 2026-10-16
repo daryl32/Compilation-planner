@@ -66,8 +66,14 @@ DEFAULTS = {
     "sm_mirror": True,
 }
 TARGET_SHOT_SEC = 2.5        # the middle pace: comfortable average shot at any tempo
-MIN_SHOT_SEC = 0.6
+MIN_SHOT_SEC = 0.6           # at contrast 1; contrast above 1 lets both limits stretch
 MAX_SHOT_SEC = 12.0
+MID_INTENSITY = 0.56         # the song's "usual" level on its own 0–1 intensity scale
+# Grid levels per unit of intensity away from the usual level, at contrast 1 for
+# a song of typical dynamics: +0.12 above usual ≈ one level faster, 0.11 below ≈
+# one slower (calm passages tolerate long shots more than loud ones tolerate short).
+LEVELS_PER_INTENSITY = {"faster": 4.5, "slower": 4.5}
+USUAL_BAND = 0.05            # within ± this of the usual level: the middle pace exactly
 # Grid levels, in beats per cut, from longest to shortest (bars are bpb beats).
 LEVEL_BARS = [8, 4, 2, 1, 0.5, 0.25]   # 0.5 bar = half bar, 0.25 bar = 1 beat in 4/4
 
@@ -245,22 +251,31 @@ def plan_cuts(track: dict, cfg: dict) -> tuple:
     sec_int = np.array([bar_int[s["start_bar"]:s["end_bar"]].mean() for s in sections])
     spread = float(np.percentile(sec_int, 90) - np.percentile(sec_int, 10)) if len(sec_int) > 1 else 0.0
     contrast = float(cfg["sm_contrast"])
-    # How far the pace may move from the middle: further towards SLOWER (an intro or
-    # breakdown can hold for 4–8 bars) than towards faster (a chorus a step quicker,
-    # a drop at most two) — and more for a more dynamic song.
-    swing_fast = int(np.clip(round(contrast * (0.6 + 1.2 * spread)), 0, 2))
-    swing_slow = int(np.clip(round(contrast * (0.8 + 2.0 * spread)), 0, 3))
-    swing = max(swing_fast, swing_slow)
+    # Contrast scales how many grid levels a section moves per unit of intensity
+    # away from the song's usual level — continuously, so every step of the slider
+    # changes something. A more dynamic song moves a little further. Past 1 the
+    # shortest / longest shot limits stretch too (otherwise at many tempos they'd be
+    # what stops the pace going further).
+    dyn = float(np.clip((0.5 + spread) / 1.1, 0.6, 1.25))
+    gain = {k: v * contrast * dyn for k, v in LEVELS_PER_INTENSITY.items()}
+    stretch = max(0.0, contrast - 1.0)
+    min_shot = max(0.4, MIN_SHOT_SEC * 0.6 ** stretch)
+    max_shot = MAX_SHOT_SEC * 1.6 ** stretch
+    # The same limits as fractional grid levels (level L = 8 / 2^L bars).
+    lvl_lo = max(0.0, math.log2(8 * bar_len / max_shot))
+    lvl_hi = min(len(LEVEL_BARS) - 1.0, math.log2(8 * bar_len / min_shot))
     min_level = len(LEVEL_BARS) - 1
-    while min_level > 0 and LEVEL_BARS[min_level] * bar_len < MIN_SHOT_SEC:
+    while min_level > 0 and LEVEL_BARS[min_level] * bar_len < min_shot:
         min_level -= 1
     max_level = 0
-    while max_level < min_level and LEVEL_BARS[max_level] * bar_len > MAX_SHOT_SEC:
+    while max_level < min_level and LEVEL_BARS[max_level] * bar_len > max_shot:
         max_level += 1
+    swing_fast, swing_slow = min_level - middle, middle - max_level
     notes.append(f"Middle pace: a cut every {_fmt_level(LEVEL_BARS[middle])} "
                  f"({LEVEL_BARS[middle] * bar_len:.1f}s) — the grid level nearest {TARGET_SHOT_SEC:g}s at this tempo")
-    notes.append(f"Song dynamics {spread:.2f} (0 = flat, 1 = huge) → up to {swing_fast} level(s) faster for the "
-                 f"most intense sections, {swing_slow} slower for the calmest")
+    notes.append(f"Song dynamics {spread:.2f} (0 = flat, 1 = huge) × contrast {contrast:g} → about "
+                 f"{gain['faster'] * 0.2:.1f} grid level(s) faster for a section 0.2 above the usual intensity; shots kept between "
+                 f"{min_shot:.2f}s and {max_shot:.0f}s")
 
     # Intensity is already on the song's own 0–1 scale (step 2), so a section's
     # place on it decides its pace: the top band cuts faster than the middle pace,
@@ -296,12 +311,14 @@ def plan_cuts(track: dict, cfg: dict) -> tuple:
         s_bar, e_bar = sec["start_bar"], sec["end_bar"]
         t0, t1 = float(bars[s_bar]), float(bars[e_bar]) if e_bar < len(bars) else duration
         xi = float(sec_int[si])
-        if xi >= 0.68:
-            step = min(swing_fast, 1 + int(xi >= 0.88))
-        else:
-            step = -min(swing_slow, int(xi <= 0.45) + int(xi <= 0.28) + int(xi <= 0.12))
-        level = int(np.clip(middle + step, max_level, min_level))
-        unit = LEVEL_BARS[level] * bar_len
+        d = xi - MID_INTENSITY
+        d = 0.0 if abs(d) < USUAL_BAND else d - math.copysign(USUAL_BAND, d)
+        # A fractional level: between two grid levels the section mixes them (e.g.
+        # 1.5 bars → shots of 1 and 2 bars), so every contrast / intensity change shows.
+        lvl_f = float(np.clip(middle + d * (gain["faster"] if d > 0 else gain["slower"]), lvl_lo, lvl_hi))
+        level = int(round(lvl_f))
+        unit = 8.0 / 2 ** lvl_f * bar_len          # LEVEL_BARS are 8 / 2^level bars
+        snap_len = LEVEL_BARS[min(len(LEVEL_BARS) - 1, int(math.ceil(lvl_f - 1e-6)))] * bar_len
         reason = "one of the song's most intense parts" if sec_int[si] >= 0.68 else \
             "one of the song's quietest parts" if sec_int[si] <= 0.28 else \
             "quieter than the song's usual level" if sec_int[si] <= 0.45 else "the song's usual intensity"
@@ -321,13 +338,19 @@ def plan_cuts(track: dict, cfg: dict) -> tuple:
                                     "every": first_of_label[label], "reason": f"same as the earlier '{label}'"})
                 units.append((t0, t1, unit))
                 continue
+        # Cuts at every `unit`, each moved onto the nearest point of the finer grid
+        # level (counted from the section start), then onto the nearest beat.
         t = t0 + unit
+        last = t0
         while t < t1 - unit * 0.5:
-            g = grid_beats[_nearest_idx(grid_beats, t)]
-            add(g, "sm_grid", 1)
-            pattern.append(round(float(g) - t0, 3))
+            g_snap = t0 + round((t - t0) / snap_len) * snap_len
+            g = float(grid_beats[_nearest_idx(grid_beats, g_snap)])
+            if g > last + 1e-3 and g < t1 - 1e-3:
+                add(g, "sm_grid", 1)
+                pattern.append(round(g - t0, 3))
+                last = g
             t += unit
-        every = _fmt_level(LEVEL_BARS[level])
+        every = _fmt_level(8.0 / 2 ** lvl_f)
         if cfg["sm_builds"]:
             for bs, be in in_build:
                 bs, be = max(bs, t0, be - 8 * bar_len), min(be, t1)   # the last 8 bars into the drop
@@ -394,7 +417,7 @@ def plan_cuts(track: dict, cfg: dict) -> tuple:
     ordered = sorted(cut_times)
     kept = []
     for t in sorted(ordered, key=lambda x: -kinds[x][1]):
-        if all(abs(t - k) >= MIN_SHOT_SEC for k in kept):
+        if all(abs(t - k) >= min_shot for k in kept):
             kept.append(t)
     kept.sort()
     # Lower-priority grid cuts closer than half their section's unit to an accent give way.
@@ -427,11 +450,11 @@ def plan_cuts(track: dict, cfg: dict) -> tuple:
     bounds = [0.0] + final + [duration]
     out_bounds = [0.0]
     for a, b in zip(bounds, bounds[1:]):
-        if b - a > MAX_SHOT_SEC:
-            n_parts = int(math.ceil((b - a) / MAX_SHOT_SEC))
+        if b - a > max_shot:
+            n_parts = int(math.ceil((b - a) / max_shot))
             for k in range(1, n_parts):
                 g = round(float(grid_beats[_nearest_idx(grid_beats, a + k * (b - a) / n_parts)]), 3)
-                if out_bounds[-1] + MIN_SHOT_SEC <= g <= b - MIN_SHOT_SEC:
+                if out_bounds[-1] + min_shot <= g <= b - min_shot:
                     out_bounds.append(g)
                     kinds.setdefault(g, ("sm_grid", 1))
         out_bounds.append(b)
@@ -449,17 +472,22 @@ def plan_cuts(track: dict, cfg: dict) -> tuple:
                      "cut": "start" if i == 0 else kinds.get(round(s, 3), ("sm_grid", 1))[0],
                      "cut_strength": round(strength, 3)})
     report = {"tempo": round(bpm, 1), "bar_sec": round(bar_len, 3), "middle": _fmt_level(LEVEL_BARS[middle]),
-              "range": swing, "sections": report_secs, "notes": notes,
+              "range": (swing_fast, swing_slow), "sections": report_secs, "notes": notes,
               "features": sorted(feats)}
     return segs, report
 
 
 def _fmt_level(bars_per_cut: float) -> str:
-    if bars_per_cut >= 1:
-        return f"{bars_per_cut:g} bar{'s' if bars_per_cut != 1 else ''}"
-    if bars_per_cut == 0.5:
+    b = round(bars_per_cut, 2)
+    exact = min(LEVEL_BARS, key=lambda x: abs(x - b))
+    approx = "" if abs(exact - b) < 0.03 * exact else "~"
+    if approx:
+        return f"~{b:.2g} bars" if b >= 1 else f"~{b * 4:.2g} beats"
+    if exact >= 1:
+        return f"{exact:g} bar{'s' if exact != 1 else ''}"
+    if exact == 0.5:
         return "half bar"
-    return f"{bars_per_cut * 4:g} beat{'s' if bars_per_cut * 4 != 1 else ''}"
+    return f"{exact * 4:g} beat{'s' if exact * 4 != 1 else ''}"
 
 
 def build_smart_segments(track: dict, cfg: dict) -> list:
