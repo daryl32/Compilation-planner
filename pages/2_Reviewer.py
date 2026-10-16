@@ -169,6 +169,7 @@ FIND_NO_OUTRO = "🎬 No outro clip"
 FIND_NO_INTRO = "🎬 No intro clip"
 FIND_UNREVIEWED = "📝 Not fully reviewed"
 FIND_NEW = f"🆕 Added in the last {CS.NEW_VIDEO_DAYS} days"
+FIND_TODAY = "📅 Added today"
 
 _added = CS.added_times()   # {video_id: unix time added}
 
@@ -197,7 +198,7 @@ with st.container(border=True):
     name_query = fc[0].text_input("Find a video", placeholder="part of a video name", key="rev_find_name")
     find_flags = fc[1].multiselect(
         "Only videos that…",
-        [FIND_NEW, FIND_NO_THUMB, FIND_SPLIT, FIND_MERGE, FIND_NO_OUTRO, FIND_NO_INTRO, FIND_UNREVIEWED,
+        [FIND_TODAY, FIND_NEW, FIND_NO_THUMB, FIND_SPLIT, FIND_MERGE, FIND_NO_OUTRO, FIND_NO_INTRO, FIND_UNREVIEWED,
          FIND_NO_ACTORS, FIND_NO_VTAGS],
         key="rev_find_flags", placeholder="any video",
         help="Pick several to narrow it down further (a video must match all of them). "
@@ -210,6 +211,9 @@ with st.container(border=True):
     find_vtags = dc[1].multiselect("With video tags", all_video_tags(), key="rev_find_vtags", placeholder="any")
     find_all = dc[2].toggle("Must have all", key="rev_find_all", disabled=not (find_actors or find_vtags),
                             help="Off: any of the picked actors / tags. On: every one of them.")
+
+    import datetime as _dt
+    _today_start = _dt.datetime.combine(_dt.date.today(), _dt.time.min).timestamp()
 
     def matches(stem: str) -> bool:
         f = facts[stem]
@@ -226,13 +230,14 @@ with st.container(border=True):
             FIND_NO_INTRO: not f["has_intro"],
             FIND_UNREVIEWED: f["reviewed"] < f["n"],
             FIND_NEW: CS.is_new_video(f["added"]),
+            FIND_TODAY: f["added"] >= _today_start,
             FIND_NO_ACTORS: not (_details.get(vid) or {}).get("actors"),
             FIND_NO_VTAGS: not (_details.get(vid) or {}).get("tags"),
         }
         return all(checks[flag] for flag in find_flags)
 
     names = [stem for stem in index if matches(stem)]
-    if FIND_NEW in find_flags:
+    if FIND_NEW in find_flags or FIND_TODAY in find_flags:
         names.sort(key=lambda stem: -facts[stem]["added"])   # newest first
     # A split / combine / review can make the video you're working on stop
     # matching "Only videos that…" (e.g. its last long clip was just split).
@@ -741,8 +746,11 @@ if sugg["split"] or sugg["merge"] or auto_ids:
                                      key=f"bulk_auto_{selected}"):
             bulk_auto_split_dialog(auto_ids)
 
-fc = st.columns([2, 1, 1, 1, 1])
+fc = st.columns([2, 1, 1, 1, 1, 1])
 tag_filter = fc[0].text_input("Filter by tag (optional)")
+hide_excluded = fc[5].toggle("Hide excluded", key="rev_hide_excluded",
+                             help="Leave excluded scenes out of the list (they stay excluded). Stays on as you "
+                                  "move between videos.")
 show_only_excluded = fc[1].checkbox("Only excluded", value=False)
 show_only_intro_outro = fc[2].checkbox("Only intro/outro", value=False)
 show_only_suggested = fc[3].checkbox("Only suggestions", value=False, disabled=not show_suggestions)
@@ -763,6 +771,8 @@ for scene in ordered_all:
     if tag_filter and tag_filter.lower() not in [t.lower() for t in current_tags]:
         continue
     if show_only_excluded and not scene.get("excluded"):
+        continue
+    if hide_excluded and not show_only_excluded and scene.get("excluded"):
         continue
     if show_only_intro_outro and not (scene.get("intro_candidate") or scene.get("outro_candidate")):
         continue
@@ -880,11 +890,10 @@ def scene_card(sid, trimmed_to) -> None:
             st.session_state["rev_open_dialog"] = (selected, sid, False)
             st.rerun()
         if sid in auto_ids and bc[1].button("⚡ Auto split", key=f"auto_{selected}_{sid}", use_container_width=True,
-                                            help=f"Cut into parts of about {auto_target_sec:g}s — "
-                                                 "you'll see the cuts before anything changes."):
+                                            help=f"Splits it straight away into parts of about {auto_target_sec:g}s "
+                                                 "(↩️ Undo split puts it back). ✂️ Split… lets you place cuts by hand."):
             back_to(sid)
-            st.session_state["rev_open_dialog"] = (selected, sid, True)
-            st.rerun()
+            do_split(sid, SE.auto_split_points(scene_by_id[sid], auto_target_sec))
         nxt = next_of.get(sid)
         if nxt is not None and bc[2].button("🔗 Combine with next", key=f"merge_next_{selected}_{sid}",
                                             use_container_width=True,
