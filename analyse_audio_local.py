@@ -31,6 +31,9 @@ everything first (python analyse_audio_local.py --setup), then runs this.
 Run from the repo folder, in your activated venv:
     python analyse_audio_local.py                 newly added tracks only
     python analyse_audio_local.py --upgrade       also add the latest analysis to older tracks
+    python analyse_audio_local.py --report        list each track: bar lines model/estimated, vocals
+    python analyse_audio_local.py --enhance       rerun tracks with estimated bar lines or no vocals
+                                                  (beats kept) — or double-click enhance_audio_analysis.bat
     python analyse_audio_local.py --only "Song"   tracks whose name contains "Song"
     python analyse_audio_local.py --redo          re-analyse everything
     python analyse_audio_local.py --fresh         redo beats too, even for Colab tracks
@@ -112,8 +115,54 @@ def write_json(path: Path, data: dict) -> None:
     os.replace(tmp, path)
 
 
+def track_status(track: dict) -> dict:
+    """What a track JSON's analysis has: bar lines from the model or estimated, vocals."""
+    a = track.get("analysis") or {}
+    m = a.get("methods") or {}
+    return {
+        "analysed": bool(a),
+        "bars_model": m.get("downbeats") == "beat_this",
+        "vocals": a.get("vocals") is not None,
+        "by": track.get("analysed_by") or ("colab" if track.get("beat_times") else "?"),
+        "when": (a.get("analysed_at") or "")[:10],
+    }
+
+
+def needs_enhance(track: dict, want_vocals: bool) -> bool:
+    st = track_status(track)
+    return (not st["analysed"] or not st["bars_model"] or (want_vocals and not st["vocals"])
+            or AA.needs_extra(track))
+
+
+def report() -> None:
+    """Every track JSON in AUDIO_DIR: bar lines (model / estimated), vocals."""
+    rows = []
+    for p in sorted(Path(AUDIO_DIR).glob("*.json")):
+        t = read_json(p)
+        if not isinstance(t, dict) or "duration_sec" not in t:
+            continue
+        rows.append((t.get("track_id", p.stem), track_status(t)))
+    if not rows:
+        print(f"No track JSONs in {AUDIO_DIR}.")
+        return
+    w = min(60, max(len(tid) for tid, _ in rows))
+    print(f"{'Track':<{w}}  {'Bar lines':<10} {'Vocals':<7} {'Made by':<10} Analysed")
+    print("-" * (w + 42))
+    for tid, st in rows:
+        bars = "model" if st["bars_model"] else ("estimated" if st["analysed"] else "—")
+        print(f"{tid[:w]:<{w}}  {bars:<10} {'yes' if st['vocals'] else 'no':<7} {st['by']:<10} {st['when']}")
+    n = len(rows)
+    est = sum(1 for _, st in rows if st["analysed"] and not st["bars_model"])
+    none = sum(1 for _, st in rows if not st["analysed"])
+    novoc = sum(1 for _, st in rows if not st["vocals"])
+    print(f"\n{n} track(s): {n - est - none} with model bar lines, {est} estimated, "
+          f"{none} without the extra analysis; {novoc} without vocals.")
+    if est or none or novoc:
+        print("Rerun them with enhance_audio_analysis.bat (or: python analyse_audio_local.py --enhance).")
+
+
 def plan_jobs(library: Path, only: str | None, redo: bool, fresh: bool, needs_extra,
-              upgrade: bool = False) -> tuple:
+              upgrade: bool = False, enhance=None) -> tuple:
     """([(audio_file, track_id, kind)], n_older_needing_upgrade) — kind "new"
     (full), "extra" (keep beats) or "fresh". Without --upgrade/--redo/--fresh/--only
     only new tracks (no JSON yet) are planned."""
@@ -133,7 +182,7 @@ def plan_jobs(library: Path, only: str | None, redo: bool, fresh: bool, needs_ex
             jobs.append((f, tid, "new"))
         elif fresh:
             jobs.append((f, tid, "fresh"))
-        elif redo or (needs_extra(existing) and (upgrade or only)):
+        elif redo or (needs_extra(existing) and (upgrade or only)) or (enhance and enhance(existing)):
             jobs.append((f, tid, "extra"))
         elif needs_extra(existing):
             older += 1
@@ -174,12 +223,17 @@ def run_job(audio_file: Path, tid: str, kind: str, rel: str, with_vocals: bool) 
 
 
 def main() -> None:
+    global AA
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--library", help=f"folder of music (default: <Drive>/{LIBRARY_FOLDER})")
     ap.add_argument("--only", help="only tracks whose file name contains this text")
     ap.add_argument("--upgrade", action="store_true", help="also add the latest analysis to older tracks "
                                                            "that were analysed before (their beats are kept)")
     ap.add_argument("--setup", action="store_true", help="check / install the packages and ffmpeg, then stop")
+    ap.add_argument("--report", action="store_true", help="list every track: bar lines (model or estimated) "
+                                                          "and vocals, then stop")
+    ap.add_argument("--enhance", action="store_true", help="rerun tracks with estimated bar lines or no vocals "
+                                                           "(their beats are kept)")
     ap.add_argument("--redo", action="store_true", help="re-run the analysis on already-analysed tracks "
                                                         "(their beats are still kept)")
     ap.add_argument("--fresh", action="store_true", help="re-analyse from scratch, replacing beats, bpm, "
@@ -190,11 +244,14 @@ def main() -> None:
     args = ap.parse_args()
     if args.setup:
         sys.exit(setup())
+    if args.report:
+        import audio_analysis as AA
+        report()
+        return
 
     device = pick_device(args.cpu)
     os.environ["AUDIO_ANALYSIS_DEVICE"] = device       # read when audio_analysis is imported
     os.environ["AUDIO_ANALYSED_BY"] = "local"
-    global AA
     import audio_analysis as AA
 
     root = drive_root()
@@ -215,12 +272,15 @@ def main() -> None:
     vocals_on = not args.no_vocals and AA.demucs_available()
     print(f"Demucs:     {'yes' if vocals_on else ('off (--no-vocals)' if args.no_vocals else 'not installed — no vocals (pip install demucs)')}")
 
-    jobs, older = plan_jobs(library, args.only, args.redo, args.fresh, AA.needs_extra, args.upgrade)
-    labels = {"new": "new — full analysis", "extra": "add analysis, keep its beats",
+    if args.enhance and not AA.beat_this_available():
+        sys.exit("--enhance needs beat_this for the bar lines — run run_audio_analysis.bat once to install it.")
+    enhance = (lambda t: needs_enhance(t, vocals_on)) if args.enhance else None
+    jobs, older = plan_jobs(library, args.only, args.redo, args.fresh, AA.needs_extra, args.upgrade, enhance)
+    labels = {"new": "new — full analysis", "extra": "redo analysis, keep its beats",
               "fresh": "from scratch, replacing beats"}
     n_new = sum(1 for _, _, k in jobs if k == "new")
     print(f"\n{len(jobs)} track(s) to analyse" + (f" ({n_new} newly added)." if n_new == len(jobs) else "."))
-    if older:
+    if older and not args.enhance:
         print(f"  ({older} older track(s) could get the latest analysis added — "
               f"run with --upgrade to include them.)")
     for f, tid, kind in jobs:
