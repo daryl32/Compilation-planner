@@ -257,6 +257,58 @@ def scene_is_usable(scene: dict, tag_filter: tuple) -> bool:
 MIN_LEFTOVER_SEC = 0.5
 
 
+# ---------------------------------------------------------------------------
+# Scene roles in the plan (see scene_roles.py / story_map.py). A block's role
+# comes from the story map, or from the old Intro/Outro blocks picker. Roles
+# are PREFERRED, never strict: a video without clips for a block's role shows
+# its normal clips there.
+# ---------------------------------------------------------------------------
+
+def has_role(c: dict, role) -> bool:
+    """Does this span / candidate / window carry the role id?"""
+    return bool(role) and role in (c.get("roles") or [])
+
+
+def role_chips(c: dict) -> str:
+    """'💥 Action  🏁 Outro' for a clip's roles, '' if it has none."""
+    ids = c.get("roles") or []
+    if not ids:
+        return ""
+    rb = SR.roles_by_id()
+    return "  ".join(SR.label(r, rb) for r in ids)
+
+
+def reserve_filter(items: list, role, reserved, min_keep: int = 1) -> list:
+    """'Keep role clips for their parts': drop clips that carry a role used
+    somewhere in the plan (reserved) unless the block's own role is among them
+    — but only while at least min_keep other clips remain; otherwise they're allowed."""
+    if not reserved:
+        return items
+    keep = [c for c in items if not (set(c.get("roles") or []) & reserved) or has_role(c, role)]
+    return keep if len(keep) >= max(1, min_keep) else items
+
+
+def role_supply(queues: dict, global_excluded: set = None) -> dict:
+    """{role id: seconds of still-available footage tagged with it}."""
+    out = {}
+    for spans in queues.values():
+        for sp in spans:
+            if (sp["video_id"], sp["scene_id"]) in (global_excluded or set()):
+                continue
+            for r in sp.get("roles") or []:
+                out[r] = out.get(r, 0.0) + sp["remaining_sec"]
+    return out
+
+
+def role_needs(block_roles: list, segments: list) -> dict:
+    """{role id: seconds the plan needs for it} (sum of that role's block lengths)."""
+    out = {}
+    for r, sg in zip(block_roles, segments):
+        if r:
+            out[r] = out.get(r, 0.0) + (sg["end"] - sg["start"])
+    return out
+
+
 def build_footage_queues(candidate_video_ids: tuple, tag_filter: tuple, video_time_ranges: dict = None) -> dict:
     """video_id -> list of mutable 'span' dicts, one per usable scene, sorted
     by start time (chronological order within that video — not scene_id, which
@@ -307,8 +359,7 @@ def build_footage_queues(candidate_video_ids: tuple, tag_filter: tuple, video_ti
                 "scene_start_sec": scene_start_sec,
                 "offset_sec": eff_start - scene_start_sec,  # starts partway in if the range clipped the front
                 "remaining_sec": duration,
-                "intro_candidate": bool(scene.get("intro_candidate", False)),
-                "outro_candidate": bool(scene.get("outro_candidate", False)),
+                "roles": SR.scene_roles(scene),
             })
         if spans:
             queues[video_id] = spans
@@ -597,8 +648,7 @@ def find_shape_candidates(
             "fps": fps,
             "tags": span["tags"],
             "thumbnail": span["thumbnail"],
-            "intro_candidate": span.get("intro_candidate", False),
-            "outro_candidate": span.get("outro_candidate", False),
+            "roles": span.get("roles", []),
         })
 
     results.sort(key=lambda r: -r["score"])
@@ -914,7 +964,7 @@ CHOR_MAX_OPTIONS_PER_VIDEO = 300  # safety cap on tiled dropdown entries — see
 def get_available_clips_for_video(queues: dict, video_id: str, block_duration: float,
                                    sequential: bool, global_excluded: set,
                                    max_options: int = CHOR_MAX_OPTIONS_PER_VIDEO,
-                                   role_filter: str = None) -> list[dict]:
+                                   role_filter: str = None, reserved: set = None) -> list[dict]:
     """Every selectable block_duration-long window across ALL of video_id's still-
     available footage — not just the front of each span.  Each currently-available
     span (one per not-yet-fully-consumed scene) is pre-trimmed into consecutive,
@@ -927,12 +977,16 @@ def get_available_clips_for_video(queues: dict, video_id: str, block_duration: f
     footage for one more whole window); it stays in the span for a future block
     of a different duration to use.
 
-    role_filter: "intro_candidate" or "outro_candidate" — if given, the result is
-    narrowed to windows whose scene carries that flag, but ONLY when at least one
+    role_filter: a scene role id (e.g. "action") — if given, the result is
+    narrowed to windows whose scene carries that role, but ONLY when at least one
     such window exists for this video; otherwise every window is returned
     unfiltered. This is deliberately opportunistic rather than a hard requirement,
-    so a video with no tagged intro/outro clips is never silently locked out of
+    so a video with no clips for the role is never silently locked out of
     a block it could otherwise fill.
+
+    reserved: role ids used somewhere in the plan ("Keep role clips for their
+    parts") — windows carrying one of them (other than role_filter) are left
+    out of a block's list while other windows remain (see reserve_filter).
 
     Returns a list of window dicts (span fields plus this window's own 'offset_sec',
     'abs_start', and a timecode 'label'), sorted by absolute start time.  Capped at
@@ -960,11 +1014,7 @@ def get_available_clips_for_video(queues: dict, video_id: str, block_duration: f
             win_offset = span_start + w * block_duration
             abs_start = span["scene_start_sec"] + win_offset
             abs_end = abs_start + block_duration
-            role_tag = ""
-            if span.get("intro_candidate"):
-                role_tag += "  🎬intro"
-            if span.get("outro_candidate"):
-                role_tag += "  🎬outro"
+            role_tag = ("  " + role_chips(span)) if span.get("roles") else ""
             label = (f"Scene {span['scene_id']}  {format_mmss(abs_start)} – {format_mmss(abs_end)}"
                      f"  motion {span['motion_norm']:.2f}{role_tag}")
             result.append({**span, "offset_sec": win_offset, "abs_start": abs_start, "label": label})
@@ -973,10 +1023,10 @@ def get_available_clips_for_video(queues: dict, video_id: str, block_duration: f
     result = sorted(result, key=lambda s: s["abs_start"])
 
     if role_filter:
-        role_matches = [c for c in result if c.get(role_filter)]
+        role_matches = [c for c in result if has_role(c, role_filter)]
         if role_matches:
             return role_matches
-    return result
+    return reserve_filter(result, role_filter, reserved)
 
 
 @fragment
@@ -984,7 +1034,7 @@ def render_choreography_block(
     seg_idx: int, seg: dict, selected_videos: list, max_chor_videos: int,
     rec_count: int, queues: dict, sequential_mode: bool, global_excluded: set,
     catalogues: dict, prev_block_videos: set = None, video_stats: dict = None,
-    role_filter: str = None, weighting: dict = None, track: dict = None,
+    role_filter: str = None, weighting: dict = None, track: dict = None, reserved: set = None,
 ) -> None:
     """One block's choreography grid: one column per source video (up to
     max_chor_videos).  Each column has:
@@ -1007,11 +1057,13 @@ def render_choreography_block(
     seconds still available in queues} — shown on each card, same as Manual
     step-through's candidate grid.
 
-    role_filter: "intro_candidate" or "outro_candidate" when this is the
-    first/last block and the Prefer Intro/Outro sidebar toggle is on —
-    narrows each column's dropdown to that video's tagged clips, when it
-    has any (see get_available_clips_for_video for the opportunistic
-    fallback). None for every other block.
+    role_filter: the block's scene role id (from the story map or the
+    Intro/Outro picker) — narrows each column's dropdown to that video's clips
+    with the role, when it has any (see get_available_clips_for_video for the
+    opportunistic fallback). In sequential mode the list stays in order and
+    only the automatic pick leans towards role clips, inside the skip budget.
+    None for a block without a role. reserved: role ids kept for their own
+    parts (see reserve_filter).
 
     weighting: {"segments", "confirmed", "weight_shape", "weight_random",
     "avoid_repeat", "weight_spread", "weight_motion", "seed"} — when
@@ -1031,8 +1083,10 @@ def render_choreography_block(
     video_stats = video_stats or {}
     block_duration = seg["end"] - seg["start"]
     seg_target = seg.get("intensity", seg["energy"])
+    _list_role = None if sequential_mode else role_filter   # sequential: keep the list in order
     _clips_by_vid = {vid: get_available_clips_for_video(queues, vid, block_duration, sequential_mode,
-                                                         global_excluded, role_filter=role_filter)
+                                                         global_excluded, role_filter=_list_role,
+                                                         reserved=reserved)
                      for vid in selected_videos}
     eligible = [vid for vid in selected_videos if _clips_by_vid[vid]]
     shown = eligible[:max_chor_videos]
@@ -1045,9 +1099,12 @@ def render_choreography_block(
     if hidden:
         st.caption(f"{hidden} more eligible video(s) not shown — increase 'Max videos per block' in the sidebar.")
     if role_filter:
-        role_label = "intro" if role_filter == "intro_candidate" else "outro"
-        st.caption(f"🎬 Dropdowns below are narrowed to each video's tagged **{role_label}** clips, "
-                   f"where it has any — videos with none show their normal full availability.")
+        st.caption(f"{SR.label(role_filter)} part — " + (
+            "the automatic pick leans towards each video's clips with this role (keeping the video's order); "
+            "the dropdown still lists every clip in order."
+            if sequential_mode else
+            "dropdowns below are narrowed to each video's clips with this role, where it has any — "
+            "videos with none show their normal full availability."))
 
     ticked_count = sum(1 for vid in shown if st.session_state.get(f"chor_pick_{seg_idx}_{vid}", False))
     st.caption(
@@ -1077,9 +1134,8 @@ def render_choreography_block(
                 stats = video_stats.get(video_id, {})
                 st.caption(f"used so far: {stats.get('used', 0.0):.0f}s  ·  "
                           f"remaining: {stats.get('remaining', 0.0):.0f}s")
-                if role_filter and clips and not any(c.get(role_filter) for c in clips):
-                    role_label = "intro" if role_filter == "intro_candidate" else "outro"
-                    st.caption(f"⚠️ no {role_label}-tagged clips for this video — showing full availability")
+                if role_filter and clips and not any(has_role(c, role_filter) for c in clips):
+                    st.caption(f"⚠️ no {SR.label(role_filter)} clips for this video — showing normal clips")
 
                 # Thumbnail for the currently selected clip
                 current_key = overrides.get(video_id)
@@ -1111,6 +1167,7 @@ def render_choreography_block(
                         auto_candidates = clips[:1]
                     else:
                         auto_candidates = clips
+                    auto_candidates = [c for c in auto_candidates if has_role(c, role_filter)] or auto_candidates
                     if weighting:
                         ranked = rank_candidates_weighted(
                             auto_candidates, seg_idx, weighting["segments"], weighting["confirmed"], queues,
@@ -1168,12 +1225,7 @@ def render_choreography_block(
 
                 if display_clip is not None:
                     auto_tag = "⭐ Auto pick — " if current_key is None else ""
-                    role_bits = []
-                    if display_clip.get("intro_candidate"):
-                        role_bits.append("🎬intro")
-                    if display_clip.get("outro_candidate"):
-                        role_bits.append("🎬outro")
-                    role_suffix = f"  {' '.join(role_bits)}" if role_bits else ""
+                    role_suffix = f"  {role_chips(display_clip)}" if display_clip.get("roles") else ""
                     pos = f"  ·  {sel_idx + 1}/{len(clips)}" if sel_idx is not None else ""
                     st.caption(
                         f"{auto_tag}Scene {display_clip['scene_id']}  "
@@ -1432,10 +1484,8 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                     st.caption("🔵 same video as previous block")
                 if c.get("similar"):
                     st.caption(f"✨ {c['similar']}% like {c['similar_to']} — {c['similar_reason']}")
-                if c.get("intro_candidate"):
-                    st.caption("🎬 intro candidate")
-                if c.get("outro_candidate"):
-                    st.caption("🎬 outro candidate")
+                if c.get("roles"):
+                    st.caption(role_chips(c))
                 clip_start = c.get("scene_start_sec", 0.0) + c["window_offset_sec"]
                 nearest_thumb = get_nearest_thumbnail(catalogues or {}, c["video_id"], clip_start) if catalogues else None
                 if nearest_thumb is not None:
@@ -1643,8 +1693,7 @@ def more_like_this_for_grid(c: dict, seg: dict, queues: dict, excluded_here: set
             "score": round(shape_score(vals, audio_curve), 3),
             "motion_norm": span["motion_norm"], "curve_slice": vals, "fps": fps,
             "tags": span["tags"], "thumbnail": span["thumbnail"],
-            "intro_candidate": span.get("intro_candidate", False),
-            "outro_candidate": span.get("outro_candidate", False),
+            "roles": span.get("roles", []),
             "similar": int(round(100 * sim)), "similar_reason": reason,
             "similar_to": f"{c['video_id']} #{c['scene_id']}",
             "_key": f"{span['video_id']}_{span['scene_id']}_s{int(round(off * 10))}",
@@ -6277,8 +6326,7 @@ else:
                             "fps": 25.0,
                             "tags": best_span["tags"],
                             "thumbnail": best_span["thumbnail"],
-                            "intro_candidate": best_span.get("intro_candidate", False),
-                            "outro_candidate": best_span.get("outro_candidate", False),
+                            "roles": best_span.get("roles", []),
                         }]
 
                 rec_b = recommended_counts[b]
