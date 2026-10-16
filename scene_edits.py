@@ -255,6 +255,9 @@ def merge_scenes(data: dict, scene_ids: list) -> int:
 
     for flag in ("excluded", "intro_candidate", "outro_candidate"):
         merged[flag] = all(bool(s.get(flag)) for s in group)
+    import scene_roles as SR
+    common = [r for r in SR.scene_roles(group[0]) if all(r in SR.scene_roles(s) for s in group[1:])]
+    SR.set_scene_roles(merged, common)    # roles every part had (as with the old flags)
     merged["reviewed"] = False
     merged["edit"] = {"kind": "merge", "originals": [copy.deepcopy(s) for s in group]}
 

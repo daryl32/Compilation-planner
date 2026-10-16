@@ -34,7 +34,7 @@ from config import CATALOGUE_DIR
 from library_common import mark_pending, scene_tags, shared_cache, tc_to_seconds
 
 # JSON files in CATALOGUE_DIR that are never video catalogues.
-NOT_CATALOGUES = {"labels.json", "library_meta.json", "video_index.json"}
+NOT_CATALOGUES = {"labels.json", "library_meta.json", "video_index.json", "scene_roles.json"}
 
 
 def catalogue_paths() -> list:
@@ -79,6 +79,11 @@ def _scene_order(s: dict) -> tuple:
         return (float("inf"), s.get("scene_id", 0))
 
 
+def _roles(scene: dict) -> list:
+    import scene_roles as SR
+    return SR.scene_roles(scene)
+
+
 def _slim_video(stem: str, cat: dict, mtime: float) -> dict:
     scenes = []
     for s in sorted(cat["scenes"], key=_scene_order):
@@ -95,6 +100,7 @@ def _slim_video(stem: str, cat: dict, mtime: float) -> dict:
             "excluded": bool(s.get("excluded")),
             "intro": bool(s.get("intro_candidate")),
             "outro": bool(s.get("outro_candidate")),
+            "roles": _roles(s),
             "reviewed": bool(s.get("reviewed")),
             "thumb": Path(thumbs[0]).name if thumbs else None,
             "motion": s.get("motion_intensity"),
