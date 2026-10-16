@@ -23,7 +23,8 @@ from pathlib import Path
 import streamlit as st
 
 from config import CATALOGUE_DIR
-from library_common import (safe_image, image_ok, mark_pending, master_thumbnail_scenes, set_master_thumbnail,
+from library_common import (safe_image, image_ok, video_details, set_video_details, all_actors,
+                            all_video_tags, suggest_video_tags, matches_details, mark_pending, master_thumbnail_scenes, set_master_thumbnail,
                             proxy_path, library_ranges, tc_to_seconds, format_mmss, overlap_with_range,
                             scene_tags)
 import catalogue_store as CS
@@ -159,6 +160,8 @@ if not index:
 ranges = library_ranges()
 masters = master_thumbnail_scenes()
 
+FIND_NO_ACTORS = "👤 No actors yet"
+FIND_NO_VTAGS = "🏷️ No video tags yet"
 FIND_NO_THUMB = "⭐ No custom thumbnail"
 FIND_SPLIT = "✂️ Has split suggestions"
 FIND_MERGE = "🔗 Has combine suggestions"
@@ -166,6 +169,7 @@ FIND_NO_OUTRO = "🎬 No outro clip"
 FIND_NO_INTRO = "🎬 No intro clip"
 FIND_UNREVIEWED = "📝 Not fully reviewed"
 FIND_NEW = f"🆕 Added in the last {CS.NEW_VIDEO_DAYS} days"
+FIND_TODAY = "📅 Added today"
 
 _added = CS.added_times()   # {video_id: unix time added}
 
@@ -194,15 +198,29 @@ with st.container(border=True):
     name_query = fc[0].text_input("Find a video", placeholder="part of a video name", key="rev_find_name")
     find_flags = fc[1].multiselect(
         "Only videos that…",
-        [FIND_NEW, FIND_NO_THUMB, FIND_SPLIT, FIND_MERGE, FIND_NO_OUTRO, FIND_NO_INTRO, FIND_UNREVIEWED],
+        [FIND_TODAY, FIND_NEW, FIND_NO_THUMB, FIND_SPLIT, FIND_MERGE, FIND_NO_OUTRO, FIND_NO_INTRO, FIND_UNREVIEWED,
+         FIND_NO_ACTORS, FIND_NO_VTAGS],
         key="rev_find_flags", placeholder="any video",
         help="Pick several to narrow it down further (a video must match all of them). "
              "Split/combine suggestions use the sidebar settings and the library range.",
     )
 
+    _details = video_details()
+    dc = st.columns([2, 2, 1])
+    find_actors = dc[0].multiselect("With actors", all_actors(), key="rev_find_actors", placeholder="anyone")
+    find_vtags = dc[1].multiselect("With video tags", all_video_tags(), key="rev_find_vtags", placeholder="any")
+    find_all = dc[2].toggle("Must have all", key="rev_find_all", disabled=not (find_actors or find_vtags),
+                            help="Off: any of the picked actors / tags. On: every one of them.")
+
+    import datetime as _dt
+    _today_start = _dt.datetime.combine(_dt.date.today(), _dt.time.min).timestamp()
+
     def matches(stem: str) -> bool:
         f = facts[stem]
         if name_query and name_query.lower() not in stem.lower():
+            return False
+        vid = index[stem]["video_id"]
+        if not matches_details(vid, _details, find_actors, find_vtags, find_all):
             return False
         checks = {
             FIND_NO_THUMB: not f["custom_thumb"],
@@ -212,11 +230,14 @@ with st.container(border=True):
             FIND_NO_INTRO: not f["has_intro"],
             FIND_UNREVIEWED: f["reviewed"] < f["n"],
             FIND_NEW: CS.is_new_video(f["added"]),
+            FIND_TODAY: f["added"] >= _today_start,
+            FIND_NO_ACTORS: not (_details.get(vid) or {}).get("actors"),
+            FIND_NO_VTAGS: not (_details.get(vid) or {}).get("tags"),
         }
         return all(checks[flag] for flag in find_flags)
 
     names = [stem for stem in index if matches(stem)]
-    if FIND_NEW in find_flags:
+    if FIND_NEW in find_flags or FIND_TODAY in find_flags:
         names.sort(key=lambda stem: -facts[stem]["added"])   # newest first
     # A split / combine / review can make the video you're working on stop
     # matching "Only videos that…" (e.g. its last long clip was just split).
@@ -311,6 +332,63 @@ with st.container(border=True):
             st.markdown("**⭐ Video thumbnail:** automatic")
         st.caption("Pick one with ⭐ on any scene below. It's used for this video in the Media "
                    "Library and the Compilation Planner's video list.")
+
+# 🎬 Video details — actors and video tags, for searching on every page.
+def _vd_fill_from_clips(key_tags: str, suggested: list) -> None:
+    cur = list(st.session_state.get(key_tags) or [])
+    st.session_state[key_tags] = cur + [t for t, _ in suggested if t.lower() not in {c.lower() for c in cur}]
+
+
+def _vd_add_actor(key_actors: str, key_new: str) -> None:
+    name = " ".join((st.session_state.get(key_new) or "").split())
+    if name:
+        cur = list(st.session_state.get(key_actors) or [])
+        if name.lower() not in {c.lower() for c in cur}:
+            st.session_state[key_actors] = cur + [name]
+            st.session_state[f"_extra_actors_{selected}"] = st.session_state.get(f"_extra_actors_{selected}", []) + [name]
+    st.session_state[key_new] = ""
+
+
+_vd = video_details().get(video_id) or {"actors": [], "tags": []}
+_ka, _kt, _kn = f"vd_actors_{selected}", f"vd_tags_{selected}", f"vd_new_actor_{selected}"
+_sugg = suggest_video_tags(data["scenes"], ranges.get(video_id))
+with st.expander(f"🎬 Video details — {len(_vd['actors'])} actor(s), {len(_vd['tags'])} video tag(s)",
+                 expanded=not (_vd["actors"] or _vd["tags"])):
+    vc = st.columns(2)
+    with vc[0]:
+        _actor_opts = sorted(set(all_actors()) | set(_vd["actors"]) | set(st.session_state.get(_ka) or [])
+                             | set(st.session_state.get(f"_extra_actors_{selected}", [])), key=str.lower)
+        st.multiselect("👤 Actors", _actor_opts, default=_vd["actors"], key=_ka,
+                       help="Who's in this video. Pick from names already used, or add a new one below.")
+        ac = st.columns([3, 1])
+        ac[0].text_input("New actor", key=_kn, placeholder="type a name", label_visibility="collapsed")
+        ac[1].button("➕ Add", key=f"vd_add_{selected}", on_click=_vd_add_actor, args=(_ka, _kn),
+                     use_container_width=True)
+    with vc[1]:
+        _tag_opts = sorted(set(CANDIDATE_LABELS) | set(all_video_tags()) | set(_vd["tags"])
+                           | set(st.session_state.get(_kt) or []), key=str.lower)
+        st.multiselect("🏷️ Video tags", _tag_opts, default=_vd["tags"], key=_kt,
+                       help="Tags for the whole video — for finding it on every page. Separate from the clip tags.")
+        if _sugg:
+            st.caption("From its clips: " + ", ".join(f"`{tg}` {share:.0%}" for tg, share in _sugg[:10]))
+            st.button("✨ Add the clip tags above", key=f"vd_fill_{selected}", on_click=_vd_fill_from_clips,
+                      args=(_kt, _sugg),
+                      help="Adds every tag that covers at least 10% of the usable footage (and 2+ clips), "
+                           "inside the library range, excluded clips left out.")
+        else:
+            st.caption("No clip tag covers 10% of this video's footage yet.")
+    _now_a, _now_t = list(st.session_state.get(_ka) or []), list(st.session_state.get(_kt) or [])
+    _changed = (_now_a != _vd["actors"]) or (_now_t != _vd["tags"])
+    sc = st.columns([1, 3])
+    if sc[0].button("💾 Save video details", key=f"vd_save_{selected}", type="primary" if _changed else "secondary",
+                    disabled=not _changed, use_container_width=True):
+        set_video_details(video_id, actors=_now_a, tags=_now_t)
+        for k in (_ka, _kt):
+            st.session_state.pop(k, None)
+        st.session_state["rev_saved_msg"] = f"Video details saved: {len(_now_a)} actor(s), {len(_now_t)} video tag(s)."
+        st.rerun()
+    sc[1].caption("✏️ Unsaved changes" if _changed else "Saved with the library (synced to Google Drive like "
+                                                         "library ranges).")
 
 lib_range = ranges.get(video_id) if use_library_range else None
 if lib_range:
@@ -668,8 +746,11 @@ if sugg["split"] or sugg["merge"] or auto_ids:
                                      key=f"bulk_auto_{selected}"):
             bulk_auto_split_dialog(auto_ids)
 
-fc = st.columns([2, 1, 1, 1, 1])
+fc = st.columns([2, 1, 1, 1, 1, 1])
 tag_filter = fc[0].text_input("Filter by tag (optional)")
+hide_excluded = fc[5].toggle("Hide excluded", key="rev_hide_excluded",
+                             help="Leave excluded scenes out of the list (they stay excluded). Stays on as you "
+                                  "move between videos.")
 show_only_excluded = fc[1].checkbox("Only excluded", value=False)
 show_only_intro_outro = fc[2].checkbox("Only intro/outro", value=False)
 show_only_suggested = fc[3].checkbox("Only suggestions", value=False, disabled=not show_suggestions)
@@ -690,6 +771,8 @@ for scene in ordered_all:
     if tag_filter and tag_filter.lower() not in [t.lower() for t in current_tags]:
         continue
     if show_only_excluded and not scene.get("excluded"):
+        continue
+    if hide_excluded and not show_only_excluded and scene.get("excluded"):
         continue
     if show_only_intro_outro and not (scene.get("intro_candidate") or scene.get("outro_candidate")):
         continue
@@ -807,11 +890,10 @@ def scene_card(sid, trimmed_to) -> None:
             st.session_state["rev_open_dialog"] = (selected, sid, False)
             st.rerun()
         if sid in auto_ids and bc[1].button("⚡ Auto split", key=f"auto_{selected}_{sid}", use_container_width=True,
-                                            help=f"Cut into parts of about {auto_target_sec:g}s — "
-                                                 "you'll see the cuts before anything changes."):
+                                            help=f"Splits it straight away into parts of about {auto_target_sec:g}s "
+                                                 "(↩️ Undo split puts it back). ✂️ Split… lets you place cuts by hand."):
             back_to(sid)
-            st.session_state["rev_open_dialog"] = (selected, sid, True)
-            st.rerun()
+            do_split(sid, SE.auto_split_points(scene_by_id[sid], auto_target_sec))
         nxt = next_of.get(sid)
         if nxt is not None and bc[2].button("🔗 Combine with next", key=f"merge_next_{selected}_{sid}",
                                             use_container_width=True,

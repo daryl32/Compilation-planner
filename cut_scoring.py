@@ -55,28 +55,194 @@ def _near(times: np.ndarray, marks, tol: float) -> np.ndarray:
     return (d <= tol).astype(float)
 
 
+def _strength_at(track: dict, times: np.ndarray) -> np.ndarray:
+    """How hard the music hits at each time: kick drum (server analysis) plus
+    onset strength, each the max within ±50 ms."""
+    hires = track.get("hires") or {}
+    a = track.get("analysis") or {}
+    out = _curve_at(hires.get("onset"), float(hires.get("rate", 30)), times)
+    if a.get("kick") is not None:
+        out = out + _curve_at(a.get("kick"), float(a.get("rate", 30)), times)
+    return out
+
+
+_GRID_CACHE = {}
+
+
+def beat_grid(track: dict) -> tuple:
+    """(beats, bpm, correction) — the track's beat grid, corrected for the two
+    usual beat-tracker slips, and filled out to cover the whole track:
+
+      half time   — beats found on every OTHER real beat (e.g. 60 instead of
+                    120 BPM, often landing on the snare). Detected when the
+                    points halfway between beats hit about as hard as the
+                    beats themselves; the missing beats are put back.
+      double time — a beat between every real one. Detected (only above 180
+                    BPM) when every other beat is clearly weaker; those go.
+      gaps        — no beats found in a quiet intro / outro: the grid is
+                    carried on at the same spacing to the start and end.
+
+    correction: None, "doubled" or "halved". Everything that counts bars or
+    beats (Rhythm Engine, Scored cuts, auto-detect) uses this."""
+    raw = np.asarray(track.get("beat_times") or [], dtype=float)
+    key = (id(track), len(raw), float(raw[0]) if len(raw) else 0.0)
+    if key in _GRID_CACHE:
+        return _GRID_CACHE[key]
+    duration = float(track.get("duration_sec") or (raw[-1] if len(raw) else 0.0))
+    bpm = float(track.get("bpm") or 120.0)
+    if len(raw) < 4:
+        res = (raw, bpm, None)
+        _GRID_CACHE[key] = res
+        return res
+    beats, how = raw, None
+    ivl = float(np.median(np.diff(raw)))
+    tempo = 60.0 / ivl if ivl > 0 else bpm
+    on_beat = float(np.mean(_strength_at(track, raw))) or 1e-9
+    if tempo < 95:
+        mids = (raw[:-1] + raw[1:]) / 2
+        if float(np.mean(_strength_at(track, mids))) >= 0.5 * on_beat:
+            beats, how = np.sort(np.concatenate([raw, mids])), "doubled"
+    elif tempo > 180:
+        even, odd = float(np.mean(_strength_at(track, raw[0::2]))), float(np.mean(_strength_at(track, raw[1::2])))
+        if min(even, odd) < 0.4 * max(even, odd):
+            beats, how = (raw[0::2] if even >= odd else raw[1::2]), "halved"
+    step = float(np.median(np.diff(beats)))
+    if step > 0:
+        beats = _extend(beats, duration)
+        bpm = 60.0 / step
+    res = (beats, bpm, how)
+    if len(_GRID_CACHE) > 64:
+        _GRID_CACHE.clear()
+    _GRID_CACHE[key] = res
+    return res
+
+
+def _extend(marks: np.ndarray, duration: float) -> np.ndarray:
+    """Carry a regular grid (beats or bars) on to the start and the end of the
+    track, at the local spacing of its first / last 16 marks (a straight-line
+    fit, so a slight tempo difference doesn't pile up over a long intro)."""
+    marks = np.asarray(marks, dtype=float)
+    if len(marks) < 3:
+        return marks
+
+    def spacing(part):
+        part = part[:16] if len(part) > 16 else part
+        return float(np.polyfit(np.arange(len(part)), part, 1)[0])
+
+    head_step, tail_step = spacing(marks[:16]), spacing(marks[-16:])
+    out = marks
+    if head_step > 0 and marks[0] > 1.5 * head_step:
+        head = marks[0] - head_step * np.arange(1, int(marks[0] / head_step) + 2)
+        out = np.concatenate([head[head >= -0.25 * head_step][::-1].clip(min=0), out])
+    if tail_step > 0 and duration - marks[-1] > 1.5 * tail_step:
+        tail = marks[-1] + tail_step * np.arange(1, int((duration - marks[-1]) / tail_step) + 1)
+        out = np.concatenate([out, tail[tail < duration - 0.25 * tail_step]])
+    return out
+
+
+def bar_sec(track: dict, beats_per_bar: int = 4) -> float:
+    return int(beats_per_bar) * 60.0 / max(beat_grid(track)[1], 1.0)
+
+
 def bar_lines(track: dict, beats_per_bar: int) -> list:
-    """Real downbeats from the server analysis when available, else every
-    beats_per_bar-th beat from the first (the old assumption)."""
-    beats = list(track.get("beat_times") or [])
+    """Bar starts. The server's downbeats when the beat grid needed no
+    correction and they match beats_per_bar; otherwise every beats_per_bar-th
+    beat of the corrected grid, starting on whichever beat hits hardest
+    (kick drum / onsets) — that's where a bar starts in nearly all music."""
+    beats, _, how = beat_grid(track)
     a = track.get("analysis") or {}
     db = a.get("downbeats") or []
-    if db and int(a.get("beats_per_bar", 4)) == int(beats_per_bar):
-        return [float(t) for t in db]
+    if how is None and db and int(a.get("beats_per_bar", 4)) == int(beats_per_bar):
+        return [float(t) for t in _extend(np.asarray(db, dtype=float), float(track.get("duration_sec") or db[-1]))]
     if len(beats) < beats_per_bar:
         return []
-    phase = 0
-    if db and beats:
-        first = int(np.argmin(np.abs(np.asarray(beats) - db[0])))
-        phase = first % beats_per_bar
-    return beats[phase::beats_per_bar]
+    bpb = int(beats_per_bar)
+    # Same recipe as the server's downbeat estimate (audio_analysis): beat 1 is
+    # where kicks, chord changes and jumps in loudness line up.
+    hires = track.get("hires") or {}
+    rate = float(hires.get("rate", 30))
+    arate = float(a.get("rate", 30))
+    rms = np.asarray(hires.get("rms") or [], dtype=float)
+    jump = np.maximum(0.0, np.diff(np.convolve(rms, np.ones(6) / 6, mode="same"), prepend=rms[:1])) if len(rms) else rms
+    k = _curve_at(a.get("kick"), arate, beats) if a.get("kick") is not None else _curve_at(hires.get("onset"), rate, beats)
+    h = _curve_at(a.get("harmony"), arate, beats, 0.1)
+    e = _curve_at(jump, rate, beats, 0.1)
+    e = e / (float(e.max()) or 1.0)
+
+    def score(p):
+        idx = np.arange(p, len(beats), bpb)
+        return float(k[idx].mean() + 1.5 * h[idx].mean() + e[idx].mean()) if len(idx) else 0.0
+
+    phase = max(range(bpb), key=score)
+    return [float(t) for t in beats[phase::bpb]]
+
+
+def snapped_marks(track: dict, marks: list, beats_per_bar: int) -> list:
+    """Section starts / drops from the analysis. When the beat grid had to be
+    corrected, the analysis placed them on its wrong grid — move each onto the
+    nearest real bar line (within a bar)."""
+    marks = [float(m) for m in marks]
+    if beat_grid(track)[2] is None or not marks:
+        return marks
+    bars = np.asarray(bar_lines(track, beats_per_bar), dtype=float)
+    if not len(bars):
+        return marks
+    one_bar = bar_sec(track, beats_per_bar)
+    # The analysis can be off by up to a (wrong) beat, i.e. half a real bar or more,
+    # so "nearest bar line" can pick the bar before. Of the bar lines within a bar,
+    # take the one where the loudness steps most (a section change / drop is a
+    # change in the sound), the nearest one on a tie.
+    hires = track.get("hires") or {}
+    rms = np.asarray(hires.get("rms") or [], dtype=float)
+    rate = float(hires.get("rate", 30))
+    c = np.concatenate([[0.0], np.cumsum(rms)]) if len(rms) else None
+    w = max(1, int(round(one_bar * rate)))
+
+    def step_at(t):
+        if c is None:
+            return 0.0
+        i = int(round(t * rate))
+        lo, hi = max(0, i - w), min(len(rms), i + w)
+        if i <= lo or hi <= i:
+            return 0.0
+        return abs((c[hi] - c[i]) / (hi - i) - (c[i] - c[lo]) / (i - lo))
+
+    out = []
+    for m in marks:
+        near = bars[np.abs(bars - m) <= one_bar * 1.01]
+        if not len(near):
+            out.append(m)
+            continue
+        scores = [(step_at(b), -abs(b - m), b) for b in near]
+        best = max(scores)
+        out.append(float(best[2]))
+    return out
+
+
+def phrase_marks(track: dict, beats_per_bar: int) -> list:
+    """[{time, level}] every 4 bars from each section start (16 / 8 / 4) — the
+    server's own when its bars were right, else rebuilt on the corrected bars."""
+    a = track.get("analysis") or {}
+    _, _, how = beat_grid(track)
+    if how is None and int(a.get("beats_per_bar", 4)) == int(beats_per_bar):
+        return list(a.get("phrases") or [])
+    bars = bar_lines(track, beats_per_bar)
+    sections = a.get("sections") or []
+    if not sections or not bars:
+        return []
+    out = []
+    for sec in sections:
+        in_sec = [t for t in bars if sec["start"] - 0.25 <= t < sec["end"] - 0.05]
+        for k in range(0, len(in_sec), 4):
+            out.append({"time": round(in_sec[k], 3), "level": 16 if k % 16 == 0 else (8 if k % 8 == 0 else 4)})
+    return out
 
 
 def candidate_scores(track: dict, cfg: dict) -> tuple:
     """(times, scores, reasons): every beat plus strong off-beat hits, each
     with its cut score and the biggest reason behind it."""
     duration = float(track["duration_sec"])
-    beats = np.asarray(track.get("beat_times") or [], dtype=float)
+    beats = np.asarray(beat_grid(track)[0], dtype=float)
     hires = track.get("hires") or {}
     rate = float(hires.get("rate", 30))
     onset = np.asarray(hires.get("onset") or [], dtype=float)
@@ -91,21 +257,19 @@ def candidate_scores(track: dict, cfg: dict) -> tuple:
             t = p / rate
             if not len(beats) or np.min(np.abs(beats - t)) > 0.12:
                 times.append(t)
-    for extra in (a.get("drops") or []):
-        times.append(float(extra))
-    for sec in (a.get("sections") or [])[1:]:
-        times.append(float(sec["start"]))
+    drop_marks = snapped_marks(track, a.get("drops") or [], bpb)
+    section_marks = snapped_marks(track, [s["start"] for s in (a.get("sections") or [])[1:]], bpb)
+    times += drop_marks + section_marks
     times = np.array(sorted(t for t in set(round(x, 3) for x in times) if 0.05 < t < duration - 0.05))
     if not len(times):
         return times, np.zeros(0), []
 
     bars = bar_lines(track, bpb)
     phrase_level = np.zeros(len(times))
-    for ph in a.get("phrases") or []:
+    for ph in phrase_marks(track, bpb):
         lvl = {16: 1.0, 8: 0.66, 4: 0.33}.get(int(ph.get("level", 4)), 0.33)
         hit = np.abs(times - float(ph["time"])) <= 0.06
         phrase_level = np.maximum(phrase_level, hit * lvl)
-    section_marks = [s["start"] for s in (a.get("sections") or [])[1:]]
 
     parts = {
         "hit": _curve_at(onset, rate, times),
@@ -115,7 +279,7 @@ def candidate_scores(track: dict, cfg: dict) -> tuple:
         "bar": _near(times, bars, 0.06),
         "phrase": phrase_level,
         "section": _near(times, section_marks, 0.06),
-        "drop": _near(times, a.get("drops") or [], 0.06),
+        "drop": _near(times, drop_marks, 0.06),
         "vocal": np.maximum(_near(times, a.get("vocal_starts") or [], 0.2),
                             _near(times, a.get("vocal_ends") or [], 0.2)),
     }
@@ -197,9 +361,8 @@ def build_scored_segments(track: dict, cfg: dict) -> list:
     if not len(times):
         return [{"start": 0.0, "end": duration, "energy": 0.0, "cut": "start", "cut_strength": 0.0}]
 
-    bpm = float(track.get("bpm") or 120.0)
-    bar_sec = int(cfg.get("beats_per_bar", 4)) * 60.0 / max(bpm, 1.0)
-    target = max(1, int(round(duration / max(0.25, float(cfg.get("sc_bars_per_cut", 2.0))) / bar_sec)))
+    one_bar = bar_sec(track, int(cfg.get("beats_per_bar", 4)))
+    target = max(1, int(round(duration / max(0.25, float(cfg.get("sc_bars_per_cut", 2.0))) / one_bar)))
     follow = float(cfg.get("sc_follow_energy", DEFAULTS["sc_follow_energy"]))
     # Busier passages make cutting cheaper, quiet ones dearer (follow = 0: flat).
     cost_shape = 2.0 ** (-follow * (2.0 * _intensity_at(track, times) - 1.0))

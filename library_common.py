@@ -181,6 +181,106 @@ def set_master_thumbnail(video_id: str, scene_id) -> None:
     save_library_meta(meta)
 
 
+# ---------------------------------------------------------------------------
+# Video details: actors and video tags (library_meta.json, synced like ranges)
+# ---------------------------------------------------------------------------
+
+def _clean_list(values) -> list:
+    seen, out = set(), []
+    for v in values or []:
+        v = " ".join(str(v).split())
+        if v and v.lower() not in seen:
+            seen.add(v.lower())
+            out.append(v)
+    return out
+
+
+def video_details() -> dict:
+    """{video_id: {"actors": [...], "tags": [...]}} for videos that have any."""
+    out = {}
+    for vid, entry in load_library_meta().items():
+        if isinstance(entry, dict) and (entry.get("actors") or entry.get("video_tags")):
+            out[vid] = {"actors": list(entry.get("actors") or []), "tags": list(entry.get("video_tags") or [])}
+    return out
+
+
+def set_video_details(video_id: str, actors=None, tags=None) -> None:
+    """Save a video's actors and/or video tags (None leaves that one as it is)."""
+    meta = load_library_meta()
+    entry = meta.get(video_id) if isinstance(meta.get(video_id), dict) else {}
+    for key, values in (("actors", actors), ("video_tags", tags)):
+        if values is None:
+            continue
+        values = _clean_list(values)
+        if values:
+            entry[key] = values
+        else:
+            entry.pop(key, None)
+    if entry:
+        meta[video_id] = entry
+    else:
+        meta.pop(video_id, None)
+    save_library_meta(meta)
+
+
+def all_actors() -> list:
+    names = {}
+    for d in video_details().values():
+        for a in d["actors"]:
+            names.setdefault(a.lower(), a)
+    return sorted(names.values(), key=str.lower)
+
+
+def all_video_tags() -> list:
+    tags = {}
+    for d in video_details().values():
+        for t in d["tags"]:
+            tags.setdefault(t.lower(), t)
+    return sorted(tags.values(), key=str.lower)
+
+
+def suggest_video_tags(scenes: list, time_range=None, min_share: float = 0.10, min_scenes: int = 2) -> list:
+    """Clip tags worth putting on the whole video: [(tag, share of footage)],
+    biggest first — a tag on at least min_share of the usable footage (inside
+    the time range, excluded scenes left out) and on at least min_scenes scenes.
+    scenes: catalogue scenes (start_tc / end_tc) or slim ones (start / end)."""
+    secs, counts, total = {}, {}, 0.0
+    for s in scenes:
+        if s.get("excluded"):
+            continue
+        try:
+            a = s["start"] if "start" in s else tc_to_seconds(s["start_tc"])
+            b = s["end"] if "end" in s else tc_to_seconds(s["end_tc"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        a, b = overlap_with_range(a, b, time_range)
+        if a is None or b <= a:
+            continue
+        total += b - a
+        for t in (s.get("tags") if "start" in s else scene_tags(s)) or []:
+            secs[t] = secs.get(t, 0.0) + (b - a)
+            counts[t] = counts.get(t, 0) + 1
+    if total <= 0:
+        return []
+    out = [(t, secs[t] / total) for t in secs if secs[t] / total >= min_share and counts[t] >= min_scenes]
+    return sorted(out, key=lambda x: -x[1])
+
+
+def matches_details(video_id: str, details: dict, actors=(), tags=(), match_all: bool = False) -> bool:
+    """Does this video have the wanted actors / video tags? Empty lists match
+    everything. match_all: every wanted one; otherwise any (actors and tags are
+    each checked on their own, and both must pass)."""
+    d = details.get(video_id) or {"actors": [], "tags": []}
+    for wanted, have in ((actors, d["actors"]), (tags, d["tags"])):
+        if not wanted:
+            continue
+        want = {w.lower() for w in wanted}
+        got = {h.lower() for h in have}
+        if (match_all and not want <= got) or (not match_all and not want & got):
+            return False
+    return True
+
+
 def scene_thumbnail_path(video_id: str, scene: dict):
     """Local path of a scene's (first) thumbnail image, or None if it isn't here.
     Always built from CATALOGUE_DIR — never trust the stored path, which was
