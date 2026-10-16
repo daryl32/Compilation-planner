@@ -38,6 +38,7 @@ from config import PREVIEW_DIR
 SIDECAR_SCHEMA = 1
 THUMB_DIR_NAME = ".thumbs"
 COMPARE_DIR_NAME = ".compare"
+PLAYLIST_DIR_NAME = ".playlists"
 SETTINGS_FILE_NAME = ".render_settings.json"
 DRIVE_FOLDER = "scene-labeling/previews"
 _PREVIEW_NAME = re.compile(r"^temp-Video-preview-(?P<track>.+)\.(?P<num>\d{3})\.mp4$")
@@ -534,6 +535,80 @@ def make_compare_video(a: dict, b: dict, audio_from: str = "A") -> tuple:
     for p in olds[4:]:
         p.unlink(missing_ok=True)
     return out, None
+
+
+def make_playlist_video(metas: list, progress=None) -> tuple:
+    """One video that plays the given renders back to back, in order. Returns
+    (path, chapters, None) — chapters = [(start_sec, meta)] — or (None, [], error).
+
+    Renders on the server with the same size are joined as they are (seconds);
+    otherwise (different sizes, or renders only on Google Drive, which are
+    streamed) each is fitted to 640×360 and re-encoded. Cached in
+    PREVIEW_DIR/.playlists — the last 3 playlists are kept."""
+    import hashlib
+    if not metas:
+        return None, [], "The playlist is empty."
+    if shutil.which("ffmpeg") is None:
+        return None, [], "ffmpeg isn't installed on this server."
+    out_dir = PREVIEW_DIR / PLAYLIST_DIR_NAME
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sig = "|".join(f"{Path(m['path']).name}:{m.get('size_bytes') or 0}" for m in metas)
+    out = out_dir / f"playlist_{hashlib.sha1(sig.encode()).hexdigest()[:16]}.mp4"
+
+    chapters, t = [], 0.0
+    for m in metas:
+        chapters.append((round(t, 2), m))
+        t += float(m.get("duration_sec") or 0)
+    if out.exists() and out.stat().st_size > 0:
+        out.touch()
+        return out, chapters, None
+
+    tmp = out.with_name(out.stem + ".part.mp4")
+    local = all(Path(m["path"]).exists() for m in metas)
+    sizes = {(m.get("width"), m.get("height")) for m in metas}
+    done = False
+    if local and len(sizes) == 1:
+        # Same size, all here: join without re-encoding.
+        lst = out_dir / (out.stem + ".txt")
+        lst.write_text("".join(f"file '{Path(m['path']).as_posix()}'\n" for m in metas))
+        proc = subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(lst),
+                               "-c", "copy", "-movflags", "+faststart", str(tmp)],
+                              capture_output=True, text=True, timeout=1800)
+        lst.unlink(missing_ok=True)
+        done = proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0
+    if not done:
+        if progress:
+            progress("Joining the renders (re-encoding — about a quarter of their length)…")
+        try:
+            args = [a for m in metas for a in _input_args(m)]
+        except Exception as e:
+            return None, [], str(e)
+        w, h = 640, 360
+        fit = (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+               f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=25")
+        parts = "".join(f"[{i}:v]{fit}[v{i}];[{i}:a:0]aresample=44100,"
+                        f"aformat=channel_layouts=stereo[a{i}];" for i in range(len(metas)))
+        joined = "".join(f"[v{i}][a{i}]" for i in range(len(metas)))
+        cmd = ["ffmpeg", "-y", "-v", "error", *args,
+               "-filter_complex", f"{parts}{joined}concat=n={len(metas)}:v=1:a=1[v][a]",
+               "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+               "-c:a", "aac", "-movflags", "+faststart", str(tmp)]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        except subprocess.SubprocessError as e:
+            tmp.unlink(missing_ok=True)
+            return None, [], str(e)
+        if proc.returncode != 0 or not tmp.exists():
+            tmp.unlink(missing_ok=True)
+            import re as _re
+            return None, [], _re.sub(r"Bearer [A-Za-z0-9._\-]+", "Bearer ***",
+                                     (proc.stderr or "ffmpeg failed")[-400:])
+    tmp.replace(out)
+    olds = sorted((p for p in out_dir.glob("playlist_*.mp4") if not p.name.endswith(".part.mp4")),
+                  key=lambda p: p.stat().st_mtime, reverse=True)
+    for p in olds[3:]:
+        p.unlink(missing_ok=True)
+    return out, chapters, None
 
 
 # ---------------------------------------------------------------------------

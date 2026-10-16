@@ -847,6 +847,9 @@ def render_renders():
     st.session_state.setdefault("ren_compare", [])
     st.session_state["ren_compare"] = [n for n in st.session_state["ren_compare"] if n in by_name]
     _render_compare_panel(by_name, st.session_state["ren_compare"], ranges)
+    st.session_state.setdefault("ren_playlist", [])
+    st.session_state["ren_playlist"] = [n for n in st.session_state["ren_playlist"] if n in by_name]
+    _render_playlist_panel(by_name, rows)
 
     n_pages = (len(rows) - 1) // PAGE_SIZE + 1
     page = st.number_input(f"Page (of {n_pages})", 1, n_pages, 1, key="ren_page") if n_pages > 1 else 1
@@ -860,7 +863,7 @@ def render_renders():
         track = r.get("track") or {}
         user = r["user"]
         with st.container(border=True):
-            cols = st.columns([2, 6, 1, 1, 1, 1, 1])
+            cols = st.columns([2, 6, 1, 1, 1, 1, 1, 1])
             with cols[0]:
                 thumb = make_thumbnail(path)
                 if thumb:
@@ -917,13 +920,20 @@ def render_renders():
                     _toggle_compare(name)
                     st.rerun()
             with cols[5]:
+                in_list = name in st.session_state["ren_playlist"]
+                if st.button("☑️" if in_list else "🎞️", key=f"ren_pl_{name}",
+                             help=f"In the playlist (#{st.session_state['ren_playlist'].index(name) + 1}) — "
+                                  "click to remove" if in_list else "Add to the playlist"):
+                    _toggle_playlist(name)
+                    st.rerun()
+            with cols[6]:
                 if st.button("↩️", key=f"ren_reopen_{name}", disabled=reopen_state(r)[0] is None,
                              help="Open the Compilation Planner with this render's settings and matches"
                              if r.get("project") else
                              "Open the Compilation Planner with this render's settings (matches are rebuilt)"
                              if r.get("plan") else "No plan was saved with this render"):
                     _reopen_in_planner(r)
-            with cols[6]:
+            with cols[7]:
                 if st.button("🗑️", key=f"ren_del_{name}", disabled=user["keep"],
                              help="Kept — unkeep it (ℹ️) to delete" if user["keep"] else "Delete this render"):
                     st.session_state["ren_confirm_delete"] = name
@@ -958,6 +968,101 @@ def _toggle_compare(name: str) -> None:
     else:
         picked = (picked + [name])[-2:]
     st.session_state["ren_compare"] = picked
+
+
+def _toggle_playlist(name: str) -> None:
+    lst = list(st.session_state.get("ren_playlist", []))
+    if name in lst:
+        lst.remove(name)
+    else:
+        lst.append(name)
+    st.session_state["ren_playlist"] = lst
+    st.session_state.pop("ren_playlist_built", None)
+
+
+def _playlist_move(i: int, step: int) -> None:
+    lst = list(st.session_state.get("ren_playlist", []))
+    j = i + step
+    if 0 <= j < len(lst):
+        lst[i], lst[j] = lst[j], lst[i]
+        st.session_state["ren_playlist"] = lst
+        st.session_state.pop("ren_playlist_built", None)
+
+
+def _playlist_set(names: list) -> None:
+    st.session_state["ren_playlist"] = list(names)
+    st.session_state.pop("ren_playlist_built", None)
+
+
+def _render_playlist_panel(by_name: dict, rows: list) -> None:
+    """🎞️ Playlist: pick renders with 🎞️ on their cards (or add every one shown),
+    order them, and play them back to back as one video with a chapter list."""
+    import random as _random
+    from renders import make_playlist_video
+    names = st.session_state["ren_playlist"]
+    shown = [Path(r["path"]).name for r in rows]
+    with st.container(border=True):
+        total = sum(float(by_name[n].get("duration_sec") or 0) for n in names)
+        head = st.columns([4, 2, 1, 1, 1])
+        head[0].markdown(f"**🎞️ Playlist** — {len(names)} render(s) · {format_mmss(total)}" if names else
+                         "**🎞️ Playlist** — add renders with 🎞️ on their cards, or add every one shown")
+        head[1].button(f"➕ Add all shown ({len(shown)})", key="ren_pl_addall", use_container_width=True,
+                       on_click=_playlist_set, args=(names + [n for n in shown if n not in names],),
+                       help="Adds every render matching the filters, in the current sort order.")
+        head[2].button("🔀", key="ren_pl_shuffle", disabled=len(names) < 2, use_container_width=True,
+                       on_click=_playlist_set, args=(_random.sample(names, len(names)),), help="Shuffle the order")
+        head[3].button("Clear", key="ren_pl_clear", disabled=not names, use_container_width=True,
+                       on_click=_playlist_set, args=([],))
+        play = head[4].button("▶️ Play", key="ren_pl_play", type="primary", disabled=not names,
+                              use_container_width=True, help="Plays the renders back to back as one video.")
+        if not names:
+            return
+        with st.expander("Order", expanded=not st.session_state.get("ren_playlist_built")):
+            for i, n in enumerate(names):
+                m = by_name[n]
+                rc = st.columns([6, 1, 1, 1])
+                rc[0].markdown(f"{i + 1}. **{(m.get('track') or {}).get('track_id') or n}** · "
+                               f"{format_mmss(m.get('duration_sec') or 0)}"
+                               + ("" if m.get("local") else "  ☁️"))
+                rc[1].button("⬆️", key=f"ren_pl_up_{n}", disabled=i == 0, on_click=_playlist_move, args=(i, -1))
+                rc[2].button("⬇️", key=f"ren_pl_dn_{n}", disabled=i == len(names) - 1,
+                             on_click=_playlist_move, args=(i, 1))
+                rc[3].button("✖", key=f"ren_pl_rm_{n}", on_click=_toggle_playlist, args=(n,))
+
+        built = st.session_state.get("ren_playlist_built")
+        if play:
+            note = st.empty()
+            with st.spinner(f"Putting {len(names)} render(s) together…"):
+                path, chapters, err = make_playlist_video([by_name[n] for n in names],
+                                                          progress=lambda t: note.caption(t))
+            note.empty()
+            if err:
+                st.error(f"Couldn't make the playlist: {err}")
+                return
+            built = {"path": str(path), "names": list(names), "start": 0,
+                     "chapters": [(t, Path(m["path"]).name) for t, m in chapters]}
+            st.session_state["ren_playlist_built"] = built
+        if not built or built["names"] != names:
+            return
+        kw = {"start_time": int(built["start"])}
+        import inspect
+        if "autoplay" in inspect.signature(st.video).parameters:
+            kw["autoplay"] = bool(built.get("autoplay"))
+        st.video(built["path"], **kw)
+        st.caption("Jump to:")
+        ccols = st.columns(min(4, len(built["chapters"])))
+        for i, (t, n) in enumerate(built["chapters"]):
+            m = by_name.get(n, {})
+            label = f"{i + 1}. {(m.get('track') or {}).get('track_id') or n} ({format_mmss(t)})"
+            if ccols[i % len(ccols)].button(label, key=f"ren_pl_ch_{i}", use_container_width=True):
+                built["start"], built["autoplay"] = t, True
+                st.rerun()
+        bc = st.columns([1, 4])
+        if bc[0].button("⏹ Close player", key="ren_pl_close"):
+            st.session_state.pop("ren_playlist_built", None)
+            st.rerun()
+        bc[1].caption("The renders play one after another as a single video. Closing the player frees the "
+                      "memory it uses.")
 
 
 def _reopen_in_planner(r: dict) -> None:
