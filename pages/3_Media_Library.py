@@ -24,7 +24,7 @@ import streamlit as st
 import config
 from config import CATALOGUE_DIR, AUDIO_DIR, PREVIEW_DIR
 from library_common import (
-    safe_image, image_ok,
+    safe_image, image_ok, video_details, all_actors, all_video_tags, matches_details,
     scene_tags, tc_to_seconds, format_mmss, overlap_with_range,
     library_ranges, set_library_range, master_thumbnail_scenes,
     render_range_picker, show_render_player, file_download_button,
@@ -149,8 +149,16 @@ def render_videos():
         days = ADDED_CHOICES[added_choice][1]
         added_since = datetime.datetime.combine(
             datetime.date.today() - datetime.timedelta(days=days), datetime.time.min).timestamp()
+    details = video_details()
+    actor_filter = st.sidebar.multiselect("👤 Actors", all_actors(), key="lib_actors", placeholder="anyone",
+                                          help="Set on each video in the Reviewer (🎬 Video details).")
+    vtag_filter = st.sidebar.multiselect("🏷️ Video tags", all_video_tags(), key="lib_vtags", placeholder="any",
+                                         help="Tags for the whole video, set in the Reviewer (🎬 Video details).")
+    details_all = st.sidebar.toggle("Must have all of these", key="lib_details_all",
+                                    disabled=not (actor_filter or vtag_filter),
+                                    help="Off: any of the picked actors / video tags. On: every one of them.")
     all_tags = sorted({t for v in library.values() for s in v["scenes"] for t in s["tags"]}, key=str.lower)
-    tag_filter = st.sidebar.multiselect("Tags", all_tags)
+    tag_filter = st.sidebar.multiselect("Clip tags", all_tags)
     match_all = st.sidebar.radio(
         "Scenes must have", ["Any of these tags", "All of these tags"], horizontal=True,
         disabled=not tag_filter,
@@ -191,6 +199,8 @@ def render_videos():
     rows = []
     for vid, video in library.items():
         if name_query and name_query.lower() not in vid.lower():
+            continue
+        if not matches_details(vid, details, actor_filter, vtag_filter, details_all):
             continue
         if added_since is not None and added.get(vid, 0) < added_since:
             continue
@@ -275,8 +285,13 @@ def render_videos():
                 st.caption(line)
                 if rng:
                     st.caption(f"📚 Library range {format_mmss(rng[0])}–{format_mmss(rng[1])}")
+                _d = details.get(vid) or {}
+                if _d.get("actors") or _d.get("tags"):
+                    st.markdown(("👤 " + ", ".join(f"**{a}**" for a in _d.get("actors", [])) if _d.get("actors") else "")
+                                + ("  ·  " if _d.get("actors") and _d.get("tags") else "")
+                                + ("🏷️ " + " ".join(f"`{x}`" for x in _d.get("tags", [])) if _d.get("tags") else ""))
                 if stats["top_tags"]:
-                    st.markdown(" ".join(f"`{t}` {n}" for t, n in stats["top_tags"]))
+                    st.caption("Clip tags: " + " ".join(f"`{t}` {n}" for t, n in stats["top_tags"]))
             with cols[2]:
                 if st.button("🎚️", key=f"lib_toggle_{vid}", help="Set the library time range for this video"):
                     # One picker open at a time — each embeds a full video player.

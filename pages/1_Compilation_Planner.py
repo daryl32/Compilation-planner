@@ -30,7 +30,7 @@ import cut_scoring as CS
 import smart_cuts as SM
 from audio_charts import add_analysis_overlays
 import preview_snippets
-from library_common import (safe_image, scene_tags, render_range_picker, library_ranges, master_thumbnail_path, proxy_path,
+from library_common import (safe_image, video_details, all_actors, all_video_tags, matches_details, scene_tags, render_range_picker, library_ranges, master_thumbnail_path, proxy_path,
                             refresh_caches_after_sync, show_render_player, shared_cache,
                             clear_shared_data_caches, memory_check)
 
@@ -2173,7 +2173,7 @@ def _usage_signature() -> tuple:
     return tuple(sig)
 
 
-def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list) -> dict:
+def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list, allowed: frozenset = None) -> dict:
     """Which videos are recommended (the top-10 ranking) and which are
     currently selected, read entirely from session_state — called by the
     Video Selection fragment on every one of its own reruns.
@@ -2191,7 +2191,8 @@ def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list)
     _experimental = bool(st.session_state.get("ranking_experimental", False))
     cache_key = (track.get("track_id"), tag_filter,
                  tuple(sorted((v, tuple(r)) for v, r in _ranges.items())),
-                 tuple(sorted(_weights.items())), _experimental, _usage_signature())
+                 tuple(sorted(_weights.items())), _experimental, _usage_signature(),
+                 tuple(sorted(allowed)) if allowed is not None else None)
     random_seed = st.session_state.get("random_top_seed")
     cache = st.session_state.get("video_ranking_cache")
     if cache and cache["key"] == cache_key and cache.get("seed") == random_seed:
@@ -2201,6 +2202,8 @@ def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list)
             video_matches = cache["ranking"]["video_matches"]   # only the seed changed — no re-scoring
         else:
             video_matches = compute_video_rankings(track, tag_filter, _ranges, _weights, _experimental)
+            if allowed is not None:   # 👤 actor / 🏷️ video tag filter
+                video_matches = [v for v in video_matches if v["video_id"] in allowed]
         if random_seed is not None:
             # 🎲 Randomize: RECOMMENDED_COUNT videos drawn purely at random from every video that
             # has usable scenes — the ranking weights play no part. Same seed → same draw.
@@ -2210,7 +2213,8 @@ def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list)
         top_ids = [v["video_id"] for v in top_matches]
         match_by_id = {v["video_id"]: v for v in video_matches}
         rank_order = {v["video_id"]: i for i, v in enumerate(video_matches)}
-        other_options = sorted((vid for vid in all_video_ids if vid not in top_ids),
+        other_options = sorted((vid for vid in all_video_ids if vid not in top_ids
+                                and (allowed is None or vid in allowed)),
                                key=lambda vid: (rank_order.get(vid, 10**6), vid))
         ranking = {
             "video_matches": video_matches, "top_matches": top_matches, "top_ids": top_ids,
@@ -2745,8 +2749,21 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                   help=f"Replace the top list with {RECOMMENDED_COUNT} videos picked purely at random from the "
                        f"whole library (ignores the ranking weights). Press again for a different set.")
 
+    _details = video_details()
+    _dc = st.columns([5, 5, 2])
+    _f_actors = _dc[0].multiselect("👤 Actors", all_actors(), key="vid_actor_filter", placeholder="anyone",
+                                   help="Only videos with these actors (set in the Reviewer's 🎬 Video details).")
+    _f_vtags = _dc[1].multiselect("🏷️ Video tags", all_video_tags(), key="vid_vtag_filter", placeholder="any",
+                                  help="Only videos with these video tags (set in the Reviewer's 🎬 Video details).")
+    _f_all = _dc[2].toggle("Must have all", key="vid_details_all", disabled=not (_f_actors or _f_vtags),
+                           help="Off: any of them. On: every one.")
+    _allowed = (frozenset(v for v in all_video_ids if matches_details(v, _details, _f_actors, _f_vtags, _f_all))
+                if (_f_actors or _f_vtags) else None)
+    if _allowed is not None:
+        st.caption(f"👤🏷️ {len(_allowed)} of {len(all_video_ids)} videos match — the recommendations and the "
+                   f"'add another video' list only include those. Videos you've already ticked stay ticked.")
     render_ranking_weights(tag_filter)
-    info = resolve_video_selection(track, tuple(tag_filter), all_video_ids)
+    info = resolve_video_selection(track, tuple(tag_filter), all_video_ids, _allowed)
     video_matches = info["video_matches"]
     st.session_state["recommended_ids"] = info["top_ids"]
 
@@ -2829,6 +2846,11 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                                                   tag_filter))
             else:
                 st.write(f"{title} — no scenes match the current tag filter / time range{range_tag}")
+            _vd = _details.get(video_id) or {}
+            if _vd.get("actors") or _vd.get("tags"):
+                st.caption(("👤 " + ", ".join(_vd.get("actors", [])) if _vd.get("actors") else "")
+                           + ("  ·  " if _vd.get("actors") and _vd.get("tags") else "")
+                           + ("🏷️ " + ", ".join(_vd.get("tags", [])) if _vd.get("tags") else ""))
         with row_cols[3]:
             if st.button("✨", key=f"sim_toggle_{video_id}", help="Find videos similar to this one"):
                 st.session_state["show_similar_videos"] = (
