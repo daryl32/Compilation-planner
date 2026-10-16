@@ -730,6 +730,41 @@ split_sugg = set(sugg["split"])
 merge_group_of = {sid: grp for grp in sugg["merge"] for sid in grp}
 auto_ids = [s["scene_id"] for s in SE.auto_split_candidates(in_range, auto_target_sec)]
 
+# Scenes whose thumbnail is missing or unreadable — remake them all in one go.
+def _thumb_dest(scene: dict) -> Path:
+    paths = scene.get("thumbnail_paths") or []
+    return thumbs_dir / (Path(paths[0]).name if paths else f"scene_{int(scene['scene_id']):04d}_manual.jpg")
+
+
+_no_thumb = [s for s in ordered_all if not image_ok(_thumb_dest(s))]
+if _no_thumb:
+    with st.container(border=True):
+        tc_ = st.columns([3, 1])
+        tc_[0].warning(f"🖼️ {len(_no_thumb)} of {len(ordered_all)} scene(s) have a missing or unreadable thumbnail.")
+        if tc_[1].button(f"🔄 Remake all {len(_no_thumb)}", type="primary", use_container_width=True,
+                         key=f"remake_all_thumbs_{selected}",
+                         help="Takes a new picture for each one from the preview copy / video (or the timeline "
+                              "thumbnails) and queues them for Google Drive."):
+            bar = st.progress(0.0, text="Remaking thumbnails…")
+            made, failed = [], 0
+            vpaths = video_paths()
+            for n, scene in enumerate(_no_thumb, 1):
+                dest = _thumb_dest(scene)
+                if SE.write_thumbnail(data, scene, dest, vpaths, sprite_path):
+                    if not scene.get("thumbnail_paths"):
+                        scene["thumbnail_paths"] = [dest.name]
+                    made.append(dest)
+                else:
+                    failed += 1
+                bar.progress(n / len(_no_thumb), text=f"Remaking thumbnails… {n}/{len(_no_thumb)}")
+            bar.empty()
+            if not made:
+                st.error("Couldn't make any pictures — no preview copy, source video or timeline thumbnails "
+                         "for this video on the server.")
+            else:
+                write_catalogue(f"Remade {len(made)} thumbnail(s)"
+                                + (f" — {failed} couldn't be made." if failed else "."), new_thumbs=made)
+
 if sugg["split"] or sugg["merge"] or auto_ids:
     with st.container(border=True):
         hc = st.columns([3, 1])
