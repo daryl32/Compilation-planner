@@ -108,19 +108,36 @@ def beat_grid(track: dict) -> tuple:
             beats, how = (raw[0::2] if even >= odd else raw[1::2]), "halved"
     step = float(np.median(np.diff(beats)))
     if step > 0:
-        head = np.arange(beats[0] - step, -step * 0.25, -step)[::-1]
-        head = head[head >= 0]
-        tail = np.arange(beats[-1] + step, duration - step * 0.25, step)
-        if beats[0] > 1.5 * step:
-            beats = np.concatenate([head, beats])
-        if duration - beats[-1] > 1.5 * step:
-            beats = np.concatenate([beats, tail])
+        beats = _extend(beats, duration)
         bpm = 60.0 / step
     res = (beats, bpm, how)
     if len(_GRID_CACHE) > 64:
         _GRID_CACHE.clear()
     _GRID_CACHE[key] = res
     return res
+
+
+def _extend(marks: np.ndarray, duration: float) -> np.ndarray:
+    """Carry a regular grid (beats or bars) on to the start and the end of the
+    track, at the local spacing of its first / last 16 marks (a straight-line
+    fit, so a slight tempo difference doesn't pile up over a long intro)."""
+    marks = np.asarray(marks, dtype=float)
+    if len(marks) < 3:
+        return marks
+
+    def spacing(part):
+        part = part[:16] if len(part) > 16 else part
+        return float(np.polyfit(np.arange(len(part)), part, 1)[0])
+
+    head_step, tail_step = spacing(marks[:16]), spacing(marks[-16:])
+    out = marks
+    if head_step > 0 and marks[0] > 1.5 * head_step:
+        head = marks[0] - head_step * np.arange(1, int(marks[0] / head_step) + 2)
+        out = np.concatenate([head[head >= -0.25 * head_step][::-1].clip(min=0), out])
+    if tail_step > 0 and duration - marks[-1] > 1.5 * tail_step:
+        tail = marks[-1] + tail_step * np.arange(1, int((duration - marks[-1]) / tail_step) + 1)
+        out = np.concatenate([out, tail[tail < duration - 0.25 * tail_step]])
+    return out
 
 
 def bar_sec(track: dict, beats_per_bar: int = 4) -> float:
@@ -136,7 +153,7 @@ def bar_lines(track: dict, beats_per_bar: int) -> list:
     a = track.get("analysis") or {}
     db = a.get("downbeats") or []
     if how is None and db and int(a.get("beats_per_bar", 4)) == int(beats_per_bar):
-        return [float(t) for t in db]
+        return [float(t) for t in _extend(np.asarray(db, dtype=float), float(track.get("duration_sec") or db[-1]))]
     if len(beats) < beats_per_bar:
         return []
     bpb = int(beats_per_bar)
@@ -171,10 +188,34 @@ def snapped_marks(track: dict, marks: list, beats_per_bar: int) -> list:
     if not len(bars):
         return marks
     one_bar = bar_sec(track, beats_per_bar)
+    # The analysis can be off by up to a (wrong) beat, i.e. half a real bar or more,
+    # so "nearest bar line" can pick the bar before. Of the bar lines within a bar,
+    # take the one where the loudness steps most (a section change / drop is a
+    # change in the sound), the nearest one on a tie.
+    hires = track.get("hires") or {}
+    rms = np.asarray(hires.get("rms") or [], dtype=float)
+    rate = float(hires.get("rate", 30))
+    c = np.concatenate([[0.0], np.cumsum(rms)]) if len(rms) else None
+    w = max(1, int(round(one_bar * rate)))
+
+    def step_at(t):
+        if c is None:
+            return 0.0
+        i = int(round(t * rate))
+        lo, hi = max(0, i - w), min(len(rms), i + w)
+        if i <= lo or hi <= i:
+            return 0.0
+        return abs((c[hi] - c[i]) / (hi - i) - (c[i] - c[lo]) / (i - lo))
+
     out = []
     for m in marks:
-        j = int(np.argmin(np.abs(bars - m)))
-        out.append(float(bars[j]) if abs(bars[j] - m) <= one_bar else m)
+        near = bars[np.abs(bars - m) <= one_bar * 1.01]
+        if not len(near):
+            out.append(m)
+            continue
+        scores = [(step_at(b), -abs(b - m), b) for b in near]
+        best = max(scores)
+        out.append(float(best[2]))
     return out
 
 

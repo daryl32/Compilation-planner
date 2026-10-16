@@ -27,6 +27,7 @@ import catalogue_store as CStore
 import autofill as AF
 import similarity as SIM
 import cut_scoring as CS
+import smart_cuts as SM
 from audio_charts import add_analysis_overlays
 import preview_snippets
 from library_common import (safe_image, scene_tags, render_range_picker, library_ranges, master_thumbnail_path, proxy_path,
@@ -2248,11 +2249,13 @@ AUDIO_SETTINGS_KEYS = [
     "phrase_lock_bars", "cinematic_bars", "dynamic_priority_override", "override_delta_thresh",
     "override_clear_secs",
     *CS.DEFAULTS.keys(),
+    *SM.DEFAULTS.keys(),
 ]
 
 SEG_ADAPTIVE = "Adaptive (energy-change + hits)"
 SEG_RHYTHM = "Rhythm Engine (bar cutting styles)"
 SEG_SCORED = "Scored cuts (all signals)"
+SEG_SMART = "Smart (self-tuning)"
 
 # Which settings each segmentation method actually uses (beats_per_bar: all).
 SEG_METHOD_KEYS = {
@@ -2262,6 +2265,7 @@ SEG_METHOD_KEYS = {
                  "cinematic_bars", "dynamic_priority_override", "override_delta_thresh",
                  "override_clear_secs"],
     SEG_SCORED: list(CS.DEFAULTS.keys()),
+    SEG_SMART: list(SM.DEFAULTS.keys()),
 }
 
 
@@ -2280,6 +2284,8 @@ def segmentation_settings() -> dict:
 def build_segments(track: dict, cfg: dict) -> list:
     """Segments for this track with the settings from segmentation_settings()."""
     bpb = int(cfg.get("beats_per_bar", 4))
+    if cfg["method"] == SEG_SMART:
+        return SM.build_smart_segments(track, cfg)
     if cfg["method"] == SEG_SCORED:
         return CS.build_scored_segments(track, cfg)
     if cfg["method"] == SEG_RHYTHM:
@@ -2295,7 +2301,8 @@ def build_segments(track: dict, cfg: dict) -> list:
 
 
 SEG_LABELS = {
-    SEG_SCORED: "🎯 Best musical moments (recommended)",
+    SEG_SMART: "🧠 Smart — tunes itself to the song (new)",
+    SEG_SCORED: "🎯 Best musical moments",
     SEG_ADAPTIVE: "⚡ Energy changes & big hits",
     SEG_RHYTHM: "🎬 Bar styles — cinematic / fast",
 }
@@ -2327,6 +2334,50 @@ def _apply_cut_focus() -> None:
            **CUT_FOCUS.get(st.session_state.get("sc_focus"), {})}
     for k, v in mix.items():
         st.session_state[k] = v   # the cutting pace doesn't touch these, so it stays as it is
+
+
+_PACE_LABELS = {-2: "much calmer", -1: "calmer", 0: "auto (the song's own)", 1: "busier", 2: "much busier"}
+
+
+def _render_smart_cut_settings(track: dict, _v) -> None:
+    """Controls and the per-section breakdown for the Smart method."""
+    _custom = dict(on_change=_mark_audio_custom)
+    a = track.get("analysis") or {}
+    if not a:
+        st.info("This track only has the basic analysis — Smart works from its beats and loudness. Add the "
+                "extra analysis (bars, sections, drops, build-ups, drums, vocals) from **Media Library → Audio → "
+                "🔬 Audio analysis** for its full picture of the song.")
+    c = st.columns(2)
+    c[0].select_slider("Pace", options=[-2, -1, 0, 1, 2], value=int(round(float(_v("sm_pace")))), key="sm_pace",
+                       format_func=lambda x: _PACE_LABELS[x], **_custom,
+                       help="Moves the whole edit one grid level calmer or busier than the pace Smart picked "
+                            "for this song (e.g. every bar → every 2 bars).")
+    c[1].slider("Contrast", 0.0, 2.0, value=float(_v("sm_contrast")), step=0.25, key="sm_contrast", **_custom,
+                help="How much the pace changes between quiet and intense sections. 1 = what this song's own "
+                     "dynamics suggest; 0 = the same pace throughout; 2 = exaggerated.")
+    t = st.columns(4)
+    t[0].toggle("Speed up into drops", value=bool(_v("sm_builds")), key="sm_builds", **_custom,
+                help="Through a build-up the cuts get quicker (e.g. every 2 bars → bar → half bar), landing on the drop.")
+    t[1].toggle("Accents", value=bool(_v("sm_accents")), key="sm_accents", **_custom,
+                help="An extra cut on hits that stand out from the rest of the song, and on vocal entries — "
+                     "only where the section's rhythm leaves room.")
+    t[2].toggle("Respect vocals", value=bool(_v("sm_vocals")), key="sm_vocals", **_custom,
+                help="Moves a cut that would land mid-line to the gap between sung lines (needs vocal analysis).")
+    t[3].toggle("Mirror repeats", value=bool(_v("sm_mirror")), key="sm_mirror", **_custom,
+                help="Repeated sections (chorus 1 and 2) get the same cutting pattern.")
+    _, rep = SM.plan_cuts(track, segmentation_settings())
+    with st.expander("🧠 How Smart read this song", expanded=True):
+        for note in rep.get("notes", []):
+            st.caption("• " + note)
+        if rep.get("features"):
+            st.caption("• Intensity from: " + ", ".join(rep["features"]))
+        rows = [{"From": format_mmss(s["start"]), "To": format_mmss(s["end"]), "Section": s["label"],
+                 "Intensity": s["intensity"], "A cut every": s["every"], "Why": s["reason"]}
+                for s in rep.get("sections", [])]
+        if rows:
+            st.dataframe(rows, hide_index=True, use_container_width=True,
+                         column_config={"Intensity": st.column_config.ProgressColumn(
+                             "Intensity", min_value=0.0, max_value=1.0, format="%.2f")})
 
 
 def _render_scored_cut_settings(track: dict, _v) -> None:
@@ -2394,6 +2445,12 @@ CUT_KIND_STYLES = (
     ("sc_harmony", "rgba(60,170,90,0.7)", "Scored cut: chord change"),
     ("sc_vocal", "rgba(230,120,0,0.8)", "Scored cut: vocal line"),
     ("sc_beat", "rgba(140,140,140,0.5)", "Scored cut: beat"),
+    ("sm_section", "rgba(150,60,200,0.9)", "Smart: section change"),
+    ("sm_drop", "rgba(220,40,40,0.9)", "Smart: drop"),
+    ("sm_build", "rgba(230,150,30,0.8)", "Smart: build-up (speeding up)"),
+    ("sm_grid", "rgba(60,90,200,0.6)", "Smart: section's cutting rhythm"),
+    ("sm_accent", "rgba(220,60,60,0.7)", "Smart: accent (standout hit)"),
+    ("sm_vocal", "rgba(230,120,0,0.8)", "Smart: vocal entry"),
 )
 
 
@@ -2434,14 +2491,16 @@ def render_audio_settings_section(track: dict) -> None:
         return st.session_state.get(key, _shadow.get(key, DIAL_DEFAULTS.get(key)))
 
     st.subheader("How the music is cut")
-    _seg_options = [SEG_SCORED, SEG_ADAPTIVE, SEG_RHYTHM]
+    _seg_options = [SEG_SMART, SEG_SCORED, SEG_ADAPTIVE, SEG_RHYTHM]
     _seg_default = _v("segmentation_method")
     segmentation_method = st.radio(
         "Method", _seg_options,
         index=_seg_options.index(_seg_default) if _seg_default in _seg_options else 0,
         key="segmentation_method", format_func=lambda m: SEG_LABELS.get(m, m), horizontal=True,
         on_change=_audio_retune_if_paced,
-        help="🎯 Best musical moments: scores every beat for how good a cut it would be (bar lines, "
+        help="🧠 Smart: reads the song's structure and intensity and sets its own cutting rhythm — a "
+             "steady pace per section on the bar / beat grid, faster when the music is bigger, speeding up "
+             "into drops, with cuts at every section change. 🎯 Best musical moments: scores every beat for how good a cut it would be (bar lines, "
              "phrases, section changes, drops, drums, chords, vocals) and picks the best set together. "
              "⚡ Energy changes & big hits: cuts where the loudness shifts and on the strongest hits, "
              "wherever they fall. 🎬 Bar styles: each stretch of bars is either CINEMATIC (a cut every "
@@ -2473,7 +2532,9 @@ def render_audio_settings_section(track: dict) -> None:
                 st.caption(line)
 
     _custom = dict(on_change=_mark_audio_custom)
-    if segmentation_method == SEG_SCORED:
+    if segmentation_method == SEG_SMART:
+        _render_smart_cut_settings(track, _v)
+    elif segmentation_method == SEG_SCORED:
         _render_scored_cut_settings(track, _v)
     elif segmentation_method == SEG_ADAPTIVE:
         col1, col2 = st.columns(2)
@@ -3735,7 +3796,7 @@ MAX_SIMULTANEOUS_CLIPS = 8   # matches the VSE add-on's layouts (up to SEVEN_UP 
 
 DIAL_DEFAULTS = {
     # Segmentation — Adaptive
-    "segmentation_method": "Scored cuts (all signals)",   # = SEG_SCORED; best on measured tracks
+    "segmentation_method": "Smart (self-tuning)",   # = SEG_SMART
     "audio_style": "Balanced",    # cutting pace preset; dials follow the track unless Custom
     "sc_focus": "Balanced",       # Scored cuts: "What to cut on" mix
     "beats_per_bar": 4,
@@ -3757,6 +3818,8 @@ DIAL_DEFAULTS = {
     "override_clear_secs": 1.0,
     # Segmentation — Scored cuts
     **CS.DEFAULTS,
+    # Segmentation — Smart
+    **SM.DEFAULTS,
     # Split screen & intensity
     "split_screen_enabled": False,
     "min_clips": 1,
@@ -4242,7 +4305,11 @@ def auto_tune_parameters(track: dict, min_clips: int, max_clips: int, method: st
     why = [f"Tempo {grid_bpm:.0f} BPM → 1 bar = {bar:.2f}s"
            + {"doubled": " (the analysis found every other beat — corrected)",
               "halved": " (the analysis found twice the beats — corrected)"}.get(fix, "")]
-    if method == SEG_RHYTHM:
+    if method == SEG_SMART:
+        s = {"sm_pace": {"Calm": -1, "Balanced": 0, "Energetic": 1}.get(style_name, 0), "sm_contrast": 1.0}
+        why.append("Smart sets its own pace from the song; the cutting pace moves it "
+                   + {"Calm": "one level calmer", "Energetic": "one level busier"}.get(style_name, "nowhere (auto)"))
+    elif method == SEG_RHYTHM:
         s = _tune_rhythm(track, style, bpb, bar, beat, why)
     elif method == SEG_SCORED:
         s = _tune_scored(track, style, bar, beat, why)
