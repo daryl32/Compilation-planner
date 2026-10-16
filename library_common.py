@@ -716,6 +716,24 @@ def render_range_picker(video_id: str, source_path: str, duration: float, curren
     return None
 
 
+def file_download_button(path, label: str, key: str, mime: str = "video/mp4", **kwargs) -> None:
+    """A download button for a file on the server that doesn't read the file
+    until it's clicked (a page full of them would otherwise load every video
+    into memory). Older Streamlit without that: a first click prepares it."""
+    path = Path(path)
+    if "callable" in (st.download_button.__doc__ or ""):
+        st.download_button(label, data=lambda p=path: p.read_bytes(), file_name=path.name, mime=mime,
+                           key=key, **kwargs)
+        return
+    ready_key = f"_dl_ready_{key}"
+    if st.session_state.get(ready_key):
+        st.download_button(f"💾 Save {path.name}", data=path.read_bytes(), file_name=path.name, mime=mime,
+                           key=key, on_click=lambda: st.session_state.pop(ready_key, None), **kwargs)
+    elif st.button(label, key=f"{key}_prep", **kwargs):
+        st.session_state[ready_key] = True
+        st.rerun()
+
+
 def show_render_player(meta: dict, height: int = 360) -> None:
     """Play a saved render: the server's copy if it's still here, otherwise
     straight from Google Drive with Drive's own player (works in a browser
