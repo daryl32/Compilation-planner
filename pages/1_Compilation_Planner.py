@@ -2336,12 +2336,34 @@ def _apply_cut_focus() -> None:
         st.session_state[k] = v   # the cutting pace doesn't touch these, so it stays as it is
 
 
+def _pace_row(_pc, _styles, _style_now) -> None:
+    """Cutting pace preset + Re-tune (every method except Smart)."""
+    _pc[0].selectbox(
+        "Cutting pace", _styles, index=_styles.index(_style_now), key="audio_style",
+        on_change=_audio_retune_if_paced,
+        format_func=lambda x: {"Calm": "🌊 Calm — a cut every ~4 bars",
+                               "Balanced": "⚖️ Balanced — every ~2 bars",
+                               "Energetic": "🔥 Energetic — every bar",
+                               AUDIO_STYLE_CUSTOM: "✏️ Custom — your own settings"}.get(x, x),
+        help="Sets every dial below for THIS track — its tempo, loudness and hits — and keeps them "
+             "tuned if you change the track or method. Moving any dial switches to Custom.")
+    _pc[1].button("🎯 Re-tune for this track", on_click=_run_auto_tune, use_container_width=True,
+                  help="Re-runs auto-detect for the current method at the chosen pace (Balanced if Custom). "
+                       "Same as the sidebar's Auto-detect.")
+
+
+def _smart_reset() -> None:
+    for k, v in SM.DEFAULTS.items():
+        st.session_state[k] = v
+
+
 _PACE_LABELS = {-2: "much calmer", -1: "calmer", 0: "auto (the song's own)", 1: "busier", 2: "much busier"}
 
 
 def _render_smart_cut_settings(track: dict, _v) -> None:
-    """Controls and the per-section breakdown for the Smart method."""
-    _custom = dict(on_change=_mark_audio_custom)
+    """Controls and the per-section breakdown for the Smart method. Smart tunes
+    itself to the track; these only dial it in (the cutting-pace presets don't apply)."""
+    _custom = {}
     a = track.get("analysis") or {}
     if not a:
         st.info("This track only has the basic analysis — Smart works from its beats and loudness. Add the "
@@ -2509,18 +2531,13 @@ def render_audio_settings_section(track: dict) -> None:
     _pc = st.columns([2, 2, 1])
     _styles = list(AUDIO_STYLES) + [AUDIO_STYLE_CUSTOM]
     _style_now = _v("audio_style") if _v("audio_style") in _styles else AUDIO_STYLE_CUSTOM
-    _pc[0].selectbox(
-        "Cutting pace", _styles, index=_styles.index(_style_now), key="audio_style",
-        on_change=_audio_retune_if_paced,
-        format_func=lambda x: {"Calm": "🌊 Calm — a cut every ~4 bars",
-                               "Balanced": "⚖️ Balanced — every ~2 bars",
-                               "Energetic": "🔥 Energetic — every bar",
-                               AUDIO_STYLE_CUSTOM: "✏️ Custom — your own settings"}.get(x, x),
-        help="Sets every dial below for THIS track — its tempo, loudness and hits — and keeps them "
-             "tuned if you change the track or method. Moving any dial switches to Custom.")
-    _pc[1].button("🎯 Re-tune for this track", on_click=_run_auto_tune, use_container_width=True,
-                  help="Re-runs auto-detect for the current method at the chosen pace (Balanced if Custom). "
-                       "Same as the sidebar's Auto-detect.")
+    if segmentation_method == SEG_SMART:
+        # Smart sets its own pace from the track; the Pace slider below dials it in.
+        _pc[0].caption("🧠 Smart sets its pace from the track itself — dial it in with **Pace** below.")
+        _pc[1].button("↺ Back to auto", on_click=_smart_reset, use_container_width=True,
+                      help="Pace back to auto, contrast back to the song's own, all switches on.")
+    else:
+        _pace_row(_pc, _styles, _style_now)
     _pc[2].number_input(
         "Beats per bar", min_value=2, max_value=12, value=int(_v("beats_per_bar")), key="beats_per_bar",
         on_change=_audio_retune_if_paced,
@@ -4306,9 +4323,8 @@ def auto_tune_parameters(track: dict, min_clips: int, max_clips: int, method: st
            + {"doubled": " (the analysis found every other beat — corrected)",
               "halved": " (the analysis found twice the beats — corrected)"}.get(fix, "")]
     if method == SEG_SMART:
-        s = {"sm_pace": {"Calm": -1, "Balanced": 0, "Energetic": 1}.get(style_name, 0), "sm_contrast": 1.0}
-        why.append("Smart sets its own pace from the song; the cutting pace moves it "
-                   + {"Calm": "one level calmer", "Energetic": "one level busier"}.get(style_name, "nowhere (auto)"))
+        s = {}   # Smart tunes itself from the track; its Pace / Contrast are left as you set them
+        why.append("Smart sets its own pace from the track — only split screen was calibrated here")
     elif method == SEG_RHYTHM:
         s = _tune_rhythm(track, style, bpb, bar, beat, why)
     elif method == SEG_SCORED:
