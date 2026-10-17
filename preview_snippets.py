@@ -69,8 +69,42 @@ def make_synced_snippet(cache_dir: Path, video_path: Path, video_start: float, d
     return out, None
 
 
+def make_audio_snippet(cache_dir: Path, audio_path: Path, start: float, duration: float,
+                       lead_in: float = 0.0) -> tuple:
+    """(path, None) / (None, error): just the music from start to start+duration
+    (plus lead_in seconds before it, to hear what leads in), as a small .m4a —
+    for the story map wizard's ▶ buttons. Cached like the video snippets."""
+    a = max(0.0, start - lead_in)
+    dur = duration + (start - a)
+    sig = "|".join(str(x) for x in ("audio", audio_path, round(a, 3), round(dur, 3), _mtime(audio_path)))
+    out = Path(cache_dir) / f"{hashlib.sha1(sig.encode()).hexdigest()[:20]}.m4a"
+    if out.exists():
+        os.utime(out)
+        return out, None
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.stem + ".part.m4a")
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+           "-ss", f"{a:.3f}", "-t", f"{dur:.3f}", "-i", str(audio_path),
+           "-map", "0:a:0", "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+           "-af", "afade=t=in:d=0.05,areverse,afade=t=in:d=0.3,areverse",
+           "-movflags", "+faststart", str(tmp)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError:
+        return None, "ffmpeg not found on the server"
+    except subprocess.TimeoutExpired:
+        tmp.unlink(missing_ok=True)
+        return None, "making the clip took too long"
+    if proc.returncode != 0 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        return None, (proc.stderr or "ffmpeg failed").strip()[-400:]
+    tmp.replace(out)
+    _prune(Path(cache_dir))
+    return out, None
+
+
 def _prune(cache_dir: Path) -> None:
-    files = sorted((p for p in cache_dir.glob("*.mp4") if ".part" not in p.name),
+    files = sorted((p for p in [*cache_dir.glob("*.mp4"), *cache_dir.glob("*.m4a")] if ".part" not in p.name),
                    key=lambda p: p.stat().st_mtime, reverse=True)
     for p in files[MAX_CACHED:]:
         p.unlink(missing_ok=True)

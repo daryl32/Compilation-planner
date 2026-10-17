@@ -5,7 +5,8 @@ One view, always editable (there's no separate review mode any more):
   • Find a video: search by name and narrow the list to videos with no custom
     thumbnail, with split or combine suggestions, with no outro clip, or not
     fully reviewed.
-  • Each scene is a card: tags, Exclude / Intro / Outro, ⭐ video thumbnail,
+  • Each scene is a card: tags, Exclude, roles (🎬 Intro · 🌙 Slow · 💥 Action ·
+    🏁 Outro and your own — see scene_roles.py), ⭐ video thumbnail,
     ✂️ Split…, ⚡ Auto split, 🔗 Combine with next, ↩️ Undo.
   • Tag and checkbox edits stay on the page until 💾 Save (each card updates on
     its own, so ticking a box doesn't reload the whole page). Split, combine,
@@ -29,6 +30,7 @@ from library_common import (safe_image, image_ok, video_details, set_video_detai
                             scene_tags)
 import catalogue_store as CS
 import scene_edits as SE
+import scene_roles as SR
 
 # Sign-in, whitelist, Drive connect, title and the shared sidebar — see page_setup.py
 from page_setup import page_setup, push_file_with_oauth, drive_token
@@ -185,6 +187,7 @@ def video_facts(v: dict) -> dict:
         "n_merge": len(sugg["merge"]),
         "has_outro": any(s["outro"] for s in v["scenes"]),
         "has_intro": any(s["intro"] for s in v["scenes"]),
+        "roles": {r for s in v["scenes"] if not s["excluded"] for r in s.get("roles", [])},
         "reviewed": sum(s["reviewed"] for s in v["scenes"]),
         "n": len(v["scenes"]),
         "added": _added.get(v["video_id"], v["added"]),
@@ -206,11 +209,20 @@ with st.container(border=True):
     )
 
     _details = video_details()
-    dc = st.columns([2, 2, 1])
+    _roles = SR.roles_by_id()
+    dc = st.columns([2, 2, 2, 2, 1])
     find_actors = dc[0].multiselect("With actors", all_actors(), key="rev_find_actors", placeholder="anyone")
     find_vtags = dc[1].multiselect("With video tags", all_video_tags(), key="rev_find_vtags", placeholder="any")
-    find_all = dc[2].toggle("Must have all", key="rev_find_all", disabled=not (find_actors or find_vtags),
-                            help="Off: any of the picked actors / tags. On: every one of them.")
+    find_roles = dc[2].multiselect("With scenes marked", list(_roles), key="rev_find_roles", placeholder="any",
+                                   format_func=lambda r: SR.label(r, _roles),
+                                   help="Videos with at least one (not excluded) scene in that role.")
+    find_no_roles = dc[3].multiselect("Without scenes marked", list(_roles), key="rev_find_no_roles",
+                                      placeholder="—", format_func=lambda r: SR.label(r, _roles),
+                                      help="Videos with no (not excluded) scene in that role yet — "
+                                           "handy for finding videos still to mark.")
+    find_all = dc[4].toggle("Must have all", key="rev_find_all",
+                            disabled=not (find_actors or find_vtags or find_roles),
+                            help="Off: any of the picked actors / tags / roles. On: every one of them.")
 
     import datetime as _dt
     _today_start = _dt.datetime.combine(_dt.date.today(), _dt.time.min).timestamp()
@@ -221,6 +233,10 @@ with st.container(border=True):
             return False
         vid = index[stem]["video_id"]
         if not matches_details(vid, _details, find_actors, find_vtags, find_all):
+            return False
+        if find_roles and not (all if find_all else any)(r in f["roles"] for r in find_roles):
+            return False
+        if any(r in f["roles"] for r in find_no_roles):
             return False
         checks = {
             FIND_NO_THUMB: not f["custom_thumb"],
@@ -402,7 +418,7 @@ elif use_library_range:
 # ---------------------------------------------------------------------------
 # Edits: unsaved field edits live in widget state until saved
 # ---------------------------------------------------------------------------
-FIELD_PREFIXES = ("tags", "excluded", "intro", "outro")
+FIELD_PREFIXES = ("tags", "excluded", "roles")
 
 
 def wkey(prefix: str, sid) -> str:
@@ -417,16 +433,14 @@ def pending_fields(scene: dict):
     return {
         "tags": list(st.session_state.get(wkey("tags", sid), scene_tags(scene))),
         "excluded": bool(st.session_state.get(wkey("excluded", sid), scene.get("excluded", False))),
-        "intro_candidate": bool(st.session_state.get(wkey("intro", sid), scene.get("intro_candidate", False))),
-        "outro_candidate": bool(st.session_state.get(wkey("outro", sid), scene.get("outro_candidate", False))),
+        "roles": list(st.session_state.get(wkey("roles", sid), SR.scene_roles(scene)) or []),
     }
 
 
 def is_changed(scene: dict, new: dict) -> bool:
     return (new["tags"] != scene_tags(scene)
             or new["excluded"] != bool(scene.get("excluded", False))
-            or new["intro_candidate"] != bool(scene.get("intro_candidate", False))
-            or new["outro_candidate"] != bool(scene.get("outro_candidate", False)))
+            or set(new["roles"]) != set(SR.scene_roles(scene)))
 
 
 def apply_pending(mark_all_ids=()) -> int:
@@ -441,8 +455,7 @@ def apply_pending(mark_all_ids=()) -> int:
             changed += 1
             scene["corrected_tags"] = new["tags"]
             scene["excluded"] = new["excluded"]
-            scene["intro_candidate"] = new["intro_candidate"]
-            scene["outro_candidate"] = new["outro_candidate"]
+            SR.set_scene_roles(scene, new["roles"])
         if ch or scene["scene_id"] in mark_all_ids:
             if "corrected_tags" not in scene:
                 scene["corrected_tags"] = scene_tags(scene)  # confirmed as correct
@@ -792,7 +805,10 @@ hide_excluded = fc[5].toggle("Hide excluded", key="rev_hide_excluded",
                              help="Leave excluded scenes out of the list (they stay excluded). Stays on as you "
                                   "move between videos.")
 show_only_excluded = fc[1].checkbox("Only excluded", value=False)
-show_only_intro_outro = fc[2].checkbox("Only intro/outro", value=False)
+ROLE_ANY, ROLE_SOME, ROLE_NONE = "Any role", "With a role", "No role"
+role_filter = fc[2].selectbox("Role", [ROLE_ANY, ROLE_SOME, ROLE_NONE, *_roles], key="rev_role_filter",
+                              format_func=lambda r: r if r in (ROLE_ANY, ROLE_SOME, ROLE_NONE) else SR.label(r, _roles),
+                              label_visibility="collapsed")
 show_only_suggested = fc[3].checkbox("Only suggestions", value=False, disabled=not show_suggestions)
 show_only_unreviewed = fc[4].checkbox("Only not reviewed", value=False)
 
@@ -814,8 +830,11 @@ for scene in ordered_all:
         continue
     if hide_excluded and not show_only_excluded and scene.get("excluded"):
         continue
-    if show_only_intro_outro and not (scene.get("intro_candidate") or scene.get("outro_candidate")):
-        continue
+    if role_filter != ROLE_ANY:
+        _sr = SR.scene_roles(scene)
+        if ((role_filter == ROLE_SOME and not _sr) or (role_filter == ROLE_NONE and _sr)
+                or (role_filter not in (ROLE_SOME, ROLE_NONE) and role_filter not in _sr)):
+            continue
     if show_only_suggested and show_suggestions and not (
             scene["scene_id"] in split_sugg or scene["scene_id"] in merge_group_of):
         continue
@@ -828,6 +847,14 @@ _motions = sorted(s["motion_intensity"] for s in data["scenes"]
                   if isinstance(s.get("motion_intensity"), (int, float)))
 
 
+def motion_rank(scene: dict):
+    """0 = calmest scene in this video, 1 = busiest (None if not measured)."""
+    m = scene.get("motion_intensity")
+    if not isinstance(m, (int, float)) or not _motions:
+        return None
+    return sum(v <= m for v in _motions) / len(_motions)
+
+
 def motion_text(scene: dict) -> str:
     m = scene.get("motion_intensity")
     if not isinstance(m, (int, float)):
@@ -835,6 +862,114 @@ def motion_text(scene: dict) -> str:
     rank = sum(v <= m for v in _motions) / len(_motions) if _motions else 0.5
     level = "calm" if rank < 0.34 else "busy" if rank > 0.66 else "medium"
     return f"🏃 motion {m:.1f} ({level})"
+
+
+# ---------------------------------------------------------------------------
+# Roles: mark every shown scene, and your own roles
+# ---------------------------------------------------------------------------
+
+def _bulk_role(role_id, add: bool, ids: list) -> None:
+    """Add / remove a role on every shown scene — an unsaved edit like ticking each card.
+    role_id None = the role picked in the popover (read now, not when the button was drawn)."""
+    role_id = role_id or st.session_state.get("rev_bulk_role")
+    for sid in ids:
+        k = wkey("roles", sid)
+        cur = (list(st.session_state.get(k) or []) if k in st.session_state
+               else SR.scene_roles(scene_by_id[sid]))
+        if add and role_id not in cur:
+            cur.append(role_id)
+        elif not add:
+            cur = [r for r in cur if r != role_id]
+        st.session_state[k] = cur
+
+
+def _bulk_hints(ids: list) -> None:
+    """Accept every 💡 motion hint among the shown scenes."""
+    for sid in ids:
+        hint = SR.motion_hint(motion_rank(scene_by_id[sid]))
+        if hint in _roles:
+            _bulk_role(hint, True, [sid])
+
+
+def _role_fit_inputs(prefix: str, fit: dict) -> dict:
+    c = st.columns(2)
+    energy = c[0].selectbox("Energy in the music", list(SR.ENERGY), index=list(SR.ENERGY).index(fit["energy"]),
+                            format_func=SR.ENERGY.get, key=f"{prefix}_energy")
+    place = c[1].selectbox("Where in the track", list(SR.PLACES), index=list(SR.PLACES).index(fit["place"]),
+                           format_func=SR.PLACES.get, key=f"{prefix}_place")
+    moments = st.multiselect("Musical moments", list(SR.MOMENTS), default=fit["moments"],
+                             format_func=SR.MOMENTS.get, key=f"{prefix}_moments")
+    suggest = st.toggle("Let the story map wizard suggest it", value=fit["suggest"], key=f"{prefix}_suggest",
+                        help="Off: the wizard never places it — you mark its parts of the track yourself.")
+    return {"energy": energy, "place": place, "moments": moments, "suggest": suggest}
+
+
+def role_manager() -> None:
+    st.markdown("**Built in**")
+    for r in SR.BUILTIN:
+        st.markdown(f"{r['emoji']} **{r['name']}** — {r['help']}  \n"
+                    f":gray[Music fit: {SR.describe_fit(r['fit'])}]")
+    custom = [r for r in _roles.values() if not r["builtin"]]
+    st.markdown("**Your own**")
+    if not custom:
+        st.caption("None yet.")
+    for r in custom:
+        st.markdown(f"{r['emoji']} **{r['name']}**" + (f" — {r['help']}" if r["help"] else "")
+                    + f"  \n:gray[Music fit: {SR.describe_fit(r['fit'])}]")
+    st.divider()
+    choices = ["➕ New role", *[r["id"] for r in custom]]
+    pick = st.selectbox("Add or change", choices, key="rev_role_edit_pick",
+                        format_func=lambda r: r if r == choices[0] else f"✏️ {SR.label(r, _roles)}")
+    r = _roles.get(pick) or {"name": "", "emoji": "🏷️", "colour": SR.next_colour(), "help": "",
+                            "fit": {"energy": "any", "place": "anywhere", "moments": [], "suggest": True}}
+    p = f"rev_role_{pick}"
+    c = st.columns([3, 1, 1])
+    name = c[0].text_input("Name", value=r["name"], key=f"{p}_name", placeholder="e.g. Reveal")
+    emoji = c[1].text_input("Emoji", value=r["emoji"], key=f"{p}_emoji", max_chars=4)
+    colour = c[2].color_picker("Colour", value=r["colour"], key=f"{p}_colour")
+    help_text = st.text_input("What it's for (optional)", value=r["help"], key=f"{p}_help")
+    st.caption("**Music fit** — where in a track this role belongs. The story map wizard uses it to "
+               "suggest that role's parts of the track.")
+    fit = _role_fit_inputs(p, r["fit"])
+    bc = st.columns(2)
+    try:
+        if pick == choices[0]:
+            if bc[0].button("➕ Add role", type="primary", use_container_width=True, key=f"{p}_add"):
+                rid = SR.add_role(name, emoji, colour, fit, help_text)
+                st.session_state["rev_saved_msg"] = f"Added {SR.label(rid)}."
+                st.rerun()
+        else:
+            if bc[0].button("💾 Save role", type="primary", use_container_width=True, key=f"{p}_save"):
+                SR.update_role(pick, name=name, emoji=emoji, colour=colour, help=help_text, fit=fit)
+                st.session_state["rev_saved_msg"] = f"Saved {SR.label(pick)}."
+                st.rerun()
+            if bc[1].button("🗑️ Delete role", use_container_width=True, key=f"{p}_del",
+                            help="Removes it from the list. Scenes keep the mark (shown as 'deleted') until "
+                                 "they're next saved, so adding a role with the same name brings them back."):
+                SR.delete_role(pick)
+                st.session_state.pop("rev_role_edit_pick", None)
+                st.session_state["rev_saved_msg"] = f"Deleted {r['name']}."
+                st.rerun()
+    except ValueError as e:
+        st.error(str(e))
+
+
+_shown_ids = [s["scene_id"] for s, _ in shown]
+rc_ = st.columns([2, 2, 3])
+with rc_[0].popover(f"🎭 Mark the {len(_shown_ids)} shown scene(s)…", use_container_width=True,
+                    disabled=not _shown_ids):
+    _brole = st.selectbox("Role", list(_roles), format_func=lambda r: SR.label(r, _roles), key="rev_bulk_role")
+    _bc = st.columns(2)
+    _bc[0].button("➕ Add to all", use_container_width=True, on_click=_bulk_role, args=(None, True, _shown_ids))
+    _bc[1].button("➖ Remove from all", use_container_width=True, on_click=_bulk_role,
+                  args=(None, False, _shown_ids))
+    _n_hints = sum(1 for i in _shown_ids if SR.motion_hint(motion_rank(scene_by_id[i])) in _roles)
+    st.button(f"💡 Accept the {_n_hints} motion hint(s)", use_container_width=True, disabled=not _n_hints,
+              on_click=_bulk_hints, args=(_shown_ids,),
+              help="Calmest fifth of this video's scenes → 🌙 Slow, busiest fifth → 💥 Action. Check them over.")
+    st.caption("Unsaved until you 💾 save, like ticking each card.")
+with rc_[1].popover("🎭 Scene roles…", use_container_width=True):
+    role_manager()
 
 
 # ---------------------------------------------------------------------------
@@ -912,14 +1047,21 @@ def scene_card(sid, trimmed_to) -> None:
                 dismiss(SE.suggestion_key("split", [sid]))
         st.multiselect("Tags", options=sorted(set(CANDIDATE_LABELS) | set(current_tags)),
                        default=current_tags, key=wkey("tags", sid))
-        rc = st.columns(3)
+        rc = st.columns([1, 3])
         rc[0].checkbox("🚫 Exclude from planner", value=scene.get("excluded", False), key=wkey("excluded", sid))
-        rc[1].checkbox("🎬 Intro candidate", value=scene.get("intro_candidate", False), key=wkey("intro", sid),
-                       help="Available to the Compilation Planner's first block when its "
-                            "'Prefer Intro/Outro-tagged clips' toggle is on. Independent of Exclude.")
-        rc[2].checkbox("🎬 Outro candidate", value=scene.get("outro_candidate", False), key=wkey("outro", sid),
-                       help="Available to the Compilation Planner's last block when its "
-                            "'Prefer Intro/Outro-tagged clips' toggle is on. Independent of Exclude.")
+        _rk = wkey("roles", sid)
+        _cur = SR.scene_roles(scene)
+        _opts = list(_roles) + [r for r in _cur if r not in _roles]
+        rc[1].pills("Roles", _opts, selection_mode="multi", key=_rk,
+                    default=None if _rk in st.session_state else _cur,
+                    format_func=lambda r: SR.label(r, _roles), label_visibility="collapsed",
+                    help="What this scene is for in the story. 🎬 Intro / 🏁 Outro: the start and end "
+                         "(the planner's 'Prefer Intro/Outro' toggle). 🌙 Slow: build-ups and breakdowns. "
+                         "💥 Action: the high points. Add your own under 🎭 Scene roles. Independent of Exclude.")
+        _hint = SR.motion_hint(motion_rank(scene))
+        if _hint and _hint in _roles and _hint not in (st.session_state.get(_rk) or []):
+            st.caption(f"💡 One of the {'calmest' if _hint == 'slow' else 'busiest'} scenes in this video — "
+                       f"maybe {SR.label(_hint, _roles)}?")
         new = pending_fields(scene)
         if new is not None and is_changed(scene, new):
             st.caption("✏️ Unsaved changes")

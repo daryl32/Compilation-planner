@@ -28,6 +28,8 @@ import autofill as AF
 import similarity as SIM
 import cut_scoring as CS
 import smart_cuts as SM
+import story_map as STM
+import scene_roles as SR
 from audio_charts import add_analysis_overlays
 import preview_snippets
 from library_common import (safe_image, video_details, all_actors, all_video_tags, matches_details, scene_tags, render_range_picker, library_ranges, master_thumbnail_path, proxy_path,
@@ -2751,7 +2753,7 @@ def render_audio_settings_section(track: dict) -> None:
     _on_bar = (sum(1 for c in _cuts if len(_bars) and np.min(np.abs(_bars - c)) < 0.12) / len(_cuts)) if _cuts else 0.0
     st.caption(f"**{len(_segs)} segments** · a cut every {track['duration_sec'] / max(len(_segs), 1) / _bar:.1f} bars "
                f"on average ({track['duration_sec'] / max(len(_segs), 1):.1f}s) · {_on_bar:.0%} of cuts on a bar line  "
-               f"|  {CS.beat_grid(track)[1]:.0f} BPM  |  switch to **Videos & Time Ranges** when happy with the cuts.")
+               f"|  {CS.beat_grid(track)[1]:.0f} BPM  |  next: **🎭 Story map**, when you're happy with the cuts.")
 
     # Save the shadow copy every call — this is what actually survives the round trip to
     # another section (plain session_state, not tied to any widget), and is what the explicit
@@ -2759,6 +2761,265 @@ def render_audio_settings_section(track: dict) -> None:
     st.session_state["audio_settings_shadow"] = {
         k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state
     }
+
+
+# ---------------------------------------------------------------------------
+# Step 1: Story map — which parts of the song call for which scene role
+# (story_map.py for the logic; scene_roles.py for the roles)
+# ---------------------------------------------------------------------------
+STORY_KEY = "story_map"   # {"track_id", "regions": [...], "v": edit counter, "edited": bool}
+SECTION_AUDIO = "🎵 0. Audio Settings"
+SECTION_STORY = "🎭 1. Story map"
+SECTION_VIDEOS = "📼 2. Videos & Time Ranges"
+SECTION_MATCH = "🎬 3. Matching & Export"
+SECTIONS = [SECTION_AUDIO, SECTION_STORY, SECTION_VIDEOS, SECTION_MATCH]
+
+
+def _track_mtime(track_id: str) -> float:
+    try:
+        return (AUDIO_DIR / f"{track_id}.json").stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+@st.cache_data(max_entries=8, show_spinner="Reading the song's structure…")
+def _story_analysis(track_id: str, beats_per_bar: int, mtime: float) -> dict:
+    return STM.analyse(load_track(track_id), beats_per_bar)
+
+
+def current_story_map(track_id: str):
+    """This track's story map regions, or None if it hasn't got one."""
+    sm = st.session_state.get(STORY_KEY)
+    if isinstance(sm, dict) and sm.get("track_id") == track_id and sm.get("regions"):
+        return sm["regions"]
+    return None
+
+
+def _story_set(regions: list, edited: bool = True) -> None:
+    sm = st.session_state.get(STORY_KEY) if isinstance(st.session_state.get(STORY_KEY), dict) else {}
+    st.session_state[STORY_KEY] = {
+        "track_id": st.session_state.get("track_id"),
+        "regions": regions,
+        "v": int(sm.get("v", 0)) + 1 if sm.get("track_id") == st.session_state.get("track_id") else 1,
+        "edited": edited,
+    }
+    st.session_state.pop("sm_play", None)
+
+
+def _story_suggest(analysis: dict, cut_times: list) -> None:
+    _story_set(STM.snap(STM.suggest(analysis, SR.all_roles()), cut_times), edited=False)
+
+
+def _story_role_changed(i: int, key: str) -> None:
+    _story_set(STM.set_role(current_story_map(st.session_state["track_id"]), i, st.session_state.get(key)))
+
+
+def _story_edit(fn, *args) -> None:
+    _story_set(fn(current_story_map(st.session_state["track_id"]), *args))
+
+
+def _story_boundary_changed(i: int, key: str) -> None:
+    _story_edit(STM.move_boundary, i, float(st.session_state[key]))
+
+
+def _story_snap_one(i: int, cut_times: list) -> None:
+    """📐 on one line: move it onto the nearest cut."""
+    regions = current_story_map(st.session_state["track_id"])
+    t = regions[i]["end"]
+    inner = [c for c in cut_times if regions[i]["start"] < c < regions[i + 1]["end"]]
+    if inner:
+        _story_edit(STM.move_boundary, i, min(inner, key=lambda c: abs(c - t)))
+
+
+def _story_play(i: int) -> None:
+    st.session_state["sm_play"] = None if st.session_state.get("sm_play") == i else i
+
+
+def _story_chart(track: dict, regions: list, segs: list, roles: dict, playing) -> go.Figure:
+    fig = go.Figure()
+    if track.get("hires"):
+        rate = float(track["hires"]["rate"])
+        rms = np.asarray(track["hires"]["rms"], dtype=float)
+        k = max(1, int(rate * 0.5))
+        sm = np.convolve(rms, np.ones(k) / k, mode="same")
+        sm = sm / max(float(sm.max()), 1e-9)
+        fig.add_trace(go.Scatter(x=np.arange(len(sm)) / rate, y=sm, mode="lines", name="Loudness",
+                                 line=dict(color="rgba(80,120,220,0.85)", width=1.5), hoverinfo="skip"))
+    xs, ys = [], []
+    for sg in segs[1:]:
+        xs += [sg["start"], sg["start"], None]
+        ys += [0, 1.05, None]
+    if xs:
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name="Cuts (blocks)", hoverinfo="skip",
+                                 line=dict(color="rgba(128,128,128,0.35)", width=1)))
+    for i, r in enumerate(regions):
+        role = roles.get(r["role"]) if r["role"] else None
+        colour = role["colour"] if role else "#bbbbbb"
+        fig.add_vrect(x0=r["start"], x1=r["end"], fillcolor=colour,
+                      opacity=0.32 if role else 0.06, line_width=2 if i == playing else 0,
+                      line_color="#222222", layer="below")
+        if role:
+            fig.add_annotation(x=(r["start"] + r["end"]) / 2, y=1.12, text=f"{role['emoji']} {role['name']}",
+                               showarrow=False, font=dict(size=12))
+    fig.update_layout(height=300, margin=dict(t=30, b=10, l=10, r=10), showlegend=False,
+                      xaxis=dict(title="Time (s)", range=[0, float(track["duration_sec"])]),
+                      yaxis=dict(visible=False, range=[0, 1.2]))
+    return fig
+
+
+def render_story_map_section(track: dict) -> None:
+    """🎭 Story map: suggest which parts of the song suit Intro / Slow / Action /
+    Outro (and your own roles), then adjust them — role per region, handles on
+    the cut points, ▶ to hear each part."""
+    autosave_now()
+    track_id = st.session_state["track_id"]
+    bpb = int(st.session_state.get("beats_per_bar", 4))
+    duration = float(track["duration_sec"])
+    segs = build_segments(track, segmentation_settings())
+    cut_times = [sg["start"] for sg in segs] + [duration]
+    roles = SR.roles_by_id()
+    analysis = _story_analysis(track_id, bpb, _track_mtime(track_id))
+
+    st.subheader("🎭 Story map")
+    st.caption("Which parts of the song call for which kind of scene — 🎬 Intro at the start, 🌙 Slow for "
+               "build-ups and breakdowns, 💥 Action for the high points, 🏁 Outro at the end, and your own "
+               "roles (Reviewer → 🎭 Scene roles). Mark scenes with these roles in the Reviewer; the planner "
+               "uses the role clips in these parts of the song, and normal picks everywhere else.")
+    regions = current_story_map(track_id)
+    if regions is None:
+        old = st.session_state.get(STORY_KEY)
+        if isinstance(old, dict) and old.get("regions"):
+            st.info(f"The story map you had was for **{old.get('track_id')}** — this track needs its own.")
+        c = st.columns([2, 2, 3])
+        c[0].button("✨ Suggest a story map from the song", type="primary", use_container_width=True,
+                    on_click=_story_suggest, args=(analysis, cut_times))
+        c[1].button("Start with an empty map", use_container_width=True,
+                    on_click=lambda: _story_set(STM.blank(duration)))
+        c[2].caption("Or skip this step — without a story map the planner works as before.")
+        return
+
+    tc = st.columns([2, 2, 2, 3])
+    tc[0].button("✨ Suggest again", use_container_width=True, on_click=_story_suggest, args=(analysis, cut_times),
+                 help="Replaces the map with a fresh suggestion from the song (your edits are lost).")
+    tc[1].button("🧹 Clear the map", use_container_width=True, on_click=lambda: _story_set(STM.blank(duration)),
+                 help="One region, no role — then split and set roles yourself.")
+    tc[2].button("📐 Line up with the cuts", use_container_width=True,
+                 on_click=lambda: _story_edit(STM.snap, cut_times),
+                 help="Moves every boundary onto the nearest cut, so no block straddles two parts. "
+                      "Useful after changing the audio settings.")
+    lead = tc[3].toggle("▶ starts 2s early", key="sm_lead_in",
+                        help="Hear what leads into each part, not just the part itself.")
+    snap = tc[3].toggle("Handles snap to cuts", key="sm_snap",
+                        help="On: the lines between parts stop only on the cut points. Off: they move freely "
+                             "(0.1s steps) to line up with the audio curve — 📐 next to a line snaps just that "
+                             "one to its nearest cut.")
+
+    playing = st.session_state.get("sm_play")
+    st.plotly_chart(_story_chart(track, regions, segs, roles, playing), use_container_width=True,
+                    key=f"sm_chart_{st.session_state[STORY_KEY].get('v', 0)}")
+
+    # Totals per role
+    tot = STM.totals(regions, segs)
+    if tot:
+        st.markdown("  ·  ".join(f"{SR.label(r, roles)} **{format_mmss(v['sec'])}** ({v['blocks']} block"
+                                 f"{'s' if v['blocks'] != 1 else ''})" for r, v in tot.items()))
+    unknown = sorted({r["role"] for r in regions if r["role"] and r["role"] not in roles})
+    if unknown:
+        st.warning("Some parts use a role that's been deleted: " + ", ".join(unknown))
+
+    v = st.session_state[STORY_KEY].get("v", 0)
+    role_opts = [None, *roles, *unknown]
+    block_role = STM.block_roles(regions, segs)
+    for i, r in enumerate(regions):
+        role = roles.get(r["role"]) if r["role"] else None
+        n_blocks = sum(1 for sg in segs if r["start"] <= (sg["start"] + sg["end"]) / 2 < r["end"])
+        with st.container(border=True):
+            rc = st.columns([0.12, 1.5, 1.8, 3.2, 0.9, 0.9, 0.9])
+            rc[0].markdown(f'<div style="width:18px;height:46px;border-radius:4px;background:'
+                           f'{role["colour"] if role else "#cccccc"};"></div>', unsafe_allow_html=True)
+            rc[1].markdown(f"**{format_mmss(r['start'])} – {format_mmss(r['end'])}**  \n"
+                           f":gray[{r['end'] - r['start']:.0f}s · {n_blocks} block{'s' if n_blocks != 1 else ''}]")
+            rk = f"sm_role_{v}_{i}"
+            rc[2].selectbox("Role", role_opts, index=role_opts.index(r["role"]) if r["role"] in role_opts else 0,
+                            key=rk, format_func=lambda x: "— no role" if x is None else SR.label(x, roles),
+                            label_visibility="collapsed", on_change=_story_role_changed, args=(i, rk))
+            with rc[3]:
+                if r.get("why"):
+                    st.caption(("✏️ " if r["why"] == "set by you" else "💡 ") + r["why"])
+                alt = r.get("alt")
+                if alt and alt.get("role") in roles and alt["role"] != r["role"]:
+                    st.button(f"↔ {SR.label(alt['role'], roles)} instead", key=f"sm_alt_{v}_{i}",
+                              on_click=_story_edit, args=(STM.set_role, i, alt["role"]),
+                              help="The runner-up for this part of the song.")
+            rc[4].button("⏹ Stop" if playing == i else "▶ Play", key=f"sm_play_{v}_{i}", use_container_width=True,
+                         on_click=_story_play, args=(i,))
+            inner = [t for t in cut_times if r["start"] < t < r["end"]]
+            mid = min(inner, key=lambda t: abs(t - (r["start"] + r["end"]) / 2)) if inner else None
+            rc[5].button("✂️ Split", key=f"sm_split_{v}_{i}", use_container_width=True, disabled=mid is None,
+                         on_click=_story_edit, args=(STM.split, i, mid),
+                         help="Split into two at the cut nearest the middle (then move the line below).")
+            rc[6].button("🔗 Join ↓", key=f"sm_merge_{v}_{i}", use_container_width=True,
+                         disabled=i == len(regions) - 1, on_click=_story_edit, args=(STM.merge_next, i),
+                         help="Join with the next part (keeps this part's role).")
+
+            if playing == i:
+                audio_path, missing = _local_media(track.get("source_path", ""))
+                if missing:
+                    st.warning(f"Needs {Path(colab_to_local(missing)).name} on the server first.")
+                    if _DRIVE_SYNC_AVAILABLE and "MyDrive/" in missing and st.button(
+                            "⬇️ Download the track from Google Drive", key=f"sm_dl_{v}_{i}"):
+                        bar = st.progress(0.0, text="Downloading…")
+                        err = download_source_video(missing.split("MyDrive/", 1)[1], Path(colab_to_local(missing)),
+                                                    progress_callback=lambda p: bar.progress(min(p, 1.0)))
+                        bar.empty()
+                        if err:
+                            st.error(f"Download failed: {err}")
+                        else:
+                            st.rerun()
+                else:
+                    with st.spinner("Cutting the music…"):
+                        clip, err = preview_snippets.make_audio_snippet(
+                            PREVIEW_DIR / "snippets", audio_path, r["start"], r["end"] - r["start"],
+                            lead_in=2.0 if lead else 0.0)
+                    if err:
+                        st.error(f"Couldn't cut the music: {err}")
+                    else:
+                        st.audio(str(clip), autoplay=True)
+
+        # The handle between this part and the next: free (0.1s steps) or on the cuts.
+        if i + 1 < len(regions):
+            nxt = regions[i + 1]
+            bk = f"sm_line_{v}_{i}_{'s' if snap else 'f'}"
+            _lab = lambda x: SR.label(x, roles) if x else "no role"
+            on_cut = any(abs(c - r["end"]) < 0.05 for c in cut_times)
+            lc = st.columns([1.3, 3.6, 0.4])
+            lc[0].caption(f"↕ Where {_lab(r['role'])} ends and {_lab(nxt['role'])} begins"
+                          + ("" if on_cut else "  ·  :orange[between cuts]"))
+            if snap:
+                opts = sorted({t for t in cut_times if r["start"] < t < nxt["end"]} | {r["end"]})
+                if len(opts) > 1:
+                    lc[1].select_slider(
+                        "Line between these parts", opts, value=r["end"], key=bk,
+                        format_func=lambda t: f"{format_mmss(t)} ({t:.1f}s)", label_visibility="collapsed",
+                        on_change=_story_boundary_changed, args=(i, bk),
+                        help="Drag to move where one part ends and the next begins — it stops on the cuts.")
+            else:
+                lo = math.ceil((r["start"] + 0.1) * 10) / 10
+                hi = math.floor((nxt["end"] - 0.1) * 10) / 10
+                if hi > lo:
+                    lc[1].slider(
+                        "Line between these parts", min_value=float(lo), max_value=float(hi),
+                        value=float(min(max(round(r["end"], 1), lo), hi)), step=0.1, format="%.1fs", key=bk,
+                        label_visibility="collapsed", on_change=_story_boundary_changed, args=(i, bk),
+                        help="Drag to line the change up with the audio curve (arrow keys move it 0.1s). "
+                             "📐 snaps it to the nearest cut.")
+            lc[2].button("📐", key=f"sm_snap1_{v}_{i}", disabled=on_cut, on_click=_story_snap_one,
+                         args=(i, cut_times), help="Snap this line to the nearest cut.")
+
+    st.divider()
+    n_role = sum(1 for x in block_role if x)
+    st.caption(f"{n_role} of {len(segs)} blocks have a role. Times are kept in seconds, so changing the "
+               "audio settings later keeps the map where it is (📐 lines it up with the new cuts).")
 
 
 def _select_all_recommended():
@@ -3041,7 +3302,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
         st.info("No videos selected yet. Tick the videos you want above, use **Select all recommended**, or add "
                 "others from the dropdown — switch to the Matching & Export tab once you're ready.")
     else:
-        st.success(f"{len(selected_now)} video(s) selected. Switch to the **Matching & Export** tab above when ready.")
+        st.success(f"{len(selected_now)} video(s) selected. Go on to **🎬 Matching & Export** (below) when ready.")
 
 
 def _moving_average(values, half_window: int):
@@ -3962,6 +4223,8 @@ DIAL_DEFAULTS = {
     "max_shape_matches": 6,
     "allow_same_video": False,
     "prefer_intro_outro": False,
+    "matching_mode": "Auto",
+    "sequential_mode": False,
     "intro_outro_exclusive": False,
     "clip_count_skip": [],
     # Auto-fill weights (used in Matching & Export, stored here for persistence)
@@ -4032,6 +4295,7 @@ PROJECT_SIMPLE_KEYS = [
     "committed_selected_videos", "committed_tag_filter", "known_extra_videos", "extra_videos",
     "adv_current_block", "chor_current_block",
     "intro_block_indices", "outro_block_indices",
+    "story_map",
 ]
 
 
@@ -4718,17 +4982,28 @@ def _undo_new_project() -> None:
         st.session_state["_project_notices"] = [("error", "Couldn't find what you had before.")]
 
 
-st.sidebar.header("Project")
+# 📁 Project bar — at the top of the page, above the steps (it used to be in the sidebar).
+_pbar = st.container(border=True)
+_pb = _pbar.columns([3, 1.3, 1, 1.2])
 _new_notice = st.session_state.pop("_new_project_notice", None)
-if _new_notice:
-    st.sidebar.success("🆕 New project started" + (f" — **{_new_notice}**" if isinstance(_new_notice, str) else "")
-                       + ". Pick a track and videos to begin.")
-    if _autosave_path(".before_new").exists():
-        st.sidebar.button("↩️ Bring back what I had", on_click=_undo_new_project, use_container_width=True,
-                          key="new_project_undo")
 _new_loaded = st.session_state.get("_loaded_project")
 _new_loaded_changes = _project_changes(_new_loaded) if _new_loaded else 0
-with st.sidebar.popover("🆕 New project", use_container_width=True):
+_loaded = _new_loaded
+with _pb[0]:
+    if _loaded:
+        _n_changed = _new_loaded_changes
+        if _n_changed:
+            st.markdown(f"📁 **{_loaded['name']}**  ·  :orange[unsaved changes ({_n_changed} area"
+                        f"{'' if _n_changed == 1 else 's'})]")
+        else:
+            st.markdown(f"📁 **{_loaded['name']}**  ·  :green[all changes saved]")
+    else:
+        st.markdown("📁 **Unsaved project**  ·  :gray[save it to keep it and come back later]")
+if _loaded and _new_loaded_changes:
+    if _pb[1].button(f"💾 Save changes", type="primary", use_container_width=True, key="project_quick_save",
+                     help=f"Save to '{_loaded['name']}'."):
+        _do_save_project(_loaded["name"])
+with _pb[2].popover("🆕 New", use_container_width=True):
     st.caption("Start again from a blank planner — default settings, no track work, no project "
                "loaded. Saved projects aren't touched, and you can bring back what's on screen "
                "now straight afterwards.")
@@ -4738,21 +5013,7 @@ with st.sidebar.popover("🆕 New project", use_container_width=True):
                   help="Filled in as the project name, ready for 💾 Save.")
     st.button("🆕 Start new project", type="primary", on_click=_new_project, use_container_width=True,
               key="new_project_go")
-_loaded = _new_loaded
-if _loaded:
-    _n_changed = _new_loaded_changes
-    if _n_changed:
-        st.sidebar.warning(f"📂 **{_loaded['name']}** — unsaved changes ({_n_changed} area"
-                           f"{'' if _n_changed == 1 else 's'})")
-        if st.sidebar.button(f"💾 Save changes to '{_loaded['name']}'", type="primary",
-                             use_container_width=True, key="project_quick_save"):
-            _do_save_project(_loaded["name"])
-    else:
-        st.sidebar.caption(f"📂 **{_loaded['name']}** — all changes saved")
-for _kind, _msg in st.session_state.pop("_project_notices", []):
-    getattr(st.sidebar, _kind)(_msg)
-
-with st.sidebar.expander("💾 Save / 📂 Load", expanded=False):
+with _pb[3].popover("💾 Save / 📂 Open", use_container_width=True):
     st.caption("Saves every setting plus matching progress (Auto, Manual step-through, and "
                "Choreography all at once) so you can close this and pick up again later.")
     _save_name = st.text_input("Project name", key="project_save_name", placeholder="my-compilation",
@@ -4766,17 +5027,24 @@ with st.sidebar.expander("💾 Save / 📂 Load", expanded=False):
     st.divider()
     _existing_projects = list_saved_projects()
     if _existing_projects:
-        _load_choice = st.selectbox("Load project", ["—"] + _existing_projects, key="project_load_choice")
-        if _load_choice != "—" and st.button("📂 Load Project", use_container_width=True):
+        _load_choice = st.selectbox("Open project", ["—"] + _existing_projects, key="project_load_choice")
+        if _load_choice != "—" and st.button("📂 Open Project", use_container_width=True):
             _path = PROJECTS_DIR / f"{_load_choice}.json"
             _load_warnings = load_project(_path)
             _remember_project(_load_choice, json.loads(_path.read_text()))
             st.session_state["_prefill_project_name"] = _load_choice
             st.session_state["_project_notices"] = ([("warning", _w) for _w in _load_warnings]
-                                                    + [("success", f"Loaded '{_load_choice}'.")])
+                                                    + [("success", f"Opened '{_load_choice}'.")])
             st.rerun()
     else:
         st.caption("No saved projects yet.")
+if _new_notice:
+    _pbar.success("🆕 New project started" + (f" — **{_new_notice}**" if isinstance(_new_notice, str) else "")
+                  + ". Pick a track and videos to begin.")
+    if _autosave_path(".before_new").exists():
+        _pbar.button("↩️ Bring back what I had", on_click=_undo_new_project, key="new_project_undo")
+for _kind, _msg in st.session_state.pop("_project_notices", []):
+    getattr(_pbar, _kind)(_msg)
 
 # A loaded project's track_id can reference a track that no longer exists (renamed/deleted
 # audio file) — the Track selectbox below would error if its backing value isn't among the
@@ -4784,136 +5052,137 @@ with st.sidebar.expander("💾 Save / 📂 Load", expanded=False):
 if st.session_state.get("track_id") not in tracks:
     st.session_state.pop("track_id", None)
     if st.session_state.get("_project_load_pending_modes"):
-        st.sidebar.warning("The loaded project's track is no longer available — defaulted to the first track.")
+        st.warning("The loaded project's track is no longer available — defaulted to the first track.")
 
 
 # 🔄 Sync now lives in the shared sidebar (page_setup → ☁️ Google Drive).
 
-st.sidebar.header("Track")
-track_id = st.sidebar.selectbox("Track", tracks, key="track_id")
+# The track is picked at the top of the 🎵 Audio step (render_track_picker); it's
+# kept like the other step settings (STEP_WIDGET_KEYS) so every step can use it.
+if tracks and st.session_state.get("track_id") not in tracks:
+    st.session_state["track_id"] = tracks[0]
+st.session_state["track_id"] = st.session_state["track_id"]
+track_id = st.session_state["track_id"]
 # A chosen cutting pace keeps the dials tuned to this track (see ensure_audio_profile) —
-# done here, before the split-screen widgets below are drawn, so it may set them.
+# done here, before the split-screen widgets (🎵 Audio step) are drawn, so it may set them.
 ensure_audio_profile(load_track(track_id), track_id)
 
-st.sidebar.button("🎯 Auto-detect settings for this track", on_click=_run_auto_tune, type="primary",
-                  help="Analyses this track's tempo, energy and hits, then sets the segmentation and "
-                       "split-screen dials below. Adjust any dial afterwards to fine-tune.")
-if st.session_state.get("auto_tune_report"):
-    with st.sidebar.expander("What auto-detect chose, and why"):
-        for line in st.session_state["auto_tune_report"]:
-            st.write("• " + line)
-
-st.sidebar.header("Matching mode")
-matching_mode = st.sidebar.radio(
-    "How clips are chosen", ["Auto", "Manual step-through", "Choreography"], key="matching_mode",
-    help="Auto: the algorithm picks the best-matching clip per segment automatically.  "
-         "Manual step-through: pick from the best shape-matched candidates one block at a time.  "
-         "Choreography: one column per source video — see the auto pick for each, then override with "
-         "any available clip from that video via a timecode dropdown.",
-)
-max_shape_matches = st.sidebar.number_input(
-    "Max candidates shown per block", min_value=1, max_value=30, key="max_shape_matches",
-    disabled=(matching_mode != "Manual step-through"),
-    help="How many of the best-scoring clips are offered per block in Manual step-through mode.",
-)
-max_chor_videos = st.sidebar.number_input(
-    "Max videos shown per block (Choreography)", min_value=2, max_value=6, key="max_chor_videos",
-    disabled=(matching_mode != "Choreography"),
-    help="How many source-video columns to show per block. Keep it small enough that the grid "
-         "stays readable — 4 is comfortable, 6 is the practical limit.",
-)
-prefer_intro_outro = st.sidebar.checkbox(
-    "Prefer Intro/Outro-tagged clips for marked blocks",
-    key="prefer_intro_outro",
-    help="Mark scenes as intro/outro candidates in the review app (app.py) — 'Intro candidate' / "
-         "'Outro candidate' checkboxes alongside Exclude. Works in all three matching modes. With "
-         "this on, an 'Intro/Outro blocks' picker appears on the Matching & Export page (default: "
-         "first block / last block, freely changeable) — those blocks draw from a video's tagged "
-         "clips, but only for videos that actually have any tagged that way; a video with none "
-         "shows its normal full availability there, same as any other block.",
-)
-
-st.sidebar.header("Video selection")
-sequential_mode = st.sidebar.checkbox(
-    "Keep each video's own clips in original sequential order",
-    value=False, key="sequential_mode",
-    help="When on, a video's scenes are only ever used in their original chronological order "
-         "(matches the VSE add-on's 'Keep Sequential Order' behaviour) — other videos can still "
-         "interleave freely around them.",
-)
-
-_n_lib_ranges = len(library_ranges())
-if _n_lib_ranges:
-    st.sidebar.caption(f"📚 {_n_lib_ranges} video(s) have a Media Library range.")
-if st.session_state["video_time_ranges"]:
-    st.sidebar.caption(f"🎚️ {len(st.session_state['video_time_ranges'])} video(s) have a range set for this project.")
-    if st.sidebar.button("Reset project ranges (back to library ranges)"):
-        st.session_state["video_time_ranges"] = {}
-        st.rerun()
-
-allow_same_video = st.sidebar.checkbox(
-    "Allow multiple clips from the same video in one split-screen segment",
-    key="allow_same_video",
-)
-
-st.sidebar.header("Split screen & intensity")
-split_screen_enabled = st.sidebar.checkbox(
-    "Enable split-screen for high-energy segments", key="split_screen_enabled",
-)
-st.sidebar.slider(
-    "Min simultaneous clips", 1, MAX_SIMULTANEOUS_CLIPS, key="min_clips",
-    disabled=not split_screen_enabled,
-)
+# ---------------------------------------------------------------------------
+# Settings that live inside ONE step (split screen on 🎵 Audio; matching mode,
+# order and intro/outro on 🎬 Matching). Their widgets are only drawn on that
+# step, and Streamlit drops a widget's value on any run where the widget isn't
+# drawn — so every run re-stores each one here, which keeps it (and keeps it in
+# saved projects / the recovery file) whichever step you're on. Everything else
+# reads them from session_state, never from the widget's return value.
+# ---------------------------------------------------------------------------
+STEP_WIDGET_KEYS = [
+    "matching_mode", "max_shape_matches", "max_chor_videos", "prefer_intro_outro", "intro_outro_exclusive",
+    "sequential_mode", "allow_same_video",
+    "split_screen_enabled", "min_clips", "max_clips", "clip_count_skip", "ramp_range", "density_contrast",
+    "vary_count", "count_seed", "min_clip_len_sec",
+]
+for _k in STEP_WIDGET_KEYS:
+    if _k in st.session_state:
+        st.session_state[_k] = st.session_state[_k]
 if st.session_state["max_clips"] < st.session_state["min_clips"]:
     st.session_state["max_clips"] = st.session_state["min_clips"]
-st.sidebar.slider(
-    "Max simultaneous clips",
-    min_value=st.session_state["min_clips"], max_value=MAX_SIMULTANEOUS_CLIPS,
-    key="max_clips", disabled=not split_screen_enabled,
-    help="Up to 8, using the same layouts as the VSE add-on.",
-)
-_between = list(range(int(st.session_state["min_clips"]) + 1, int(st.session_state["max_clips"])))
-if _between:
-    # Keep only counts still between min and max (the widget errors on a value it can't offer).
-    if "clip_count_skip" in st.session_state:
-        st.session_state["clip_count_skip"] = [x for x in (st.session_state["clip_count_skip"] or [])
-                                               if x in _between]
-    st.sidebar.pills(
-        "Skip these clip counts", _between, selection_mode="multi", key="clip_count_skip",
-        disabled=not split_screen_enabled, format_func=lambda n: f"{n} clips",
-        help="Blocks never use a count you pick here — e.g. min 1, max 4, skip 3 → blocks use 1, 2 or 4 "
-             "clips. A block that would have used a skipped count takes the nearest allowed one "
-             "(the smaller when it's halfway).",
-    )
-st.sidebar.slider(
-    "Intensity ramp range", 0.0, 1.0, step=0.05, key="ramp_range",
-    disabled=not split_screen_enabled,
-    help="At or below left value: min clips. At or above right: max clips.",
-)
-st.sidebar.slider(
-    "Density contrast", 0.25, 3.0, step=0.05, key="density_contrast",
-    disabled=not split_screen_enabled,
-    help="Above 1 = only the loudest sections reach high clip counts; below 1 = rises more evenly.",
-)
-_vary = st.sidebar.checkbox(
-    "Vary clip count within range (seeded)", key="vary_count",
-    disabled=not split_screen_enabled,
-)
-st.sidebar.number_input(
-    "Clip count seed", 0, 99999, key="count_seed",
-    disabled=not (split_screen_enabled and _vary),
-)
-st.sidebar.slider(
-    "Minimum clip length (s)", 0.2, 3.0, step=0.1, key="min_clip_len_sec",
-    help="If footage left to fill a slot is shorter than this, extend the previous clip instead.",
-)
+
+matching_mode = st.session_state["matching_mode"]
+max_shape_matches = st.session_state["max_shape_matches"]
+max_chor_videos = st.session_state["max_chor_videos"]
+prefer_intro_outro = bool(st.session_state["prefer_intro_outro"])
+sequential_mode = bool(st.session_state["sequential_mode"])
+allow_same_video = bool(st.session_state["allow_same_video"])
+split_screen_enabled = bool(st.session_state["split_screen_enabled"])
+
+
+def render_split_screen_settings() -> None:
+    """🔀 Split screen & clip length — on the 🎵 Audio step (they set how many clips
+    each block gets, which the audio preview chart shows)."""
+    on = bool(st.session_state.get("split_screen_enabled"))
+    summary = (f"{st.session_state['min_clips']}–{st.session_state['max_clips']} clips per block"
+               if on else "off — one clip per block")
+    with st.expander(f"🔀 Split screen & clip length  ·  {summary}", expanded=False):
+        c = st.columns([1, 1])
+        with c[0]:
+            st.toggle("Split-screen for high-energy blocks", key="split_screen_enabled",
+                      help="Louder blocks show several clips at once (the VSE add-on's split-screen layouts).")
+            st.slider("Min simultaneous clips", 1, MAX_SIMULTANEOUS_CLIPS, key="min_clips", disabled=not on)
+            st.slider("Max simultaneous clips", min_value=st.session_state["min_clips"],
+                      max_value=MAX_SIMULTANEOUS_CLIPS, key="max_clips", disabled=not on,
+                      help="Up to 8, using the same layouts as the VSE add-on.")
+            between = list(range(int(st.session_state["min_clips"]) + 1, int(st.session_state["max_clips"])))
+            if between:
+                # Keep only counts still between min and max (the widget errors on a value it can't offer).
+                if "clip_count_skip" in st.session_state:
+                    st.session_state["clip_count_skip"] = [x for x in (st.session_state["clip_count_skip"] or [])
+                                                           if x in between]
+                st.pills(
+                    "Skip these clip counts", between, selection_mode="multi", key="clip_count_skip",
+                    disabled=not on, format_func=lambda n: f"{n} clips",
+                    help="Blocks never use a count you pick here — e.g. min 1, max 4, skip 3 → blocks use 1, 2 "
+                         "or 4 clips. A block that would have used a skipped count takes the nearest allowed "
+                         "one (the smaller when it's halfway).")
+        with c[1]:
+            st.slider("Intensity ramp range", 0.0, 1.0, step=0.05, key="ramp_range", disabled=not on,
+                      help="At or below left value: min clips. At or above right: max clips.")
+            st.slider("Density contrast", 0.25, 3.0, step=0.05, key="density_contrast", disabled=not on,
+                      help="Above 1 = only the loudest sections reach high clip counts; below 1 = rises more evenly.")
+            vary = st.checkbox("Vary clip count within range (seeded)", key="vary_count", disabled=not on)
+            st.number_input("Clip count seed", 0, 99999, key="count_seed", disabled=not (on and vary))
+        st.slider("Minimum clip length (s)", 0.2, 3.0, step=0.1, key="min_clip_len_sec",
+                  help="If footage left to fill a slot is shorter than this, extend the previous clip instead.")
+
+
+def render_matching_mode_settings() -> None:
+    """🎛️ Mode tab of the 🎬 Matching step's settings."""
+    c = st.columns([2, 1])
+    with c[0]:
+        mode = st.radio(
+            "How clips are chosen", ["Auto", "Manual step-through", "Choreography"], key="matching_mode",
+            horizontal=True,
+            help="Auto: the algorithm picks the best-matching clip per segment automatically.  "
+                 "Manual step-through: pick from the best shape-matched candidates one block at a time.  "
+                 "Choreography: one column per source video — see the auto pick for each, then override with "
+                 "any available clip from that video via a timecode dropdown.")
+    with c[1]:
+        if mode == "Manual step-through":
+            st.number_input("Candidates shown per block", min_value=1, max_value=30, key="max_shape_matches",
+                            help="How many of the best-scoring clips are offered per block.")
+        elif mode == "Choreography":
+            st.number_input("Videos shown per block", min_value=2, max_value=6, key="max_chor_videos",
+                            help="How many source-video columns to show per block. 4 is comfortable, 6 is "
+                                 "the practical limit.")
+    c = st.columns(3)
+    c[0].toggle("Keep each video's clips in order", key="sequential_mode",
+                help="A video's scenes are only ever used in their original chronological order (the VSE "
+                     "add-on's 'Keep Sequential Order') — other videos can still interleave around them.")
+    c[1].toggle("Allow one video twice in a split-screen block", key="allow_same_video",
+                help="Lets a split-screen block use more than one clip from the same video.")
+    c[2].toggle("Prefer Intro/Outro-tagged clips", key="prefer_intro_outro",
+                help="Intro/Outro blocks (🎬 Intro/Outro tab — default: first and last block) draw from a "
+                     "video's clips marked Intro / Outro in the Reviewer, for videos that have any; a video "
+                     "with none offers its normal clips there.")
+
 
 # ---------------------------------------------------------------------------
 # Compute: track + video-level energy matching
 # ---------------------------------------------------------------------------
 
 track = load_track(track_id)
-st.sidebar.caption(f"🎵 Track length: {format_mmss(track['duration_sec'])}")
+
+
+def render_track_picker() -> None:
+    """🎵 Track — first thing on the Audio step."""
+    c = st.columns([2, 3])
+    c[0].selectbox("🎵 Track", tracks, key="track_id",
+                   help="The music this compilation is cut to. Changing it re-tunes the cutting settings "
+                        "if a cutting pace is chosen; each track has its own story map.")
+    try:
+        info = f"{format_mmss(track['duration_sec'])}  ·  {float(track.get('bpm') or 0):.0f} BPM"
+    except (TypeError, ValueError):
+        info = format_mmss(track["duration_sec"])
+    c[1].markdown(f"<div style='padding-top:2.1rem;opacity:.7'>{info}</div>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # App-scope audio settings preservation
@@ -4946,18 +5215,105 @@ for _k in AUDIO_SETTINGS_KEYS:
 # rerun that section, not the whole page.
 # ---------------------------------------------------------------------------
 
-ui_section = st.radio(
-    "Section",
-    ["🎵 0. Audio Settings", "📼 1. Videos & Time Ranges", "🎬 2. Matching & Export"],
-    horizontal=True, key="ui_section", label_visibility="collapsed",
-)
+# Sessions / projects from before the 🎭 Story map step: same section, new name.
+_old_section = st.session_state.get("ui_section")
+if _old_section is not None and _old_section not in SECTIONS:
+    st.session_state["ui_section"] = next((x for x in SECTIONS if x[:1] == str(_old_section)[:1]), SECTION_AUDIO)
+def _goto(section: str) -> None:
+    st.session_state["ui_section"] = section
 
-if ui_section == "🎵 0. Audio Settings":
+
+def _step_status() -> list:
+    """One short line per step, shown under the step bar."""
+    method = st.session_state.get("segmentation_method", SEG_SMART)
+    audio = f"{track_id} · " + SEG_LABELS.get(method, method).split("—")[0].strip()
+    if st.session_state.get("split_screen_enabled"):
+        audio += f" · split {st.session_state['min_clips']}–{st.session_state['max_clips']}"
+    regions = current_story_map(track_id)
+    story = (f"{sum(1 for r in regions if r['role'])} part(s) with a role" if regions else "optional — not set")
+    n_vid = len(st.session_state.get("committed_selected_videos", []))
+    videos = f"{n_vid} video(s) selected" if n_vid else "none selected yet"
+    mode = st.session_state.get("matching_mode", "Auto")
+    done = {"Manual step-through": len(st.session_state.get("adv_confirmed", {}) or {}),
+            "Choreography": len(st.session_state.get("chor_confirmed", {}) or {})}.get(mode)
+    match = mode + (f" · {done} block(s) confirmed" if done else "")
+    if sequential_mode:
+        match += " · in order"
+    return [audio, story, videos, match]
+
+
+def step_nav(back: str = None, nxt: str = None) -> None:
+    """⬅ / ➡ buttons at the foot of a step."""
+    st.divider()
+    c = st.columns([1, 2, 1])
+    if back:
+        c[0].button(f"⬅ {back.split(' ', 1)[1]}", on_click=_goto, args=(back,), use_container_width=True,
+                    key=f"nav_back_{back}")
+    if nxt:
+        c[2].button(f"{nxt.split(' ', 1)[1]} ➡", on_click=_goto, args=(nxt,), type="primary",
+                    use_container_width=True, key=f"nav_next_{nxt}")
+
+
+# The step bar: the radio (same key and values as always — saved sessions and the
+# recovery file keep working) styled as steps, with a status line under each.
+st.markdown("""<style>
+.st-key-stepnav .stElementContainer, .st-key-stepnav .stRadio { width: 100% !important; }
+.st-key-stepnav [role="radiogroup"] { display: grid !important; grid-template-columns: repeat(4, 1fr); gap: .5rem;
+  width: 100%; }
+.st-key-stepnav [role="radiogroup"] > div { margin: 0 !important; border-radius: .6rem;
+  border: 1px solid rgba(128,128,128,.35); background: rgba(128,128,128,.06); }
+.st-key-stepnav [role="radiogroup"] > div:hover { border-color: rgba(255,75,75,.6); }
+.st-key-stepnav [role="radiogroup"] > div[data-selected="true"] { border-color: #ff4b4b;
+  background: rgba(255,75,75,.10); box-shadow: inset 0 -3px 0 #ff4b4b; }
+.st-key-stepnav label[data-testid="stRadioOption"] { width: 100%; padding: .6rem .9rem; margin: 0; cursor: pointer; }
+.st-key-stepnav label[data-testid="stRadioOption"] > div > div:first-child { display: none; }
+.st-key-stepnav [data-testid="stMarkdownContainer"] p { font-weight: 600; margin: 0; }
+.st-key-stepstatus { margin-top: -.6rem; }
+.st-key-stepstatus [data-testid="stCaptionContainer"] { padding: 0 .9rem; }
+</style>""", unsafe_allow_html=True)
+with st.container(key="stepnav"):
+    ui_section = st.radio(
+        "Section", SECTIONS,
+        horizontal=True, key="ui_section", label_visibility="collapsed",
+    )
+with st.container(key="stepstatus"):
+    for _col, _txt in zip(st.columns(4), _step_status()):
+        _col.caption(_txt)
+
+if ui_section == SECTION_AUDIO:
+    render_track_picker()
+    _ac = st.columns([1, 2])
+    _ac[0].button("🎯 Auto-detect settings for this track", on_click=_run_auto_tune, type="primary",
+                  use_container_width=True,
+                  help="Analyses this track's tempo, energy and hits, then sets the cutting and split-screen "
+                       "settings. Adjust anything afterwards to fine-tune.")
+    _ac[1].caption("Pick how the music is cut into blocks and check where the cuts land. Split screen "
+                   "(below) sets how many clips each block shows.")
+    render_split_screen_settings()
     render_audio_settings_section(track)
+    step_nav(nxt=SECTION_STORY)
     st.stop()
 
-if ui_section == "📼 1. Videos & Time Ranges":
+if ui_section == SECTION_STORY:
+    render_story_map_section(track)
+    step_nav(back=SECTION_AUDIO, nxt=SECTION_VIDEOS)
+    st.stop()
+
+if ui_section == SECTION_VIDEOS:
+    _n_lib_ranges = len(library_ranges())
+    if _n_lib_ranges or st.session_state["video_time_ranges"]:
+        _rc = st.columns([3, 1])
+        _rc[0].caption(" · ".join(x for x in (
+            f"📚 {_n_lib_ranges} video(s) have a Media Library range" if _n_lib_ranges else "",
+            f"🎚️ {len(st.session_state['video_time_ranges'])} have a range set for this project"
+            if st.session_state["video_time_ranges"] else "") if x))
+        if st.session_state["video_time_ranges"] and _rc[1].button("Reset project ranges",
+                                                                    use_container_width=True,
+                                                                    help="Back to the Media Library ranges."):
+            st.session_state["video_time_ranges"] = {}
+            st.rerun()
     render_video_selection_section(track, all_video_ids, all_tag_options, catalogues)
+    step_nav(back=SECTION_STORY, nxt=SECTION_MATCH)
     st.stop()
 
 tag_filter = list(st.session_state.get("committed_tag_filter", []))
@@ -4982,9 +5338,17 @@ if not split_screen_enabled:
     density_contrast, vary_count, count_seed = 1.0, False, 0
 
 if not selected_videos:
-    st.info("No videos selected yet. Switch to the **Videos & Time Ranges** tab above to tick some — the "
-            "plan builds as soon as at least one is selected.")
+    st.info("No videos selected yet. Go to **📼 Videos & Time Ranges** to tick some — the plan builds as soon "
+            "as at least one is selected.")
+    step_nav(back=SECTION_VIDEOS)
     st.stop()
+
+# ⚙️ Matching settings — every setting for this step in one panel. All three tabs
+# are drawn on every run (st.tabs runs each body), so nothing is dropped.
+with st.container(border=True):
+    _mt = st.tabs(["🎛️ Mode & order", "⚖️ Auto-fill weights", "🎬 Intro / Outro", "🧹 Resets"])
+with _mt[0]:
+    render_matching_mode_settings()
 
 # ---------------------------------------------------------------------------
 # Auto-fill weighting — shown inline on this page, not in the sidebar
@@ -5030,7 +5394,7 @@ _preset_vals = AF.PRESETS.get(st.session_state.get("autofill_preset"))
 if _preset_vals and any(abs(float(st.session_state.get(k, v)) - v) > 1e-6 for k, v in _preset_vals.items()):
     st.session_state["autofill_preset"] = _PRESET_CUSTOM
 
-with st.expander("⚙️ Auto-fill weighting", expanded=False):
+with _mt[1]:
     if _is_auto_mode:
         st.caption("In Auto mode these weights drive EVERY pick directly. On a marked intro/outro "
                    "block, clips actually tagged are still preferred first.")
@@ -5127,14 +5491,16 @@ if st.session_state.get("planner_state_key") != state_key:
         st.session_state["segment_clip_reduction"] = {}
         st.session_state["global_excluded_scenes"] = set()
 
-if st.sidebar.button("Reset manual clip overrides"):
+if _mt[3].button("Reset manual clip overrides",
+                 help="Clears Auto mode's per-block Swap / Reject / Remove changes and every clip rejected "
+                      "from this plan."):
     st.session_state["segment_exclusions"] = {}
     st.session_state["segment_clip_reduction"] = {}
     st.session_state["global_excluded_scenes"] = set()
     st.rerun()
 
 if st.session_state["global_excluded_scenes"]:
-    st.sidebar.caption(f"{len(st.session_state['global_excluded_scenes'])} clip(s) permanently rejected from this plan.")
+    _mt[3].caption(f"{len(st.session_state['global_excluded_scenes'])} clip(s) permanently rejected from this plan.")
 
 queues = build_footage_queues(tuple(selected_videos), tuple(tag_filter), effective_time_ranges())
 if not queues:
@@ -5161,6 +5527,18 @@ recommended_counts = [
 st.session_state["_avg_clips_per_block"] = (sum(recommended_counts) / len(recommended_counts)
                                             if recommended_counts else 1.0)
 
+# 🎭 The story map's part for each block (by the block's middle) — shown on every
+# block card and over the chart, as a guide while picking clips.
+_story_regions = current_story_map(track_id)
+_story_roles = SR.roles_by_id()
+story_block_roles = STM.block_roles(_story_regions, segments) if _story_regions else [None] * len(segments)
+
+
+def story_tag(i: int) -> str:
+    """'  ·  🎭 💥 Action part' for block i's story map part, '' if none."""
+    r = story_block_roles[i] if 0 <= i < len(story_block_roles) else None
+    return f"  ·  🎭 **{SR.label(r, _story_roles)}** part" if r else ""
+
 # ---------------------------------------------------------------------------
 # Intro/Outro block picker — shared across all three matching modes. Defaults
 # to the first block for intro and the last for outro, but every block is
@@ -5178,8 +5556,11 @@ st.session_state["_avg_clips_per_block"] = (sum(recommended_counts) / len(recomm
 # ---------------------------------------------------------------------------
 intro_blocks_0based: set = set()
 outro_blocks_0based: set = set()
+if not st.session_state.get("prefer_intro_outro"):
+    _mt[2].caption("Turn on **Prefer Intro/Outro-tagged clips** (🎛️ Mode & order) to choose which blocks use the "
+                   "clips marked Intro / Outro in the Reviewer.")
 if st.session_state.get("prefer_intro_outro"):
-    with st.expander("🎬 Intro/Outro blocks", expanded=False):
+    with _mt[2]:
         st.caption("Which block(s) draw from each video's intro/outro-tagged clips (tag scenes in "
                    "app.py). Add blocks alongside the defaults, or remove a default and pick others "
                    "instead — a video with no tagged clips for a block just shows its normal full "
@@ -5545,7 +5926,16 @@ fig.update_layout(
     yaxis2=dict(title="Clips", overlaying="y", side="right", range=[0, max_clips + 0.5], dtick=1, showgrid=False),
     legend=dict(orientation="h", y=-0.25),
 )
+# 🎭 Story map parts behind the chart, labelled along the top.
+for _r in (_story_regions or []):
+    _role = _story_roles.get(_r["role"]) if _r["role"] else None
+    if _role:
+        fig.add_vrect(x0=_r["start"], x1=_r["end"], fillcolor=_role["colour"], opacity=0.16, line_width=0,
+                      layer="below", annotation_text=f"{_role['emoji']} {_role['name']}",
+                      annotation_position="top left", annotation_font_size=11)
 st.plotly_chart(fig, use_container_width=True)
+if _story_regions:
+    st.caption("🎭 Shaded: the story map's parts (🎭 1. Story map). Each block card says which part it's in.")
 
 # ---------------------------------------------------------------------------
 # Timeline table + thumbnails preview
@@ -5568,7 +5958,7 @@ if matching_mode == "Auto":
         role_tag = ("  🎬 INTRO BLOCK" if seg_idx in intro_blocks_0based
                    else "  🎬 OUTRO BLOCK" if seg_idx in outro_blocks_0based else "")
         st.markdown(f"**Block {seg_idx + 1}**  {t0:.1f}s – {t1:.1f}s  (intensity {entry['segment_intensity']:.2f})"
-                   f"{split_tag}{edited_tag}{role_tag}")
+                   f"{split_tag}{edited_tag}{role_tag}{story_tag(seg_idx)}")
 
         if not entry["scenes"]:
             st.caption("No clip selected for this segment (all rejected).")
@@ -5681,7 +6071,7 @@ elif matching_mode == "Choreography":
             hdr_cols = st.columns([6, 1])
             with hdr_cols[0]:
                 st.markdown(f"**Block {seg_idx + 1}** &nbsp; {t0:.1f}s – {t1:.1f}s &nbsp; "
-                            f"intensity {entry['segment_intensity']:.2f}{chor_review_role_tag}")
+                            f"intensity {entry['segment_intensity']:.2f}{chor_review_role_tag}{story_tag(seg_idx)}")
             with hdr_cols[1]:
                 if st.button("✏️ Edit", key=f"chor_edit_{seg_idx}",
                              help=f"Re-pick block {seg_idx + 1}'s clips. Every other block stays as it is."):
@@ -5722,6 +6112,9 @@ elif matching_mode == "Choreography":
         st.subheader(f"{'✏️ Editing block' if chor_editing is not None else 'Block'} "
                      f"{chor_block + 1} of {len(segments)}  "
                      f"({seg['start']:.1f}s – {seg['end']:.1f}s, intensity {seg['intensity']:.2f}){chor_role_tag}")
+        if story_tag(chor_block):
+            st.markdown(f"This block is in the story map's{story_tag(chor_block)[4:]} — "
+                        f"{(SR.roles_by_id().get(story_block_roles[chor_block]) or {}).get('help', '')}")
         if chor_editing is not None:
             st.info("Every other block stays committed. The dropdowns only offer footage no other block uses"
                     + (" — and, with sequential order on, only footage between each video's clips in the "
@@ -6031,7 +6424,7 @@ else:
             with hdr_cols[0]:
                 st.markdown(
                     f"**Block {seg_idx + 1}** &nbsp; {t0:.1f}s – {t1:.1f}s &nbsp; "
-                    f"intensity {entry['segment_intensity']:.2f}{split_tag}{adv_review_role_tag}"
+                    f"intensity {entry['segment_intensity']:.2f}{split_tag}{adv_review_role_tag}{story_tag(seg_idx)}"
                 )
             with hdr_cols[1]:
                 if st.button("✏️ Edit", key=f"adv_edit_block_{seg_idx}",
@@ -6070,6 +6463,9 @@ else:
         st.subheader(f"{'✏️ Editing block' if adv_editing is not None else 'Block'} "
                      f"{current_block + 1} of {len(segments)}  "
                      f"({seg['start']:.1f}s – {seg['end']:.1f}s, intensity {seg['intensity']:.2f}){adv_role_tag}")
+        if story_tag(current_block):
+            st.markdown(f"This block is in the story map's{story_tag(current_block)[4:]} — "
+                        f"{(SR.roles_by_id().get(story_block_roles[current_block]) or {}).get('help', '')}")
         if adv_editing is not None:
             st.info("Every other block stays confirmed. The candidates only use footage no other block uses"
                     + (" — and, with sequential order on, only footage between each video's clips in the "
