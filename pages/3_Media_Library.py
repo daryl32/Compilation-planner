@@ -293,6 +293,12 @@ def render_videos():
                 if stats["top_tags"]:
                     st.caption("Clip tags: " + " ".join(f"`{t}` {n}" for t, n in stats["top_tags"]))
             with cols[2]:
+                try:
+                    st.page_link("pages/2_Reviewer.py", label="📝 Review",
+                                 query_params={"video": video.get("stem", vid)},
+                                 help="Open this video in the Reviewer (tags, roles, splits, thumbnails).")
+                except Exception:   # page list unavailable (e.g. run on its own) — a plain link instead
+                    st.markdown(f"[📝 Review](Reviewer?video={video.get('stem', vid)})")
                 if st.button("🎚️", key=f"lib_toggle_{vid}", help="Set the library time range for this video"):
                     # One picker open at a time — each embeds a full video player.
                     st.session_state["lib_open_picker"] = None if st.session_state["lib_open_picker"] == vid else vid
