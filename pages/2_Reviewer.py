@@ -253,6 +253,14 @@ with st.container(border=True):
         return all(checks[flag] for flag in find_flags)
 
     names = [stem for stem in index if matches(stem)]
+    # Sent here for one video (Media Library → 📝 Review, or a link): open it,
+    # even if another video was showing or the search above would hide it.
+    _qp_video = st.query_params.get("video")
+    if _qp_video in index and _qp_video != st.session_state.get("_rev_qp_seen"):
+        st.session_state["_rev_qp_seen"] = _qp_video
+        st.session_state["rev_video"] = _qp_video
+        st.session_state["_rev_video_keep"] = _qp_video
+        st.session_state["_rev_find_sig"] = (name_query, tuple(find_flags))   # keep it listed (see below)
     if FIND_NEW in find_flags or FIND_TODAY in find_flags:
         names.sort(key=lambda stem: -facts[stem]["added"])   # newest first
     # A split / combine / review can make the video you're working on stop
@@ -298,6 +306,7 @@ with st.container(border=True):
     st.session_state["_rev_video_keep"] = selected
     if st.query_params.get("video") != selected:
         st.query_params["video"] = selected
+    st.session_state["_rev_qp_seen"] = selected
 
 _saved_msg = st.session_state.pop("rev_saved_msg", None)
 if _saved_msg:

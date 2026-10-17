@@ -234,9 +234,12 @@ def rank(candidates: list, *, current_block: int, segments: list, confirmed: dic
     return [candidates[t[2]] for t in scored], [t[3] for t in scored]
 
 
-def fill_order(n_blocks: int, intensities: list, role_blocks: set) -> list:
+def fill_order(n_blocks: int, intensities: list, role_blocks: set, block_priority: dict = None) -> list:
     """The order to fill blocks in when they don't depend on each other (non-
-    sequential Auto mode): intro/outro blocks first (their tagged clips are
-    scarce), then the most intense blocks (high-motion footage is scarce),
-    then the rest. Ties keep track order."""
-    return sorted(range(n_blocks), key=lambda i: (i not in role_blocks, -float(intensities[i]), i))
+    sequential Auto mode): blocks with a role first (their clips are scarce) —
+    scarcest role first when block_priority ({block: footage per second needed,
+    lower = scarcer}) is given — then the most intense blocks (high-motion
+    footage is scarce), then the rest. Ties keep track order."""
+    pr = block_priority or {}
+    return sorted(range(n_blocks), key=lambda i: (i not in role_blocks, pr.get(i, float("inf")),
+                                                  -float(intensities[i]), i))
