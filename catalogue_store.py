@@ -34,7 +34,8 @@ from config import CATALOGUE_DIR
 from library_common import mark_pending, scene_tags, shared_cache, tc_to_seconds
 
 # JSON files in CATALOGUE_DIR that are never video catalogues.
-NOT_CATALOGUES = {"labels.json", "library_meta.json", "video_index.json", "scene_roles.json"}
+NOT_CATALOGUES = {"labels.json", "library_meta.json", "video_index.json", "scene_roles.json",
+                  "story_maps.json"}
 
 
 def catalogue_paths() -> list:

@@ -595,6 +595,8 @@ def _render_upgrade(aa, tracks: dict) -> None:
 
 
 def render_audio():
+    if st.session_state.pop("_switch_to_planner", False):
+        st.switch_page("pages/1_Compilation_Planner.py")
     tracks = load_audio_library(_audio_signature())
     _, track_use = render_usage()
     render_analysis_panel(tracks)
@@ -625,6 +627,11 @@ def render_audio():
              "high = dynamic, punchy tracks; low = steady, calm ones.",
     )
     descending = st.sidebar.toggle("Descending", value=(sort_by != "Name"), key="aud_desc")
+    import story_map as STM
+    _maps = STM.saved_maps()
+    story_filter = st.sidebar.selectbox("🎭 Story map", ["Any", "Has one", "Not yet"], key="aud_story",
+                                        help="Tracks with / without a saved story map (which parts of the "
+                                             "song suit 🎬 Intro, 🌙 Slow, 💥 Action, 🏁 Outro…).")
 
     if not tracks:
         st.info("No audio catalogues yet — use **Check for new tracks** above, or sync from Google Drive.")
@@ -637,6 +644,9 @@ def render_audio():
         if not (duration_filter[0] * 60 <= t["duration"] <= duration_filter[1] * 60):
             continue
         if bpm_filter and t["bpm"] and not (bpm_filter[0] <= t["bpm"] <= bpm_filter[1]):
+            continue
+        if (story_filter == "Has one" and t["track_id"] not in _maps) or \
+                (story_filter == "Not yet" and t["track_id"] in _maps):
             continue
         rows.append(t)
     rows.sort(key=sorts[sort_by], reverse=descending)
@@ -669,6 +679,7 @@ def render_audio():
                 if track_use.get(tid):
                     info.append(f"🎞️ in {track_use[tid]} render(s)")
                 st.caption("  ·  ".join(info))
+                _story_strip(tid, _maps.get(tid), t["duration"])
             with cols[1]:
                 if t["energy"] and t["extra"]:
                     from audio_charts import mini_figure
@@ -692,10 +703,74 @@ def render_audio():
                         None if st.session_state["aud_open_player"] == tid else tid)
                     st.rerun()
 
+            sc = st.columns([1, 1, 3])
+            if tid in _maps:
+                sc[0].button("🎭 Edit story map", key=f"aud_story_edit_{tid}", on_click=_open_story_in_planner,
+                             args=(tid,), use_container_width=True,
+                             help="Opens this track's 🎭 Story map step in the Compilation Planner.")
+            else:
+                sc[0].button("✨ Suggest story map", key=f"aud_story_new_{tid}", on_click=_suggest_story_map,
+                             args=(tid,), use_container_width=True, disabled=not t["extra"],
+                             help="Marks out which parts of the song suit 🎬 Intro, 🌙 Slow, 💥 Action and "
+                                  "🏁 Outro from its analysis — then 🎭 Edit to adjust it in the planner."
+                             if t["extra"] else "Needs the extra analysis (panel above) first.")
+            _sm_msg = st.session_state.pop(f"aud_story_msg_{tid}", None)
+            if _sm_msg is True:
+                sc[2].success("✨ Story map suggested — 🎭 Edit to check and adjust it.")
+            elif _sm_msg:
+                sc[2].error(_sm_msg)
+
             if st.session_state["aud_open_detail"] == tid:
                 _render_analysis_detail(tid)
             if st.session_state["aud_open_player"] == tid:
                 _render_audio_player(tid, t["source_path"])
+
+
+def _story_strip(track_id: str, regions, duration: float) -> None:
+    """A thin coloured bar of the track's story map parts (or a note that it has none)."""
+    if not regions:
+        st.caption("🎭 No story map yet")
+        return
+    import scene_roles as SR
+    roles = SR.roles_by_id()
+    total = max(duration, regions[-1]["end"], 1e-6)
+    bits, totals = [], {}
+    for r in regions:
+        role = roles.get(r["role"]) if r["role"] else None
+        w = 100 * (r["end"] - r["start"]) / total
+        colour = role["colour"] if role else "rgba(128,128,128,.18)"
+        tip = f"{SR.label(r['role'], roles) if r['role'] else 'no role'} {format_mmss(r['start'])}–{format_mmss(r['end'])}"
+        bits.append(f'<div title="{tip}" style="width:{w:.3f}%;background:{colour};height:100%"></div>')
+        if r["role"]:
+            totals[r["role"]] = totals.get(r["role"], 0.0) + r["end"] - r["start"]
+    st.markdown('<div style="display:flex;height:10px;border-radius:5px;overflow:hidden;margin:.2rem 0 .3rem">'
+                + "".join(bits) + "</div>", unsafe_allow_html=True)
+    st.caption("🎭 " + "  ·  ".join(f"{SR.label(r, roles)} {format_mmss(v)}" for r, v in totals.items()))
+
+
+def _suggest_story_map(track_id: str) -> None:
+    """✨ Suggest: the same suggestion as the planner's Story map step, lined up with
+    the Smart method's default cuts, saved as the track's story map."""
+    import scene_roles as SR
+    import smart_cuts as SM
+    import story_map as STM
+    path = AUDIO_DIR / f"{track_id}.json"
+    try:
+        track = _load_track(track_id, path.stat().st_mtime)
+    except (OSError, ValueError) as e:
+        st.session_state[f"aud_story_msg_{track_id}"] = f"Couldn't read this track: {e}"
+        return
+    segs = SM.build_smart_segments(track, {"beats_per_bar": 4})
+    cuts = [sg["start"] for sg in segs] + [float(track["duration_sec"])]
+    regions = STM.snap(STM.suggest(STM.analyse(track, 4), SR.all_roles()), cuts)
+    STM.save_map(track_id, regions)
+    st.session_state[f"aud_story_msg_{track_id}"] = True
+
+
+def _open_story_in_planner(track_id: str) -> None:
+    """Hand-off to the planner: open this track on the 🎭 Story map step."""
+    st.session_state["_open_story_for"] = track_id
+    st.session_state["_switch_to_planner"] = True
 
 
 @st.cache_data(max_entries=3, show_spinner=False)

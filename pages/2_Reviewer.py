@@ -965,6 +965,10 @@ def role_manager() -> None:
 
 _shown_ids = [s["scene_id"] for s, _ in shown]
 rc_ = st.columns([2, 2, 3])
+quick_mode = rc_[2].toggle("🎭 Quick role marking", key="rev_quick_roles",
+                           help="A grid of the shown scenes' pictures: pick a role, then click scenes to "
+                                "add or remove it — no cards to open. 💾 Save when done. Uses the filters "
+                                "above (e.g. Role → No role to see just the unmarked ones).")
 with rc_[0].popover(f"🎭 Mark the {len(_shown_ids)} shown scene(s)…", use_container_width=True,
                     disabled=not _shown_ids):
     _brole = st.selectbox("Role", list(_roles), format_func=lambda r: SR.label(r, _roles), key="rev_bulk_role")
@@ -1099,7 +1103,125 @@ def scene_card(sid, trimmed_to) -> None:
                 do_undo(sid)
 
 
-if not shown:
+QUICK_PAGE = 36   # pictures per page in quick role marking
+
+
+def _qr_key() -> str:
+    return f"rev_qr_{selected}"
+
+
+def _qr_roles(sid) -> list:
+    """A scene's roles in quick marking: the unsaved choice, else what's saved."""
+    pend = st.session_state.get(_qr_key()) or {}
+    return list(pend[sid]) if sid in pend else SR.scene_roles(scene_by_id[sid])
+
+
+def _qr_toggle(sid) -> None:
+    role = st.session_state.get("rev_qr_role")
+    if not role:
+        return
+    cur = _qr_roles(sid)
+    cur = [r for r in cur if r != role] if role in cur else cur + [role]
+    st.session_state.setdefault(_qr_key(), {})[sid] = cur
+
+
+def _qr_all(ids: list, add: bool) -> None:
+    role = st.session_state.get("rev_qr_role")
+    for sid in ids:
+        cur = _qr_roles(sid)
+        if add and role not in cur:
+            cur = cur + [role]
+        elif not add:
+            cur = [r for r in cur if r != role]
+        st.session_state.setdefault(_qr_key(), {})[sid] = cur
+
+
+def _qr_hints(ids: list) -> None:
+    for sid in ids:
+        hint = SR.motion_hint(motion_rank(scene_by_id[sid]))
+        if hint in _roles and hint not in _qr_roles(sid):
+            st.session_state.setdefault(_qr_key(), {})[sid] = _qr_roles(sid) + [hint]
+
+
+def _qr_changed() -> list:
+    pend = st.session_state.get(_qr_key()) or {}
+    return [sid for sid, roles in pend.items()
+            if sid in scene_by_id and set(roles) != set(SR.scene_roles(scene_by_id[sid]))]
+
+
+@st.fragment
+def quick_role_grid(ids: list) -> None:
+    """🎭 Quick role marking — click pictures to add / remove the chosen role.
+    Clicks only rerun this grid; 💾 Save writes them all at once."""
+    top = st.columns([4, 2, 2])
+    with top[0]:
+        role = st.pills("Role to mark", list(_roles), selection_mode="single", key="rev_qr_role",
+                        default=None if "rev_qr_role" in st.session_state else "action",
+                        format_func=lambda r: SR.label(r, _roles))
+    changed = _qr_changed()
+    if top[1].button(f"💾 Save {len(changed)} change(s)", type="primary", disabled=not changed,
+                     use_container_width=True, key="rev_qr_save"):
+        for sid in changed:
+            sc = scene_by_id[sid]
+            SR.set_scene_roles(sc, _qr_roles(sid))
+            if "corrected_tags" not in sc:
+                sc["corrected_tags"] = scene_tags(sc)
+            sc["reviewed"] = True
+        st.session_state.pop(_qr_key(), None)
+        write_catalogue(f"Saved roles for {len(changed)} scene(s).")
+    if top[2].button("↩️ Undo unsaved", disabled=not changed, use_container_width=True, key="rev_qr_discard"):
+        st.session_state.pop(_qr_key(), None)
+        st.rerun(scope="fragment")
+    n_pages = (len(ids) - 1) // QUICK_PAGE + 1
+    page = 1
+    bc = st.columns([2, 2, 2, 2])
+    if n_pages > 1:
+        page = bc[3].number_input(f"Page (of {n_pages})", 1, n_pages, 1, key=f"rev_qr_page_{selected}",
+                                  label_visibility="collapsed")
+    page_ids = ids[(page - 1) * QUICK_PAGE: page * QUICK_PAGE]
+    bc[0].button(f"➕ {SR.label(role, _roles) if role else 'role'} on all {len(page_ids)}",
+                 disabled=not role, on_click=_qr_all, args=(page_ids, True), use_container_width=True,
+                 key="rev_qr_all_add")
+    bc[1].button("➖ Off all of these", disabled=not role, on_click=_qr_all, args=(page_ids, False),
+                 use_container_width=True, key="rev_qr_all_off")
+    bc[2].button("💡 Accept motion hints", on_click=_qr_hints, args=(page_ids,), use_container_width=True,
+                  key="rev_qr_hints",
+                  help="Calmest fifth of this video's scenes → 🌙 Slow, busiest fifth → 💥 Action.")
+    if not role:
+        st.caption("Pick a role above, then click pictures to add or remove it.")
+    per_row = 6
+    for i in range(0, len(page_ids), per_row):
+        cols = st.columns(per_row)
+        for col, sid in zip(cols, page_ids[i:i + per_row]):
+            sc = scene_by_id[sid]
+            cur = _qr_roles(sid)
+            on = bool(role) and role in cur
+            with col.container(border=True):
+                paths = sc.get("thumbnail_paths") or []
+                tp = thumbs_dir / Path(paths[0]).name if paths else None
+                if tp is not None and image_ok(tp):
+                    safe_image(str(tp), width="stretch")
+                else:
+                    st.caption("🖼️ no picture")
+                hint = SR.motion_hint(motion_rank(sc))
+                st.caption(f"**{SE.scene_label(sc)}** · {fmt_dur(SE.scene_duration(sc))}"
+                           + (" · 🚫" if sc.get("excluded") else "")
+                           + (f" · 💡{_roles[hint]['emoji']}" if hint in _roles and hint not in cur else "")
+                           + ("  \n" + " ".join(_roles[r]["emoji"] if r in _roles else "🏷️" for r in cur)
+                              if cur else ""))
+                st.button(("✓ " if on else "＋ ") + (_roles[role]["emoji"] if role else ""),
+                          key=f"rev_qr_t_{selected}_{sid}", type="primary" if on else "secondary",
+                          use_container_width=True, disabled=not role, on_click=_qr_toggle, args=(sid,))
+    if changed:
+        st.caption(f"✏️ {len(changed)} unsaved change(s) — 💾 Save above.")
+
+
+if quick_mode:
+    if shown:
+        quick_role_grid([sc["scene_id"] for sc, _ in shown])
+    else:
+        st.info("No scenes match these filters.")
+elif not shown:
     st.info("No scenes match these filters.")
 else:
     save_top = save_row("top")
