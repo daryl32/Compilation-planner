@@ -3020,8 +3020,6 @@ def render_story_map_section(track: dict) -> None:
     n_role = sum(1 for x in block_role if x)
     st.caption(f"{n_role} of {len(segs)} blocks have a role. Times are kept in seconds, so changing the "
                "audio settings later keeps the map where it is (📐 lines it up with the new cuts).")
-    st.button("Next: 📼 Videos & Time Ranges ➡", type="primary",
-              on_click=lambda: st.session_state.update(ui_section=SECTION_VIDEOS))
 
 
 def _select_all_recommended():
@@ -3304,7 +3302,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
         st.info("No videos selected yet. Tick the videos you want above, use **Select all recommended**, or add "
                 "others from the dropdown — switch to the Matching & Export tab once you're ready.")
     else:
-        st.success(f"{len(selected_now)} video(s) selected. Switch to the **Matching & Export** tab above when ready.")
+        st.success(f"{len(selected_now)} video(s) selected. Go on to **🎬 Matching & Export** (below) when ready.")
 
 
 def _moving_average(values, half_window: int):
@@ -4225,6 +4223,8 @@ DIAL_DEFAULTS = {
     "max_shape_matches": 6,
     "allow_same_video": False,
     "prefer_intro_outro": False,
+    "matching_mode": "Auto",
+    "sequential_mode": False,
     "intro_outro_exclusive": False,
     "clip_count_skip": [],
     # Auto-fill weights (used in Matching & Export, stored here for persistence)
@@ -5056,128 +5056,116 @@ if st.session_state.get("track_id") not in tracks:
 st.sidebar.header("Track")
 track_id = st.sidebar.selectbox("Track", tracks, key="track_id")
 # A chosen cutting pace keeps the dials tuned to this track (see ensure_audio_profile) —
-# done here, before the split-screen widgets below are drawn, so it may set them.
+# done here, before the split-screen widgets (🎵 Audio step) are drawn, so it may set them.
 ensure_audio_profile(load_track(track_id), track_id)
 
-st.sidebar.button("🎯 Auto-detect settings for this track", on_click=_run_auto_tune, type="primary",
-                  help="Analyses this track's tempo, energy and hits, then sets the segmentation and "
-                       "split-screen dials below. Adjust any dial afterwards to fine-tune.")
-if st.session_state.get("auto_tune_report"):
-    with st.sidebar.expander("What auto-detect chose, and why"):
-        for line in st.session_state["auto_tune_report"]:
-            st.write("• " + line)
-
-st.sidebar.header("Matching mode")
-matching_mode = st.sidebar.radio(
-    "How clips are chosen", ["Auto", "Manual step-through", "Choreography"], key="matching_mode",
-    help="Auto: the algorithm picks the best-matching clip per segment automatically.  "
-         "Manual step-through: pick from the best shape-matched candidates one block at a time.  "
-         "Choreography: one column per source video — see the auto pick for each, then override with "
-         "any available clip from that video via a timecode dropdown.",
-)
-max_shape_matches = st.sidebar.number_input(
-    "Max candidates shown per block", min_value=1, max_value=30, key="max_shape_matches",
-    disabled=(matching_mode != "Manual step-through"),
-    help="How many of the best-scoring clips are offered per block in Manual step-through mode.",
-)
-max_chor_videos = st.sidebar.number_input(
-    "Max videos shown per block (Choreography)", min_value=2, max_value=6, key="max_chor_videos",
-    disabled=(matching_mode != "Choreography"),
-    help="How many source-video columns to show per block. Keep it small enough that the grid "
-         "stays readable — 4 is comfortable, 6 is the practical limit.",
-)
-prefer_intro_outro = st.sidebar.checkbox(
-    "Prefer Intro/Outro-tagged clips for marked blocks",
-    key="prefer_intro_outro",
-    help="Mark scenes as intro/outro candidates in the review app (app.py) — 'Intro candidate' / "
-         "'Outro candidate' checkboxes alongside Exclude. Works in all three matching modes. With "
-         "this on, an 'Intro/Outro blocks' picker appears on the Matching & Export page (default: "
-         "first block / last block, freely changeable) — those blocks draw from a video's tagged "
-         "clips, but only for videos that actually have any tagged that way; a video with none "
-         "shows its normal full availability there, same as any other block.",
-)
-
-st.sidebar.header("Video selection")
-sequential_mode = st.sidebar.checkbox(
-    "Keep each video's own clips in original sequential order",
-    value=False, key="sequential_mode",
-    help="When on, a video's scenes are only ever used in their original chronological order "
-         "(matches the VSE add-on's 'Keep Sequential Order' behaviour) — other videos can still "
-         "interleave freely around them.",
-)
-
-_n_lib_ranges = len(library_ranges())
-if _n_lib_ranges:
-    st.sidebar.caption(f"📚 {_n_lib_ranges} video(s) have a Media Library range.")
-if st.session_state["video_time_ranges"]:
-    st.sidebar.caption(f"🎚️ {len(st.session_state['video_time_ranges'])} video(s) have a range set for this project.")
-    if st.sidebar.button("Reset project ranges (back to library ranges)"):
-        st.session_state["video_time_ranges"] = {}
-        st.rerun()
-
-allow_same_video = st.sidebar.checkbox(
-    "Allow multiple clips from the same video in one split-screen segment",
-    key="allow_same_video",
-)
-
-st.sidebar.header("Split screen & intensity")
-split_screen_enabled = st.sidebar.checkbox(
-    "Enable split-screen for high-energy segments", key="split_screen_enabled",
-)
-st.sidebar.slider(
-    "Min simultaneous clips", 1, MAX_SIMULTANEOUS_CLIPS, key="min_clips",
-    disabled=not split_screen_enabled,
-)
+# ---------------------------------------------------------------------------
+# Settings that live inside ONE step (split screen on 🎵 Audio; matching mode,
+# order and intro/outro on 🎬 Matching). Their widgets are only drawn on that
+# step, and Streamlit drops a widget's value on any run where the widget isn't
+# drawn — so every run re-stores each one here, which keeps it (and keeps it in
+# saved projects / the recovery file) whichever step you're on. Everything else
+# reads them from session_state, never from the widget's return value.
+# ---------------------------------------------------------------------------
+STEP_WIDGET_KEYS = [
+    "matching_mode", "max_shape_matches", "max_chor_videos", "prefer_intro_outro", "intro_outro_exclusive",
+    "sequential_mode", "allow_same_video",
+    "split_screen_enabled", "min_clips", "max_clips", "clip_count_skip", "ramp_range", "density_contrast",
+    "vary_count", "count_seed", "min_clip_len_sec",
+]
+for _k in STEP_WIDGET_KEYS:
+    if _k in st.session_state:
+        st.session_state[_k] = st.session_state[_k]
 if st.session_state["max_clips"] < st.session_state["min_clips"]:
     st.session_state["max_clips"] = st.session_state["min_clips"]
-st.sidebar.slider(
-    "Max simultaneous clips",
-    min_value=st.session_state["min_clips"], max_value=MAX_SIMULTANEOUS_CLIPS,
-    key="max_clips", disabled=not split_screen_enabled,
-    help="Up to 8, using the same layouts as the VSE add-on.",
-)
-_between = list(range(int(st.session_state["min_clips"]) + 1, int(st.session_state["max_clips"])))
-if _between:
-    # Keep only counts still between min and max (the widget errors on a value it can't offer).
-    if "clip_count_skip" in st.session_state:
-        st.session_state["clip_count_skip"] = [x for x in (st.session_state["clip_count_skip"] or [])
-                                               if x in _between]
-    st.sidebar.pills(
-        "Skip these clip counts", _between, selection_mode="multi", key="clip_count_skip",
-        disabled=not split_screen_enabled, format_func=lambda n: f"{n} clips",
-        help="Blocks never use a count you pick here — e.g. min 1, max 4, skip 3 → blocks use 1, 2 or 4 "
-             "clips. A block that would have used a skipped count takes the nearest allowed one "
-             "(the smaller when it's halfway).",
-    )
-st.sidebar.slider(
-    "Intensity ramp range", 0.0, 1.0, step=0.05, key="ramp_range",
-    disabled=not split_screen_enabled,
-    help="At or below left value: min clips. At or above right: max clips.",
-)
-st.sidebar.slider(
-    "Density contrast", 0.25, 3.0, step=0.05, key="density_contrast",
-    disabled=not split_screen_enabled,
-    help="Above 1 = only the loudest sections reach high clip counts; below 1 = rises more evenly.",
-)
-_vary = st.sidebar.checkbox(
-    "Vary clip count within range (seeded)", key="vary_count",
-    disabled=not split_screen_enabled,
-)
-st.sidebar.number_input(
-    "Clip count seed", 0, 99999, key="count_seed",
-    disabled=not (split_screen_enabled and _vary),
-)
-st.sidebar.slider(
-    "Minimum clip length (s)", 0.2, 3.0, step=0.1, key="min_clip_len_sec",
-    help="If footage left to fill a slot is shorter than this, extend the previous clip instead.",
-)
+
+matching_mode = st.session_state["matching_mode"]
+max_shape_matches = st.session_state["max_shape_matches"]
+max_chor_videos = st.session_state["max_chor_videos"]
+prefer_intro_outro = bool(st.session_state["prefer_intro_outro"])
+sequential_mode = bool(st.session_state["sequential_mode"])
+allow_same_video = bool(st.session_state["allow_same_video"])
+split_screen_enabled = bool(st.session_state["split_screen_enabled"])
+
+
+def render_split_screen_settings() -> None:
+    """🔀 Split screen & clip length — on the 🎵 Audio step (they set how many clips
+    each block gets, which the audio preview chart shows)."""
+    on = bool(st.session_state.get("split_screen_enabled"))
+    summary = (f"{st.session_state['min_clips']}–{st.session_state['max_clips']} clips per block"
+               if on else "off — one clip per block")
+    with st.expander(f"🔀 Split screen & clip length  ·  {summary}", expanded=False):
+        c = st.columns([1, 1])
+        with c[0]:
+            st.toggle("Split-screen for high-energy blocks", key="split_screen_enabled",
+                      help="Louder blocks show several clips at once (the VSE add-on's split-screen layouts).")
+            st.slider("Min simultaneous clips", 1, MAX_SIMULTANEOUS_CLIPS, key="min_clips", disabled=not on)
+            st.slider("Max simultaneous clips", min_value=st.session_state["min_clips"],
+                      max_value=MAX_SIMULTANEOUS_CLIPS, key="max_clips", disabled=not on,
+                      help="Up to 8, using the same layouts as the VSE add-on.")
+            between = list(range(int(st.session_state["min_clips"]) + 1, int(st.session_state["max_clips"])))
+            if between:
+                # Keep only counts still between min and max (the widget errors on a value it can't offer).
+                if "clip_count_skip" in st.session_state:
+                    st.session_state["clip_count_skip"] = [x for x in (st.session_state["clip_count_skip"] or [])
+                                                           if x in between]
+                st.pills(
+                    "Skip these clip counts", between, selection_mode="multi", key="clip_count_skip",
+                    disabled=not on, format_func=lambda n: f"{n} clips",
+                    help="Blocks never use a count you pick here — e.g. min 1, max 4, skip 3 → blocks use 1, 2 "
+                         "or 4 clips. A block that would have used a skipped count takes the nearest allowed "
+                         "one (the smaller when it's halfway).")
+        with c[1]:
+            st.slider("Intensity ramp range", 0.0, 1.0, step=0.05, key="ramp_range", disabled=not on,
+                      help="At or below left value: min clips. At or above right: max clips.")
+            st.slider("Density contrast", 0.25, 3.0, step=0.05, key="density_contrast", disabled=not on,
+                      help="Above 1 = only the loudest sections reach high clip counts; below 1 = rises more evenly.")
+            vary = st.checkbox("Vary clip count within range (seeded)", key="vary_count", disabled=not on)
+            st.number_input("Clip count seed", 0, 99999, key="count_seed", disabled=not (on and vary))
+        st.slider("Minimum clip length (s)", 0.2, 3.0, step=0.1, key="min_clip_len_sec",
+                  help="If footage left to fill a slot is shorter than this, extend the previous clip instead.")
+
+
+def render_matching_mode_settings() -> None:
+    """🎛️ Mode tab of the 🎬 Matching step's settings."""
+    c = st.columns([2, 1])
+    with c[0]:
+        mode = st.radio(
+            "How clips are chosen", ["Auto", "Manual step-through", "Choreography"], key="matching_mode",
+            horizontal=True,
+            help="Auto: the algorithm picks the best-matching clip per segment automatically.  "
+                 "Manual step-through: pick from the best shape-matched candidates one block at a time.  "
+                 "Choreography: one column per source video — see the auto pick for each, then override with "
+                 "any available clip from that video via a timecode dropdown.")
+    with c[1]:
+        if mode == "Manual step-through":
+            st.number_input("Candidates shown per block", min_value=1, max_value=30, key="max_shape_matches",
+                            help="How many of the best-scoring clips are offered per block.")
+        elif mode == "Choreography":
+            st.number_input("Videos shown per block", min_value=2, max_value=6, key="max_chor_videos",
+                            help="How many source-video columns to show per block. 4 is comfortable, 6 is "
+                                 "the practical limit.")
+    c = st.columns(3)
+    c[0].toggle("Keep each video's clips in order", key="sequential_mode",
+                help="A video's scenes are only ever used in their original chronological order (the VSE "
+                     "add-on's 'Keep Sequential Order') — other videos can still interleave around them.")
+    c[1].toggle("Allow one video twice in a split-screen block", key="allow_same_video",
+                help="Lets a split-screen block use more than one clip from the same video.")
+    c[2].toggle("Prefer Intro/Outro-tagged clips", key="prefer_intro_outro",
+                help="Intro/Outro blocks (🎬 Intro/Outro tab — default: first and last block) draw from a "
+                     "video's clips marked Intro / Outro in the Reviewer, for videos that have any; a video "
+                     "with none offers its normal clips there.")
+
 
 # ---------------------------------------------------------------------------
 # Compute: track + video-level energy matching
 # ---------------------------------------------------------------------------
 
 track = load_track(track_id)
-st.sidebar.caption(f"🎵 Track length: {format_mmss(track['duration_sec'])}")
+try:
+    st.sidebar.caption(f"🎵 {format_mmss(track['duration_sec'])}  ·  {float(track.get('bpm') or 0):.0f} BPM")
+except (TypeError, ValueError):
+    st.sidebar.caption(f"🎵 {format_mmss(track['duration_sec'])}")
 
 # ---------------------------------------------------------------------------
 # App-scope audio settings preservation
@@ -5214,21 +5202,100 @@ for _k in AUDIO_SETTINGS_KEYS:
 _old_section = st.session_state.get("ui_section")
 if _old_section is not None and _old_section not in SECTIONS:
     st.session_state["ui_section"] = next((x for x in SECTIONS if x[:1] == str(_old_section)[:1]), SECTION_AUDIO)
-ui_section = st.radio(
-    "Section", SECTIONS,
-    horizontal=True, key="ui_section", label_visibility="collapsed",
-)
+def _goto(section: str) -> None:
+    st.session_state["ui_section"] = section
+
+
+def _step_status() -> list:
+    """One short line per step, shown under the step bar."""
+    method = st.session_state.get("segmentation_method", SEG_SMART)
+    audio = SEG_LABELS.get(method, method).split("—")[0].strip()
+    if st.session_state.get("split_screen_enabled"):
+        audio += f" · split {st.session_state['min_clips']}–{st.session_state['max_clips']}"
+    regions = current_story_map(track_id)
+    story = (f"{sum(1 for r in regions if r['role'])} part(s) with a role" if regions else "optional — not set")
+    n_vid = len(st.session_state.get("committed_selected_videos", []))
+    videos = f"{n_vid} video(s) selected" if n_vid else "none selected yet"
+    mode = st.session_state.get("matching_mode", "Auto")
+    done = {"Manual step-through": len(st.session_state.get("adv_confirmed", {}) or {}),
+            "Choreography": len(st.session_state.get("chor_confirmed", {}) or {})}.get(mode)
+    match = mode + (f" · {done} block(s) confirmed" if done else "")
+    if sequential_mode:
+        match += " · in order"
+    return [audio, story, videos, match]
+
+
+def step_nav(back: str = None, nxt: str = None) -> None:
+    """⬅ / ➡ buttons at the foot of a step."""
+    st.divider()
+    c = st.columns([1, 2, 1])
+    if back:
+        c[0].button(f"⬅ {back.split(' ', 1)[1]}", on_click=_goto, args=(back,), use_container_width=True,
+                    key=f"nav_back_{back}")
+    if nxt:
+        c[2].button(f"{nxt.split(' ', 1)[1]} ➡", on_click=_goto, args=(nxt,), type="primary",
+                    use_container_width=True, key=f"nav_next_{nxt}")
+
+
+# The step bar: the radio (same key and values as always — saved sessions and the
+# recovery file keep working) styled as steps, with a status line under each.
+st.markdown("""<style>
+.st-key-stepnav .stElementContainer, .st-key-stepnav .stRadio { width: 100% !important; }
+.st-key-stepnav [role="radiogroup"] { display: grid !important; grid-template-columns: repeat(4, 1fr); gap: .5rem;
+  width: 100%; }
+.st-key-stepnav [role="radiogroup"] > div { margin: 0 !important; border-radius: .6rem;
+  border: 1px solid rgba(128,128,128,.35); background: rgba(128,128,128,.06); }
+.st-key-stepnav [role="radiogroup"] > div:hover { border-color: rgba(255,75,75,.6); }
+.st-key-stepnav [role="radiogroup"] > div[data-selected="true"] { border-color: #ff4b4b;
+  background: rgba(255,75,75,.10); box-shadow: inset 0 -3px 0 #ff4b4b; }
+.st-key-stepnav label[data-testid="stRadioOption"] { width: 100%; padding: .6rem .9rem; margin: 0; cursor: pointer; }
+.st-key-stepnav label[data-testid="stRadioOption"] > div > div:first-child { display: none; }
+.st-key-stepnav [data-testid="stMarkdownContainer"] p { font-weight: 600; margin: 0; }
+.st-key-stepstatus { margin-top: -.6rem; }
+.st-key-stepstatus [data-testid="stCaptionContainer"] { padding: 0 .9rem; }
+</style>""", unsafe_allow_html=True)
+with st.container(key="stepnav"):
+    ui_section = st.radio(
+        "Section", SECTIONS,
+        horizontal=True, key="ui_section", label_visibility="collapsed",
+    )
+with st.container(key="stepstatus"):
+    for _col, _txt in zip(st.columns(4), _step_status()):
+        _col.caption(_txt)
 
 if ui_section == SECTION_AUDIO:
+    _ac = st.columns([1, 2])
+    _ac[0].button("🎯 Auto-detect settings for this track", on_click=_run_auto_tune, type="primary",
+                  use_container_width=True,
+                  help="Analyses this track's tempo, energy and hits, then sets the cutting and split-screen "
+                       "settings. Adjust anything afterwards to fine-tune.")
+    _ac[1].caption("Pick how the music is cut into blocks and check where the cuts land. Split screen "
+                   "(below) sets how many clips each block shows.")
+    render_split_screen_settings()
     render_audio_settings_section(track)
+    step_nav(nxt=SECTION_STORY)
     st.stop()
 
 if ui_section == SECTION_STORY:
     render_story_map_section(track)
+    step_nav(back=SECTION_AUDIO, nxt=SECTION_VIDEOS)
     st.stop()
 
 if ui_section == SECTION_VIDEOS:
+    _n_lib_ranges = len(library_ranges())
+    if _n_lib_ranges or st.session_state["video_time_ranges"]:
+        _rc = st.columns([3, 1])
+        _rc[0].caption(" · ".join(x for x in (
+            f"📚 {_n_lib_ranges} video(s) have a Media Library range" if _n_lib_ranges else "",
+            f"🎚️ {len(st.session_state['video_time_ranges'])} have a range set for this project"
+            if st.session_state["video_time_ranges"] else "") if x))
+        if st.session_state["video_time_ranges"] and _rc[1].button("Reset project ranges",
+                                                                    use_container_width=True,
+                                                                    help="Back to the Media Library ranges."):
+            st.session_state["video_time_ranges"] = {}
+            st.rerun()
     render_video_selection_section(track, all_video_ids, all_tag_options, catalogues)
+    step_nav(back=SECTION_STORY, nxt=SECTION_MATCH)
     st.stop()
 
 tag_filter = list(st.session_state.get("committed_tag_filter", []))
@@ -5253,9 +5320,17 @@ if not split_screen_enabled:
     density_contrast, vary_count, count_seed = 1.0, False, 0
 
 if not selected_videos:
-    st.info("No videos selected yet. Switch to the **Videos & Time Ranges** tab above to tick some — the "
-            "plan builds as soon as at least one is selected.")
+    st.info("No videos selected yet. Go to **📼 Videos & Time Ranges** to tick some — the plan builds as soon "
+            "as at least one is selected.")
+    step_nav(back=SECTION_VIDEOS)
     st.stop()
+
+# ⚙️ Matching settings — every setting for this step in one panel. All three tabs
+# are drawn on every run (st.tabs runs each body), so nothing is dropped.
+with st.container(border=True):
+    _mt = st.tabs(["🎛️ Mode & order", "⚖️ Auto-fill weights", "🎬 Intro / Outro", "🧹 Resets"])
+with _mt[0]:
+    render_matching_mode_settings()
 
 # ---------------------------------------------------------------------------
 # Auto-fill weighting — shown inline on this page, not in the sidebar
@@ -5301,7 +5376,7 @@ _preset_vals = AF.PRESETS.get(st.session_state.get("autofill_preset"))
 if _preset_vals and any(abs(float(st.session_state.get(k, v)) - v) > 1e-6 for k, v in _preset_vals.items()):
     st.session_state["autofill_preset"] = _PRESET_CUSTOM
 
-with st.expander("⚙️ Auto-fill weighting", expanded=False):
+with _mt[1]:
     if _is_auto_mode:
         st.caption("In Auto mode these weights drive EVERY pick directly. On a marked intro/outro "
                    "block, clips actually tagged are still preferred first.")
@@ -5398,14 +5473,16 @@ if st.session_state.get("planner_state_key") != state_key:
         st.session_state["segment_clip_reduction"] = {}
         st.session_state["global_excluded_scenes"] = set()
 
-if st.sidebar.button("Reset manual clip overrides"):
+if _mt[3].button("Reset manual clip overrides",
+                 help="Clears Auto mode's per-block Swap / Reject / Remove changes and every clip rejected "
+                      "from this plan."):
     st.session_state["segment_exclusions"] = {}
     st.session_state["segment_clip_reduction"] = {}
     st.session_state["global_excluded_scenes"] = set()
     st.rerun()
 
 if st.session_state["global_excluded_scenes"]:
-    st.sidebar.caption(f"{len(st.session_state['global_excluded_scenes'])} clip(s) permanently rejected from this plan.")
+    _mt[3].caption(f"{len(st.session_state['global_excluded_scenes'])} clip(s) permanently rejected from this plan.")
 
 queues = build_footage_queues(tuple(selected_videos), tuple(tag_filter), effective_time_ranges())
 if not queues:
@@ -5449,8 +5526,11 @@ st.session_state["_avg_clips_per_block"] = (sum(recommended_counts) / len(recomm
 # ---------------------------------------------------------------------------
 intro_blocks_0based: set = set()
 outro_blocks_0based: set = set()
+if not st.session_state.get("prefer_intro_outro"):
+    _mt[2].caption("Turn on **Prefer Intro/Outro-tagged clips** (🎛️ Mode & order) to choose which blocks use the "
+                   "clips marked Intro / Outro in the Reviewer.")
 if st.session_state.get("prefer_intro_outro"):
-    with st.expander("🎬 Intro/Outro blocks", expanded=False):
+    with _mt[2]:
         st.caption("Which block(s) draw from each video's intro/outro-tagged clips (tag scenes in "
                    "app.py). Add blocks alongside the defaults, or remove a default and pick others "
                    "instead — a video with no tagged clips for a block just shows its normal full "
