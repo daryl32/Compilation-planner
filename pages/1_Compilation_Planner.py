@@ -4982,17 +4982,28 @@ def _undo_new_project() -> None:
         st.session_state["_project_notices"] = [("error", "Couldn't find what you had before.")]
 
 
-st.sidebar.header("Project")
+# 📁 Project bar — at the top of the page, above the steps (it used to be in the sidebar).
+_pbar = st.container(border=True)
+_pb = _pbar.columns([3, 1.3, 1, 1.2])
 _new_notice = st.session_state.pop("_new_project_notice", None)
-if _new_notice:
-    st.sidebar.success("🆕 New project started" + (f" — **{_new_notice}**" if isinstance(_new_notice, str) else "")
-                       + ". Pick a track and videos to begin.")
-    if _autosave_path(".before_new").exists():
-        st.sidebar.button("↩️ Bring back what I had", on_click=_undo_new_project, use_container_width=True,
-                          key="new_project_undo")
 _new_loaded = st.session_state.get("_loaded_project")
 _new_loaded_changes = _project_changes(_new_loaded) if _new_loaded else 0
-with st.sidebar.popover("🆕 New project", use_container_width=True):
+_loaded = _new_loaded
+with _pb[0]:
+    if _loaded:
+        _n_changed = _new_loaded_changes
+        if _n_changed:
+            st.markdown(f"📁 **{_loaded['name']}**  ·  :orange[unsaved changes ({_n_changed} area"
+                        f"{'' if _n_changed == 1 else 's'})]")
+        else:
+            st.markdown(f"📁 **{_loaded['name']}**  ·  :green[all changes saved]")
+    else:
+        st.markdown("📁 **Unsaved project**  ·  :gray[save it to keep it and come back later]")
+if _loaded and _new_loaded_changes:
+    if _pb[1].button(f"💾 Save changes", type="primary", use_container_width=True, key="project_quick_save",
+                     help=f"Save to '{_loaded['name']}'."):
+        _do_save_project(_loaded["name"])
+with _pb[2].popover("🆕 New", use_container_width=True):
     st.caption("Start again from a blank planner — default settings, no track work, no project "
                "loaded. Saved projects aren't touched, and you can bring back what's on screen "
                "now straight afterwards.")
@@ -5002,21 +5013,7 @@ with st.sidebar.popover("🆕 New project", use_container_width=True):
                   help="Filled in as the project name, ready for 💾 Save.")
     st.button("🆕 Start new project", type="primary", on_click=_new_project, use_container_width=True,
               key="new_project_go")
-_loaded = _new_loaded
-if _loaded:
-    _n_changed = _new_loaded_changes
-    if _n_changed:
-        st.sidebar.warning(f"📂 **{_loaded['name']}** — unsaved changes ({_n_changed} area"
-                           f"{'' if _n_changed == 1 else 's'})")
-        if st.sidebar.button(f"💾 Save changes to '{_loaded['name']}'", type="primary",
-                             use_container_width=True, key="project_quick_save"):
-            _do_save_project(_loaded["name"])
-    else:
-        st.sidebar.caption(f"📂 **{_loaded['name']}** — all changes saved")
-for _kind, _msg in st.session_state.pop("_project_notices", []):
-    getattr(st.sidebar, _kind)(_msg)
-
-with st.sidebar.expander("💾 Save / 📂 Load", expanded=False):
+with _pb[3].popover("💾 Save / 📂 Open", use_container_width=True):
     st.caption("Saves every setting plus matching progress (Auto, Manual step-through, and "
                "Choreography all at once) so you can close this and pick up again later.")
     _save_name = st.text_input("Project name", key="project_save_name", placeholder="my-compilation",
@@ -5030,17 +5027,24 @@ with st.sidebar.expander("💾 Save / 📂 Load", expanded=False):
     st.divider()
     _existing_projects = list_saved_projects()
     if _existing_projects:
-        _load_choice = st.selectbox("Load project", ["—"] + _existing_projects, key="project_load_choice")
-        if _load_choice != "—" and st.button("📂 Load Project", use_container_width=True):
+        _load_choice = st.selectbox("Open project", ["—"] + _existing_projects, key="project_load_choice")
+        if _load_choice != "—" and st.button("📂 Open Project", use_container_width=True):
             _path = PROJECTS_DIR / f"{_load_choice}.json"
             _load_warnings = load_project(_path)
             _remember_project(_load_choice, json.loads(_path.read_text()))
             st.session_state["_prefill_project_name"] = _load_choice
             st.session_state["_project_notices"] = ([("warning", _w) for _w in _load_warnings]
-                                                    + [("success", f"Loaded '{_load_choice}'.")])
+                                                    + [("success", f"Opened '{_load_choice}'.")])
             st.rerun()
     else:
         st.caption("No saved projects yet.")
+if _new_notice:
+    _pbar.success("🆕 New project started" + (f" — **{_new_notice}**" if isinstance(_new_notice, str) else "")
+                  + ". Pick a track and videos to begin.")
+    if _autosave_path(".before_new").exists():
+        _pbar.button("↩️ Bring back what I had", on_click=_undo_new_project, key="new_project_undo")
+for _kind, _msg in st.session_state.pop("_project_notices", []):
+    getattr(_pbar, _kind)(_msg)
 
 # A loaded project's track_id can reference a track that no longer exists (renamed/deleted
 # audio file) — the Track selectbox below would error if its backing value isn't among the
@@ -5048,13 +5052,17 @@ with st.sidebar.expander("💾 Save / 📂 Load", expanded=False):
 if st.session_state.get("track_id") not in tracks:
     st.session_state.pop("track_id", None)
     if st.session_state.get("_project_load_pending_modes"):
-        st.sidebar.warning("The loaded project's track is no longer available — defaulted to the first track.")
+        st.warning("The loaded project's track is no longer available — defaulted to the first track.")
 
 
 # 🔄 Sync now lives in the shared sidebar (page_setup → ☁️ Google Drive).
 
-st.sidebar.header("Track")
-track_id = st.sidebar.selectbox("Track", tracks, key="track_id")
+# The track is picked at the top of the 🎵 Audio step (render_track_picker); it's
+# kept like the other step settings (STEP_WIDGET_KEYS) so every step can use it.
+if tracks and st.session_state.get("track_id") not in tracks:
+    st.session_state["track_id"] = tracks[0]
+st.session_state["track_id"] = st.session_state["track_id"]
+track_id = st.session_state["track_id"]
 # A chosen cutting pace keeps the dials tuned to this track (see ensure_audio_profile) —
 # done here, before the split-screen widgets (🎵 Audio step) are drawn, so it may set them.
 ensure_audio_profile(load_track(track_id), track_id)
@@ -5162,10 +5170,19 @@ def render_matching_mode_settings() -> None:
 # ---------------------------------------------------------------------------
 
 track = load_track(track_id)
-try:
-    st.sidebar.caption(f"🎵 {format_mmss(track['duration_sec'])}  ·  {float(track.get('bpm') or 0):.0f} BPM")
-except (TypeError, ValueError):
-    st.sidebar.caption(f"🎵 {format_mmss(track['duration_sec'])}")
+
+
+def render_track_picker() -> None:
+    """🎵 Track — first thing on the Audio step."""
+    c = st.columns([2, 3])
+    c[0].selectbox("🎵 Track", tracks, key="track_id",
+                   help="The music this compilation is cut to. Changing it re-tunes the cutting settings "
+                        "if a cutting pace is chosen; each track has its own story map.")
+    try:
+        info = f"{format_mmss(track['duration_sec'])}  ·  {float(track.get('bpm') or 0):.0f} BPM"
+    except (TypeError, ValueError):
+        info = format_mmss(track["duration_sec"])
+    c[1].markdown(f"<div style='padding-top:2.1rem;opacity:.7'>{info}</div>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # App-scope audio settings preservation
@@ -5209,7 +5226,7 @@ def _goto(section: str) -> None:
 def _step_status() -> list:
     """One short line per step, shown under the step bar."""
     method = st.session_state.get("segmentation_method", SEG_SMART)
-    audio = SEG_LABELS.get(method, method).split("—")[0].strip()
+    audio = f"{track_id} · " + SEG_LABELS.get(method, method).split("—")[0].strip()
     if st.session_state.get("split_screen_enabled"):
         audio += f" · split {st.session_state['min_clips']}–{st.session_state['max_clips']}"
     regions = current_story_map(track_id)
@@ -5264,6 +5281,7 @@ with st.container(key="stepstatus"):
         _col.caption(_txt)
 
 if ui_section == SECTION_AUDIO:
+    render_track_picker()
     _ac = st.columns([1, 2])
     _ac[0].button("🎯 Auto-detect settings for this track", on_click=_run_auto_tune, type="primary",
                   use_container_width=True,
