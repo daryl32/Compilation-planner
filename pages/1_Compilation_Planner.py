@@ -5527,6 +5527,18 @@ recommended_counts = [
 st.session_state["_avg_clips_per_block"] = (sum(recommended_counts) / len(recommended_counts)
                                             if recommended_counts else 1.0)
 
+# 🎭 The story map's part for each block (by the block's middle) — shown on every
+# block card and over the chart, as a guide while picking clips.
+_story_regions = current_story_map(track_id)
+_story_roles = SR.roles_by_id()
+story_block_roles = STM.block_roles(_story_regions, segments) if _story_regions else [None] * len(segments)
+
+
+def story_tag(i: int) -> str:
+    """'  ·  🎭 💥 Action part' for block i's story map part, '' if none."""
+    r = story_block_roles[i] if 0 <= i < len(story_block_roles) else None
+    return f"  ·  🎭 **{SR.label(r, _story_roles)}** part" if r else ""
+
 # ---------------------------------------------------------------------------
 # Intro/Outro block picker — shared across all three matching modes. Defaults
 # to the first block for intro and the last for outro, but every block is
@@ -5914,7 +5926,16 @@ fig.update_layout(
     yaxis2=dict(title="Clips", overlaying="y", side="right", range=[0, max_clips + 0.5], dtick=1, showgrid=False),
     legend=dict(orientation="h", y=-0.25),
 )
+# 🎭 Story map parts behind the chart, labelled along the top.
+for _r in (_story_regions or []):
+    _role = _story_roles.get(_r["role"]) if _r["role"] else None
+    if _role:
+        fig.add_vrect(x0=_r["start"], x1=_r["end"], fillcolor=_role["colour"], opacity=0.16, line_width=0,
+                      layer="below", annotation_text=f"{_role['emoji']} {_role['name']}",
+                      annotation_position="top left", annotation_font_size=11)
 st.plotly_chart(fig, use_container_width=True)
+if _story_regions:
+    st.caption("🎭 Shaded: the story map's parts (🎭 1. Story map). Each block card says which part it's in.")
 
 # ---------------------------------------------------------------------------
 # Timeline table + thumbnails preview
@@ -5937,7 +5958,7 @@ if matching_mode == "Auto":
         role_tag = ("  🎬 INTRO BLOCK" if seg_idx in intro_blocks_0based
                    else "  🎬 OUTRO BLOCK" if seg_idx in outro_blocks_0based else "")
         st.markdown(f"**Block {seg_idx + 1}**  {t0:.1f}s – {t1:.1f}s  (intensity {entry['segment_intensity']:.2f})"
-                   f"{split_tag}{edited_tag}{role_tag}")
+                   f"{split_tag}{edited_tag}{role_tag}{story_tag(seg_idx)}")
 
         if not entry["scenes"]:
             st.caption("No clip selected for this segment (all rejected).")
@@ -6050,7 +6071,7 @@ elif matching_mode == "Choreography":
             hdr_cols = st.columns([6, 1])
             with hdr_cols[0]:
                 st.markdown(f"**Block {seg_idx + 1}** &nbsp; {t0:.1f}s – {t1:.1f}s &nbsp; "
-                            f"intensity {entry['segment_intensity']:.2f}{chor_review_role_tag}")
+                            f"intensity {entry['segment_intensity']:.2f}{chor_review_role_tag}{story_tag(seg_idx)}")
             with hdr_cols[1]:
                 if st.button("✏️ Edit", key=f"chor_edit_{seg_idx}",
                              help=f"Re-pick block {seg_idx + 1}'s clips. Every other block stays as it is."):
@@ -6091,6 +6112,9 @@ elif matching_mode == "Choreography":
         st.subheader(f"{'✏️ Editing block' if chor_editing is not None else 'Block'} "
                      f"{chor_block + 1} of {len(segments)}  "
                      f"({seg['start']:.1f}s – {seg['end']:.1f}s, intensity {seg['intensity']:.2f}){chor_role_tag}")
+        if story_tag(chor_block):
+            st.markdown(f"This block is in the story map's{story_tag(chor_block)[4:]} — "
+                        f"{(SR.roles_by_id().get(story_block_roles[chor_block]) or {}).get('help', '')}")
         if chor_editing is not None:
             st.info("Every other block stays committed. The dropdowns only offer footage no other block uses"
                     + (" — and, with sequential order on, only footage between each video's clips in the "
@@ -6400,7 +6424,7 @@ else:
             with hdr_cols[0]:
                 st.markdown(
                     f"**Block {seg_idx + 1}** &nbsp; {t0:.1f}s – {t1:.1f}s &nbsp; "
-                    f"intensity {entry['segment_intensity']:.2f}{split_tag}{adv_review_role_tag}"
+                    f"intensity {entry['segment_intensity']:.2f}{split_tag}{adv_review_role_tag}{story_tag(seg_idx)}"
                 )
             with hdr_cols[1]:
                 if st.button("✏️ Edit", key=f"adv_edit_block_{seg_idx}",
@@ -6439,6 +6463,9 @@ else:
         st.subheader(f"{'✏️ Editing block' if adv_editing is not None else 'Block'} "
                      f"{current_block + 1} of {len(segments)}  "
                      f"({seg['start']:.1f}s – {seg['end']:.1f}s, intensity {seg['intensity']:.2f}){adv_role_tag}")
+        if story_tag(current_block):
+            st.markdown(f"This block is in the story map's{story_tag(current_block)[4:]} — "
+                        f"{(SR.roles_by_id().get(story_block_roles[current_block]) or {}).get('help', '')}")
         if adv_editing is not None:
             st.info("Every other block stays confirmed. The candidates only use footage no other block uses"
                     + (" — and, with sequential order on, only footage between each video's clips in the "
