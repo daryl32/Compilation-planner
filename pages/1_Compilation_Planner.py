@@ -2822,6 +2822,15 @@ def _story_boundary_changed(i: int, key: str) -> None:
     _story_edit(STM.move_boundary, i, float(st.session_state[key]))
 
 
+def _story_snap_one(i: int, cut_times: list) -> None:
+    """📐 on one line: move it onto the nearest cut."""
+    regions = current_story_map(st.session_state["track_id"])
+    t = regions[i]["end"]
+    inner = [c for c in cut_times if regions[i]["start"] < c < regions[i + 1]["end"]]
+    if inner:
+        _story_edit(STM.move_boundary, i, min(inner, key=lambda c: abs(c - t)))
+
+
 def _story_play(i: int) -> None:
     st.session_state["sm_play"] = None if st.session_state.get("sm_play") == i else i
 
@@ -2900,6 +2909,10 @@ def render_story_map_section(track: dict) -> None:
                       "Useful after changing the audio settings.")
     lead = tc[3].toggle("▶ starts 2s early", key="sm_lead_in",
                         help="Hear what leads into each part, not just the part itself.")
+    snap = tc[3].toggle("Handles snap to cuts", key="sm_snap",
+                        help="On: the lines between parts stop only on the cut points. Off: they move freely "
+                             "(0.1s steps) to line up with the audio curve — 📐 next to a line snaps just that "
+                             "one to its nearest cut.")
 
     playing = st.session_state.get("sm_play")
     st.plotly_chart(_story_chart(track, regions, segs, roles, playing), use_container_width=True,
@@ -2973,20 +2986,35 @@ def render_story_map_section(track: dict) -> None:
                     else:
                         st.audio(str(clip), autoplay=True)
 
-        # The handle between this part and the next: any cut in between.
+        # The handle between this part and the next: free (0.1s steps) or on the cuts.
         if i + 1 < len(regions):
             nxt = regions[i + 1]
-            opts = sorted({t for t in cut_times if r["start"] < t < nxt["end"]} | {r["end"]})
-            if len(opts) > 1:
-                bk = f"sm_line_{v}_{i}"
-                lc = st.columns([1.3, 4])
-                _lab = lambda x: SR.label(x, roles) if x else "no role"
-                lc[0].caption(f"↕ Where {_lab(r['role'])} ends and {_lab(nxt['role'])} begins")
-                lc[1].select_slider(
-                    "Line between these parts", opts, value=r["end"], key=bk,
-                    format_func=lambda t: f"{format_mmss(t)} ({t:.1f}s)", label_visibility="collapsed",
-                    on_change=_story_boundary_changed, args=(i, bk),
-                    help="Drag to move where one part ends and the next begins — it stops on the cuts.")
+            bk = f"sm_line_{v}_{i}_{'s' if snap else 'f'}"
+            _lab = lambda x: SR.label(x, roles) if x else "no role"
+            on_cut = any(abs(c - r["end"]) < 0.05 for c in cut_times)
+            lc = st.columns([1.3, 3.6, 0.4])
+            lc[0].caption(f"↕ Where {_lab(r['role'])} ends and {_lab(nxt['role'])} begins"
+                          + ("" if on_cut else "  ·  :orange[between cuts]"))
+            if snap:
+                opts = sorted({t for t in cut_times if r["start"] < t < nxt["end"]} | {r["end"]})
+                if len(opts) > 1:
+                    lc[1].select_slider(
+                        "Line between these parts", opts, value=r["end"], key=bk,
+                        format_func=lambda t: f"{format_mmss(t)} ({t:.1f}s)", label_visibility="collapsed",
+                        on_change=_story_boundary_changed, args=(i, bk),
+                        help="Drag to move where one part ends and the next begins — it stops on the cuts.")
+            else:
+                lo = math.ceil((r["start"] + 0.1) * 10) / 10
+                hi = math.floor((nxt["end"] - 0.1) * 10) / 10
+                if hi > lo:
+                    lc[1].slider(
+                        "Line between these parts", min_value=float(lo), max_value=float(hi),
+                        value=float(min(max(round(r["end"], 1), lo), hi)), step=0.1, format="%.1fs", key=bk,
+                        label_visibility="collapsed", on_change=_story_boundary_changed, args=(i, bk),
+                        help="Drag to line the change up with the audio curve (arrow keys move it 0.1s). "
+                             "📐 snaps it to the nearest cut.")
+            lc[2].button("📐", key=f"sm_snap1_{v}_{i}", disabled=on_cut, on_click=_story_snap_one,
+                         args=(i, cut_times), help="Snap this line to the nearest cut.")
 
     st.divider()
     n_role = sum(1 for x in block_role if x)
