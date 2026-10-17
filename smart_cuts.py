@@ -61,11 +61,14 @@ DEFAULTS = {
     "sm_pace": 0.0,          # −2 … +2 grid levels from the song's own middle pace
     "sm_contrast": 1.0,      # 0 = same pace everywhere, 1 = auto from the song, 2 = exaggerated
     "sm_builds": True,
+    "sm_build_strength": 1.0,  # 0 = no speed-up, 1 = from the song's rise, 2 = exaggerated
     "sm_accents": True,
     "sm_vocals": True,
     "sm_mirror": True,
 }
 TARGET_SHOT_SEC = 2.5        # the middle pace: comfortable average shot at any tempo
+PACE_OFFSET = -1             # "auto" sits one grid level calmer than TARGET_SHOT_SEC suggests —
+                             # calmer fits most songs best (Pace slider moves from there)
 MIN_SHOT_SEC = 0.6           # at contrast 1; contrast above 1 lets both limits stretch
 MAX_SHOT_SEC = 12.0
 MID_INTENSITY = 0.56         # the song's "usual" level on its own 0–1 intensity scale
@@ -243,11 +246,17 @@ def plan_cuts(track: dict, cfg: dict) -> tuple:
                         if np.any((beat_mid >= bars[i]) & (beat_mid < bars[i + 1])) else 0.0
                         for i in range(len(bars) - 1)])
     sections = find_sections(track, bars, bar_int, bpb)
+
+    def _int_at(t: float, n_bars: int) -> float:
+        """Mean intensity of the n_bars bars starting at time t."""
+        i = int(np.clip(np.searchsorted(bars, t + 1e-3) - 1, 0, max(len(bar_int) - 1, 0)))
+        seg = bar_int[i:i + n_bars]
+        return float(seg.mean()) if len(seg) else 0.0
     builds, drops = _builds_and_drops(track, bars, bpb)
 
     # The song's own middle pace and how far it may swing.
     middle = _level_for(TARGET_SHOT_SEC, bar_len)
-    middle = int(np.clip(middle + round(float(cfg["sm_pace"])), 0, len(LEVEL_BARS) - 1))   # + = busier
+    middle = int(np.clip(middle + PACE_OFFSET + round(float(cfg["sm_pace"])), 0, len(LEVEL_BARS) - 1))   # + = busier
     sec_int = np.array([bar_int[s["start_bar"]:s["end_bar"]].mean() for s in sections])
     spread = float(np.percentile(sec_int, 90) - np.percentile(sec_int, 10)) if len(sec_int) > 1 else 0.0
     contrast = float(cfg["sm_contrast"])
@@ -290,7 +299,7 @@ def plan_cuts(track: dict, cfg: dict) -> tuple:
             if float(np.polyfit(np.arange(len(seg)), seg, 1)[0]) * len(seg) > 0.15:
                 t_end = float(bars[eb]) if eb < len(bars) else duration
                 if not any(abs(be - t_end) < bar_len for _, be in builds):
-                    builds.append((max(float(bars[sb]), t_end - 8 * bar_len), t_end))
+                    builds.append((float(bars[sb]), t_end))   # how much of it speeds up: see below
                     if not any(abs(d - t_end) < bar_len for d in drops):
                         drops.append(t_end)
     cut_times, kinds = {}, {}
@@ -351,18 +360,27 @@ def plan_cuts(track: dict, cfg: dict) -> tuple:
                 last = g
             t += unit
         every = _fmt_level(8.0 / 2 ** lvl_f)
-        if cfg["sm_builds"]:
-            for bs, be in in_build:
-                bs, be = max(bs, t0, be - 8 * bar_len), min(be, t1)   # the last 8 bars into the drop
+        strength = float(cfg.get("sm_build_strength", 1.0))
+        if cfg["sm_builds"] and strength > 0:
+            for b0, be in in_build:
+                # How big the rise is — the intensity just after the drop minus where the
+                # build-up starts — sets how long the speed-up runs and how far it goes:
+                # a small lift gets a short nudge, a huge rise a long, steep run.
+                rise = max(0.0, _int_at(be, 2) - _int_at(max(b0, t0), 2))
+                eff = rise * strength
+                ramp_bars = 2 if eff < 0.15 else 4 if eff < 0.3 else 8 if eff < 0.5 else 16
+                steps = int(np.clip(round((1 + 4 * rise) * strength), 1, 5))
+                bs, be = max(b0, t0, be - ramp_bars * bar_len), min(be, t1)
                 if be - bs < bar_len * 2:
                     continue
-                # remove grid cuts inside the build, then accelerate: each quarter one level
-                # faster, from the middle pace (or slower) to two levels above it
+                # remove grid cuts inside the run, then accelerate stage by stage: from one
+                # level calmer than the section (or the middle pace) up `steps` levels
                 for c in [c for c in cut_times if bs < c < be and kinds[c][0] == "sm_grid"]:
                     cut_times.pop(c), kinds.pop(c)
                 lvl = int(np.clip(min(level, middle) - 1, max_level, min_level))
-                q = (be - bs) / 4
-                for part in range(4):
+                stages = steps + 1
+                q = (be - bs) / stages
+                for part in range(stages):
                     a, b = bs + part * q, bs + (part + 1) * q
                     u = LEVEL_BARS[lvl] * bar_len
                     tt = a + (u if part == 0 else 0)
@@ -370,7 +388,7 @@ def plan_cuts(track: dict, cfg: dict) -> tuple:
                         add(grid_beats[_nearest_idx(grid_beats, tt)], "sm_build", 2)
                         tt += u
                     lvl = min(lvl + 1, min_level)
-                every += " · speeds up through the build"
+                every += f" · speeds up over the last {(be - bs) / bar_len:.0f} bars into the drop"
         if label not in patterns:
             patterns[label] = (t1 - t0, pattern, float(sec_int[si]))
             first_of_label[label] = every

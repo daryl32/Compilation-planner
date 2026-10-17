@@ -352,6 +352,29 @@ def get_candidate_spans(queues: dict, sequential: bool, global_excluded: set = N
     return candidates
 
 
+def role_locked_keys(queues: dict, role_filter) -> set:
+    """'Intro/outro clips only in their blocks' (weights panel; needs Prefer
+    Intro/Outro on): the (video, scene) keys a block may NOT use — intro-marked
+    clips outside intro blocks, outro-marked clips outside outro blocks. A hard
+    rule; videos with no marked clips are unaffected. In sequential mode these are
+    skipped over (not consumed), like rejected clips, so they stay for their blocks."""
+    if not (st.session_state.get("intro_outro_exclusive") and st.session_state.get("prefer_intro_outro")):
+        return set()
+    out = set()
+    for spans in queues.values():
+        for sp in spans:
+            flags = {f for f in ("intro_candidate", "outro_candidate") if sp.get(f)}
+            if flags and role_filter not in flags:
+                out.add((sp["video_id"], sp["scene_id"]))
+    return out
+
+
+def excluded_for_block(queues: dict, global_excluded: set, role_filter) -> set:
+    """Rejected clips plus the ones role_locked_keys keeps out of this block."""
+    locked = role_locked_keys(queues, role_filter)
+    return (set(global_excluded) | locked) if locked else global_excluded
+
+
 def consume_span(span: dict, needed_sec: float) -> dict:
     """Trim needed_sec off the front of a span (in place) and return the
     picked sub-clip. If less than needed_sec remains, the whole remainder is
@@ -532,7 +555,41 @@ def find_shape_candidates(
     missing_curve_videos = set()
     video_curves_cache = {}  # video_id -> {scene_id: curve}, fetched at most once per call, not per span
 
-    for span in get_candidate_spans(queues, sequential, global_excluded, min_duration=block_duration):
+    search_spans = get_candidate_spans(queues, sequential, global_excluded, min_duration=block_duration)
+    span_limit = {}   # (video, scene) -> seconds of this span the search may reach (restrict_to_front)
+    if restrict_to_front and sequential:
+        # The skip budget counts windows across the WHOLE video (not just its front
+        # scene), and later scenes within it are searched too — picking one discards
+        # what's before it, as any sequential skip does.
+        extra = []
+        for front in list(search_spans):
+            vid = front["video_id"]
+            spans_v = [sp for sp in queues.get(vid, [])
+                       if sp["remaining_sec"] > 0.05 and (vid, sp["scene_id"]) not in (global_excluded or set())]
+            windows = sum(int(sp["remaining_sec"] // block_duration) for sp in spans_v)
+            budget_sec = (compute_skip_budget(max(1, windows), remaining_blocks, weight_position, len(queues)) + 1) \
+                * block_duration
+            reach = budget_sec
+            # Never further than one part past where this use should land (weight F's target).
+            tgt = (position_targets or {}).get(vid)
+            if tgt:
+                front_abs = front["scene_start_sec"] + front["offset_sec"]
+                reach = min(reach, max(block_duration, tgt[0] + tgt[1] - front_abs))
+            started = False
+            for sp in spans_v:
+                if sp is front:
+                    started = True
+                if not started:
+                    continue
+                if reach <= 1e-6:
+                    break
+                span_limit[(vid, sp["scene_id"])] = reach
+                if sp is not front and sp["remaining_sec"] >= block_duration - 1e-6:
+                    extra.append(sp)
+                reach -= sp["remaining_sec"]
+        search_spans = list(search_spans) + extra
+
+    for span in search_spans:
         key = (span["video_id"], span["scene_id"])
         if key in excluded_here or span["remaining_sec"] < block_duration - 1e-6:
             continue
@@ -558,9 +615,9 @@ def find_shape_candidates(
             # either the single front window or the whole span — still scores
             # the actual best-matching position WITHIN that budgeted range
             # properly (needed for weight A / reporting).
-            available_windows = max(1, int(span["remaining_sec"] // block_duration))
-            skip_budget = compute_skip_budget(available_windows, remaining_blocks, weight_position)
-            search_end_frame = min(span_end_frame, span_start_frame + (skip_budget + 1) * window_frames)
+            reach = span_limit.get(key, block_duration)
+            search_end_frame = min(span_end_frame,
+                                   span_start_frame + max(window_frames, round(max(reach, block_duration) * fps)))
         else:
             search_end_frame = span_end_frame
 
@@ -615,30 +672,38 @@ def find_shape_candidates(
     return unique[:max_matches], missing_curve_videos
 
 
-def compute_skip_budget(available_windows: int, remaining_blocks: int, weight_position: float) -> int:
-    """How many windows past the frontmost an automatic sequential-mode pick
-    is allowed to consider, instead of always being pinned to the very front.
+SKIP_SAFETY = 1.5   # keep this many times a video's expected remaining uses in reserve
 
-    surplus = how many MORE windows this video has available right now than
-    one-per-remaining-block — a conservative estimate, since not every
-    remaining block will necessarily draw from this particular video, so it
-    never overcommits footage that might genuinely be needed later. Never
-    negative: a video with barely enough (or less than enough) footage for
-    what's left gets a surplus of 0, so it's pinned to the front exactly like
-    before this existed.
 
-    weight F (spread through each video) controls how much of that surplus
-    is actually used — 0 means never skip ahead (the original, fully
-    conservative behaviour); the slider's own max means use the entire safety
-    margin. (This used to be part of weight D's job; F now owns everything
-    about WHERE within a video a pick comes from.)
+def plan_clips_per_block() -> float:
+    """Average clips per block in the current plan (set where the clip counts are worked out)."""
+    return max(1.0, float(st.session_state.get("_avg_clips_per_block", 1.0)))
 
-    Returns the number of EXTRA windows beyond the frontmost that may be
-    considered — 0 means restricted to just the front window, same as
-    before; slice candidates with [: this + 1]."""
-    surplus = max(0, available_windows - max(1, remaining_blocks))
-    power = max(0.0, min(1.0, weight_position / 5.0))  # F's slider range is 0..5
-    return int(surplus * power)
+
+def compute_skip_budget(available_windows: int, remaining_blocks: int, weight_position: float,
+                        n_videos: int = 1) -> int:
+    """How many windows past the frontmost an automatic sequential-mode pick may
+    consider, instead of always being pinned to the very front.
+
+    A video only appears in its SHARE of the remaining blocks — about
+    remaining blocks × clips per block ÷ videos in play. That many windows
+    (× SKIP_SAFETY, +1) are kept in reserve so later blocks never run short;
+    everything beyond is surplus the pick may skip ahead into. (This used to
+    reserve one window for EVERY remaining block of the plan, as if one video
+    had to fill them all — so the surplus was almost always 0 and each video
+    was used only from its start.)
+
+    weight F (Move through each video in order) > 0 opens the whole surplus;
+    the ranking's position term (compute_position_targets) then pulls each pick
+    towards the part of the video it should come from — beginning → middle →
+    end across the plan. F = 0 keeps the strict front-of-queue behaviour.
+
+    Returns the number of EXTRA windows beyond the frontmost — slice with [: this + 1]."""
+    if weight_position <= 0:
+        return 0
+    share = min(1.0, plan_clips_per_block() / max(1, n_videos))
+    reserve = int(math.ceil(max(1, remaining_blocks) * share * SKIP_SAFETY)) + 1
+    return max(0, int(available_windows) - reserve)
 
 
 def compute_position_targets(current_block: int, n_blocks: int, confirmed: dict, queues: dict,
@@ -1105,7 +1170,7 @@ def render_choreography_block(
                     if sequential_mode and weighting:
                         _remaining_blocks = len(weighting["segments"]) - seg_idx
                         _skip = compute_skip_budget(len(clips), _remaining_blocks,
-                                                    weighting.get("weight_position", 0.0))
+                                                    weighting.get("weight_position", 0.0), len(queues))
                         auto_candidates = clips[:_skip + 1]
                     elif sequential_mode:
                         auto_candidates = clips[:1]
@@ -2363,7 +2428,7 @@ def _smart_reset() -> None:
         st.session_state[k] = v
 
 
-_PACE_LABELS = {-2: "much calmer", -1: "calmer", 0: "auto (the song's own)", 1: "busier", 2: "much busier"}
+_PACE_LABELS = {-2: "much calmer", -1: "calmer", 0: "auto", 1: "busier", 2: "much busier"}
 
 
 def _render_smart_cut_settings(track: dict, _v) -> None:
@@ -2384,8 +2449,15 @@ def _render_smart_cut_settings(track: dict, _v) -> None:
                 help="How much the pace changes between quiet and intense sections. 1 = what this song's own "
                      "dynamics suggest; 0 = the same pace throughout; 2 = exaggerated.")
     t = st.columns(4)
-    t[0].toggle("Speed up into drops", value=bool(_v("sm_builds")), key="sm_builds", **_custom,
-                help="Through a build-up the cuts get quicker (e.g. every 2 bars → bar → half bar), landing on the drop.")
+    _bld = t[0].toggle("Speed up into drops", value=bool(_v("sm_builds")), key="sm_builds", **_custom,
+                       help="Through a build-up the cuts get quicker (e.g. every 2 bars → bar → half bar), "
+                            "landing on the drop. How long the speed-up runs and how fast it gets follow how "
+                            "big the rise into the drop is.")
+    c[1].slider("Speed-up strength", 0.0, 2.0, value=float(_v("sm_build_strength")), step=0.25,
+                key="sm_build_strength", disabled=not _bld, **_custom,
+                help="1 = follows the song: a small rise gets a short nudge (2 bars, a step or two quicker), a "
+                     "huge rise a long, steep run (up to 16 bars). Lower = gentler and shorter; 2 = longer and "
+                     "faster; 0 = no speed-up.")
     t[1].toggle("Accents", value=bool(_v("sm_accents")), key="sm_accents", **_custom,
                 help="An extra cut on hits that stand out from the rest of the song, and on vocal entries — "
                      "only where the section's rhythm leaves room.")
@@ -3737,6 +3809,13 @@ def apply_segment_intensity(segments: list[dict], track: dict, contrast: float) 
 
 def clips_for_intensity(intensity: float, min_clips: int, max_clips: int,
                         ramp_start: float, ramp_end: float, vary: bool, rng) -> int:
+    """_clips_for_intensity, then 'Skip these counts' (allowed_clip_count)."""
+    return allowed_clip_count(_clips_for_intensity(intensity, min_clips, max_clips, ramp_start, ramp_end, vary, rng),
+                              min_clips, max_clips)
+
+
+def _clips_for_intensity(intensity: float, min_clips: int, max_clips: int,
+                         ramp_start: float, ramp_end: float, vary: bool, rng) -> int:
     """Map a segment's 0-1 intensity to a clip count.
 
     The ramp range rescales intensity first (at/below ramp_start = 0, at/above
@@ -3758,6 +3837,16 @@ def clips_for_intensity(intensity: float, min_clips: int, max_clips: int,
         return ceiling
     floor = min(ceiling, int(round(min_clips + max(0.0, (pos - 0.5) * 2) * span)))
     return rng.randint(floor, ceiling)
+
+
+def allowed_clip_count(n: int, min_clips: int, max_clips: int) -> int:
+    """'Skip these counts' (sidebar): n moved to the nearest count that's allowed
+    (ties go to the smaller). Min and max are always allowed."""
+    skip = {int(x) for x in (st.session_state.get("clip_count_skip") or [])} - {min_clips, max_clips}
+    if n not in skip:
+        return n
+    allowed = [c for c in range(min_clips, max_clips + 1) if c not in skip]
+    return min(allowed, key=lambda c: (abs(c - n), c)) if allowed else n
 
 
 MAX_CHAIN_LINKS = 20  # safety cap against pathological tiny-leftover loops
@@ -3837,7 +3926,7 @@ def fill_slot(seg_energy: float, needed_sec: float, queues: dict, sequential: bo
                 ranked_pool = list(candidates)
                 for vid in {c["video_id"] for c in candidates}:
                     windows = get_available_clips_for_video(queues, vid, remaining, sequential, global_excluded)
-                    skip = compute_skip_budget(len(windows), remaining_blocks, weight_position)
+                    skip = compute_skip_budget(len(windows), remaining_blocks, weight_position, len(queues))
                     for w in windows[1:skip + 1]:
                         ranked_pool.append({**w, "_skip_window": True})
             ranked = rank_candidates_weighted(
@@ -3992,8 +4081,8 @@ def match_scenes_to_track(
         for _ in range(n_picks):
             avoid = used_videos if not allow_same_video else set()
             chain, unfilled = fill_slot(target, seg_duration, queues, sequential,
-                                         excluded_here, global_excluded, avoid, min_clip_len_sec,
-                                         role_filter, weighting)
+                                         excluded_here, excluded_for_block(queues, global_excluded, role_filter),
+                                         avoid, min_clip_len_sec, role_filter, weighting)
             if not chain:
                 break
             slots.append({
@@ -4108,6 +4197,8 @@ DIAL_DEFAULTS = {
     "max_shape_matches": 6,
     "allow_same_video": False,
     "prefer_intro_outro": False,
+    "intro_outro_exclusive": False,
+    "clip_count_skip": [],
     # Auto-fill weights (used in Matching & Export, stored here for persistence)
     # Defaults = autofill.PRESETS["Balanced"] (projects keep the values they were saved with).
     "weight_shape": 2.0,
@@ -4166,9 +4257,9 @@ PROJECT_FILE_VERSION = 1
 # Plain scalar / list-of-strings keys — copied straight across, no conversion needed.
 PROJECT_SIMPLE_KEYS = [
     "track_id", "matching_mode", "max_shape_matches", "max_chor_videos", "allow_same_video",
-    "sequential_mode", "prefer_intro_outro",
+    "sequential_mode", "prefer_intro_outro", "intro_outro_exclusive",
     *AUDIO_SETTINGS_KEYS,
-    "split_screen_enabled", "min_clips", "max_clips", "density_contrast",
+    "split_screen_enabled", "min_clips", "max_clips", "clip_count_skip", "density_contrast",
     "vary_count", "count_seed", "min_clip_len_sec",
     "weight_shape", "weight_random", "avoid_repeat", "weight_spread", "weight_motion",
     "weight_position", "autofill_seed", "autofill_v2", "autofill_preset",
@@ -5017,6 +5108,19 @@ st.sidebar.slider(
     key="max_clips", disabled=not split_screen_enabled,
     help="Up to 8, using the same layouts as the VSE add-on.",
 )
+_between = list(range(int(st.session_state["min_clips"]) + 1, int(st.session_state["max_clips"])))
+if _between:
+    # Keep only counts still between min and max (the widget errors on a value it can't offer).
+    if "clip_count_skip" in st.session_state:
+        st.session_state["clip_count_skip"] = [x for x in (st.session_state["clip_count_skip"] or [])
+                                               if x in _between]
+    st.sidebar.pills(
+        "Skip these clip counts", _between, selection_mode="multi", key="clip_count_skip",
+        disabled=not split_screen_enabled, format_func=lambda n: f"{n} clips",
+        help="Blocks never use a count you pick here — e.g. min 1, max 4, skip 3 → blocks use 1, 2 or 4 "
+             "clips. A block that would have used a skipped count takes the nearest allowed one "
+             "(the smaller when it's halfway).",
+    )
 st.sidebar.slider(
     "Intensity ramp range", 0.0, 1.0, step=0.05, key="ramp_range",
     disabled=not split_screen_enabled,
@@ -5211,6 +5315,12 @@ with st.expander("⚙️ Auto-fill weighting", expanded=False):
         st.toggle("Never repeat the previous block's videos", key="avoid_repeat", disabled=_autofill_disabled,
                   help="(C) A hard rule: automatic picks never reuse a video from the neighbouring "
                        "block unless no other video has footage for that spot (you'll be warned).")
+        st.toggle("Intro/outro clips only in their blocks", key="intro_outro_exclusive",
+                  disabled=not prefer_intro_outro,
+                  help="A hard rule: clips marked as intro are only used in intro blocks, and outro clips "
+                       "only in outro blocks — in every mode, including what you pick by hand. In an intro / "
+                       "outro block, a video that has marked clips offers only those. Videos with no marked "
+                       "clips aren't affected. Needs 'Prefer Intro/Outro-tagged clips' on (sidebar).")
     with _wt_cols[2]:
         if sequential_mode:
             st.slider("Move through each video in order", 0.0, 5.0, step=0.1, key="weight_position",
@@ -5290,6 +5400,9 @@ recommended_counts = [
     clips_for_intensity(sg["intensity"], min_clips, max_clips, ramp_start, ramp_end, False, None)
     for sg in segments
 ]
+# For the sequential skip allowance (compute_skip_budget): each video's share of the blocks.
+st.session_state["_avg_clips_per_block"] = (sum(recommended_counts) / len(recommended_counts)
+                                            if recommended_counts else 1.0)
 
 # ---------------------------------------------------------------------------
 # Intro/Outro block picker — shared across all three matching modes. Defaults
@@ -5911,7 +6024,8 @@ elif matching_mode == "Choreography":
                 eligible_b = [vid for vid in selected_videos
                               if get_available_clips_for_video(
                                   queues, vid, block_duration_b, sequential_mode,
-                                  st.session_state["global_excluded_scenes"], role_filter=role_filter_b)]
+                                  excluded_for_block(queues, st.session_state["global_excluded_scenes"],
+                                                     role_filter_b), role_filter=role_filter_b)]
                 shown_b = eligible_b[:int(max_chor_videos)]
 
                 # For each eligible video, the WEIGHTED best clip from its own (already
@@ -5921,7 +6035,8 @@ elif matching_mode == "Choreography":
                 for vid in shown_b:
                     clips_b = get_available_clips_for_video(
                         queues, vid, block_duration_b, sequential_mode,
-                        st.session_state["global_excluded_scenes"], role_filter=role_filter_b)
+                        excluded_for_block(queues, st.session_state["global_excluded_scenes"], role_filter_b),
+                        role_filter=role_filter_b)
                     if not clips_b:
                         continue
                     # Sequential mode: skip budget (weight F-controlled) rather than a hard
@@ -5931,7 +6046,7 @@ elif matching_mode == "Choreography":
                     # how many blocks are still left overall.
                     if sequential_mode:
                         _remaining_blocks_b = len(segments) - b
-                        _skip_b = compute_skip_budget(len(clips_b), _remaining_blocks_b, weight_position)
+                        _skip_b = compute_skip_budget(len(clips_b), _remaining_blocks_b, weight_position, len(queues))
                         auto_candidates_b = clips_b[:_skip_b + 1]
                     else:
                         auto_candidates_b = clips_b
@@ -6020,7 +6135,8 @@ elif matching_mode == "Choreography":
                 eligible_videos = [vid for vid in selected_videos
                                    if get_available_clips_for_video(
                                        queues, vid, block_duration, sequential_mode,
-                                       st.session_state["global_excluded_scenes"],
+                                       excluded_for_block(queues, st.session_state["global_excluded_scenes"],
+                                                          chor_role_filter),
                                        role_filter=chor_role_filter)]
                 shown_videos = eligible_videos[:int(max_chor_videos)]
                 seg_target = seg.get("intensity", seg["energy"])
@@ -6033,7 +6149,8 @@ elif matching_mode == "Choreography":
                     override = overrides.get(video_id)
                     clips = get_available_clips_for_video(
                         queues, video_id, block_duration, sequential_mode,
-                        st.session_state["global_excluded_scenes"], role_filter=chor_role_filter)
+                        excluded_for_block(queues, st.session_state["global_excluded_scenes"], chor_role_filter),
+                        role_filter=chor_role_filter)
                     if not clips:
                         continue
 
@@ -6054,7 +6171,7 @@ elif matching_mode == "Choreography":
                         # in render_choreography_block's preview above.
                         if sequential_mode:
                             _remaining_blocks = len(segments) - chor_block
-                            _skip = compute_skip_budget(len(clips), _remaining_blocks, weight_position)
+                            _skip = compute_skip_budget(len(clips), _remaining_blocks, weight_position, len(queues))
                             auto_candidates = clips[:_skip + 1]
                         else:
                             auto_candidates = clips
@@ -6104,7 +6221,7 @@ elif matching_mode == "Choreography":
         render_choreography_block(
             chor_block, seg, selected_videos, int(max_chor_videos),
             chor_rec_count, queues, sequential_mode,
-            st.session_state["global_excluded_scenes"], catalogues,
+            excluded_for_block(queues, st.session_state["global_excluded_scenes"], chor_role_filter), catalogues,
             chor_prev_block_videos, chor_video_stats, chor_role_filter, chor_weighting,
             track=track,
         )
@@ -6215,7 +6332,9 @@ else:
                 seg_b = segments[b]
                 audio_curve_b = get_block_audio_curve(track, seg_b["start"], seg_b["end"])
                 _excl_b = st.session_state["segment_exclusions"].get(b, set())
-                _global_excl = st.session_state["global_excluded_scenes"]
+                _rf_b = ("intro_candidate" if b in intro_blocks_0based
+                         else "outro_candidate" if b in outro_blocks_0based else None)
+                _global_excl = excluded_for_block(queues, st.session_state["global_excluded_scenes"], _rf_b)
                 _pos_targets_b = (
                     compute_position_targets(b, len(segments), confirmed, queues, recommended_counts[b])
                     if sequential_mode and weight_position > 0 else None
@@ -6421,9 +6540,16 @@ else:
         # depend on it: deselecting a video removes it from queues, and without this the cached
         # candidate list would still show that video's clips until something else invalidated it.
         prev_block_videos = {p["video_id"] for p in confirmed.get(current_block - 1, [])} if current_block > 0 else set()
+        adv_role_filter = None
+        if current_block in intro_blocks_0based:
+            adv_role_filter = "intro_candidate"
+        elif current_block in outro_blocks_0based:
+            adv_role_filter = "outro_candidate"
+        _adv_excl = excluded_for_block(queues, st.session_state["global_excluded_scenes"], adv_role_filter)
+        _io_exclusive = bool(st.session_state.get("intro_outro_exclusive") and prefer_intro_outro)
         search_key = (adv_key, current_block, int(max_shape_matches), sequential_mode,
                      prior_picks_fingerprint, current_skips_fingerprint, tuple(sorted(selected_videos)),
-                     _edit_fp, avoid_repeat, tuple(sorted(prev_block_videos)))
+                     _edit_fp, avoid_repeat, tuple(sorted(prev_block_videos)), _io_exclusive, adv_role_filter)
         cache = st.session_state.get(f"adv_search_cache_{current_block}")
         block_audio_curve = get_block_audio_curve(track, seg["start"], seg["end"])  # cheap — always needed, cache or not
 
@@ -6432,7 +6558,7 @@ else:
         else:
             candidates, missing_curve_videos = find_shape_candidates(
                 seg, queues, sequential_mode, st.session_state["segment_exclusions"].get(current_block, set()),
-                st.session_state["global_excluded_scenes"], block_audio_curve, int(max_shape_matches),
+                _adv_excl, block_audio_curve, int(max_shape_matches),
             )
             if avoid_repeat:
                 # Make sure Auto-fill has enough non-repeating videos to choose from
@@ -6444,7 +6570,7 @@ else:
                     lambda ex: find_shape_candidates(
                         seg, queues, sequential_mode,
                         st.session_state["segment_exclusions"].get(current_block, set()),
-                        st.session_state["global_excluded_scenes"], block_audio_curve,
+                        _adv_excl, block_audio_curve,
                         max(_rc, 1), exclude_videos=ex)[0])
             for _k in [k for k in st.session_state
                        if k.startswith("adv_search_cache_") and k != f"adv_search_cache_{current_block}"]:
@@ -6458,11 +6584,10 @@ else:
         # preserves every legitimate shape match felt like the better fit than a hard
         # filter (unlike Auto/Choreography, which do filter). Stable sort: within each
         # group (tagged vs not), the existing best-score-first order is untouched.
-        adv_role_filter = None
-        if current_block in intro_blocks_0based:
-            adv_role_filter = "intro_candidate"
-        elif current_block in outro_blocks_0based:
-            adv_role_filter = "outro_candidate"
+        if adv_role_filter and _io_exclusive:
+            # The hard rule: a video with clips marked for this block offers only those.
+            _has_role = {c["video_id"] for c in candidates if c.get(adv_role_filter)}
+            candidates = [c for c in candidates if c["video_id"] not in _has_role or c.get(adv_role_filter)]
         if adv_role_filter:
             candidates = sorted(candidates, key=lambda c: not c.get(adv_role_filter, False))
 
