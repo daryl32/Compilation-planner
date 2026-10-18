@@ -188,15 +188,14 @@ def all_catalogues() -> dict:
 @shared_cache
 @st.cache_resource(max_entries=20, ttl=1800, show_spinner=False)
 def _motion_curves(video_id: str, mtime: float) -> dict:
-    try:
-        cat = json.loads(catalogue_path(video_id).read_text())
-    except (ValueError, OSError):
-        return {}
-    return {s["scene_id"]: s["motion_curve"] for s in cat.get("scenes", []) if s.get("motion_curve")}
+    import curve_cache
+    return curve_cache.load(catalogue_path(video_id), curve_cache.default_cache_dir(CATALOGUE_DIR))
 
 
 def motion_curves(video_id: str) -> dict:
-    """{scene_id: motion_curve} for one video, reloaded when its file changes.
+    """{scene_id: {"fps": fps, "values": numpy array}} for one video, reloaded
+    when its file changes. The values are read-only numpy arrays from the local
+    curve cache (curve_cache.py) — test emptiness with len(), not truthiness.
     Shared — read only."""
     try:
         mtime = catalogue_path(video_id).stat().st_mtime

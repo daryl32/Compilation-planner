@@ -1,0 +1,37 @@
+# Runs the test suite (tests/) on every push to dev or main and on pull
+# requests: golden snapshots of cutting and matching, the core/ checks, and
+# every page run headless with a synthetic library. A red ❌ on the commit in
+# GitHub means something changed that shouldn't have — don't merge to main.
+name: Tests
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libgl1 libglib2.0-0 ffmpeg
+          pip install -r requirements.txt "streamlit[auth]" pytest
+      - name: Test
+        run: |
+          set -o pipefail
+          python -m pytest -rfE 2>&1 | tee pytest.txt || {
+            # Failures as annotations, so they show on the commit without opening the log.
+            grep -E "^FAILED" pytest.txt | head -20 | cut -c1-900 | sed 's/^/::error::/'
+            exit 1
+          }

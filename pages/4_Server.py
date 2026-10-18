@@ -33,6 +33,136 @@ if _msg:
     st.success(_msg)
 
 # ---------------------------------------------------------------------------
+# 🩺 Diagnostics — the whole server, memory over the week, how long things take
+# ---------------------------------------------------------------------------
+import diagnostics as DG
+import library_common as LC
+
+
+def render_diagnostics() -> None:
+    st.subheader("🩺 Diagnostics")
+    mem, cpu_info = DG.system_memory(), DG.cpu()
+    history = DG.memory_history(7)
+    try:
+        disk_pct = SG.disk_usage()["pct"]
+    except Exception:
+        disk_pct = None
+    with st.container(border=True):
+        if mem is None and cpu_info is None:
+            st.caption("Server figures are only available on the server.")
+        for kind, text in DG.verdict(mem, cpu_info, history, disk_pct):
+            {"warn": st.warning, "info": st.info, "ok": st.success}[kind](text)
+        if mem:
+            c = st.columns(4)
+            c[0].metric("Server RAM used", f"{mem['used']:,.0f} MB", help=f"of {mem['total']:,.0f} MB")
+            c[1].metric("Available", f"{mem['available']:,.0f} MB")
+            c[2].metric("Swap used", f"{mem['swap_used']:,.0f} MB",
+                        help=f"of {mem['swap_total']:,.0f} MB — memory parked on disk; much of it means RAM is short")
+            if cpu_info:
+                c[3].metric("CPU load (5 min)", f"{cpu_info['load5']:.2f}",
+                            help=f"{cpu_info['cores']} cores · 1 min {cpu_info['load1']:.2f} · "
+                                 f"15 min {cpu_info['load15']:.2f}. Above the core count = overloaded.")
+            st.progress(min(mem["used"] / max(mem["total"], 1), 1.0),
+                        text=f"RAM {mem['used'] / max(mem['total'], 1):.0%} used")
+        procs = DG.app_processes()
+        if procs:
+            st.markdown("**What's using the server's memory**")
+            for label, mb, n in procs[:10]:
+                rc = st.columns([3, 1, 4])
+                rc[0].markdown(label + (f" ×{n}" if n > 1 else ""))
+                rc[1].markdown(f"{mb:,.0f} MB")
+                rc[2].progress(min(mb / max((mem or {}).get("total", mb) or 1, 1), 1.0))
+        if history:
+            st.markdown("**This app's memory, last 7 days** (peak and typical per day)")
+            import pandas as pd
+            df = pd.DataFrame(history).set_index("day")[["peak_mb", "median_mb"]]
+            df.columns = ["Peak MB", "Typical MB"]
+            st.bar_chart(df, stack=False, height=220)
+            clears = sum(d["clears"] for d in history)
+            if clears:
+                st.caption(f"Hit the {LC.MEMORY_LIMIT_MB:,.0f} MB limit and cleared caches {clears} time(s).")
+        timings = DG.timing_summary(7)
+        if timings:
+            st.markdown("**How long things take** (last 7 days, seconds)")
+            st.dataframe(
+                [{"Step": t["step"], "Runs": t["runs"], "Typical": round(t["median"], 2),
+                  "Slow (90%)": round(t["p90"], 2), "Slowest": round(t["max"], 2), "Last": round(t["last"], 2)}
+                 for t in timings],
+                hide_index=True, use_container_width=True)
+        else:
+            st.caption("Step timings appear here once the planner has been used.")
+
+
+render_diagnostics()
+
+
+# ---------------------------------------------------------------------------
+# 🧪 Test copy only: compare this code's cutting & matching with the live app's
+# ---------------------------------------------------------------------------
+def render_parity_check() -> None:
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    import config
+    here = Path(__file__).resolve().parents[1]
+    live = Path(getattr(config, "LIVE_REPO_DIR", "/root/Compilation-planner"))
+    data = LC.CATALOGUE_DIR.parent
+    report = data / "logs" / "parity_report.txt"
+    log = data / "logs" / "parity_run.log"
+    st.subheader("🧪 Same results as the live app?")
+    with st.container(border=True):
+        st.caption("Cuts every track with all four methods, runs 🎯 Auto-detect and Auto matching with THIS "
+                   "copy's code and with the live app's code, on this copy's data, and checks the results are "
+                   "identical. Use it before pushing a change that shouldn't alter results. Takes a few minutes "
+                   "and uses the CPU while it runs.")
+        pid_file = data / "logs" / "parity.pid"
+        running = None
+        try:
+            pid = int(pid_file.read_text())
+            os.kill(pid, 0)                     # still running? (any page, any session)
+            try:                                # finished but not yet reaped → done
+                if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                    raise ProcessLookupError
+            except ChildProcessError:
+                pass                            # not our child — another page started it
+            if "Z" in Path(f"/proc/{pid}/stat").read_text().split(")")[-1].split()[:1]:
+                raise ProcessLookupError
+            running = pid
+        except (OSError, ValueError, IndexError):
+            pass
+        if running:
+            st.info("⏳ Running — this takes a few minutes. Press 🔄 to check.")
+            if st.button("🔄 Check again"):
+                st.rerun()
+            st.caption("A restart or idle shut-down of this test copy stops it — run it again if so.")
+            return
+        try:
+            live_ok = live.exists()
+        except OSError:
+            live_ok = False
+        if not live_ok:
+            st.caption(f"The live app's code isn't at {live} (set LIVE_REPO_DIR in config.py).")
+        elif st.button("▶️ Run the comparison"):
+            log.parent.mkdir(parents=True, exist_ok=True)
+            report.unlink(missing_ok=True)
+            with open(log, "w") as f:
+                proc = subprocess.Popen([sys.executable, str(here / "deploy" / "check_parity.py"), str(live),
+                                         str(here), "--data", str(data)],
+                                        stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+            pid_file.write_text(str(proc.pid))
+            st.rerun()
+        if report.exists():
+            st.code(report.read_text(), language=None)
+        elif log.exists() and log.stat().st_size:
+            st.error("The last comparison stopped without a report. Its output:")
+            st.code(log.read_text()[-3000:], language=None)
+
+
+if LC.IS_TEST:
+    render_parity_check()
+
+# ---------------------------------------------------------------------------
 # Memory
 # ---------------------------------------------------------------------------
 import library_common as LC

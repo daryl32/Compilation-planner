@@ -45,7 +45,12 @@ Home.py                         # Entry point — links to the pages below
 pages/1_Compilation_Planner.py  # Match clips to a track, render previews, export plans
 pages/2_Reviewer.py             # Tags, exclude/intro/outro, ⭐ thumbnail, split / combine / ⚡ auto split
 pages/3_Media_Library.py        # Videos (library ranges), Audio, Renders, Analytics
-pages/4_Server.py               # Disk usage and clean-up
+pages/4_Server.py               # 🩺 Diagnostics, memory, disk usage and clean-up
+
+core/                           # Cutting, Auto-detect, shape matching, footage pool — no Streamlit
+diagnostics.py                  # Whole-server RAM/CPU, memory history, step timings (Server page)
+curve_cache.py                  # Motion curves as a local numpy cache (never inside Drive)
+tests/                          # Golden snapshots + headless page runs (see Testing below)
 
 page_setup.py                   # Sign-in, whitelist, and the sidebar every page shares
 catalogue_store.py              # THE way to read/write video catalogues (shared, refreshed per file)
@@ -75,6 +80,33 @@ config_example.py               # Template — copy to config.py and fill in
 Code that needs "something about every video" should use `catalogue_store.video_index()`
 (slim: times, tags, flags, motion score) or `all_catalogues()` (full, no motion curves) —
 never glob and json-load the catalogue folder itself.
+
+New logic that doesn't draw anything (cutting, matching, scoring, recommendations) goes in
+`core/` as plain functions that take what they need as arguments — no `st.`, no session
+state. Pages call it; scripts and background jobs can too.
+
+## Testing
+
+```
+pip install pytest "streamlit[auth]"
+python -m pytest            # ~1 minute
+```
+
+- `tests/fixtures.py` writes a small synthetic library (tracks with and without the extra
+  analysis, a legacy track, videos with roles, excluded scenes, no motion curves …).
+- `tests/test_golden.py` — cutting (all four methods), 🎯 Auto-detect, shape matching, the
+  footage pool and Auto matching must give **exactly** the results in
+  `tests/golden/planner_golden.json`.
+- `tests/test_pages.py` — every page runs headless (Streamlit AppTest) without an error,
+  and 11 planner scenarios (track × method × mode, all four steps) export exactly the plans
+  in `tests/golden/page_golden.json`.
+- GitHub runs these on every push to `dev` and `main` (`.github/workflows/tests.yml`).
+
+A change that is MEANT to alter results: re-capture the snapshots and say so in the commit —
+`python -m tests.capture_golden` and `python -m tests.page_scenarios`.
+
+On real data, `deploy/check_parity.py` (or 🧪 on the test copy's Server page) compares the
+live app's code with the test copy's.
 
 ---
 

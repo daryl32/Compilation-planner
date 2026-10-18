@@ -36,6 +36,24 @@ from library_common import (safe_image, video_details, all_actors, all_video_tag
                             refresh_caches_after_sync, show_render_player, shared_cache,
                             clear_shared_data_caches, memory_check)
 
+# Cutting, shape matching and the footage pool live in core/ (no Streamlit) so
+# scripts and background jobs can use them too. The few that read this page's
+# settings have thin wrappers below that pass those settings in.
+import core.segmentation as CSEG
+import core.autotune as CAT
+import core.footage as CFOOT
+import core.picking as CPICK
+from core.segmentation import (SEG_ADAPTIVE, SEG_RHYTHM, SEG_SCORED, SEG_SMART, SEG_METHOD_KEYS,
+                               build_segments, compute_density_curve, apply_segment_intensity)
+from core.autotune import AUDIO_STYLES, AUDIO_STYLE_CUSTOM
+from core.shape import (SHAPE_MATCH_POINTS, resample_curve, shape_score, find_best_shape_window,
+                        get_block_audio_curve)
+from core.footage import (_tc_to_seconds, _overlap_with_range, get_candidate_spans, has_role, role_supply,
+                          role_needs, role_scarcity, consume_span, limit_queue_before, split_span_at,
+                          skip_span, carve_span)
+from core.picking import position_closeness, select_autofill_picks, _stable_random_unit, repeat_fallback_videos
+from diagnostics import timed as _timed   # 🩺 step timings for the Server page
+
 # st.fragment (Streamlit 1.37+; was st.experimental_fragment in 1.33-1.36) lets
 # part of the page rerun on its own instead of the whole script re-executing on
 # every click — used below so "Use this clip" / "View fit" don't have to redo
@@ -91,6 +109,15 @@ except ImportError:
 from page_setup import (page_setup, push_file_with_oauth, APP_VERSION, drive_token,
                         OAUTH_AVAILABLE as _OAUTH_AVAILABLE, DRIVE_SESSION_KEY as _OAUTH_SESSION_KEY)
 page_setup("Compilation Planner", "pages/1_Compilation_Planner.py")
+_PAGE_T0 = time.perf_counter()   # 🩺 whole-page run time — see _record_page_run
+
+
+def _record_page_run() -> None:
+    """🩺 How long this full run of the page took, for the Server page's timings
+    (fragment reruns and runs that stop early — e.g. no track yet — aren't counted)."""
+    import diagnostics as _diag
+    _diag.record("Planner page (full run)", time.perf_counter() - _PAGE_T0,
+                 str(st.session_state.get("ui_section", ""))[:2].strip())
 # The background Drive sync timer may have pulled new catalogues/audio since
 # the caches were filled — reload them once if so.
 refresh_caches_after_sync()
@@ -99,11 +126,6 @@ refresh_caches_after_sync()
 def sanitize_filename(name: str) -> str:
     """Strip characters that aren't valid in Windows filenames."""
     return re.sub(r'[<>:"/\\|?*]', "_", name)
-
-
-def _tc_to_seconds(tc: str) -> float:
-    h, m, s = tc.split(":")
-    return int(h) * 3600 + int(m) * 60 + float(s)
 
 
 def resolve_thumbnail(stored_path: str, video_id: str) -> Path:
@@ -228,129 +250,10 @@ def effective_time_ranges() -> dict:
     return {vid: tuple(rng) for vid, rng in merged.items() if rng}
 
 
-def _overlap_with_range(scene_start: float, scene_end: float, time_range) -> tuple:
-    """Intersect a scene's [start, end] with an optional (start, end) restriction.
-    Returns (effective_start, effective_end) or (None, None) if no overlap."""
-    if not time_range:
-        return scene_start, scene_end
-    r_start, r_end = time_range
-    eff_start, eff_end = max(scene_start, r_start), min(scene_end, r_end)
-    if eff_end <= eff_start:
-        return None, None
-    return eff_start, eff_end
-
-
-def scene_is_usable(scene: dict, tag_filter: tuple) -> bool:
-    """False if the scene should never be used by the planner — either it's
-    been manually excluded (e.g. an intro/outro clip) or it doesn't match the
-    current tag filter."""
-    if scene.get("excluded"):
-        return False
-    if not tag_filter:
-        return True
-    wanted = set(t.lower() for t in tag_filter)
-    return bool(wanted & set(t.lower() for t in scene.get("tags", [])))
-
-
-# Leftover footage shorter than this after a trim is discarded rather than
-# kept in the pool — not worth tracking a sliver nobody could use anyway.
-MIN_LEFTOVER_SEC = 0.5
-
-
 def build_footage_queues(candidate_video_ids: tuple, tag_filter: tuple, video_time_ranges: dict = None) -> dict:
-    """video_id -> list of mutable 'span' dicts, one per usable scene, sorted
-    by start time (chronological order within that video — not scene_id, which
-    stops being chronological once the Reviewer splits a scene). Each span tracks how
-    much of that scene's footage is still unused — segments consume from the
-    front of a span, and any leftover stays available for a later segment to
-    pick up. motion_norm is normalized PER VIDEO, matching the previous
-    behaviour (shape/rhythm matching within that video's own scenes).
-
-    video_time_ranges: optional {video_id: (start_sec, end_sec)} — restricts
-    that video to only the footage overlapping the given range. A scene that
-    straddles the boundary is trimmed to the overlapping portion, not
-    dropped or included whole."""
-    video_time_ranges = video_time_ranges or {}
-    catalogues = load_all_catalogues()
-    queues = {}
-
-    for video_id, cat in catalogues.items():
-        if candidate_video_ids and video_id not in candidate_video_ids:
-            continue
-
-        filtered = [s for s in cat["scenes"] if scene_is_usable(s, tag_filter)]
-        motions = [s.get("motion_intensity", 0.0) for s in filtered]
-        if not motions:
-            continue
-        m_min, m_max = min(motions), max(motions)
-        m_span = (m_max - m_min) or 1.0
-        time_range = video_time_ranges.get(video_id)
-
-        spans = []
-        for scene in sorted(filtered, key=lambda s: (_tc_to_seconds(s["start_tc"]), s["scene_id"])):
-            scene_start_sec = _tc_to_seconds(scene["start_tc"])
-            scene_end_sec = _tc_to_seconds(scene["end_tc"])
-            eff_start, eff_end = _overlap_with_range(scene_start_sec, scene_end_sec, time_range)
-            if eff_start is None:
-                continue  # entirely outside the selected range
-            duration = eff_end - eff_start
-            if duration <= 0:
-                continue
-            spans.append({
-                "video_id": video_id,
-                "scene_id": scene["scene_id"],
-                "tags": scene.get("tags", []),
-                "thumbnail": str(resolve_thumbnail(scene["thumbnail_paths"][0], video_id))
-                             if scene["thumbnail_paths"] else None,
-                "motion_norm": round((scene.get("motion_intensity", 0.0) - m_min) / m_span, 3),
-                "motion_raw": scene.get("motion_intensity"),   # for Improved auto-fill's motion scale
-                "scene_start_sec": scene_start_sec,
-                "offset_sec": eff_start - scene_start_sec,  # starts partway in if the range clipped the front
-                "remaining_sec": duration,
-                "intro_candidate": bool(scene.get("intro_candidate", False)),
-                "outro_candidate": bool(scene.get("outro_candidate", False)),
-                "roles": SR.scene_roles(scene),     # 🎭 scene roles (incl. the two above)
-            })
-        if spans:
-            queues[video_id] = spans
-
-    return queues
-
-
-def get_candidate_spans(queues: dict, sequential: bool, global_excluded: set = None,
-                        min_duration: float = 0.0) -> list[dict]:
-    """Currently-pickable spans. In sequential mode, only the earliest
-    not-yet-exhausted, non-rejected span of each video is eligible —
-    enforcing that a video's own scenes are only ever used in their original
-    order. Globally-rejected spans (see global_excluded) are skipped over
-    entirely here, not just filtered out afterward — a rejected clip is never
-    consumed, so without this it would permanently block a sequential
-    queue's front position, effectively banning every scene after it too.
-
-    min_duration: in sequential mode, spans SHORTER than this are also
-    skipped over (not just rejected ones) when looking for "the front" —
-    used by Advanced Shape Matching so a too-short leftover doesn't lock a
-    video out of a block entirely. This only affects which span is offered
-    as a SEARCH candidate; nothing is discarded here — a video's shorter
-    earlier footage is still there and still gets discarded the normal way
-    (via carve_span's sequential rule) only if something later actually gets
-    picked. Non-sequential mode and auto mode's fill_slot (min_duration=0.0,
-    the default) are unaffected."""
-    global_excluded = global_excluded or set()
-    candidates = []
-    for spans in queues.values():
-        if sequential:
-            for span in spans:
-                key = (span["video_id"], span["scene_id"])
-                if span["remaining_sec"] > 0.05 and span["remaining_sec"] >= min_duration and key not in global_excluded:
-                    candidates.append(span)
-                    break
-        else:
-            candidates.extend(
-                s for s in spans
-                if s["remaining_sec"] > 0.05 and (s["video_id"], s["scene_id"]) not in global_excluded
-            )
-    return candidates
+    """core.footage.build_footage_queues on this library's catalogues."""
+    return CFOOT.build_footage_queues(load_all_catalogues(), candidate_video_ids, tag_filter, video_time_ranges,
+                                      thumbnail_for=resolve_thumbnail, roles_of=SR.scene_roles)
 
 
 # ---------------------------------------------------------------------------
@@ -360,10 +263,6 @@ def get_candidate_spans(queues: dict, sequential: bool, global_excluded: set = N
 # PREFERRED: a block draws from clips with its role where there are any, and
 # falls back to normal picks otherwise. Sequential mode keeps each video in order.
 # ---------------------------------------------------------------------------
-
-def has_role(c: dict, role) -> bool:
-    """Does this span / candidate / window carry the role id?"""
-    return bool(role) and role in (c.get("roles") or [])
 
 
 def role_chips(c: dict) -> str:
@@ -403,37 +302,6 @@ def prefer_role(items: list, role, sequential: bool = False, reach: int = None) 
     return matches or items
 
 
-def role_supply(queues: dict, global_excluded: set = None) -> dict:
-    """{role id: seconds of still-available footage carrying it}."""
-    out = {}
-    for spans in queues.values():
-        for sp in spans:
-            if (sp["video_id"], sp["scene_id"]) in (global_excluded or set()):
-                continue
-            for r in sp.get("roles") or []:
-                out[r] = out.get(r, 0.0) + sp["remaining_sec"]
-    return out
-
-
-def role_needs(block_roles: list, segments: list) -> dict:
-    """{role id: seconds the plan needs for it} (its blocks' total length)."""
-    out = {}
-    for r, sg in zip(block_roles or [], segments):
-        if r:
-            out[r] = out.get(r, 0.0) + (sg["end"] - sg["start"])
-    return out
-
-
-def role_scarcity(block_roles: list, segments: list, queues: dict):
-    """{block: footage seconds per second needed for its role} — lower is scarcer,
-    so Auto fills those blocks first. None without block roles."""
-    if not block_roles:
-        return None
-    supply, needs = role_supply(queues), role_needs(block_roles, segments)
-    ratio = {r: supply.get(r, 0.0) / max(n, 1e-6) for r, n in needs.items()}
-    return {i: ratio[r] for i, r in enumerate(block_roles) if r}
-
-
 def role_locked_keys(queues: dict, role_filter) -> set:
     """'Intro/outro clips only in their blocks' (weights panel; needs Prefer
     Intro/Outro on): the (video, scene) keys a block may NOT use — intro-marked
@@ -458,28 +326,6 @@ def excluded_for_block(queues: dict, global_excluded: set, role_filter) -> set:
     return (set(global_excluded) | locked) if locked else global_excluded
 
 
-def consume_span(span: dict, needed_sec: float) -> dict:
-    """Trim needed_sec off the front of a span (in place) and return the
-    picked sub-clip. If less than needed_sec remains, the whole remainder is
-    used — the resulting clip is simply shorter than requested."""
-    used_sec = min(needed_sec, span["remaining_sec"])
-    pick = {
-        "video_id": span["video_id"],
-        "scene_id": span["scene_id"],
-        "tags": span["tags"],
-        "thumbnail": span["thumbnail"],
-        "motion_norm": span["motion_norm"],
-        "clip_start_sec": round(span["scene_start_sec"] + span["offset_sec"], 3),
-        "clip_duration_sec": round(used_sec, 3),
-        "offset_into_scene_sec": round(span["offset_sec"], 2),
-    }
-    span["offset_sec"] += used_sec
-    span["remaining_sec"] -= used_sec
-    if span["remaining_sec"] < MIN_LEFTOVER_SEC:
-        span["remaining_sec"] = 0.0
-    return pick
-
-
 # ---------------------------------------------------------------------------
 # Advanced Shape Matching: compare a candidate clip's frame-by-frame motion
 # curve to a block's audio energy curve, point for point, rather than a
@@ -488,111 +334,9 @@ def consume_span(span: dict, needed_sec: float) -> dict:
 # in Colab to add it to catalogues processed before this feature existed).
 # ---------------------------------------------------------------------------
 
-SHAPE_MATCH_POINTS = 40      # both curves are resampled to this many points before comparing
 # (A per-position search-step constant used to live here — the search is now vectorized and
 #  exhaustive, checking every frame position at once, so the speed/precision compromise it existed
 #  for is gone; see find_best_shape_window.)
-
-
-def resample_curve(values, n_points: int) -> np.ndarray:
-    values = np.asarray(values, dtype=float)
-    if len(values) < 2:
-        return np.full(n_points, float(values[0]) if len(values) else 0.0)
-    x_old = np.linspace(0, 1, len(values))
-    x_new = np.linspace(0, 1, n_points)
-    return np.interp(x_new, x_old, values)
-
-
-def shape_score(curve_a, curve_b, n_points: int = SHAPE_MATCH_POINTS) -> float:
-    """Pearson correlation between two curves of possibly different length /
-    sample rate, after resampling both to n_points and z-scoring — so this
-    measures PATTERN similarity (rises and falls in the same places),
-    independent of either curve's absolute scale. Range roughly [-1, 1];
-    higher is a better shape match. Returns 0.0 for a degenerate (flat)
-    curve, since correlation is undefined there."""
-    a = resample_curve(curve_a, n_points)
-    b = resample_curve(curve_b, n_points)
-    a_std, b_std = a.std(), b.std()
-    if a_std < 1e-9 or b_std < 1e-9:
-        return 0.0
-    return float(np.corrcoef(a, b)[0, 1])
-
-
-def _make_interp_matrix(src_len: int, n_points: int) -> np.ndarray:
-    """Precomputed linear-interpolation weights: resampling any uniformly-
-    sampled src_len-point signal to n_points is a FIXED linear combination —
-    it depends only on src_len/n_points, never on the values themselves. So
-    this matrix, built once, lets many candidate windows get resampled at
-    once via a single matrix multiply (W @ values, or windows @ W.T for many
-    windows stacked as rows) instead of calling np.interp per window.
-    Verified to reproduce np.interp's own output exactly."""
-    if src_len < 2:
-        return np.ones((n_points, max(src_len, 1)))
-    x_old = np.linspace(0, 1, src_len)
-    x_new = np.linspace(0, 1, n_points)
-    idx = np.clip(np.searchsorted(x_old, x_new, side="right") - 1, 0, src_len - 2)
-    x0, x1 = x_old[idx], x_old[idx + 1]
-    frac = np.where(x1 > x0, (x_new - x0) / (x1 - x0), 0.0)
-    W = np.zeros((n_points, src_len))
-    rows = np.arange(n_points)
-    W[rows, idx] += 1 - frac
-    W[rows, idx + 1] += frac
-    return W
-
-
-def find_best_shape_window(values: np.ndarray, window_frames: int, audio_curve: np.ndarray,
-                           n_points: int = SHAPE_MATCH_POINTS, bias=None) -> tuple:
-    """Vectorized replacement for sliding shape_score() across every
-    candidate start position one at a time: resamples EVERY window in a
-    single matrix multiply and scores them all in one batched correlation,
-    instead of a Python loop calling np.interp + np.corrcoef per position.
-    Mathematically identical to shape_score() at each position (verified
-    directly against it) — the only behavioural change is that it's cheap
-    enough to check every single frame position, not just every
-    SHAPE_SEARCH_STEP_SEC, so it can also find a better-aligned match than
-    the old stepped search could. Returns (best_score, best_start_frame)."""
-    n_positions = len(values) - window_frames + 1
-    if n_positions <= 0:
-        return -2.0, 0
-
-    windows = np.lib.stride_tricks.sliding_window_view(values, window_frames)  # (n_positions, window_frames), no copy
-    W = _make_interp_matrix(window_frames, n_points)
-    resampled = windows @ W.T  # (n_positions, n_points)
-
-    audio_r = resample_curve(audio_curve, n_points)
-    audio_c = audio_r - audio_r.mean()
-    audio_std = audio_r.std()
-
-    row_mean = resampled.mean(axis=1, keepdims=True)
-    row_std = resampled.std(axis=1)
-    numerator = (resampled - row_mean) @ audio_c
-    with np.errstate(divide="ignore", invalid="ignore"):
-        scores = np.where((row_std > 1e-9) & (audio_std > 1e-9),
-                          numerator / (n_points * row_std * audio_std), 0.0)
-
-    # bias (optional, one value per start position): added only when CHOOSING the
-    # position — e.g. weight F's pull toward a target part of the video — while
-    # the returned score stays the plain shape score.
-    if bias is not None and len(bias) == len(scores):
-        best_idx = int(np.argmax(scores + bias))
-    else:
-        best_idx = int(np.argmax(scores))
-    return float(scores[best_idx]), best_idx
-
-
-def get_block_audio_curve(track: dict, start_sec: float, end_sec: float) -> np.ndarray:
-    """The audio energy curve for one block's time range, at whatever
-    resolution the track has (30 Hz hires if available, else the coarse
-    envelope)."""
-    hires = track.get("hires")
-    if hires:
-        rate = float(hires["rate"])
-        rms = np.asarray(hires["rms"], dtype=float)
-        lo, hi = int(start_sec * rate), max(int(start_sec * rate) + 1, int(end_sec * rate))
-        return rms[lo:hi]
-    env = track["energy_envelope"]
-    slice_ = np.array([e["energy"] for e in env if start_sec <= e["time"] < end_sec])
-    return slice_ if slice_.size > 0 else np.array([e["energy"] for e in env])
 
 
 def find_shape_candidates(
@@ -685,7 +429,7 @@ def find_shape_candidates(
         if span["video_id"] not in video_curves_cache:
             video_curves_cache[span["video_id"]] = load_motion_curves_for_video(span["video_id"])
         curve = video_curves_cache[span["video_id"]].get(span["scene_id"])
-        if not curve or not curve.get("values"):
+        if not curve or curve.get("values") is None or len(curve["values"]) == 0:
             missing_curve_videos.add(span["video_id"])
             continue
 
@@ -736,7 +480,7 @@ def find_shape_candidates(
             "window_duration_sec": block_duration,
             "score": round(best_score, 3),
             "motion_norm": span["motion_norm"],
-            "curve_slice": values[best_start_frame:best_start_frame + window_frames],
+            "curve_slice": np.array(values[best_start_frame:best_start_frame + window_frames]),  # own copy — not tied to the curve cache's file
             "fps": fps,
             "tags": span["tags"],
             "thumbnail": span["thumbnail"],
@@ -759,9 +503,6 @@ def find_shape_candidates(
     return unique[:max_matches], missing_curve_videos
 
 
-SKIP_SAFETY = 1.5   # keep this many times a video's expected remaining uses in reserve
-
-
 def plan_clips_per_block() -> float:
     """Average clips per block in the current plan (set where the clip counts are worked out)."""
     return max(1.0, float(st.session_state.get("_avg_clips_per_block", 1.0)))
@@ -769,83 +510,16 @@ def plan_clips_per_block() -> float:
 
 def compute_skip_budget(available_windows: int, remaining_blocks: int, weight_position: float,
                         n_videos: int = 1) -> int:
-    """How many windows past the frontmost an automatic sequential-mode pick may
-    consider, instead of always being pinned to the very front.
-
-    A video only appears in its SHARE of the remaining blocks — about
-    remaining blocks × clips per block ÷ videos in play. That many windows
-    (× SKIP_SAFETY, +1) are kept in reserve so later blocks never run short;
-    everything beyond is surplus the pick may skip ahead into. (This used to
-    reserve one window for EVERY remaining block of the plan, as if one video
-    had to fill them all — so the surplus was almost always 0 and each video
-    was used only from its start.)
-
-    weight F (Move through each video in order) > 0 opens the whole surplus;
-    the ranking's position term (compute_position_targets) then pulls each pick
-    towards the part of the video it should come from — beginning → middle →
-    end across the plan. F = 0 keeps the strict front-of-queue behaviour.
-
-    Returns the number of EXTRA windows beyond the frontmost — slice with [: this + 1]."""
-    if weight_position <= 0:
-        return 0
-    share = min(1.0, plan_clips_per_block() / max(1, n_videos))
-    reserve = int(math.ceil(max(1, remaining_blocks) * share * SKIP_SAFETY)) + 1
-    return max(0, int(available_windows) - reserve)
+    """core.picking.compute_skip_budget with this plan's clips per block."""
+    return CPICK.compute_skip_budget(available_windows, remaining_blocks, weight_position, n_videos,
+                                     clips_per_block=plan_clips_per_block())
 
 
 def compute_position_targets(current_block: int, n_blocks: int, confirmed: dict, queues: dict,
                              videos_per_block: float = None) -> dict:
-    """Weight F (sequential mode): where in each video its NEXT use should
-    come from, so a video's uses spread beginning → middle → end across the
-    plan instead of bunching at its front.
-
-    Each video's usable footage (its effective time range — project override,
-    else Media Library range, else the whole video) is split into as many
-    equal parts as the video is expected to be used; use #k aims at the
-    centre of part k. Expected uses = clips per block (from blocks confirmed
-    so far, or videos_per_block before any are) × blocks ÷ videos in play,
-    never fewer than the uses already made + 1, so it self-corrects as the
-    plan fills in. A use = a block the video appears in (chain links within
-    one block count once).
-
-    Returns {video_id: (target_abs_sec, part_len_sec)}."""
-    used_blocks = {}
-    video_block_count = 0
-    for i in range(current_block):
-        vids_i = {p["video_id"] for p in confirmed.get(i, [])}
-        video_block_count += len(vids_i)
-        for v in vids_i:
-            used_blocks[v] = used_blocks.get(v, 0) + 1
-    if current_block > 0 and video_block_count:
-        per_block = video_block_count / current_block
-    else:
-        per_block = max(1.0, float(videos_per_block or 1))
-    n_videos = max(1, len(queues))
-    expected_uses = per_block * n_blocks / n_videos
-
-    ranges = effective_time_ranges()
-    targets = {}
-    for vid in queues:
-        r0, r1 = ranges.get(vid) or (0.0, get_video_duration(vid))
-        length = max(r1 - r0, 1e-6)
-        used = used_blocks.get(vid, 0)
-        n_parts = max(used + 1, int(round(expected_uses)), 1)
-        part_len = length / n_parts
-        targets[vid] = (r0 + (used + 0.5) * part_len, part_len)
-    return targets
-
-
-def position_closeness(c: dict, targets: dict, default_duration: float) -> float:
-    """Weight F's score for one candidate: 1.0 when the clip's midpoint is at
-    its video's target, falling to 0 two parts away (see
-    compute_position_targets). 0 when the video has no target."""
-    target = targets.get(c["video_id"])
-    if not target:
-        return 0.0
-    start = c.get("scene_start_sec", 0.0) + c.get("window_offset_sec", c.get("offset_sec", 0.0))
-    duration = c.get("window_duration_sec") or default_duration
-    mid = start + duration / 2
-    return max(0.0, 1.0 - abs(mid - target[0]) / (2 * target[1]))
+    """core.picking.compute_position_targets with this project's time ranges."""
+    return CPICK.compute_position_targets(current_block, n_blocks, confirmed, queues, videos_per_block,
+                                          ranges=effective_time_ranges(), duration_of=get_video_duration)
 
 
 def widen_for_repeat_rule(cands: list, prev_block_videos: set, need: int, search) -> list:
@@ -869,32 +543,6 @@ def widen_for_repeat_rule(cands: list, prev_block_videos: set, need: int, search
         extra.append(c)
         have.add(c["video_id"])
     return cands + extra
-
-
-def select_autofill_picks(ranked: list, count: int, allow_same_video: bool) -> list:
-    """The sidebar's hard rules for an automatic pick: at most `count` clips
-    (1 when split-screen is off), and — unless 'Allow multiple clips from the
-    same video' is on — no two from the same video. Walks the weighted ranking
-    best-first, skipping a clip only when its video is already used."""
-    chosen, used_videos = [], set()
-    for c in ranked:
-        if len(chosen) >= count:
-            break
-        if not allow_same_video and c["video_id"] in used_videos:
-            continue
-        chosen.append(c)
-        used_videos.add(c["video_id"])
-    return chosen
-
-
-def _stable_random_unit(seed: int, *parts) -> float:
-    """Deterministic pseudo-random value in [0,1), derived from seed + parts.
-    Stable across reruns for the SAME inputs (so an unrelated widget click
-    never reshuffles already-made auto-fill picks) — changes only if the
-    seed itself changes. Not Python's hash(), which is randomized per
-    process for strings."""
-    h = hashlib.sha256(f"{seed}:{':'.join(str(p) for p in parts)}".encode()).hexdigest()
-    return int(h[:8], 16) / 0xFFFFFFFF
 
 
 def rank_candidates_weighted(
@@ -1026,15 +674,6 @@ def _rank_v2(candidates, current_block, segments, confirmed, queues, prev_block_
             **w, "rank": i + 1, "of": len(ranked), "video_id": c["video_id"], "scene_id": c["scene_id"],
         }
     return ranked
-
-
-def repeat_fallback_videos(picks: list, prev_block_videos: set, avoid_repeat: bool) -> list:
-    """Videos among an automatic block's picks that repeat the previous block
-    despite 'Avoid repeating previous block' being on — i.e. the fallback was
-    used because nothing else could fill the spot. Empty when the rule held."""
-    if not avoid_repeat or not prev_block_videos:
-        return []
-    return sorted({p["video_id"] for p in picks if p["video_id"] in prev_block_videos})
 
 
 def flash_repeat_fallback(blocks: list) -> None:
@@ -1459,7 +1098,6 @@ def _render_chor_preview_panel(seg_idx: int, seg: dict, video_id: str, shown: tu
                 rerun_fragment()
 
 
-
 # Streamlit has no simple "coloured border" parameter, so getting an actual
 # blue box (not just a text label) relies on a version-dependent technique:
 # st.container(key=...) generates a CSS class named "st-key-<key>" (added
@@ -1698,13 +1336,13 @@ def cand_key(c: dict) -> str:
 def _clip_curve(video_id: str, scene_id: int, offset_sec: float, duration_sec: float):
     """(values, fps) of a clip's slice of its scene's motion curve, or (None, None)."""
     curve = load_motion_curves_for_video(video_id).get(scene_id)
-    if not curve or not curve.get("values"):
+    if not curve or curve.get("values") is None or len(curve["values"]) == 0:
         return None, None
     fps = float(curve["fps"])
     vals = np.asarray(curve["values"], dtype=float)
     a = int(round(offset_sec * fps))
     b = a + max(1, int(round(duration_sec * fps)))
-    return vals[a:b], fps
+    return np.array(vals[a:b]), fps      # own copy — not tied to the curve cache's file
 
 
 @shared_cache
@@ -1979,150 +1617,6 @@ def blocks_to_show(label: str, key: str, n_blocks: int) -> int:
     return st.slider(label, 1, n_blocks, default, key=key)
 
 
-def limit_queue_before(queues: dict, video_id: str, abs_end_sec: float) -> None:
-    """Drop every bit of video_id's queued footage at or after abs_end_sec
-    (absolute time in the video), trimming a span that crosses it. Used when
-    editing a block in sequential mode: a video's clip for the edited block
-    has to come before that video's clip in any LATER committed block."""
-    kept = []
-    for span in queues.get(video_id, []):
-        start = span["scene_start_sec"] + span["offset_sec"]
-        end = start + span["remaining_sec"]
-        if start >= abs_end_sec - 1e-6:
-            continue
-        if end > abs_end_sec:
-            span = {**span, "remaining_sec": abs_end_sec - start}
-            if span["remaining_sec"] < MIN_LEFTOVER_SEC:
-                continue
-        kept.append(span)
-    queues[video_id] = kept
-
-
-def split_span_at(queues: dict, video_id: str, scene_id: int, offset_sec: float) -> None:
-    """Split the span of scene_id that contains offset_sec into two at that
-    point, so the window grid (get_available_clips_for_video) has a window
-    starting exactly there — used so a block being edited can offer its own
-    currently-committed clip as an exact dropdown choice."""
-    spans = queues.get(video_id, [])
-    for i, span in enumerate(spans):
-        if span["scene_id"] != scene_id:
-            continue
-        start, end = span["offset_sec"], span["offset_sec"] + span["remaining_sec"]
-        if start + 1e-6 < offset_sec < end - 1e-6:
-            spans[i:i + 1] = [{**span, "remaining_sec": offset_sec - start},
-                              {**span, "offset_sec": offset_sec, "remaining_sec": end - offset_sec}]
-            return
-
-
-def skip_span(queues: dict, video_id: str, scene_id: int, sequential: bool = False) -> None:
-    """Manual escape hatch for sequential mode: discard a video's current
-    front span ENTIRELY without using any of it, so the search can reach
-    whatever comes after it in that video. Unlike carve_span, this produces
-    no pick — the footage is simply given up. Raises ValueError if that
-    scene's span no longer exists (already used or already skipped).
-
-    sequential=True also discards every OTHER remaining span in this video
-    that starts earlier, not just the exact one skipped. Without this,
-    skipping straight to a much later scene_id (jumping over several scenes
-    the search never individually touched) left those in-between scenes
-    sitting untouched in the queue — free to resurface as a candidate on a
-    LATER block, stepping backward past something already used. See
-    carve_span's matching fix for the same invariant when a scene is used
-    rather than skipped."""
-    spans = queues.get(video_id, [])
-    if not any(s["scene_id"] == scene_id for s in spans):
-        raise ValueError(f"No available span for {video_id} scene {scene_id} to skip — it may already be gone.")
-    if sequential:
-        # By start time, not scene_id (not chronological after a Reviewer split).
-        t0 = next(s["scene_start_sec"] for s in spans if s["scene_id"] == scene_id)
-        spans[:] = [s for s in spans if s["scene_start_sec"] > t0]
-    else:
-        spans[:] = [s for s in spans if s["scene_id"] != scene_id]
-
-
-SNAP_TOL_SEC = 0.05  # see carve_span
-
-
-def carve_span(queues: dict, video_id: str, scene_id: int, window_offset_sec: float,
-               window_duration_sec: float, sequential: bool = False) -> dict:
-    """Generalization of consume_span for Advanced Shape Matching: consumes
-    an ARBITRARY window from within a scene's still-available region, not
-    just the front. consume_span always eats from span["offset_sec"] forward,
-    which is right for auto mode's chain-filling — but a shape-matched window
-    can be the best fit ANYWHERE in a scene, including its middle, which can
-    leave usable footage on BOTH sides. This finds the span containing the
-    window and replaces it in the queue with the remainder(s), returning a
-    pick dict in the exact same shape consume_span does, so everything
-    downstream (render, export, Blender import) is unaffected by which
-    function produced a pick.
-
-    sequential=True (mirrors "keep sequential order"): the LEADING remainder
-    — footage before the carved window, WITHIN THIS SAME SCENE — is discarded,
-    not kept for later. E.g. using 6.7s-9.7s of a scene means nothing before
-    6.7s in that scene is offered to any later block for this video; only
-    what comes after 9.7s can still be picked. ANY OTHER remaining scene in
-    this video with a smaller scene_id is discarded too — using scene 36
-    must also give up scenes 6 through 35, even ones the search never
-    individually touched, or a later block could still find one of them and
-    step backward past something already used. Non-sequential mode keeps
-    everything else, as before.
-
-    Raises ValueError if no current span for this scene covers the requested
-    window — this would mean the window was already (partly) consumed by an
-    earlier confirmed block since the candidate was generated, which the
-    caller should treat as "re-search this block", not silently paper over."""
-    spans = queues.get(video_id, [])
-
-    for i, span in enumerate(spans):
-        if span["scene_id"] != scene_id:
-            continue
-        span_start = span["offset_sec"]
-        span_end = span["offset_sec"] + span["remaining_sec"]
-        win_start = window_offset_sec
-        win_end = window_offset_sec + window_duration_sec
-        # Windows come from frame-rounded searches and picks are stored rounded to
-        # 0.01 s, so a window can sit a hair outside its span. Up to SNAP_TOL_SEC
-        # (about a frame) it's snapped back inside instead of being rejected —
-        # rejecting it used to leave Auto-fill blocks empty and silently drop
-        # confirmed clips on replay.
-        if span_start - SNAP_TOL_SEC <= win_start and win_end <= span_end + SNAP_TOL_SEC:
-            win_start = max(win_start, span_start)
-            if win_start + window_duration_sec > span_end:
-                win_start = max(span_start, span_end - window_duration_sec)
-            win_end = min(span_end, win_start + window_duration_sec)
-            window_duration_sec = win_end - win_start
-            pick = {
-                "video_id": span["video_id"],
-                "scene_id": span["scene_id"],
-                "tags": span["tags"],
-                "thumbnail": span["thumbnail"],
-                "motion_norm": span["motion_norm"],
-                "clip_start_sec": round(span["scene_start_sec"] + win_start, 3),
-                "clip_duration_sec": round(window_duration_sec, 3),
-                "offset_into_scene_sec": round(win_start, 2),
-            }
-
-            replacements = []
-            leading = win_start - span_start
-            if leading >= MIN_LEFTOVER_SEC and not sequential:
-                replacements.append({**span, "offset_sec": span_start, "remaining_sec": leading})
-            trailing = span_end - win_end
-            if trailing >= MIN_LEFTOVER_SEC:
-                replacements.append({**span, "offset_sec": win_end, "remaining_sec": trailing})
-
-            spans[i:i + 1] = replacements
-            if sequential:
-                # By start time, not scene_id (not chronological after a Reviewer split).
-                t0 = span["scene_start_sec"]
-                spans[:] = [s for s in spans if s["scene_start_sec"] >= t0]
-            return pick
-
-    raise ValueError(
-        f"No available span for {video_id} scene {scene_id} covers "
-        f"[{win_start:.2f}, {win_end:.2f}] — it may have already been used by an earlier confirmed block."
-    )
-
-
 @shared_cache
 @st.cache_resource(ttl=1800, show_spinner=False)   # shared, not copied per call — read-only
 def load_all_audio_tracks() -> dict:
@@ -2388,7 +1882,8 @@ def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list,
         if cache and cache["key"] == cache_key:
             video_matches = cache["ranking"]["video_matches"]   # only the seed changed — no re-scoring
         else:
-            video_matches = compute_video_rankings(track, tag_filter, _ranges, _weights, _experimental)
+            with _timed("Video ranking", f"{len(_ranges)} ranges"):
+                video_matches = compute_video_rankings(track, tag_filter, _ranges, _weights, _experimental)
             if allowed is not None:   # 👤 actor / 🏷️ video tag filter
                 video_matches = [v for v in video_matches if v["video_id"] in allowed]
         if random_seed is not None:
@@ -2443,22 +1938,6 @@ AUDIO_SETTINGS_KEYS = [
     *SM.DEFAULTS.keys(),
 ]
 
-SEG_ADAPTIVE = "Adaptive (energy-change + hits)"
-SEG_RHYTHM = "Rhythm Engine (bar cutting styles)"
-SEG_SCORED = "Scored cuts (all signals)"
-SEG_SMART = "Smart (self-tuning)"
-
-# Which settings each segmentation method actually uses (beats_per_bar: all).
-SEG_METHOD_KEYS = {
-    SEG_ADAPTIVE: ["change_window_secs", "change_threshold", "min_segment_sec", "max_segment_sec",
-                   "react_to_hits", "hit_threshold", "snap_secs"],
-    SEG_RHYTHM: ["fast_energy_thresh", "fast_max_bars", "fast_cooldown_bars", "phrase_lock_bars",
-                 "cinematic_bars", "dynamic_priority_override", "override_delta_thresh",
-                 "override_clear_secs"],
-    SEG_SCORED: list(CS.DEFAULTS.keys()),
-    SEG_SMART: list(SM.DEFAULTS.keys()),
-}
-
 
 def segmentation_settings() -> dict:
     """The current segmentation method plus exactly the settings it uses —
@@ -2470,25 +1949,6 @@ def segmentation_settings() -> dict:
     for k in SEG_METHOD_KEYS[method]:
         out[k] = st.session_state.get(k, DIAL_DEFAULTS.get(k))
     return out
-
-
-def build_segments(track: dict, cfg: dict) -> list:
-    """Segments for this track with the settings from segmentation_settings()."""
-    bpb = int(cfg.get("beats_per_bar", 4))
-    if cfg["method"] == SEG_SMART:
-        return SM.build_smart_segments(track, cfg)
-    if cfg["method"] == SEG_SCORED:
-        return CS.build_scored_segments(track, cfg)
-    if cfg["method"] == SEG_RHYTHM:
-        return build_rhythm_engine_segments(
-            track, bpb, float(cfg["fast_energy_thresh"]), int(cfg["fast_max_bars"]),
-            int(cfg["fast_cooldown_bars"]), int(cfg["phrase_lock_bars"]), int(cfg["cinematic_bars"]),
-            bool(cfg["dynamic_priority_override"]), float(cfg["override_delta_thresh"]),
-            float(cfg["override_clear_secs"]))
-    return build_track_segments(
-        track, float(cfg["change_window_secs"]), float(cfg["change_threshold"]),
-        float(cfg["min_segment_sec"]), bool(cfg["react_to_hits"]), float(cfg["hit_threshold"]),
-        float(cfg["snap_secs"]), float(cfg["max_segment_sec"]), bpb)
 
 
 SEG_LABELS = {
@@ -3444,44 +2904,6 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
         st.success(f"{len(selected_now)} video(s) selected. Go on to **🎬 Matching & Export** (below) when ready.")
 
 
-def _moving_average(values, half_window: int):
-    """Symmetric moving average with edge clamping (cumulative-sum version,
-    fast enough for 30 Hz signals)."""
-    values = np.asarray(values, dtype=float)
-    if half_window <= 0:
-        return values.copy()
-    n = len(values)
-    c = np.concatenate([[0.0], np.cumsum(values)])
-    idx = np.arange(n)
-    lo = np.maximum(0, idx - half_window)
-    hi = np.minimum(n, idx + half_window + 1)
-    return (c[hi] - c[lo]) / (hi - lo)
-
-
-def compute_bar_times(track: dict, beats_per_bar: int = 4) -> list:
-    """Bar start times for beats_per_bar beats per bar (4 = common time; 3 for
-    a waltz, etc.). Uses the real downbeats when the server's extra analysis
-    is present; otherwise every Nth beat counting from the first detected beat."""
-    # Real downbeats from the server's extra analysis when the track has it
-    # (see cut_scoring.bar_lines); otherwise every Nth beat from the first.
-    return CS.bar_lines(track, beats_per_bar)
-
-
-def _snap_to_bar_or_onset(i: int, bar_frames: np.ndarray, onset: np.ndarray, snap: int, n: int) -> int:
-    """Snap position i onto the nearest bar line if one is close enough to be
-    plausibly the SAME musical moment (within 1.5 bars, or 3x the onset-snap
-    radius if bars are sparse/unavailable) — otherwise fall back to the
-    original onset-peak snap, same as before bar-awareness existed."""
-    if len(bar_frames) > 0:
-        nearest = int(np.argmin(np.abs(bar_frames - i)))
-        bar_pos = int(bar_frames[nearest])
-        bar_spacing = float(np.median(np.diff(bar_frames))) if len(bar_frames) > 1 else float(n)
-        if abs(bar_pos - i) <= max(bar_spacing * 1.5, snap * 3):
-            return bar_pos
-    lo, hi = max(1, i - snap), min(n - 1, i + snap + 1)
-    return lo + int(np.argmax(onset[lo:hi])) if hi > lo else int(i)
-
-
 # ---------------------------------------------------------------------------
 # Rhythm Engine: an alternative segmentation method, ported from a reference
 # state-machine design. Instead of detecting individual cut POINTS, it works
@@ -3492,526 +2914,17 @@ def _snap_to_bar_or_onset(i: int, bar_frames: np.ndarray, onset: np.ndarray, sna
 # cutting can't run on for too long or restart straight away.
 # ---------------------------------------------------------------------------
 
-RHYTHM_STATE_CINEMATIC = "CINEMATIC"
-RHYTHM_STATE_FAST = "FAST"
-
-
-def compute_cutting_states(
-    track: dict,
-    beats_per_bar: int = 4,
-    fast_energy_thresh: float = 0.75,
-    fast_max_bars: int = 8,
-    fast_cooldown_bars: int = 4,
-    phrase_lock_bars: int = 4,
-) -> list:
-    """Assigns a cutting style to every bar. Returns a list of state strings,
-    one per bar (same length/order as compute_bar_times' output), or an
-    empty list if there isn't enough beat/hires data to form bars.
-
-    fast_max_bars: a FAST run is forced back to CINEMATIC after this many
-    bars (0 = no limit). fast_cooldown_bars: after ANY FAST run ends, this
-    many bars must pass before FAST may start again. phrase_lock_bars: a
-    newly chosen style is held for this many bars (the FAST limit still
-    applies inside the lock)."""
-    bar_times = compute_bar_times(track, beats_per_bar)
-    hires = track.get("hires")
-    if len(bar_times) < 2 or not hires:
-        return []
-
-    rate = float(hires["rate"])
-    rms = np.asarray(hires["rms"], dtype=float)
-    bar_frames = [round(bt * rate) for bt in bar_times] + [len(rms)]
-
-    bar_energies = np.array([
-        float(rms[bar_frames[i]:bar_frames[i + 1]].mean()) if bar_frames[i + 1] > bar_frames[i] else 0.0
-        for i in range(len(bar_times))
-    ])
-    max_e = bar_energies.max() if bar_energies.max() > 0 else 1.0
-    norm = bar_energies / max_e
-    local_smooth = np.convolve(norm, np.ones(2) / 2, mode="same")
-
-    states = []
-    current = RHYTHM_STATE_CINEMATIC
-    fast_run = 0          # bars in the current FAST run
-    fast_allowed_at = 0   # first bar index where FAST may start again
-    lock = 0              # bars still held by phrase lock
-
-    for i in range(len(bar_times)):
-        if current == RHYTHM_STATE_FAST and fast_max_bars > 0 and fast_run >= fast_max_bars:
-            current, lock = RHYTHM_STATE_CINEMATIC, 0          # forced out: max run reached
-            fast_allowed_at = i + max(0, fast_cooldown_bars)
-        elif lock > 0:
-            lock -= 1
-        else:
-            want = (RHYTHM_STATE_FAST if local_smooth[i] > fast_energy_thresh and i >= fast_allowed_at
-                    else RHYTHM_STATE_CINEMATIC)
-            if want != current:
-                if current == RHYTHM_STATE_FAST:                 # FAST ended on its own
-                    fast_allowed_at = i + max(0, fast_cooldown_bars)
-                current = want
-                lock = max(0, phrase_lock_bars - 1)
-        fast_run = fast_run + 1 if current == RHYTHM_STATE_FAST else 0
-        states.append(current)
-
-    return states
-
-
-def find_dynamic_priority_cuts(track: dict, bar_times: list, override_delta_thresh: float) -> list:
-    """Secondary pass, run after the state machine: scans the RAW,
-    frame-by-frame change in RMS — not the bar-averaged, smoothed energy the
-    state machine uses — for instantaneous jumps (a single dramatic hit or
-    drop mid-bar). For each bar whose biggest jump exceeds
-    override_delta_thresh, returns (time_sec, jump_size) at that exact frame."""
-    hires = track.get("hires")
-    if not hires or len(bar_times) < 2:
-        return []
-    rate = float(hires["rate"])
-    rms = np.asarray(hires["rms"], dtype=float)
-    raw_deltas = np.abs(np.diff(rms, prepend=rms[0]))
-
-    bar_frames = [round(bt * rate) for bt in bar_times] + [len(rms)]
-    out = []
-    for i in range(len(bar_times)):
-        s, e = bar_frames[i], bar_frames[i + 1]
-        if e <= s:
-            continue
-        window = raw_deltas[s:e]
-        peak_idx = int(np.argmax(window))
-        if window[peak_idx] > override_delta_thresh:
-            out.append(((s + peak_idx) / rate, float(window[peak_idx])))
-    return out
-
-
-MIN_OVERRIDE_GAP_SEC = 0.15  # never leave a sliver shorter than this next to a dynamic cut
-
-
-def apply_dynamic_priority_overrides(raw_segments: list, overrides: list, clear_secs: float,
-                                     duration: float) -> list:
-    """Dynamic cuts take priority over the state machine's own cuts.
-
-    overrides: [(time_sec, strength)]. Dynamic cuts closer than clear_secs to
-    each other keep only the strongest; then every ordinary cut closer than
-    clear_secs (before OR after) to a kept dynamic cut is removed, and the
-    dynamic cut is added. The segment after a dynamic cut is tagged
-    "override"; every other segment keeps its original kind."""
-    if not overrides:
-        return raw_segments
-    gap = max(clear_secs, MIN_OVERRIDE_GAP_SEC)
-    kept = []
-    for t, strength in sorted(overrides, key=lambda o: -o[1]):
-        if gap < t < duration - MIN_OVERRIDE_GAP_SEC and all(abs(t - k) >= gap for k in kept):
-            kept.append(t)
-    if not kept:
-        return raw_segments
-    bounds = [(s, kind) for s, _, kind in raw_segments
-              if s <= 1e-6 or all(abs(s - k) >= gap for k in kept)]
-    bounds += [(t, "override") for t in kept]
-    bounds.sort()
-    out = []
-    for (s, kind), nxt in zip(bounds, bounds[1:] + [(duration, None)]):
-        if nxt[0] > s:
-            out.append((s, nxt[0], kind))
-    return out
-
-
-def build_rhythm_engine_segments(
-    track: dict,
-    beats_per_bar: int = 4,
-    fast_energy_thresh: float = 0.75,
-    fast_max_bars: int = 8,
-    fast_cooldown_bars: int = 4,
-    phrase_lock_bars: int = 4,
-    cinematic_bars: int = 4,
-    dynamic_priority_override: bool = False,
-    override_delta_thresh: float = 0.15,
-    override_clear_secs: float = 1.0,
-) -> list:
-    """Converts the per-bar cutting states into actual segments, in the same
-    {"start","end","energy","cut","cut_strength"} schema build_track_segments
-    produces — so everything downstream works with either method unchanged.
-    CINEMATIC runs are grouped into cinematic_bars-bar chunks; FAST bars each
-    become their own segment. Falls back to the whole track as one segment if
-    there isn't enough data to form even one bar."""
-    duration = float(track["duration_sec"])
-    hires = track.get("hires")
-    bar_times = compute_bar_times(track, beats_per_bar)
-    states = compute_cutting_states(track, beats_per_bar, fast_energy_thresh, fast_max_bars,
-                                    fast_cooldown_bars, phrase_lock_bars)
-
-    if len(bar_times) < 2 or not states:
-        energy = float(np.mean(hires["rms"])) if hires else 0.0
-        return [{"start": 0.0, "end": duration, "energy": round(energy, 3), "cut": "start", "cut_strength": 0.0}]
-
-    bar_bounds = list(bar_times) + [duration]
-    raw_segments = []  # (start, end, cut_kind)
-    # Lead-in before the first bar: its own segment if at least a bar long,
-    # otherwise folded into the first bar.
-    if bar_bounds[0] >= bar_bounds[1] - bar_bounds[0]:
-        raw_segments.append((0.0, bar_bounds[0], "start"))
-    else:
-        bar_bounds[0] = 0.0
-    i = 0
-    while i < len(states):
-        j = i
-        while j < len(states) and states[j] == states[i]:
-            j += 1
-        if states[i] == RHYTHM_STATE_FAST:
-            for k in range(i, j):
-                raw_segments.append((bar_bounds[k], bar_bounds[k + 1], "fast"))
-        else:
-            k = i
-            while k < j:
-                chunk_end = min(k + max(1, cinematic_bars), j)
-                raw_segments.append((bar_bounds[k], bar_bounds[chunk_end], "cinematic"))
-                k = chunk_end
-        i = j
-
-    raw_segments.sort()
-    # A sliver after the last whole bar (e.g. a fade-out) joins the segment before it.
-    if len(raw_segments) > 1 and len(bar_times) > 1:
-        half_bar = 0.5 * float(np.median(np.diff(bar_times)))
-        s0, e0, k0 = raw_segments[-1]
-        if e0 - s0 < half_bar:
-            ps, _, pk = raw_segments[-2]
-            raw_segments[-2:] = [(ps, e0, pk)]
-    if dynamic_priority_override:
-        overrides = find_dynamic_priority_cuts(track, bar_times, override_delta_thresh)
-        raw_segments = apply_dynamic_priority_overrides(raw_segments, overrides, override_clear_secs, duration)
-
-    rate = float(hires["rate"]) if hires else 0.0
-    rms = np.asarray(hires["rms"], dtype=float) if hires else np.array([])
-    onset = np.asarray(hires["onset"], dtype=float) if hires else np.array([])
-
-    segments = []
-    for start, end, kind in raw_segments:
-        if end <= start:
-            continue
-        s_f, e_f = int(round(start * rate)), int(round(end * rate))
-        energy = float(rms[s_f:e_f].mean()) if e_f > s_f and len(rms) else 0.0
-        strength = float(onset[s_f]) if 0 <= s_f < len(onset) else 0.0
-        segments.append({
-            "start": round(start, 3),
-            "end": round(min(end, duration), 3),
-            "energy": round(energy, 3),
-            "cut": kind,
-            "cut_strength": round(strength, 3),
-        })
-    return segments
-
-
-def build_track_segments(
-    track: dict,
-    change_window_secs: float,
-    change_threshold: float,
-    min_block_secs: float,
-    react_to_hits: bool,
-    hit_threshold: float,
-    snap_secs: float,
-    max_block_secs: float = 0.0,
-    beats_per_bar: int = 4,
-) -> list[dict]:
-    """Tight segmentation on the 30 Hz signals from audio_pipeline.py.
-
-    1. ENERGY CHANGES — a step detector: at every sample, compare the mean
-       energy over the next `change_window_secs` with the mean over the
-       previous `change_window_secs`. Peaks in that difference above
-       `change_threshold` are genuine level changes (drops, build-ups,
-       chorus in/out). Steady beat ripple averages out, so it can't slowly
-       accumulate into false cuts.
-    2. SNAP — each energy-change cut moves onto the strongest nearby onset
-       (the add-on's "Clip Change" score) within ±snap_secs.
-    3. BIG HITS — onset peaks at or above hit_threshold become extra cuts,
-       landing exactly on the transient, NOT snapped to a bar line — a hit
-       can legitimately fall mid-bar, and forcing it onto the bar grid would
-       undo the point of reacting to it individually.
-
-    Candidates are accepted strongest-first (energy changes rank above hits),
-    skipping any closer than min_block_secs to an accepted cut, so the most
-    important moments always win.
-
-    4. MAX LENGTH — like the add-on's Build Signal Grid Plan (which chunks long
-       blocks and snaps chunk boundaries to hits), any segment longer than
-       max_block_secs is split at its strongest internal onset, repeatedly,
-       so evenly-busy passages with no standout hit still get cut on a beat.
-       0 = off.
-
-    Tracks analysed before the 30 Hz signals existed fall back to the older
-    coarse method (re-run audio_pipeline.py in Colab to upgrade them)."""
-    hires = track.get("hires")
-    if not hires:
-        return _legacy_track_segments(track, change_window_secs, 0.5, 0.5, min_block_secs, react_to_hits)
-
-    rate = float(hires["rate"])
-    rms = np.asarray(hires["rms"], dtype=float)
-    onset = np.asarray(hires["onset"], dtype=float)
-    n = min(len(rms), len(onset))
-    rms, onset = rms[:n], onset[:n]
-    duration = float(track["duration_sec"])
-    if n < 3:
-        return [{"start": 0.0, "end": duration, "energy": float(rms.mean()) if n else 0.0,
-                 "cut": "start", "cut_strength": 0.0}]
-
-    w = max(1, round(rate * change_window_secs))
-    min_len = max(1, round(rate * min_block_secs))
-    snap = max(0, round(rate * snap_secs))
-
-    # Bar snapping was retired (the "Snap structural cuts to bar lines" toggle);
-    # with no bar frames, snapping and max-length splits use onsets only.
-    bar_frames = np.array([])
-
-    # 1. step detector: |mean(after) - mean(before)|
-    c = np.concatenate([[0.0], np.cumsum(rms)])
-    idx = np.arange(n)
-    b_lo, a_hi = np.maximum(0, idx - w), np.minimum(n, idx + w)
-    before = (c[idx] - c[b_lo]) / np.maximum(1, idx - b_lo)
-    after = (c[a_hi] - c[idx]) / np.maximum(1, a_hi - idx)
-    change = np.abs(after - before)
-    change[:1] = 0.0
-    change_peaks = np.flatnonzero((change[1:-1] >= change[:-2]) & (change[1:-1] > change[2:])) + 1
-
-    candidates = []  # (score, index, kind)
-    for i in change_peaks:
-        if change[i] < change_threshold:
-            continue
-        # 2. snap onto the strongest nearby onset
-        pos = _snap_to_bar_or_onset(i, bar_frames, onset, snap, n)
-        candidates.append((1.0 + float(change[i]), int(pos), "change"))
-
-    # 3. big hits
-    if react_to_hits:
-        peaks = np.flatnonzero((onset[1:-1] >= onset[:-2]) & (onset[1:-1] > onset[2:])) + 1
-        for pos in peaks:
-            if onset[pos] >= hit_threshold:
-                candidates.append((float(onset[pos]), int(pos), "hit"))
-
-    accepted = []
-    for score, pos, kind in sorted(candidates, key=lambda x: -x[0]):
-        if pos < min_len or n - pos < min_len:
-            continue
-        if any(abs(pos - a) < min_len for a, _ in accepted):
-            continue
-        accepted.append((pos, kind))
-    accepted.sort()
-
-    # 4. split over-long segments at their strongest internal onset
-    if max_block_secs and max_block_secs > 0:
-        max_len = max(2 * min_len, round(rate * max_block_secs))
-        onset_peak = np.zeros(n, dtype=bool)
-        onset_peak[1:-1] = (onset[1:-1] >= onset[:-2]) & (onset[1:-1] > onset[2:])
-        changed = True
-        while changed:
-            changed = False
-            edges = [0] + [a for a, _ in accepted] + [n]
-            for s0, e0 in zip(edges[:-1], edges[1:]):
-                if e0 - s0 <= max_len:
-                    continue
-                lo, hi = s0 + min_len, e0 - min_len
-                if hi <= lo:
-                    continue
-                bars_in_range = bar_frames[(bar_frames > lo) & (bar_frames < hi)] if len(bar_frames) else np.array([])
-                if len(bars_in_range):
-                    mid = (lo + hi) / 2
-                    fill_pos = int(bars_in_range[np.argmin(np.abs(bars_in_range - mid))])
-                else:
-                    window = np.where(onset_peak[lo:hi], onset[lo:hi], -1.0)
-                    if window.max() < 0:
-                        window = onset[lo:hi]
-                    fill_pos = lo + int(np.argmax(window))
-                accepted.append((fill_pos, "fill"))
-                changed = True
-            accepted.sort()
-
-    bounds = [0] + [a for a, _ in accepted] + [n]
-    kinds = ["start"] + [k for _, k in accepted]
-    segments = []
-    for k in range(len(bounds) - 1):
-        s, e = bounds[k], bounds[k + 1]
-        segments.append({
-            "start": round(s / rate, 3),
-            "end": round(min(e / rate, duration), 3) if e < n else duration,
-            "energy": round(float(rms[s:e].mean()), 3),
-            "cut": kinds[k],
-            "cut_strength": round(float(onset[s]), 3),
-        })
-    return segments
-
-
-def _legacy_track_segments(
-    track: dict,
-    smooth_secs: float,
-    lookback_secs: float,
-    drift_threshold: float,
-    min_block_secs: float,
-    react_to_beats: bool = True,
-) -> list[dict]:
-    """Adaptive segmentation ported from the VSE add-on's block-detection
-    algorithm: cut a new segment wherever the smoothed energy level has
-    drifted from where it was `lookback_secs` ago by more than
-    `drift_threshold` (accumulated). This alone only reacts to broad energy
-    LEVEL shifts, which is too slow for sharp hits — so when react_to_beats
-    is on, every detected beat is ALSO forced in as a cut candidate, keeping
-    blocks reactive to individual hits, not just plateau changes. Either way,
-    any resulting span shorter than `min_block_secs` is merged into whichever
-    neighbour is more energetic, so beat-forcing can't fragment things below
-    your chosen floor. Operates on the track's energy envelope (sampled every
-    ENERGY_WINDOW_SEC seconds in audio_pipeline.py)."""
-    envelope = track["energy_envelope"]
-    times = np.array([e["time"] for e in envelope])
-    energies = np.array([e["energy"] for e in envelope])
-    n = len(energies)
-    if n < 2:
-        return [{"start": 0.0, "end": track["duration_sec"], "energy": float(energies[0]) if n else 0.0}]
-
-    sample_rate = 1.0 / max(times[1] - times[0], 1e-6)  # samples per second
-    hw_smooth = max(1, round(sample_rate * smooth_secs / 2.0))
-    lb = max(1, round(sample_rate * lookback_secs))
-    min_samples = max(1, round(sample_rate * min_block_secs))
-
-    smoothed = _moving_average(energies, hw_smooth)
-
-    # --- cut boundaries wherever accumulated drift crosses the threshold ---
-    drift_boundaries = {0, n}
-    accumulator = 0.0
-    since_last = 0
-    for i in range(n):
-        since_last += 1
-        prev_idx = max(0, i - lb)
-        accumulator += abs(smoothed[i] - smoothed[prev_idx])
-        if accumulator >= drift_threshold and since_last >= min_samples and i > 0:
-            drift_boundaries.add(i)
-            accumulator = 0.0
-            since_last = 0
-
-    # --- fold in every beat as a forced cut candidate, so blocks react to hits too ---
-    if react_to_beats and track.get("beat_times"):
-        for bt in track["beat_times"]:
-            idx = int(round(bt * sample_rate))
-            if 0 < idx < n:
-                drift_boundaries.add(idx)
-
-    raw_boundaries = sorted(drift_boundaries)
-
-    spans = [(raw_boundaries[k], raw_boundaries[k + 1]) for k in range(len(raw_boundaries) - 1)
-             if raw_boundaries[k] < raw_boundaries[k + 1]]
-
-    # --- merge pass: absorb spans shorter than min_samples into the more energetic neighbour ---
-    def avg_smoothed(span):
-        lo, hi = span
-        return float(smoothed[lo:hi].mean())
-
-    changed = True
-    while changed and len(spans) > 1:
-        changed = False
-        for k in range(len(spans)):
-            s, e = spans[k]
-            if (e - s) < min_samples:
-                if k == 0:
-                    ns, ne = spans[k + 1]; spans[k + 1] = (s, ne)
-                elif k == len(spans) - 1:
-                    ps, pe = spans[k - 1]; spans[k - 1] = (ps, e)
-                else:
-                    if avg_smoothed(spans[k + 1]) >= avg_smoothed(spans[k - 1]):
-                        ns, ne = spans[k + 1]; spans[k + 1] = (s, ne)
-                    else:
-                        ps, pe = spans[k - 1]; spans[k - 1] = (ps, e)
-                del spans[k]
-                changed = True
-                break
-
-    # --- convert sample-index spans to time ranges with an attached energy value ---
-    segments = []
-    for s, e in spans:
-        start_t = float(times[s])
-        end_t = float(times[e]) if e < n else track["duration_sec"]
-        segments.append({
-            "start": start_t,
-            "end": end_t,
-            "energy": round(float(energies[s:e].mean()), 3) if e > s else 0.0,
-        })
-
-    return segments
-
-
-DENSITY_SMOOTH_SECS = 1.5  # same as the VSE add-on's density signal
-
-
-def compute_density_curve(track: dict) -> tuple:
-    """Port of the add-on's density signal: smooth the raw energy over
-    DENSITY_SMOOTH_SECS FIRST, then normalise 0-1 — so the scale reflects
-    sustained loudness rather than being set by a single transient peak.
-    Returns (times, density)."""
-    hires = track.get("hires")
-    if hires:
-        rate = float(hires["rate"])
-        raw = np.asarray(hires["rms"], dtype=float)
-    else:
-        env = track["energy_envelope"]
-        raw = np.asarray([e["energy"] for e in env], dtype=float)
-        rate = 1.0 / max(env[1]["time"] - env[0]["time"], 1e-6) if len(env) > 1 else 2.0
-    dens = _moving_average(raw, max(1, round(rate * DENSITY_SMOOTH_SECS / 2.0)))
-    lo, hi = float(dens.min()), float(dens.max())
-    dens = (dens - lo) / (hi - lo) if hi - lo > 1e-9 else np.full_like(dens, 0.5)
-    return np.arange(len(dens)) / rate, dens
-
-
-def apply_segment_intensity(segments: list[dict], track: dict, contrast: float) -> None:
-    """Port of the add-on's block density (compute_block_density_values):
-    average the density curve over each segment, then RE-NORMALISE across
-    segments so the quietest segment is 0 and the busiest is 1 — the full
-    clip-count range is always used, whatever the track's absolute level.
-    `contrast` is the add-on's Density Power (>1 spreads values apart,
-    <1 flattens them). Writes seg["intensity"] in place."""
-    times, dens = compute_density_curve(track)
-    means = []
-    for seg in segments:
-        mask = (times >= seg["start"]) & (times < seg["end"])
-        means.append(float(dens[mask].mean()) if mask.any() else 0.0)
-    lo, hi = min(means), max(means)
-    for seg, m in zip(segments, means):
-        norm = (m - lo) / (hi - lo) if hi - lo > 1e-9 else 0.5
-        seg["intensity"] = round(norm ** max(0.05, contrast), 3)
-
 
 def clips_for_intensity(intensity: float, min_clips: int, max_clips: int,
                         ramp_start: float, ramp_end: float, vary: bool, rng) -> int:
-    """_clips_for_intensity, then 'Skip these counts' (allowed_clip_count)."""
-    return allowed_clip_count(_clips_for_intensity(intensity, min_clips, max_clips, ramp_start, ramp_end, vary, rng),
-                              min_clips, max_clips)
-
-
-def _clips_for_intensity(intensity: float, min_clips: int, max_clips: int,
-                         ramp_start: float, ramp_end: float, vary: bool, rng) -> int:
-    """Map a segment's 0-1 intensity to a clip count.
-
-    The ramp range rescales intensity first (at/below ramp_start = 0, at/above
-    ramp_end = 1). Then, following the add-on's _overlap_count_from_intensity:
-    intensity sets both a ceiling (min + i*span) and a floor that only starts
-    rising above the midpoint (min + max(0, (i-0.5)*2)*span).
-      vary off -> always the ceiling (the add-on's FIXED mode, smooth & predictable)
-      vary on  -> a seeded pick between floor and ceiling (the add-on's RANDOM mode)
-    Either way intensity 0 guarantees min_clips and 1 guarantees max_clips."""
-    if max_clips <= min_clips:
-        return min_clips
-    if ramp_end <= ramp_start:
-        pos = 1.0 if intensity >= ramp_start else 0.0
-    else:
-        pos = min(1.0, max(0.0, (intensity - ramp_start) / (ramp_end - ramp_start)))
-    span = max_clips - min_clips
-    ceiling = int(round(min_clips + pos * span))
-    if not vary:
-        return ceiling
-    floor = min(ceiling, int(round(min_clips + max(0.0, (pos - 0.5) * 2) * span)))
-    return rng.randint(floor, ceiling)
+    """core.segmentation.clips_for_intensity with the 'Skip these counts' setting."""
+    return CSEG.clips_for_intensity(intensity, min_clips, max_clips, ramp_start, ramp_end, vary, rng,
+                                    skip=st.session_state.get("clip_count_skip"))
 
 
 def allowed_clip_count(n: int, min_clips: int, max_clips: int) -> int:
-    """'Skip these counts' (sidebar): n moved to the nearest count that's allowed
-    (ties go to the smaller). Min and max are always allowed."""
-    skip = {int(x) for x in (st.session_state.get("clip_count_skip") or [])} - {min_clips, max_clips}
-    if n not in skip:
-        return n
-    allowed = [c for c in range(min_clips, max_clips + 1) if c not in skip]
-    return min(allowed, key=lambda c: (abs(c - n), c)) if allowed else n
+    """core.segmentation.allowed_clip_count with the 'Skip these counts' setting."""
+    return CSEG.allowed_clip_count(n, min_clips, max_clips, skip=st.session_state.get("clip_count_skip"))
 
 
 MAX_CHAIN_LINKS = 20  # safety cap against pathological tiny-leftover loops
@@ -4778,176 +3691,22 @@ def _consume_load_suppression(mode_name: str) -> bool:
     return False
 
 
-def _weighted_percentile(values, weights, q):
-    order = np.argsort(values)
-    v, w = np.asarray(values)[order], np.asarray(weights, dtype=float)[order]
-    cum = np.cumsum(w) / max(w.sum(), 1e-9)
-    return float(v[min(len(v) - 1, int(np.searchsorted(cum, q)))])
-
-
-# Cutting pace presets. pace = average bars per cut; follow = how much faster
-# loud passages cut than quiet ones; fast_share = share of bars the Rhythm
-# Engine cuts every bar.
-AUDIO_STYLES = {
-    "Calm":      {"pace": 4.0, "follow": 0.3, "fast_share": 0.15, "cooldown": 8, "lock": 4},
-    "Balanced":  {"pace": 2.0, "follow": 0.5, "fast_share": 0.30, "cooldown": 4, "lock": 4},
-    "Energetic": {"pace": 1.0, "follow": 0.7, "fast_share": 0.50, "cooldown": 2, "lock": 2},
-}
-AUDIO_STYLE_CUSTOM = "Custom"
+def _dial_value(k):
+    """A dial's current value (its default if it hasn't been set)."""
+    return st.session_state.get(k, DIAL_DEFAULTS.get(k))
 
 
 def _method_cfg(method: str, settings: dict, bpb: int) -> dict:
-    """A segmentation_settings()-style dict from explicit values (falling back to
-    the current ones), so auto-detect can try settings before applying them."""
-    cfg = {"method": method, "beats_per_bar": int(bpb)}
-    for k in SEG_METHOD_KEYS[method]:
-        cfg[k] = settings.get(k, st.session_state.get(k, DIAL_DEFAULTS.get(k)))
-    return cfg
-
-
-def _tune_adaptive(track: dict, style: dict, bar: float, beat: float, why: list) -> dict:
-    s = {}
-    pace = style["pace"]
-    duration = float(track["duration_sec"])
-    s["change_window_secs"] = round(min(4.0, max(1.0, bar)), 1)
-    s["min_segment_sec"] = round(min(8.0, max(0.5, 0.9 * beat * 2, 0.9 * 0.5 * pace * bar)), 2)
-    s["max_segment_sec"] = round(min(30.0, max(2 * s["min_segment_sec"], 1.1 * 2 * pace * bar)), 1)
-    s["snap_secs"] = round(min(0.5, max(0.1, beat / 2)), 2)
-    s["react_to_hits"] = True
-    why.append(f"Min segment {s['min_segment_sec']}s, max {s['max_segment_sec']}s "
-               f"(≈{0.5 * pace:g}–{2 * pace:g} bars); energy window 1 bar; snap ½ beat")
-    hires = track.get("hires")
-    if not hires:
-        why.append("⚠️ No detailed (30 Hz) signals for this track — thresholds left as they were.")
-        return s
-    rate = float(hires["rate"])
-    rms = np.asarray(hires["rms"], dtype=float)
-    onset = np.asarray(hires["onset"], dtype=float)
-    n = min(len(rms), len(onset))
-    rms, onset = rms[:n], onset[:n]
-    min_len = max(1, round(rate * s["min_segment_sec"]))
-    # Energy changes: about one structural change per 8 bars, never below 3× the ripple.
-    w = max(1, round(rate * s["change_window_secs"]))
-    c = np.concatenate([[0.0], np.cumsum(rms)])
-    idx = np.arange(n)
-    b_lo, a_hi = np.maximum(0, idx - w), np.minimum(n, idx + w)
-    change = np.abs((c[a_hi] - c[idx]) / np.maximum(1, a_hi - idx) - (c[idx] - c[b_lo]) / np.maximum(1, idx - b_lo))
-    cp = np.flatnonzero((change[1:-1] >= change[:-2]) & (change[1:-1] > change[2:])) + 1
-    target_changes = max(2, int(duration / (8 * bar)))
-    peak_vals = np.sort(change[cp])[::-1] if len(cp) else np.array([0.12])
-    thr = peak_vals[min(len(peak_vals) - 1, target_changes - 1)]
-    s["change_threshold"] = round(float(np.clip(max(thr, 3.0 * float(np.median(change))), 0.02, 0.5)), 2)
-    # Big hits: fill up to the pace's overall cut rate with the strongest hits.
-    op = np.flatnonzero((onset[1:-1] >= onset[:-2]) & (onset[1:-1] > onset[2:])) + 1
-    accepted = []
-    for pos in sorted(op, key=lambda i: -onset[i]):
-        if pos >= min_len and n - pos >= min_len and all(abs(pos - x) >= min_len for x in accepted):
-            accepted.append(pos)
-    target_hits = max(1, int(duration / (pace * bar)) - target_changes)
-    if accepted:
-        hit_thr = onset[accepted[min(len(accepted) - 1, target_hits - 1)]]
-        typical = float(np.percentile(onset[op], 75)) if len(op) else 0.5
-        s["hit_threshold"] = round(float(np.clip(max(hit_thr, typical), 0.5, 0.99)), 2)
-    why.append(f"Energy-change threshold {s['change_threshold']} (≈1 structural cut per 8 bars); "
-               f"big-hit threshold {s.get('hit_threshold', '—')} (≈1 cut per {pace:g} bars overall)")
-    return s
-
-
-def _tune_rhythm(track: dict, style: dict, bpb: int, bar: float, beat: float, why: list) -> dict:
-    # Music moves in 2 / 4 / 8-bar phrases — CINEMATIC chunks of 2× the pace stay on them.
-    s = {"cinematic_bars": int(min(8, max(1, 2 * style["pace"]))),
-         "phrase_lock_bars": int(style["lock"]), "fast_max_bars": 8,
-         "fast_cooldown_bars": int(style["cooldown"]),
-         "override_clear_secs": round(min(4.0, max(0.2, 2 * beat)), 1)}
-    bars = compute_bar_times(track, bpb)
-    hires = track.get("hires")
-    if len(bars) >= 4 and hires:
-        rate = float(hires["rate"])
-        rms = np.asarray(hires["rms"], dtype=float)
-        frames = [round(t * rate) for t in bars] + [len(rms)]
-        e = np.array([float(rms[frames[i]:frames[i + 1]].mean()) if frames[i + 1] > frames[i] else 0.0
-                      for i in range(len(bars))])
-        norm = e / (e.max() or 1.0)
-        smooth = np.convolve(norm, np.ones(2) / 2, mode="same")
-        s["fast_energy_thresh"] = round(float(np.clip(np.quantile(smooth, 1 - style["fast_share"]), 0.1, 1.0)), 2)
-        deltas = np.abs(np.diff(rms, prepend=rms[0]))
-        per_bar = np.sort([float(deltas[frames[i]:frames[i + 1]].max()) for i in range(len(bars))
-                           if frames[i + 1] > frames[i]])[::-1]
-        if len(per_bar):
-            k = max(1, len(bars) // 8)          # about one dynamic cut per 8 bars
-            s["override_delta_thresh"] = round(float(np.clip(per_bar[min(k, len(per_bar) - 1)], 0.02, 1.0)), 2)
-        s["dynamic_priority_override"] = style is AUDIO_STYLES["Energetic"]
-        why.append(f"FAST (a cut every bar) on the loudest {style['fast_share']:.0%} of bars → threshold "
-                   f"{s['fast_energy_thresh']}; CINEMATIC segments {s['cinematic_bars']} bars; style held "
-                   f"{s['phrase_lock_bars']} bars; FAST pause {s['fast_cooldown_bars']} bars after a run")
-        if s["dynamic_priority_override"]:
-            why.append(f"Dynamic override on (≈1 extra cut per 8 bars at sudden jumps, sensitivity "
-                       f"{s.get('override_delta_thresh')})")
-    else:
-        why.append("⚠️ Not enough beat / energy data for bar styles — only the bar counts were set.")
-    return s
-
-
-def _tune_scored(track: dict, style: dict, bar: float, beat: float, why: list) -> dict:
-    pace = style["pace"]
-    s = {"sc_bars_per_cut": pace, "sc_follow_energy": style["follow"]}
-    # 10% under / over whole bars, so cuts a bar (or phrase) apart are always allowed
-    # despite tiny tempo wobble.
-    s["sc_min_sec"] = round(min(8.0, max(0.3, 0.9 * beat, 0.9 * 0.5 * pace * bar)), 2)
-    s["sc_max_sec"] = round(min(30.0, max(2 * s["sc_min_sec"], 1.1 * 2.5 * pace * bar)), 1)
-    a = track.get("analysis") or {}
-    why.append(f"≈1 cut per {pace:g} bars; segments {s['sc_min_sec']}–{s['sc_max_sec']}s; "
-               f"follow the energy {style['follow']:g}")
-    if not a:
-        why.append("Only the basic analysis — cuts are scored from hits and beats. Add the extra analysis "
-                   "in Media Library → Audio for drums, chords, sections, drops and vocals.")
-    return s
+    return CAT._method_cfg(method, settings, bpb, lookup=_dial_value)
 
 
 def auto_tune_parameters(track: dict, min_clips: int, max_clips: int, method: str = None,
                          style_name: str = "Balanced", beats_per_bar: int = None) -> tuple:
-    """Settings for THIS track and the chosen segmentation method at a cutting
-    pace (Calm / Balanced / Energetic), plus split screen calibrated on the
-    resulting cuts. Returns (settings dict, list of explanation lines)."""
+    """core.autotune.auto_tune_parameters for the current method / beats per bar."""
     method = method or st.session_state.get("segmentation_method", SEG_ADAPTIVE)
-    if method not in SEG_METHOD_KEYS:
-        method = SEG_ADAPTIVE
     bpb = int(beats_per_bar or st.session_state.get("beats_per_bar", 4))
-    style = AUDIO_STYLES.get(style_name) or AUDIO_STYLES["Balanced"]
-    bar = CS.bar_sec(track, bpb)
-    beat = bar / bpb
-    _, grid_bpm, fix = CS.beat_grid(track)
-    why = [f"Tempo {grid_bpm:.0f} BPM → 1 bar = {bar:.2f}s"
-           + {"doubled": " (the analysis found every other beat — corrected)",
-              "halved": " (the analysis found twice the beats — corrected)"}.get(fix, "")]
-    if method == SEG_SMART:
-        s = {}   # Smart tunes itself from the track; its Pace / Contrast are left as you set them
-        why.append("Smart sets its own pace from the track — only split screen was calibrated here")
-    elif method == SEG_RHYTHM:
-        s = _tune_rhythm(track, style, bpb, bar, beat, why)
-    elif method == SEG_SCORED:
-        s = _tune_scored(track, style, bar, beat, why)
-    else:
-        s = _tune_adaptive(track, style, bar, beat, why)
-
-    # Split screen: shape intensity on the cuts this method will actually make.
-    segs = build_segments(track, _method_cfg(method, s, bpb))
-    apply_segment_intensity(segs, track, 1.0)
-    base = np.array([sg["intensity"] for sg in segs])
-    lengths = np.array([sg["end"] - sg["start"] for sg in segs])
-    med = _weighted_percentile(base, lengths, 0.5)
-    contrast = np.log(0.5) / np.log(med) if 0.05 < med < 0.95 else 1.0
-    s["density_contrast"] = round(float(np.clip(contrast, 0.5, 2.5)), 2)
-    shaped = base ** s["density_contrast"]
-    lo = _weighted_percentile(shaped, lengths, 0.2)
-    hi = _weighted_percentile(shaped, lengths, 0.9)
-    if hi - lo < 0.2:
-        lo, hi = max(0.0, (lo + hi) / 2 - 0.1), min(1.0, (lo + hi) / 2 + 0.1)
-    s["ramp_range"] = (round(lo * 20) / 20, round(max(hi, lo + 0.1) * 20) / 20)
-    s["vary_count"] = False
-    why.append(f"Split screen: quietest 20% of the track gets {min_clips} clip(s), loudest 10% gets {max_clips}")
-    why.append(f"Result: {len(segs)} segments, about {np.mean(lengths) / bar:.1f} bars each")
-    return s, why
+    return CAT.auto_tune_parameters(track, min_clips, max_clips, method=method, style_name=style_name,
+                                    beats_per_bar=bpb, lookup=_dial_value)
 
 
 def _audio_profile_key(track_id) -> tuple:
@@ -5530,11 +4289,13 @@ if ui_section == SECTION_AUDIO:
     render_split_screen_settings()
     render_audio_settings_section(track)
     step_nav(nxt=SECTION_STORY)
+    _record_page_run()
     st.stop()
 
 if ui_section == SECTION_STORY:
     render_story_map_section(track)
     step_nav(back=SECTION_AUDIO, nxt=SECTION_VIDEOS)
+    _record_page_run()
     st.stop()
 
 if ui_section == SECTION_VIDEOS:
@@ -5552,6 +4313,7 @@ if ui_section == SECTION_VIDEOS:
             st.rerun()
     render_video_selection_section(track, all_video_ids, all_tag_options, catalogues)
     step_nav(back=SECTION_STORY, nxt=SECTION_MATCH)
+    _record_page_run()
     st.stop()
 
 tag_filter = list(st.session_state.get("committed_tag_filter", []))
@@ -5749,8 +4511,9 @@ if not queues:
 
 total_footage_sec = sum(span["remaining_sec"] for spans in queues.values() for span in spans)
 
-segments = build_segments(track, seg_cfg)
-apply_segment_intensity(segments, track, density_contrast)
+with _timed("Cutting the track", seg_cfg["method"]):
+    segments = build_segments(track, seg_cfg)
+    apply_segment_intensity(segments, track, density_contrast)
 if not track.get("hires"):
     if seg_cfg["method"] == SEG_ADAPTIVE:
         st.warning("This track was analysed before the 30 Hz onset signals existed, so cuts use the older, "
@@ -5895,7 +4658,8 @@ if matching_mode == "Auto":
         timeline, clip_count_shortfall, duration_shortfall_sec = _auto_cache["result"]
         _auto_repeat_fallbacks = set(_auto_cache["fallbacks"])
     else:
-        with st.spinner("Matching clips to the music's shape…"):
+        with st.spinner("Matching clips to the music's shape…"), \
+                _timed("Auto matching", f"{len(segments)} blocks, {len(selected_videos)} videos"):
             timeline, clip_count_shortfall, duration_shortfall_sec = match_scenes_to_track(
                 segments, queues,
                 min_clips, max_clips, ramp_start, ramp_end, allow_same_video, sequential_mode,
@@ -7017,10 +5781,11 @@ else:
         if cache and cache["key"] == search_key:
             candidates, missing_curve_videos = cache["candidates"], cache["missing"]
         else:
-            candidates, missing_curve_videos = find_shape_candidates(
-                seg, queues, sequential_mode, st.session_state["segment_exclusions"].get(current_block, set()),
-                _adv_excl, block_audio_curve, int(max_shape_matches),
-            )
+            with _timed("Manual: block shape search", f"{len(selected_videos)} videos"):
+                candidates, missing_curve_videos = find_shape_candidates(
+                    seg, queues, sequential_mode, st.session_state["segment_exclusions"].get(current_block, set()),
+                    _adv_excl, block_audio_curve, int(max_shape_matches),
+                )
             if adv_role_filter:
                 # Also offer this block's best role clips (they may not be among the top shape matches).
                 _role_c, _ = find_shape_candidates(
@@ -7401,3 +6166,5 @@ if versions:
                         st.rerun()
 else:
     st.caption("No previews rendered yet for this track.")
+
+_record_page_run()

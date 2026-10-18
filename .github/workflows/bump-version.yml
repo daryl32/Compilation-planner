@@ -28,6 +28,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0          # full history + tags, for the release notes
+
+      # The version this push replaces gets a tag and Release page too, if it
+      # doesn't have one yet (e.g. releases made before tagging existed).
+      - name: Tag the version being replaced
+        env:
+          BEFORE: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git cat-file -e "$BEFORE^{commit}" 2>/dev/null || exit 0
+          [ -n "$(git tag --points-at "$BEFORE" --list 'v*')" ] && exit 0
+          OLD=$(git show "$BEFORE:page_setup.py" | sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' | head -1)
+          [ -n "$OLD" ] || exit 0
+          git rev-parse -q --verify "refs/tags/v$OLD" >/dev/null && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$OLD" "$BEFORE" -m "Release $OLD"
+          git push origin "v$OLD"
+          printf '%s\n' "Production version before the next release." "" \
+            "_To roll back to this version: 'roll main back to v$OLD'. This tag is exactly what ran in production._" > old_notes.md
+          gh release create "v$OLD" --title "v$OLD" --notes-file old_notes.md --verify-tag
 
       - name: Bump APP_VERSION
         id: bump
@@ -44,3 +65,22 @@ jobs:
           git add page_setup.py
           git commit -m "Version $VERSION [skip version]"
           git push origin HEAD:main
+
+      # Every release gets a tag (vX.Y.Z) and a GitHub Release page listing what
+      # changed since the previous release — the named points to roll back to.
+      - name: Tag and publish the release
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PREV=$(git describe --tags --abbrev=0 --match 'v*' HEAD^ 2>/dev/null || true)
+          RANGE=${PREV:+$PREV..}HEAD
+          {
+            echo "## What changed"
+            git log --no-merges --pretty='- %s' $RANGE | grep -v '\[skip version\]' || true
+            echo
+            echo "_Roll back: ask for \"roll main back to v$VERSION\" — the code at this tag is what ran in production._"
+          } > notes.md
+          git tag -a "v$VERSION" -m "Release $VERSION"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" --title "v$VERSION" --notes-file notes.md --verify-tag
