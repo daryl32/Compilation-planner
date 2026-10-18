@@ -1,0 +1,406 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#ffffff; --fg:#262730; --muted:#8a8f98; --line:#d9dce1; --accent:#ff4b4b;
+          --cut:#3b6fd8; --edit:#e8890c; --sel:#ff4b4b; --wave:#7aa2ff; --panel:#f3f4f7; }
+  html, body { margin:0; padding:0; background:transparent; color:var(--fg);
+               font-family: "Source Sans Pro", -apple-system, system-ui, sans-serif; font-size:15px;
+               -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color: transparent; }
+  .bar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:4px 0; }
+  button { min-height:44px; min-width:44px; padding:0 12px; border-radius:8px; border:1px solid var(--line);
+           background:var(--panel); color:var(--fg); font-size:15px; cursor:pointer; touch-action:manipulation; }
+  button:active { transform: scale(0.97); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  button.on { outline:2px solid var(--accent); }
+  button:disabled { opacity:.4; cursor:default; }
+  .time { font-variant-numeric: tabular-nums; min-width:118px; text-align:center; font-weight:600; }
+  .grow { flex:1; }
+  canvas { display:block; width:100%; touch-action:none; border-radius:8px; }
+  #main { height:190px; background:var(--panel); }
+  #over { height:34px; margin-top:6px; background:var(--panel); }
+  .hint { color:var(--muted); font-size:13px; margin-top:4px; min-height:18px; }
+  .sep { width:1px; height:28px; background:var(--line); margin:0 2px; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <button id="play" class="primary" title="Play / pause (space)">▶</button>
+  <button id="back" title="Back 5 seconds">⏪</button>
+  <button id="fwd" title="Forward 5 seconds">⏩</button>
+  <span class="time" id="time">0:00.0</span>
+  <span class="grow"></span>
+  <button id="zout" title="Zoom out ( [ )">−</button>
+  <button id="zin" title="Zoom in ( ] )">+</button>
+  <span class="sep"></span>
+  <button id="snap" class="on" title="New and moved cuts land on the nearest beat">🎯 Snap to beat</button>
+  <button id="tick" title="A click as the playhead passes each cut">🔔 Click on cuts</button>
+</div>
+<canvas id="main"></canvas>
+<canvas id="over"></canvas>
+<div class="bar">
+  <button id="add" class="primary" title="Add a cut at the playhead (C)">✂️ Cut here</button>
+  <button id="del" title="Remove the selected cut (Delete)" disabled>🗑 Remove cut</button>
+  <button id="prev" title="Move the selected cut earlier (←)" disabled>◀ Earlier</button>
+  <button id="next" title="Move the selected cut later (→)" disabled>Later ▶</button>
+  <span class="grow"></span>
+  <button id="undo" title="Undo (Ctrl/Cmd+Z)" disabled>↶ Undo</button>
+</div>
+<div class="hint" id="hint">Tap the chart to move the playhead · tap a cut to select it, then drag it · double-tap to add a cut</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Streamlit component protocol (no build step needed)
+// ---------------------------------------------------------------------------
+function post(type, extra) {
+  window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra || {}), "*");
+}
+function setHeight() { post("streamlit:setFrameHeight", {height: document.body.scrollHeight + 4}); }
+function sendValue(v) { post("streamlit:setComponentValue", {value: v, dataType: "json"}); }
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+let A = null;                 // latest args from Python
+let cuts = [];                // edited cut times (sorted)
+let baseCuts = [];            // the method's cuts (to show what was removed / added)
+let docRev = -1;              // Python's revision of the cut list
+let undoStack = [];
+let selected = -1;            // index into cuts
+let view = {start: 0, span: 16};
+let snapOn = true, tickOn = false;
+let audio = new Audio();
+audio.preload = "auto";
+let playing = false, lastT = 0;
+let actx = null;
+const MIN_GAP = 0.15, EDGE = 0.05;
+
+const $ = id => document.getElementById(id);
+const main = $("main"), over = $("over");
+
+function fmt(t) {
+  t = Math.max(0, t || 0);
+  const m = Math.floor(t / 60), s = t - m * 60;
+  return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1);
+}
+function dur() { return A ? A.duration : 1; }
+function now() { return audio && !isNaN(audio.currentTime) ? audio.currentTime : 0; }
+function nearestIdx(arr, t) {
+  let lo = 0, hi = arr.length - 1;
+  if (hi < 0) return -1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < t) lo = m + 1; else hi = m; }
+  if (lo > 0 && Math.abs(arr[lo - 1] - t) <= Math.abs(arr[lo] - t)) lo--;
+  return lo;
+}
+function snap(t) {
+  if (!snapOn || !A || !A.beats.length) return t;
+  return A.beats[nearestIdx(A.beats, t)];
+}
+function clean(list) {
+  const out = [];
+  list.slice().sort((a, b) => a - b).forEach(t => {
+    if (t <= EDGE || t >= dur() - EDGE) return;
+    if (out.length && t - out[out.length - 1] < MIN_GAP) return;
+    out.push(Math.round(t * 1000) / 1000);
+  });
+  return out;
+}
+function commit(newCuts, keepSelectAt) {
+  undoStack.push(cuts.slice());
+  if (undoStack.length > 100) undoStack.shift();
+  cuts = clean(newCuts);
+  selected = keepSelectAt == null ? -1 : nearestIdx(cuts, keepSelectAt);
+  sendValue({cuts: cuts, doc_rev: docRev, edited: true});
+  refreshButtons(); draw();
+}
+
+// ---------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------
+function fit(c) {
+  const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  if (c.width !== Math.round(r.width * d) || c.height !== Math.round(r.height * d)) {
+    c.width = Math.round(r.width * d); c.height = Math.round(r.height * d);
+  }
+  const g = c.getContext("2d"); g.setTransform(d, 0, 0, d, 0, 0);
+  return [g, r.width, r.height];
+}
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function isBase(t) { const i = nearestIdx(baseCuts, t); return i >= 0 && Math.abs(baseCuts[i] - t) <= 0.02; }
+
+function drawWave(g, w, h, t0, t1, alpha) {
+  const env = A.env, rate = A.env_rate;
+  g.fillStyle = css("--wave"); g.globalAlpha = alpha;
+  g.beginPath(); g.moveTo(0, h);
+  const step = Math.max(1, Math.floor((t1 - t0) * rate / w));
+  for (let px = 0; px <= w; px++) {
+    const t = t0 + (t1 - t0) * px / w; let i = Math.floor(t * rate);
+    let v = 0; for (let k = 0; k < step; k++) v = Math.max(v, env[i + k] || 0);
+    g.lineTo(px, h - v * (h - 6));
+  }
+  g.lineTo(w, h); g.closePath(); g.fill(); g.globalAlpha = 1;
+}
+
+function draw() {
+  if (!A) return;
+  // keep the view inside the track
+  view.span = Math.min(Math.max(view.span, 2), Math.max(dur(), 2));
+  view.start = Math.min(Math.max(view.start, 0), Math.max(0, dur() - view.span));
+  const [g, w, h] = fit(main);
+  g.clearRect(0, 0, w, h);
+  const t0 = view.start, t1 = view.start + view.span, X = t => (t - t0) / (t1 - t0) * w;
+  // beats & bars
+  g.lineWidth = 1;
+  g.strokeStyle = css("--line");
+  A.beats.forEach(b => { if (b >= t0 && b <= t1) { g.beginPath(); g.moveTo(X(b), h - 14); g.lineTo(X(b), h); g.stroke(); } });
+  g.strokeStyle = css("--muted"); g.globalAlpha = 0.5;
+  A.bars.forEach(b => { if (b >= t0 && b <= t1) { g.beginPath(); g.moveTo(X(b), 0); g.lineTo(X(b), h); g.stroke(); } });
+  g.globalAlpha = 1;
+  drawWave(g, w, h, t0, t1, 0.55);
+  // removed cuts (faint, dashed)
+  g.setLineDash([4, 4]); g.strokeStyle = css("--muted"); g.lineWidth = 1.5;
+  baseCuts.forEach(b => {
+    if (b < t0 || b > t1) return;
+    const i = nearestIdx(cuts, b); if (i >= 0 && Math.abs(cuts[i] - b) <= 0.02) return;
+    g.beginPath(); g.moveTo(X(b), 0); g.lineTo(X(b), h); g.stroke();
+  });
+  g.setLineDash([]);
+  // cuts
+  cuts.forEach((c, i) => {
+    if (c < t0 - 1 || c > t1 + 1) return;
+    const sel = i === selected, x = X(c);
+    g.strokeStyle = sel ? css("--sel") : (isBase(c) ? css("--cut") : css("--edit"));
+    g.lineWidth = sel ? 3 : 2;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
+    g.fillStyle = g.strokeStyle;
+    g.beginPath(); g.arc(x, 10, sel ? 9 : 6, 0, Math.PI * 2); g.fill();   // handle
+  });
+  // playhead
+  const p = now();
+  if (p >= t0 && p <= t1) {
+    g.strokeStyle = css("--fg"); g.lineWidth = 2;
+    g.beginPath(); g.moveTo(X(p), 0); g.lineTo(X(p), h); g.stroke();
+  }
+  // seconds ruler
+  g.fillStyle = css("--muted"); g.font = "11px sans-serif";
+  const every = view.span > 40 ? 10 : view.span > 16 ? 5 : view.span > 6 ? 2 : 1;
+  for (let s = Math.ceil(t0 / every) * every; s <= t1; s += every) g.fillText(fmt(s).replace(/\.0$/, ""), X(s) + 3, h - 3);
+
+  // overview
+  const [o, ow, oh] = fit(over);
+  o.clearRect(0, 0, ow, oh);
+  drawWave(o, ow, oh, 0, dur(), 0.45);
+  const OX = t => t / dur() * ow;
+  o.lineWidth = 1;
+  cuts.forEach(c => { o.strokeStyle = isBase(c) ? css("--cut") : css("--edit"); o.beginPath(); o.moveTo(OX(c), 0); o.lineTo(OX(c), oh); o.stroke(); });
+  o.strokeStyle = css("--fg"); o.lineWidth = 1.5; o.strokeRect(OX(t0), 1, Math.max(3, OX(t1) - OX(t0)), oh - 2);
+  o.fillStyle = css("--accent"); o.fillRect(OX(p) - 1, 0, 2, oh);
+  $("time").textContent = fmt(p) + " / " + fmt(dur());
+}
+
+// ---------------------------------------------------------------------------
+// Playback + click on cuts
+// ---------------------------------------------------------------------------
+function click() {
+  if (!actx) return;
+  const o = actx.createOscillator(), gn = actx.createGain();
+  o.frequency.value = 1800; gn.gain.setValueAtTime(0.35, actx.currentTime);
+  gn.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.05);
+  o.connect(gn); gn.connect(actx.destination); o.start(); o.stop(actx.currentTime + 0.06);
+}
+function loop() {
+  const t = now();
+  if (playing) {
+    if (tickOn && t > lastT) cuts.forEach(c => { if (c > lastT && c <= t) click(); });
+    // page the view along with the playhead
+    if (t > view.start + view.span * 0.85 || t < view.start) view.start = t - view.span * 0.15;
+  }
+  lastT = t;
+  draw();
+  requestAnimationFrame(loop);
+}
+function ensureAudioCtx() {
+  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (actx && actx.state === "suspended") actx.resume();
+}
+function togglePlay() {
+  ensureAudioCtx();
+  if (!A || !A.audio_url) { hint("No audio for this track on the server yet — see the note above the editor."); return; }
+  if (audio.paused) { audio.play().catch(e => hint("Couldn't play: " + e.message)); } else audio.pause();
+}
+audio.addEventListener("play", () => { playing = true; $("play").textContent = "⏸"; });
+audio.addEventListener("pause", () => { playing = false; $("play").textContent = "▶"; });
+audio.addEventListener("ended", () => { playing = false; $("play").textContent = "▶"; });
+function seek(t) { t = Math.min(Math.max(t, 0), dur()); try { audio.currentTime = t; } catch (e) {} lastT = t; draw(); }
+
+// ---------------------------------------------------------------------------
+// Editing
+// ---------------------------------------------------------------------------
+function hint(s) { $("hint").textContent = s; }
+function refreshButtons() {
+  const has = selected >= 0;
+  $("del").disabled = !has; $("prev").disabled = !has; $("next").disabled = !has;
+  $("undo").disabled = !undoStack.length;
+}
+function addCutAt(t) {
+  t = snap(t);
+  const i = nearestIdx(cuts, t);
+  if (i >= 0 && Math.abs(cuts[i] - t) < MIN_GAP) { selected = i; hint("There's already a cut there — selected it."); refreshButtons(); draw(); return; }
+  if (t <= EDGE || t >= dur() - EDGE) return;
+  commit(cuts.concat([t]), t);
+  hint("Added a cut at " + fmt(t) + ".");
+}
+function removeSelected() {
+  if (selected < 0) return;
+  const t = cuts[selected];
+  commit(cuts.filter((_, i) => i !== selected), null);
+  hint("Removed the cut at " + fmt(t) + ".");
+}
+function nudge(dir) {
+  if (selected < 0) return;
+  const t = cuts[selected];
+  let nt;
+  if (snapOn && A.beats.length) {
+    const i = nearestIdx(A.beats, t);
+    let j = i + dir;
+    if (A.beats[i] !== undefined && Math.abs(A.beats[i] - t) > 0.02) j = dir > 0 ? (A.beats[i] > t ? i : i + 1) : (A.beats[i] < t ? i : i - 1);
+    nt = A.beats[Math.min(Math.max(j, 0), A.beats.length - 1)];
+  } else nt = t + dir * 0.05;
+  const others = cuts.filter((_, k) => k !== selected);
+  if (others.some(o => Math.abs(o - nt) < MIN_GAP) || nt <= EDGE || nt >= dur() - EDGE) { hint("Can't move it there."); return; }
+  commit(others.concat([nt]), nt);
+  if (!playing) seek(Math.max(0, nt - 1.0));
+}
+function undo() {
+  if (!undoStack.length) return;
+  cuts = undoStack.pop(); selected = -1;
+  sendValue({cuts: cuts, doc_rev: docRev, edited: true});
+  refreshButtons(); draw(); hint("Undone.");
+}
+
+// ---------------------------------------------------------------------------
+// Pointer: tap = scrub / select, drag a cut = move, drag elsewhere = pan, double-tap = add
+// ---------------------------------------------------------------------------
+let ptr = null, lastTap = {t: 0, x: -99};
+function tAt(e) { const r = main.getBoundingClientRect(); return view.start + (e.clientX - r.left) / r.width * view.span; }
+function cutNear(e) {
+  const r = main.getBoundingClientRect(), x = e.clientX - r.left;
+  const tol = (e.pointerType === "touch" ? 22 : 10);
+  let best = -1, bd = 1e9;
+  cuts.forEach((c, i) => { const cx = (c - view.start) / view.span * r.width, d = Math.abs(cx - x); if (d < bd) { bd = d; best = i; } });
+  return bd <= tol ? best : -1;
+}
+main.addEventListener("pointerdown", e => {
+  main.setPointerCapture(e.pointerId);
+  const i = cutNear(e);
+  ptr = {id: e.pointerId, x0: e.clientX, start0: view.start, cut: i, moved: false, t0: Date.now()};
+  if (i >= 0) { selected = i; refreshButtons(); draw(); }
+});
+main.addEventListener("pointermove", e => {
+  if (!ptr || e.pointerId !== ptr.id) return;
+  const dx = e.clientX - ptr.x0;
+  if (Math.abs(dx) > 6) ptr.moved = true;
+  if (!ptr.moved) return;
+  if (ptr.cut >= 0) {                          // dragging a cut
+    const t = Math.min(Math.max(tAt(e), EDGE + 0.01), dur() - EDGE - 0.01);
+    ptr.dragT = t;
+    const tmp = cuts.slice(); tmp[ptr.cut] = t;
+    drawPreview(tmp);
+  } else {                                     // panning the view
+    const r = main.getBoundingClientRect();
+    view.start = ptr.start0 - dx / r.width * view.span; draw();
+  }
+});
+function drawPreview(tmp) { const keep = cuts; cuts = tmp; draw(); cuts = keep; }
+main.addEventListener("pointerup", e => {
+  if (!ptr || e.pointerId !== ptr.id) return;
+  const p = ptr; ptr = null;
+  if (p.cut >= 0 && p.moved && p.dragT != null) {
+    const nt = snap(p.dragT), others = cuts.filter((_, k) => k !== p.cut);
+    if (others.some(o => Math.abs(o - nt) < MIN_GAP)) { hint("Too close to another cut — left where it was."); draw(); return; }
+    commit(others.concat([nt]), nt);
+    hint("Moved the cut to " + fmt(nt) + ".");
+    return;
+  }
+  if (p.moved) return;                          // a pan
+  const t = tAt(e), nowMs = Date.now();
+  if (p.cut < 0 && nowMs - lastTap.t < 350 && Math.abs(e.clientX - lastTap.x) < 30) {
+    addCutAt(t); lastTap = {t: 0, x: -99}; return;   // double-tap
+  }
+  lastTap = {t: nowMs, x: e.clientX};
+  if (p.cut < 0) { selected = -1; refreshButtons(); seek(t); }
+});
+main.addEventListener("pointercancel", () => { ptr = null; draw(); });
+over.addEventListener("pointerdown", e => {
+  const r = over.getBoundingClientRect(), t = (e.clientX - r.left) / r.width * dur();
+  view.start = t - view.span / 2; seek(t);
+});
+
+// ---------------------------------------------------------------------------
+// Buttons & keys
+// ---------------------------------------------------------------------------
+$("play").onclick = togglePlay;
+$("back").onclick = () => seek(now() - 5);
+$("fwd").onclick = () => seek(now() + 5);
+$("zin").onclick = () => { const c = view.start + view.span / 2; view.span /= 1.6; view.start = c - view.span / 2; draw(); };
+$("zout").onclick = () => { const c = view.start + view.span / 2; view.span *= 1.6; view.start = c - view.span / 2; draw(); };
+$("snap").onclick = () => { snapOn = !snapOn; $("snap").classList.toggle("on", snapOn); };
+$("tick").onclick = () => { ensureAudioCtx(); tickOn = !tickOn; $("tick").classList.toggle("on", tickOn); };
+$("add").onclick = () => addCutAt(now());
+$("del").onclick = removeSelected;
+$("prev").onclick = () => nudge(-1);
+$("next").onclick = () => nudge(1);
+$("undo").onclick = undo;
+document.addEventListener("keydown", e => {
+  if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
+  if (e.code === "Space") { e.preventDefault(); togglePlay(); }
+  else if (e.key === "c" || e.key === "C") addCutAt(now());
+  else if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); removeSelected(); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); selected >= 0 ? nudge(-1) : seek(now() - 1); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); selected >= 0 ? nudge(1) : seek(now() + 1); }
+  else if (e.key === "[") $("zout").click();
+  else if (e.key === "]") $("zin").click();
+  else if ((e.ctrlKey || e.metaKey) && e.key === "z") { e.preventDefault(); undo(); }
+});
+
+// ---------------------------------------------------------------------------
+// Render from Python
+// ---------------------------------------------------------------------------
+function applyTheme(th) {
+  if (!th) return;
+  const r = document.documentElement.style;
+  if (th.base === "dark") { r.setProperty("--panel", "#1f2129"); r.setProperty("--line", "#3a3d47"); r.setProperty("--muted", "#9aa0aa"); }
+  if (th.textColor) r.setProperty("--fg", th.textColor);
+  if (th.primaryColor) { r.setProperty("--accent", th.primaryColor); r.setProperty("--sel", th.primaryColor); }
+}
+window.addEventListener("message", ev => {
+  const d = ev.data;
+  if (!d || d.type !== "streamlit:render") return;
+  const args = d.args;
+  applyTheme(d.theme);
+  const firstTime = !A;
+  if (!A || A.audio_url !== args.audio_url) {
+    const t = now();
+    audio.src = args.audio_url || "";
+    if (args.audio_url && !firstTime) { try { audio.currentTime = t; } catch (e) {} }
+  }
+  const trackChanged = A && A.track_id !== args.track_id;
+  A = args;
+  baseCuts = args.base_cuts || [];
+  if (firstTime || trackChanged || args.doc_rev !== docRev) {   // Python changed the cut list (load, reset, re-cut)
+    cuts = clean(args.cuts || []);
+    docRev = args.doc_rev;
+    if (trackChanged) { undoStack = []; view.start = 0; }
+    selected = -1;
+  }
+  if (firstTime) view.span = Math.min(16, Math.max(dur(), 2));
+  refreshButtons(); draw(); setHeight();
+});
+window.addEventListener("resize", () => { draw(); setHeight(); });
+post("streamlit:componentReady", {apiVersion: 1});
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

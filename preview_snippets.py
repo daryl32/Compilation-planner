@@ -103,8 +103,39 @@ def make_audio_snippet(cache_dir: Path, audio_path: Path, start: float, duration
     return out, None
 
 
+def make_editor_audio(cache_dir: Path, audio_path: Path) -> tuple:
+    """(path, None) / (None, error): the whole track as a small mono .mp3 (96 kbps)
+    for the ✂️ cut editor to play in the browser — no fades or trimming, so its
+    timeline is exactly the track's. MP3 because every browser plays it (AAC
+    isn't in some Chromium / Firefox builds); the LAME header tells browsers the
+    encoder delay, so the timeline stays in step. Cached like the snippets."""
+    sig = "|".join(str(x) for x in ("editor-mp3", audio_path, _mtime(audio_path)))
+    out = Path(cache_dir) / f"{hashlib.sha1(sig.encode()).hexdigest()[:20]}.mp3"
+    if out.exists():
+        os.utime(out)
+        return out, None
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.stem + ".part.mp3")
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(audio_path),
+           "-map", "0:a:0", "-c:a", "libmp3lame", "-b:a", "96k", "-ac", "1", str(tmp)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except FileNotFoundError:
+        return None, "ffmpeg not found on the server"
+    except subprocess.TimeoutExpired:
+        tmp.unlink(missing_ok=True)
+        return None, "preparing the audio took too long"
+    if proc.returncode != 0 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        return None, (proc.stderr or "ffmpeg failed").strip()[-400:]
+    tmp.replace(out)
+    _prune(Path(cache_dir))
+    return out, None
+
+
 def _prune(cache_dir: Path) -> None:
-    files = sorted((p for p in [*cache_dir.glob("*.mp4"), *cache_dir.glob("*.m4a")] if ".part" not in p.name),
+    files = sorted((p for p in [*cache_dir.glob("*.mp4"), *cache_dir.glob("*.m4a"), *cache_dir.glob("*.mp3")]
+                    if ".part" not in p.name),
                    key=lambda p: p.stat().st_mtime, reverse=True)
     for p in files[MAX_CACHED:]:
         p.unlink(missing_ok=True)

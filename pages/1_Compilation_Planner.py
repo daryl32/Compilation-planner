@@ -46,6 +46,9 @@ import core.picking as CPICK
 from core.segmentation import (SEG_ADAPTIVE, SEG_RHYTHM, SEG_SCORED, SEG_SMART, SEG_METHOD_KEYS,
                                build_segments, compute_density_curve, apply_segment_intensity)
 from core.autotune import AUDIO_STYLES, AUDIO_STYLE_CUSTOM
+import core.targets as CTGT
+import core.cut_edits as CED
+from cut_editor import cut_editor as _cut_editor_widget, media_url as _media_url
 from core.shape import (SHAPE_MATCH_POINTS, resample_curve, shape_score, find_best_shape_window,
                         get_block_audio_curve)
 from core.footage import (_tc_to_seconds, _overlap_with_range, get_candidate_spans, has_role, role_supply,
@@ -1016,11 +1019,17 @@ def _chor_slider_changed(overrides: dict, video_id: str, clips: list, slider_key
 
 
 def _local_media(raw_source: str, prefer: Path = None):
-    """(local path, None) for a media file, or (None, raw_source) if it isn't on this machine."""
-    if prefer is not None and Path(prefer).exists():
+    """(local path, None) for a media file, or (None, raw_source) if it isn't on this machine
+    (or can't be checked — e.g. /root isn't readable by this user)."""
+    def _there(p):
+        try:
+            return p.exists()
+        except OSError:
+            return False
+    if prefer is not None and _there(Path(prefer)):
         return Path(prefer), None
     local = Path(colab_to_local(raw_source)) if raw_source else None
-    if local is not None and local.exists():
+    if local is not None and _there(local):
         return local, None
     return None, raw_source
 
@@ -1972,6 +1981,7 @@ CUT_FOCUS = {
 def _mark_audio_custom() -> None:
     """A dial was moved by hand: stop auto-tuning over it."""
     st.session_state["audio_style"] = AUDIO_STYLE_CUSTOM
+    st.session_state.pop("aim_report", None)     # 🎯 its dial values no longer apply
 
 
 def _audio_retune_if_paced() -> None:
@@ -2001,6 +2011,164 @@ def _pace_row(_pc, _styles, _style_now) -> None:
     _pc[1].button("🎯 Re-tune for this track", on_click=_run_auto_tune, use_container_width=True,
                   help="Re-runs auto-detect for the current method at the chosen pace (Balanced if Custom). "
                        "Same as the sidebar's Auto-detect.")
+
+
+AIM_MODES = {"avg": "Average clip length", "count": "Number of segments"}
+ADAPTIVE_DIAL_KEYS = ["change_window_secs", "change_threshold", "min_segment_sec", "max_segment_sec",
+                      "react_to_hits", "hit_threshold", "snap_secs"]
+
+
+def _aim_adaptive() -> None:
+    """🎯 Set the Adaptive dials to give the segment count / clip length asked for
+    (core/targets.py). Runs as a button callback, so the dials redraw with the new values."""
+    track = load_track(st.session_state["track_id"])
+    mode = st.session_state.get("aim_mode", "avg")
+    base = {k: st.session_state.get(k, DIAL_DEFAULTS.get(k)) for k in ADAPTIVE_DIAL_KEYS}
+    kw = ({"avg_sec": float(st.session_state.get("aim_avg_sec", 2.5))} if mode == "avg"
+          else {"segments": int(st.session_state.get("aim_segments", 40))})
+    res = CTGT.adaptive_for_target(track, base=base, beats_per_bar=int(st.session_state.get("beats_per_bar", 4)),
+                                   **kw)
+    for k, v in res["settings"].items():
+        st.session_state[k] = v
+    st.session_state["audio_style"] = AUDIO_STYLE_CUSTOM      # your own settings now — don't re-tune over them
+    appscope = st.session_state.get("_audio_appscope", {})
+    appscope.update({k: v for k, v in res["settings"].items() if k in AUDIO_SETTINGS_KEYS})
+    appscope["audio_style"] = AUDIO_STYLE_CUSTOM
+    st.session_state["_audio_appscope"] = appscope
+    st.session_state["aim_report"] = {"track_id": st.session_state["track_id"], "exact": res["exact"],
+                                      "notes": res["notes"]}
+
+
+def _render_aim_adaptive(track: dict, current_segments: int) -> None:
+    """🎯 Aim for: say how many cuts you want and let the app set the dials."""
+    dur = float(track["duration_sec"])
+    st.session_state.setdefault("aim_avg_sec", round(min(max(dur / max(current_segments, 1), 0.5), 30.0), 1))
+    st.session_state.setdefault("aim_segments", int(min(max(current_segments, 1), 1000)))
+    with st.container(border=True):
+        c = st.columns([2, 2, 2])
+        mode = c[0].selectbox("🎯 Aim for", list(AIM_MODES), format_func=AIM_MODES.get, key="aim_mode",
+                              help="Say what you want and the app sets the dials below to get it. "
+                                   "You can still fine-tune them afterwards.")
+        if mode == "avg":
+            c[1].number_input("Seconds per clip (average)", 0.5, 30.0, step=0.5, key="aim_avg_sec",
+                              help=f"This track is {dur:.0f}s long, so 2.5s ≈ {dur / 2.5:.0f} segments.")
+        else:
+            c[1].number_input("Segments", 1, 1000, step=1, key="aim_segments",
+                              help=f"This track is {dur:.0f}s long.")
+        c[2].button("Set the dials", on_click=_aim_adaptive, type="primary", use_container_width=True,
+                    help="Finds energy-change and big-hit thresholds plus shortest / longest segment that "
+                         "give that many cuts on this track.")
+        rep = st.session_state.get("aim_report")
+        if rep and rep.get("track_id") == st.session_state.get("track_id"):
+            (st.caption if rep["exact"] else st.warning)("  \n".join(rep["notes"]))
+
+
+# ---------------------------------------------------------------------------
+# ✂️ Hand-edited cuts (per project): st.session_state["cut_edits"] =
+#   {"track_id", "cuts": [seconds…], "base_sig": settings the cuts were edited from}
+# planned_segments() is what everything downstream uses — the method's segments,
+# or the edited ones when this project has edits for this track.
+# ---------------------------------------------------------------------------
+
+def _bump_cut_edit_rev() -> None:
+    """Tell the editor the cut list changed from here (load, reset…), not from its own edits."""
+    st.session_state["cut_edit_rev"] = int(time.time() * 1000) % 2_000_000_000
+
+
+def _cut_edits(track_id: str = None):
+    e = st.session_state.get("cut_edits")
+    tid = track_id or st.session_state.get("track_id")
+    return e if isinstance(e, dict) and e.get("track_id") == tid and isinstance(e.get("cuts"), list) else None
+
+
+def planned_segments(track: dict, cfg: dict) -> list:
+    """The segments the plan uses: the method's, or this project's hand-edited cuts."""
+    base = build_segments(track, cfg)
+    e = _cut_edits()
+    return CED.segments_from_cuts(track, e["cuts"], base) if e else base
+
+
+def _drop_cut_edits() -> None:
+    st.session_state.pop("cut_edits", None)
+    _bump_cut_edit_rev()
+
+
+def _keep_cut_edits(sig: str) -> None:
+    e = _cut_edits()
+    if e:
+        e["base_sig"] = sig
+
+
+def _render_cut_editor(track: dict) -> None:
+    """✂️ Listen and edit the cuts — see cut_editor.py."""
+    tid = st.session_state["track_id"]
+    cfg = segmentation_settings()
+    sig = CED.settings_signature(cfg)
+    bpb = int(st.session_state.get("beats_per_bar", 4))
+    base_cuts = CED.base_cut_times(build_segments(track, cfg))
+    e = _cut_edits(tid)
+    st.subheader("✂️ Listen and edit the cuts")
+    if e and e.get("base_sig") != sig:
+        d = CED.diff(base_cuts, e["cuts"])
+        with st.container(border=True):
+            st.warning(f"You edited these cuts by hand, then changed the cutting settings. The plan still uses "
+                       f"your edited cuts ({len(e['cuts']) + 1} segments) — the new settings would give "
+                       f"{len(base_cuts) + 1}, with {len(d['added'])} of your cuts not among them.")
+            bc = st.columns(2)
+            bc[0].button("✋ Keep my edited cuts", on_click=_keep_cut_edits, args=(sig,), use_container_width=True)
+            bc[1].button("♻️ Use the new settings (drop my edits)", on_click=_drop_cut_edits,
+                         use_container_width=True)
+
+    audio_url = ""
+    audio_path, missing = _local_media(track.get("source_path", ""))
+    if audio_path is not None:
+        clip, err = preview_snippets.make_editor_audio(PREVIEW_DIR / "snippets", audio_path)
+        if err:
+            st.warning(f"Couldn't prepare the audio for playback: {err}")
+        else:
+            audio_url = _media_url(clip, "audio/mpeg", f"cut_editor_audio_{tid}")
+    elif missing:
+        _dc = st.columns([3, 2])
+        _dc[0].caption(f"▶ Playback needs {Path(colab_to_local(missing)).name} on the server — you can still "
+                       f"edit the cuts without it.")
+        if _DRIVE_SYNC_AVAILABLE and "MyDrive/" in missing and _dc[1].button(
+                "⬇️ Download the track from Google Drive", key="ced_dl", use_container_width=True):
+            bar = st.progress(0.0, text="Downloading…")
+            dl_err = download_source_video(missing.split("MyDrive/", 1)[1], Path(colab_to_local(missing)),
+                                           progress_callback=lambda pr: bar.progress(min(pr, 1.0)))
+            bar.empty()
+            if dl_err:
+                st.error(f"Download failed: {dl_err}")
+            else:
+                rerun_fragment()
+
+    if "cut_edit_rev" not in st.session_state:
+        _bump_cut_edit_rev()
+    rev = int(st.session_state["cut_edit_rev"])
+    cuts_now = e["cuts"] if e else base_cuts
+    val = _cut_editor_widget(track, tid, cuts=cuts_now, base_cuts=base_cuts,
+                             beats=CS.beat_grid(track)[0], bars=CS.bar_lines(track, bpb), doc_rev=rev,
+                             audio_url=audio_url)
+    if isinstance(val, dict) and val.get("edited") and int(val.get("doc_rev", -1)) == rev:
+        new = CED.clean_cuts(val.get("cuts") or [], float(track["duration_sec"]))
+        if new != cuts_now:
+            if not CED.diff(base_cuts, new)["added"] and len(new) == len(base_cuts):
+                st.session_state.pop("cut_edits", None)       # back to exactly the method's cuts
+            else:
+                st.session_state["cut_edits"] = {"track_id": tid, "cuts": new,
+                                                 "base_sig": e.get("base_sig", sig) if e else sig}
+            e = _cut_edits(tid)
+    if e:
+        d = CED.diff(base_cuts, e["cuts"])
+        ec = st.columns([4, 2])
+        ec[0].caption(f"✏️ **Edited by hand:** {len(e['cuts']) + 1} segments — {len(d['added'])} cut(s) added or "
+                      f"moved, {len(d['removed'])} of the method's removed. Saved with this project. "
+                      f"🟠 = your cuts · 🔵 = the method's · dashed = removed.")
+        ec[1].button("↺ Undo all edits", on_click=_drop_cut_edits, use_container_width=True,
+                     help="Drops your hand edits for this track (Undo in the editor can't bring them back).")
+    else:
+        st.caption("▶ Play and listen — tap ✂️ *Cut here* on the beat, drag a cut to move it, or select one and "
+                   "🗑 remove it. Your edits are saved with this project.")
 
 
 def _smart_reset() -> None:
@@ -2212,6 +2380,7 @@ def render_audio_settings_section(track: dict) -> None:
     elif segmentation_method == SEG_SCORED:
         _render_scored_cut_settings(track, _v)
     elif segmentation_method == SEG_ADAPTIVE:
+        _render_aim_adaptive(track, len(build_segments(track, segmentation_settings())))
         col1, col2 = st.columns(2)
         with col1:
             st.slider("Cut at energy changes — threshold", 0.02, 0.5, value=float(_v("change_threshold")),
@@ -2270,6 +2439,9 @@ def render_audio_settings_section(track: dict) -> None:
                           step=0.1, key="override_clear_secs", disabled=not dpo, **_custom,
                           help="Other cuts closer than this to a jump cut are removed.")
 
+    st.divider()
+    _render_cut_editor(track)
+
     # ---- Live preview chart ------------------------------------------------
     st.divider()
     st.subheader("Preview: cut points on the audio signal")
@@ -2282,7 +2454,7 @@ def render_audio_settings_section(track: dict) -> None:
     _max_c = st.session_state.get("max_clips", 4) if st.session_state.get("split_screen_enabled") else 1
     _rs, _re = st.session_state.get("ramp_range", (0.2, 0.85))
 
-    _segs = build_segments(track, segmentation_settings())
+    _segs = planned_segments(track, segmentation_settings())
     apply_segment_intensity(_segs, track, _dc)
     _rec_counts = [
         clips_for_intensity(sg["intensity"], _min_c, _max_c, _rs, _re, False, None)
@@ -2468,7 +2640,7 @@ def render_story_map_section(track: dict) -> None:
     track_id = st.session_state["track_id"]
     bpb = int(st.session_state.get("beats_per_bar", 4))
     duration = float(track["duration_sec"])
-    segs = build_segments(track, segmentation_settings())
+    segs = planned_segments(track, segmentation_settings())
     cut_times = [sg["start"] for sg in segs] + [duration]
     roles = SR.roles_by_id()
     analysis = _story_analysis(track_id, bpb, _track_mtime(track_id))
@@ -3430,6 +3602,7 @@ PROJECT_SIMPLE_KEYS = [
     "adv_current_block", "chor_current_block",
     "intro_block_indices", "outro_block_indices",
     "story_map",
+    "cut_edits",
 ]
 
 
@@ -3503,6 +3676,9 @@ def _apply_project_load_dict(data: dict) -> list:
     for k in PROJECT_SIMPLE_KEYS:
         if k in data:
             st.session_state[k] = data[k]
+    if "cut_edits" not in data:
+        st.session_state.pop("cut_edits", None)       # a project without hand edits
+    _bump_cut_edit_rev()                               # the ✂️ editor reloads its cuts
     # Projects saved before cutting paces existed keep their exact dials.
     if "audio_style" not in data:
         st.session_state["audio_style"] = AUDIO_STYLE_CUSTOM
@@ -4512,7 +4688,7 @@ if not queues:
 total_footage_sec = sum(span["remaining_sec"] for spans in queues.values() for span in spans)
 
 with _timed("Cutting the track", seg_cfg["method"]):
-    segments = build_segments(track, seg_cfg)
+    segments = planned_segments(track, seg_cfg)
     apply_segment_intensity(segments, track, density_contrast)
 if not track.get("hires"):
     if seg_cfg["method"] == SEG_ADAPTIVE:
@@ -5981,6 +6157,8 @@ export_plan = {
     "allow_same_video": allow_same_video,
     "timeline": timeline,
 }
+if _cut_edits():
+    export_plan["segmentation"]["hand_edited_cuts"] = True    # ✂️ cuts edited in the cut editor
 
 if st.button("💾 Save plan"):
     PLANS_DIR.mkdir(parents=True, exist_ok=True)
