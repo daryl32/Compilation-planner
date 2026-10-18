@@ -22,6 +22,9 @@ No Streamlit in here.
 
 from __future__ import annotations
 
+import json
+import os
+
 import numpy as np
 
 import cut_scoring as CS
@@ -297,3 +300,47 @@ def totals(regions: list, segments: list) -> dict:
         if role:
             out.setdefault(role, {"sec": 0.0, "blocks": 0})["blocks"] += 1
     return out
+
+
+# ---------------------------------------------------------------------------
+# Saved story maps — one per track, in CATALOGUE_DIR/story_maps.json (synced to
+# Drive with the catalogues), so the Media Library and every project see them.
+# A project keeps its own copy too (see the planner).
+# ---------------------------------------------------------------------------
+
+def _maps_file():
+    from config import CATALOGUE_DIR
+    return CATALOGUE_DIR / "story_maps.json"
+
+
+def saved_maps() -> dict:
+    """{track_id: regions} for every track with a saved story map."""
+    try:
+        data = json.loads(_maps_file().read_text())
+    except (FileNotFoundError, ValueError, OSError):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, list) and v} if isinstance(data, dict) else {}
+
+
+def saved_map(track_id: str):
+    return saved_maps().get(track_id)
+
+
+def save_map(track_id: str, regions) -> None:
+    """Save (or with regions None / empty, remove) a track's story map."""
+    from library_common import mark_pending
+    maps = saved_maps()
+    if regions:
+        if maps.get(track_id) == regions:
+            return
+        maps[track_id] = regions
+    elif track_id in maps:
+        maps.pop(track_id)
+    else:
+        return
+    path = _maps_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(maps, indent=1))
+    os.replace(tmp, path)
+    mark_pending(path.stem)

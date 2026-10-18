@@ -2137,6 +2137,37 @@ def load_all_audio_tracks() -> dict:
     return tracks
 
 
+def video_role_seconds(time_ranges: dict) -> dict:
+    """{video_id: {role id: seconds of usable (not excluded, in range) footage carrying it}}."""
+    out = {}
+    for vid, cat in load_all_catalogues().items():
+        rng = time_ranges.get(vid)
+        d = {}
+        for sc in cat["scenes"]:
+            if sc.get("excluded"):
+                continue
+            roles = SR.scene_roles(sc)
+            if not roles:
+                continue
+            a, b = _overlap_with_range(_tc_to_seconds(sc["start_tc"]), _tc_to_seconds(sc["end_tc"]), rng)
+            if a is None:
+                continue
+            for r in roles:
+                d[r] = d.get(r, 0.0) + (b - a)
+        if d:
+            out[vid] = d
+    return out
+
+
+def story_role_need(track_id: str) -> dict:
+    """{role id: seconds of the song its story map gives that role} ({} without a map)."""
+    out = {}
+    for r in current_story_map(track_id) or []:
+        if r["role"]:
+            out[r["role"]] = out.get(r["role"], 0.0) + (r["end"] - r["start"])
+    return out
+
+
 def compute_video_rankings(track: dict, tag_filter: tuple, time_ranges: dict,
                            weights: dict, experimental: bool) -> list[dict]:
     """Match score (0–100) for every video with usable footage, best first — see
@@ -2167,6 +2198,7 @@ def compute_video_rankings(track: dict, tag_filter: tuple, time_ranges: dict,
     return VR.score_videos(
         track, load_all_audio_tracks(), feats, reference, weights, tuple(tag_filter),
         usage=VR.combined_usage(PROJECTS_DIR, PREVIEW_DIR), experimental=experimental,
+        role_feats=video_role_seconds(time_ranges), role_need=story_role_need(track.get("track_id")),
     )
 
 
@@ -2208,14 +2240,17 @@ def render_ranking_weights(tag_filter: list) -> None:
 
 def format_match_breakdown(match: dict, experimental: bool, tag_filter) -> str:
     short = {"dynamics": "dyn", "punch": "punch", "footage": "footage", "pace": "pace",
-             "spread": "spread", "relevance": "tags", "freshness": "fresh", "tempo": "tempo", "arc": "arc"}
+             "spread": "spread", "relevance": "tags", "freshness": "fresh", "story": "story",
+             "tempo": "tempo", "arc": "arc"}
     parts = []
     for m in VR.METRICS:
         if m in VR.EXPERIMENTAL and not experimental:
             continue
         if m == "relevance" and not tag_filter:
             continue
-        v = match["parts"][m]
+        if m == "story" and not story_role_need(st.session_state.get("track_id")):
+            continue
+        v = match["parts"].get(m, 0.0)
         dots = "●" * int(round(v * 4)) + "○" * (4 - int(round(v * 4)))
         label = short[m]
         if m == "tempo" and match.get("tempo_bpm"):
@@ -2343,7 +2378,8 @@ def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list,
     cache_key = (track.get("track_id"), tag_filter,
                  tuple(sorted((v, tuple(r)) for v, r in _ranges.items())),
                  tuple(sorted(_weights.items())), _experimental, _usage_signature(),
-                 tuple(sorted(allowed)) if allowed is not None else None)
+                 tuple(sorted(allowed)) if allowed is not None else None,
+                 tuple(sorted(story_role_need(track.get("track_id")).items())))
     random_seed = st.session_state.get("random_top_seed")
     cache = st.session_state.get("video_ranking_cache")
     if cache and cache["key"] == cache_key and cache.get("seed") == random_seed:
@@ -2872,10 +2908,19 @@ def _story_analysis(track_id: str, beats_per_bar: int, mtime: float) -> dict:
 
 
 def current_story_map(track_id: str):
-    """This track's story map regions, or None if it hasn't got one."""
+    """This track's story map regions, or None if it hasn't got one. The one in
+    this session/project first; otherwise the track's saved map (Media Library →
+    Audio, or saved from another project), which this session then adopts."""
     sm = st.session_state.get(STORY_KEY)
-    if isinstance(sm, dict) and sm.get("track_id") == track_id and sm.get("regions"):
-        return sm["regions"]
+    if isinstance(sm, dict) and sm.get("track_id") == track_id:
+        if sm.get("regions"):
+            return sm["regions"]
+        if sm.get("cleared"):
+            return None
+    saved = STM.saved_map(track_id) if track_id else None
+    if saved:
+        st.session_state[STORY_KEY] = {"track_id": track_id, "regions": saved, "v": 1, "edited": False}
+        return saved
     return None
 
 
@@ -2888,6 +2933,10 @@ def _story_set(regions: list, edited: bool = True) -> None:
         "edited": edited,
     }
     st.session_state.pop("sm_play", None)
+    try:
+        STM.save_map(st.session_state.get("track_id"), regions)   # the track's saved map, for every page
+    except OSError:
+        pass
 
 
 def _story_suggest(analysis: dict, cut_times: list) -> None:
@@ -3167,6 +3216,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                        f"whole library (ignores the ranking weights). Press again for a different set.")
 
     _details = video_details()
+    _role_secs_now = video_role_seconds(effective_time_ranges())
     _dc = st.columns([5, 5, 2])
     _f_actors = _dc[0].multiselect("👤 Actors", all_actors(), key="vid_actor_filter", placeholder="anyone",
                                    help="Only videos with these actors (set in the Reviewer's 🎬 Video details).")
@@ -3263,6 +3313,11 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                                                   tag_filter))
             else:
                 st.write(f"{title} — no scenes match the current tag filter / time range{range_tag}")
+            _rs = (match or {}).get("role_sec") or _role_secs_now.get(video_id) or {}
+            if _rs:
+                _rb = SR.roles_by_id()
+                st.caption("🎭 " + "  ·  ".join(f"{SR.label(r, _rb)} {format_mmss(v)}"
+                                                for r, v in sorted(_rs.items(), key=lambda kv: -kv[1])))
             _vd = _details.get(video_id) or {}
             if _vd.get("actors") or _vd.get("tags"):
                 st.caption(("👤 " + ", ".join(_vd.get("actors", [])) if _vd.get("actors") else "")
@@ -5149,6 +5204,11 @@ if st.session_state.get("track_id") not in tracks:
 
 # 🔄 Sync now lives in the shared sidebar (page_setup → ☁️ Google Drive).
 
+# Media Library → Audio → 🎭 Edit story map: open that track on the Story map step.
+_open_story = st.session_state.pop("_open_story_for", None)
+if _open_story in tracks:
+    st.session_state["track_id"] = _open_story
+    st.session_state["ui_section"] = "🎭 1. Story map"
 # The track is picked at the top of the 🎵 Audio step (render_track_picker); it's
 # kept like the other step settings (STEP_WIDGET_KEYS) so every step can use it.
 if tracks and st.session_state.get("track_id") not in tracks:

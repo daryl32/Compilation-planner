@@ -37,19 +37,21 @@ SUMMARY_RATE_HZ = 16          # motion curves are pooled down to ~this many samp
 HIST_BINS = 12
 ARC_POINTS = 60
 FOOTAGE_SHARE = 0.25          # full "footage" marks once usable ≥ this share of the track
+STORY_SHARE_VIDEOS = 4        # 'story': full marks for covering 1/4 of a role's need on its own
 RECENT_PROJECTS = 10          # freshness looks at this many most recent saved projects
 RECENT_RENDERS = 10           # ... and this many most recent renders
 
-METRICS = ["dynamics", "punch", "footage", "pace", "spread", "relevance", "freshness", "tempo", "arc"]
+METRICS = ["dynamics", "punch", "footage", "pace", "spread", "relevance", "freshness", "story", "tempo", "arc"]
 EXPERIMENTAL = {"tempo", "arc"}
 LABELS = {
     "dynamics": "Dynamics", "punch": "Punch", "footage": "Enough footage", "pace": "Cut pace",
     "spread": "Intensity spread", "relevance": "Tag relevance", "freshness": "Freshness",
+    "story": "Story roles",
     "tempo": "Movement tempo ⚗", "arc": "Energy arc ⚗",
 }
 DEFAULT_WEIGHTS = {
     "dynamics": 2.0, "punch": 2.0, "footage": 2.0, "pace": 1.0, "spread": 1.0,
-    "relevance": 1.0, "freshness": 0.5, "tempo": 0.0, "arc": 0.0,
+    "relevance": 1.0, "freshness": 0.5, "story": 2.0, "tempo": 0.0, "arc": 0.0,
 }
 HELP = {
     "dynamics": "How much the video's motion swings compared with how much the track's energy swings — "
@@ -66,6 +68,9 @@ HELP = {
                  "tags. Without a filter it has no effect.",
     "freshness": f"Lower for videos used in your {RECENT_PROJECTS} most recent saved projects and "
                  f"{RECENT_RENDERS} most recent renders, for more variety between compilations.",
+    "story": "Only with a story map: how much of what the map needs (🎬 Intro, 🌙 Slow, 💥 Action, 🏁 Outro, "
+             "your own roles) this video has clips marked for — each role counted by its share of the song. "
+             f"Full marks when a video alone covers 1/{STORY_SHARE_VIDEOS} of a role's part.",
     "tempo": "EXPERIMENTAL — finds the dominant rhythm in the video's movement and compares it with the "
              "track's BPM (half and double time count as a match). Scored by how clear that rhythm is.",
     "arc": "EXPERIMENTAL — the track's energy over time (build, drop, outro) against the video's motion "
@@ -386,7 +391,7 @@ def combined_usage(projects_dir: Path, preview_dir: Path) -> dict:
 
 def score_videos(track: dict, all_tracks: dict, video_feats: dict, reference_feats: dict,
                  weights: dict, tag_filter: tuple = (), usage: dict = None,
-                 experimental: bool = False) -> list:
+                 experimental: bool = False, role_feats: dict = None, role_need: dict = None) -> list:
     """video_feats: {video_id: video_features(...) under the current filter and ranges}
     reference_feats: the same for the WHOLE library without the tag filter — the
         fixed population each video is compared against.
@@ -411,6 +416,10 @@ def score_videos(track: dict, all_tracks: dict, video_feats: dict, reference_fea
             active[m] = 0.0
     if not tag_filter:
         active["relevance"] = 0.0
+    role_need = {r: n for r, n in (role_need or {}).items() if n > 0}
+    if not role_need:
+        active["story"] = 0.0
+    need_total = sum(role_need.values()) or 1.0
 
     results = []
     for vid, f in video_feats.items():
@@ -424,6 +433,9 @@ def score_videos(track: dict, all_tracks: dict, video_feats: dict, reference_fea
             "spread": 1.0 - 0.5 * float(np.abs(f["hist"] - t["hist"]).sum()),
             "relevance": (f["usable_sec"] / f["in_range_sec"]) if f["in_range_sec"] > 0 else 0.0,
             "freshness": 1.0 / (1.0 + usage.get(vid, 0)),
+            "story": sum((n / need_total) * min(1.0, (role_feats or {}).get(vid, {}).get(r, 0.0)
+                                                 / (n / STORY_SHARE_VIDEOS))
+                         for r, n in role_need.items()) if role_need else 0.0,
         }
         if t["bpm"] and f["tempo_bpm"]:
             err = min(abs(math.log2(f["tempo_bpm"] * k / t["bpm"])) for k in (0.5, 1.0, 2.0))
@@ -445,6 +457,7 @@ def score_videos(track: dict, all_tracks: dict, video_feats: dict, reference_fea
             "level_pct": round(_percentile_of(f["level"], ref_pop["level"]), 3),
             "tempo_bpm": round(f["tempo_bpm"], 1) if f["tempo_bpm"] else None,
             "curve_coverage": f["curve_coverage"],
+            "role_sec": dict((role_feats or {}).get(vid, {})),
         })
     results.sort(key=lambda r: (-r["score"], r["video_id"]))
     return results
