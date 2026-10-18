@@ -1019,11 +1019,17 @@ def _chor_slider_changed(overrides: dict, video_id: str, clips: list, slider_key
 
 
 def _local_media(raw_source: str, prefer: Path = None):
-    """(local path, None) for a media file, or (None, raw_source) if it isn't on this machine."""
-    if prefer is not None and Path(prefer).exists():
+    """(local path, None) for a media file, or (None, raw_source) if it isn't on this machine
+    (or can't be checked — e.g. /root isn't readable by this user)."""
+    def _there(p):
+        try:
+            return p.exists()
+        except OSError:
+            return False
+    if prefer is not None and _there(Path(prefer)):
         return Path(prefer), None
     local = Path(colab_to_local(raw_source)) if raw_source else None
-    if local is not None and local.exists():
+    if local is not None and _there(local):
         return local, None
     return None, raw_source
 
