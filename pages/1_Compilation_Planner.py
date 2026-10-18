@@ -46,6 +46,7 @@ import core.picking as CPICK
 from core.segmentation import (SEG_ADAPTIVE, SEG_RHYTHM, SEG_SCORED, SEG_SMART, SEG_METHOD_KEYS,
                                build_segments, compute_density_curve, apply_segment_intensity)
 from core.autotune import AUDIO_STYLES, AUDIO_STYLE_CUSTOM
+import core.targets as CTGT
 from core.shape import (SHAPE_MATCH_POINTS, resample_curve, shape_score, find_best_shape_window,
                         get_block_audio_curve)
 from core.footage import (_tc_to_seconds, _overlap_with_range, get_candidate_spans, has_role, role_supply,
@@ -1972,6 +1973,7 @@ CUT_FOCUS = {
 def _mark_audio_custom() -> None:
     """A dial was moved by hand: stop auto-tuning over it."""
     st.session_state["audio_style"] = AUDIO_STYLE_CUSTOM
+    st.session_state.pop("aim_report", None)     # 🎯 its dial values no longer apply
 
 
 def _audio_retune_if_paced() -> None:
@@ -2001,6 +2003,56 @@ def _pace_row(_pc, _styles, _style_now) -> None:
     _pc[1].button("🎯 Re-tune for this track", on_click=_run_auto_tune, use_container_width=True,
                   help="Re-runs auto-detect for the current method at the chosen pace (Balanced if Custom). "
                        "Same as the sidebar's Auto-detect.")
+
+
+AIM_MODES = {"avg": "Average clip length", "count": "Number of segments"}
+ADAPTIVE_DIAL_KEYS = ["change_window_secs", "change_threshold", "min_segment_sec", "max_segment_sec",
+                      "react_to_hits", "hit_threshold", "snap_secs"]
+
+
+def _aim_adaptive() -> None:
+    """🎯 Set the Adaptive dials to give the segment count / clip length asked for
+    (core/targets.py). Runs as a button callback, so the dials redraw with the new values."""
+    track = load_track(st.session_state["track_id"])
+    mode = st.session_state.get("aim_mode", "avg")
+    base = {k: st.session_state.get(k, DIAL_DEFAULTS.get(k)) for k in ADAPTIVE_DIAL_KEYS}
+    kw = ({"avg_sec": float(st.session_state.get("aim_avg_sec", 2.5))} if mode == "avg"
+          else {"segments": int(st.session_state.get("aim_segments", 40))})
+    res = CTGT.adaptive_for_target(track, base=base, beats_per_bar=int(st.session_state.get("beats_per_bar", 4)),
+                                   **kw)
+    for k, v in res["settings"].items():
+        st.session_state[k] = v
+    st.session_state["audio_style"] = AUDIO_STYLE_CUSTOM      # your own settings now — don't re-tune over them
+    appscope = st.session_state.get("_audio_appscope", {})
+    appscope.update({k: v for k, v in res["settings"].items() if k in AUDIO_SETTINGS_KEYS})
+    appscope["audio_style"] = AUDIO_STYLE_CUSTOM
+    st.session_state["_audio_appscope"] = appscope
+    st.session_state["aim_report"] = {"track_id": st.session_state["track_id"], "exact": res["exact"],
+                                      "notes": res["notes"]}
+
+
+def _render_aim_adaptive(track: dict, current_segments: int) -> None:
+    """🎯 Aim for: say how many cuts you want and let the app set the dials."""
+    dur = float(track["duration_sec"])
+    st.session_state.setdefault("aim_avg_sec", round(min(max(dur / max(current_segments, 1), 0.5), 30.0), 1))
+    st.session_state.setdefault("aim_segments", int(min(max(current_segments, 1), 1000)))
+    with st.container(border=True):
+        c = st.columns([2, 2, 2])
+        mode = c[0].selectbox("🎯 Aim for", list(AIM_MODES), format_func=AIM_MODES.get, key="aim_mode",
+                              help="Say what you want and the app sets the dials below to get it. "
+                                   "You can still fine-tune them afterwards.")
+        if mode == "avg":
+            c[1].number_input("Seconds per clip (average)", 0.5, 30.0, step=0.5, key="aim_avg_sec",
+                              help=f"This track is {dur:.0f}s long, so 2.5s ≈ {dur / 2.5:.0f} segments.")
+        else:
+            c[1].number_input("Segments", 1, 1000, step=1, key="aim_segments",
+                              help=f"This track is {dur:.0f}s long.")
+        c[2].button("Set the dials", on_click=_aim_adaptive, type="primary", use_container_width=True,
+                    help="Finds energy-change and big-hit thresholds plus shortest / longest segment that "
+                         "give that many cuts on this track.")
+        rep = st.session_state.get("aim_report")
+        if rep and rep.get("track_id") == st.session_state.get("track_id"):
+            (st.caption if rep["exact"] else st.warning)("  \n".join(rep["notes"]))
 
 
 def _smart_reset() -> None:
@@ -2212,6 +2264,7 @@ def render_audio_settings_section(track: dict) -> None:
     elif segmentation_method == SEG_SCORED:
         _render_scored_cut_settings(track, _v)
     elif segmentation_method == SEG_ADAPTIVE:
+        _render_aim_adaptive(track, len(build_segments(track, segmentation_settings())))
         col1, col2 = st.columns(2)
         with col1:
             st.slider("Cut at energy changes — threshold", 0.02, 0.5, value=float(_v("change_threshold")),
