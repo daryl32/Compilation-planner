@@ -58,3 +58,16 @@ def test_matches_golden(results, golden, prefix):
     for k in keys:
         d = _first_diff(golden[k], results[k], k)
         assert d is None, d
+
+
+def test_matcher_entry_points_match_golden():
+    """Manual ranking + Auto-fill, Choreography windows, role rules and chain
+    filling — snapshot taken before the matcher moved to core/."""
+    from tests.capture_matcher_golden import GOLDEN as MG
+    from tests.golden_cases import matcher_cases
+    golden = json.loads(MG.read_text())
+    got = matcher_cases(load_page(PLANNER))
+    assert set(got) == set(golden)
+    for k in golden:
+        d = _first_diff(golden[k], got[k], k)
+        assert d is None, d

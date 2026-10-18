@@ -296,3 +296,77 @@ def run_all(ns) -> dict:
                match_cases):
         out.update(fn(ns))
     return plain(out)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1b: the matcher's other entry points — Manual step-through's ranking and
+# Auto-fill, Choreography's clip windows, role rules — captured from the code
+# before the matcher moved to core/ (tests/golden/matcher_golden.json).
+# ---------------------------------------------------------------------------
+
+def matcher_cases(ns) -> dict:
+    ns = with_core(ns)
+    out = {}
+    states = {
+        "plain": {},
+        "story": {"_plan_story_in_use": True, "_plan_reserved_roles": {"intro", "outro", "action"}},
+        "locked": {"intro_outro_exclusive": True, "_plan_locked_roles": {"intro", "outro"}},
+        "v1": {"autofill_v2": False},
+        "clips2": {"_avg_clips_per_block": 2.0},
+    }
+    for sname, st_over in states.items():
+        _reset_state(ns, **copy.deepcopy(st_over))
+        track, segs = _segments(ns, "song_full", "adaptive")
+        q = _queues(ns)
+        # role rules
+        for role in (None, "intro", "action"):
+            cands = ns["get_candidate_spans"](q, False, set())
+            out[f"m/{sname}/soft_reserve/{role}"] = [(x["video_id"], x["scene_id"])
+                                                     for x in ns["soft_reserve"](ns["prefer_role"](cands, role), role)]
+            out[f"m/{sname}/locked/{role}"] = ns["role_locked_keys"](q, role)
+            out[f"m/{sname}/excluded/{role}"] = ns["excluded_for_block"](q, {("vid_b", 0)}, role)
+        # Choreography windows
+        for vid in ("vid_a", "vid_c"):
+            for dur in (1.7, 4.2):
+                for role in (None, "action"):
+                    for seqm in (False, True):
+                        w = ns["get_available_clips_for_video"](
+                            q, vid, dur, seqm, {("vid_a", 3)}, role_filter=role,
+                            role_reach=(lambda n: 2) if seqm else None)
+                        out[f"m/{sname}/windows/{vid}/{dur}/{role}/{seqm}"] = [
+                            (x["scene_id"], round(x["offset_sec"], 4), x["label"]) for x in w]
+        # Manual: rank shape candidates for a few blocks, sequential and not
+        for seqm in (False, True):
+            confirmed = {}
+            for bi in (0, 2, 5):
+                seg = segs[bi]
+                curve = ns["get_block_audio_curve"](track, seg["start"], seg["end"])
+                cands, _ = ns["find_shape_candidates"](seg, q, seqm, set(), set(), curve, 10)
+                prev = {p["video_id"] for p in confirmed.get(bi - 1, [])}
+                ranked = ns["rank_candidates_weighted"](
+                    cands, bi, segs, confirmed, q, prev, 2.0, 0.5, True, 1.5, 2.0, 42,
+                    weight_position=1.0, sequential=seqm, videos_per_block=2)
+                out[f"m/{sname}/rank/{seqm}/{bi}"] = [(x["video_id"], x["scene_id"], x.get("score")) for x in ranked]
+                picks = ns["select_autofill_picks"](ranked, 2, False)
+                confirmed[bi] = [{"video_id": x["video_id"], "scene_id": x["scene_id"],
+                                  "clip_duration_sec": x["window_duration_sec"]} for x in picks]
+            why = ns["st"].session_state.get("autofill_why") or {}
+            out[f"m/{sname}/why/{seqm}"] = sorted(
+                [list(k) + [v.get("rank"), v.get("of")] for k, v in why.items()], key=str)
+        # Auto mode's chain filling for one slot, with and without weighting / roles
+        for role in (None, "intro"):
+            for weighted in (False, True):
+                q2 = _queues(ns)
+                weighting = None
+                if weighted:
+                    weighting = {"seg_idx": 3, "segments": segs, "confirmed": {}, "prev_block_videos": {"vid_c"},
+                                 "weight_shape": 2.0, "weight_random": 0.5, "avoid_repeat": True,
+                                 "weight_spread": 1.5, "weight_motion": 2.0, "seed": 42,
+                                 "weight_position": 1.0, "videos_per_block": 2}
+                for seqm in (False, True):
+                    chain, unfilled = ns["fill_slot"](0.6, 7.5, q2, seqm, set(), set(), {"vid_d"},
+                                                      1.0, role, weighting)
+                    out[f"m/{sname}/fill/{role}/{weighted}/{seqm}"] = {"chain": chain, "unfilled": unfilled,
+                                                                       "fallbacks": (weighting or {}).get(
+                                                                           "repeat_fallbacks", set())}
+    return plain(out)

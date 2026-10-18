@@ -78,3 +78,45 @@ def test_build_segments_every_method_every_track():
             assert abs(segs[-1]["end"] - tr["duration_sec"]) < 0.05, (tid, method, segs[-1])
             for a, b in zip(segs, segs[1:]):
                 assert abs(a["end"] - b["start"]) < 1e-6, (tid, method)
+
+
+def test_matcher_runs_headless_and_matches_the_page():
+    """core.matching with a PlanContext built by hand — no Streamlit loaded —
+    gives exactly the Auto-mode result the page gives (golden 'match/song_full/default')."""
+    code = textwrap.dedent(f"""
+        import sys, json
+        from pathlib import Path
+        sys.modules["streamlit"] = None
+        sys.path.insert(0, {str(REPO)!r})
+        import tests.support                     # test config (no Streamlit needed)
+        import curve_cache, core.segmentation as S, core.footage as F, core.matching as M
+        from tests.golden_cases import plain, _cfg
+        from tests.support import DATA
+        cat_dir = DATA / "catalogue"
+        cats = {{p.stem: json.loads(p.read_text()) for p in sorted(cat_dir.glob("vid_*.json"))}}
+        for c in cats.values():
+            for s in c["scenes"]:
+                s.pop("motion_curve", None)
+        tr = json.loads((DATA / "audio_catalogue" / "song_full.json").read_text())
+        segs = S.build_segments(tr, {{"method": S.SEG_SMART, "beats_per_bar": 4,
+                                      **{{k: S.SEG_DEFAULTS[k] for k in S.SEG_METHOD_KEYS[S.SEG_SMART]}}}})
+        S.apply_segment_intensity(segs, tr, 1.0)
+        from scene_roles import scene_roles
+        q = F.build_footage_queues(cats, tuple(sorted(cats)), (), {{}},
+                                   thumbnail_for=lambda stored, vid: cat_dir / "thumbnails" / vid / Path(stored).name,
+                                   roles_of=scene_roles)
+        dur = {{v: F._tc_to_seconds(c["scenes"][-1]["end_tc"]) for v, c in cats.items()}}
+        ctx = M.PlanContext(curves_of=lambda v: curve_cache.load(cat_dir / f"{{v}}.json", DATA / ".curve_cache"),
+                            duration_of=dur.get, catalogue_dir=cat_dir)
+        fb = set()
+        tl, n, s = M.match_scenes_to_track(segs, q, 1, 1, 0.2, 0.85, False, False, min_clip_len_sec=1.0,
+            weight_shape=2.0, weight_random=0.5, avoid_repeat=True, weight_spread=1.5, weight_motion=2.0,
+            autofill_seed=42, weight_position=1.0, repeat_fallbacks=fb, track=tr, shape_matches=6, ctx=ctx)
+        golden = json.loads((Path({str(REPO)!r}) / "tests/golden/planner_golden.json").read_text())["match/song_full/default"]
+        same = plain({{"timeline": tl, "short_n": n, "short_s": s, "fallbacks": fb,
+                       "left": {{v: sum(x["remaining_sec"] for x in sp) for v, sp in q.items()}}}}) == golden
+        print("SAME" if same else "DIFFERENT", len(tl))
+    """)
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=REPO)
+    assert r.returncode == 0, r.stderr[-3000:]
+    assert r.stdout.strip().startswith("SAME"), r.stdout
