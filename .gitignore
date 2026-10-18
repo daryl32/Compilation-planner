@@ -32,3 +32,4 @@ config.py
 # oauth creds
 oauth_config.py
 
+tests/.data/
