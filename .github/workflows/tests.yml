@@ -32,6 +32,6 @@ jobs:
           set -o pipefail
           python -m pytest -rfE 2>&1 | tee pytest.txt || {
             # Failures as annotations, so they show on the commit without opening the log.
-            grep -E "^(FAILED|ERROR)" pytest.txt | head -20 | sed 's/^/::error::/'
+            grep -E "^FAILED" pytest.txt | head -20 | cut -c1-900 | sed 's/^/::error::/'
             exit 1
           }
