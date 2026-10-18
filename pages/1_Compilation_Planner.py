@@ -3383,6 +3383,35 @@ def _undo_new_project() -> None:
         st.session_state["_project_notices"] = [("error", "Couldn't find what you had before.")]
 
 
+def _open_recommended_plan(plan: dict) -> None:
+    """🔮 Recommendations → 🎬 Open as project: a new project (what was on screen is
+    autosaved and kept as the 🆕 undo backup) with the plan's track, cut settings and
+    videos, on the Matching step in Auto mode — the plan the Recommendations page scored."""
+    _new_project()
+    st.session_state.pop("_new_project_notice", None)
+    ss = st.session_state
+    ss["track_id"] = plan["track_id"]
+    for k, v in plan["settings"].items():
+        ss[k] = v
+    ss["audio_style"] = AUDIO_STYLE_CUSTOM          # these settings exactly — don't re-tune over them
+    ss["_audio_appscope"] = {k: ss[k] for k in AUDIO_SETTINGS_KEYS if k in ss}
+    ss["committed_selected_videos"] = list(plan["videos"])
+    for vid in plan["videos"]:
+        ss[f"select_video_{vid}"] = True
+    ss["matching_mode"] = "Auto"
+    ss["use_story_map"] = False                     # the recommendation was scored without story roles
+    ss["ui_section"] = SECTION_MATCH
+    ss["_project_notices"] = [("success", f"🔮 Opened {plan.get('label') or 'the recommended plan'} as a new "
+                                          "project. The 🎭 story map is off so the plan is exactly the one "
+                                          "recommended — turn it on under 🎛️ Mode if you like.")]
+    ss["_rec_opened"] = True
+
+
+if st.session_state.get("_open_recommended_plan"):
+    _open_recommended_plan(st.session_state.pop("_open_recommended_plan"))
+    st.rerun()
+
+
 # 📁 Project bar — at the top of the page, above the steps (it used to be in the sidebar).
 _pbar = st.container(border=True)
 _pb = _pbar.columns([3, 1.3, 1, 1.2])
@@ -3446,6 +3475,8 @@ if _new_notice:
         _pbar.button("↩️ Bring back what I had", on_click=_undo_new_project, key="new_project_undo")
 for _kind, _msg in st.session_state.pop("_project_notices", []):
     getattr(_pbar, _kind)(_msg)
+if st.session_state.pop("_rec_opened", False) and _autosave_path(".before_new").exists():
+    _pbar.button("↩️ Bring back what I had", on_click=_undo_new_project, key="rec_open_undo")
 
 # A loaded project's track_id can reference a track that no longer exists (renamed/deleted
 # audio file) — the Track selectbox below would error if its backing value isn't among the
