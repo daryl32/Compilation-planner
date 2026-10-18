@@ -4139,6 +4139,59 @@ def fill_slot(seg_energy: float, needed_sec: float, queues: dict, sequential: bo
     return chain, max(0.0, remaining)
 
 
+def _auto_shape_picks(i: int, seg: dict, n_picks: int, queues: dict, sequential: bool, excluded_here: set,
+                      global_excluded: set, role_filter, segments: list, confirmed: dict,
+                      prev_block_videos: set, allow_same_video: bool, weighting: dict, track: dict,
+                      max_matches: int, repeat_fallbacks) -> list:
+    """Auto mode's picks for one block — Manual step-through's Auto-fill ALL, per block:
+    shape-scored windows (only within the in-order reach in sequential mode), the
+    block's story role preferred, the never-repeat rule widened for, ranked by the
+    Auto-fill weights, and carved out of the queues. Returns the placed picks
+    (possibly fewer than n_picks)."""
+    w = weighting
+    wp = float(w.get("weight_position", 0.0)) if sequential else 0.0
+    audio_curve = get_block_audio_curve(track, seg["start"], seg["end"])
+    pos_targets = (compute_position_targets(i, len(segments), confirmed, queues, n_picks)
+                   if sequential and wp > 0 else None)
+    search = dict(restrict_to_front=sequential, remaining_blocks=len(segments) - i, weight_position=wp,
+                  position_targets=pos_targets, weight_shape=w["weight_shape"])
+    cands, _ = find_shape_candidates(seg, queues, sequential, excluded_here, global_excluded, audio_curve,
+                                     max(int(max_matches), n_picks * 3), **search)
+    if role_filter and not any(has_role(c, role_filter) for c in cands):
+        role_c, _ = find_shape_candidates(seg, queues, sequential, excluded_here, global_excluded, audio_curve,
+                                          max(int(max_matches), n_picks * 3), only_role=role_filter, **search)
+        cands = role_c or cands
+    cands = soft_reserve(prefer_role(cands, role_filter), role_filter)
+    if not cands:
+        return []
+    if w.get("avoid_repeat"):
+        cands = widen_for_repeat_rule(
+            cands, prev_block_videos, 1 if allow_same_video else n_picks,
+            lambda ex: find_shape_candidates(seg, queues, sequential, excluded_here, global_excluded, audio_curve,
+                                             max(n_picks, 1), exclude_videos=ex, **search)[0])
+    ranked = rank_candidates_weighted(
+        cands, i, segments, confirmed, queues, prev_block_videos,
+        w["weight_shape"], w["weight_random"], w["avoid_repeat"], w["weight_spread"],
+        w["weight_motion"], w["seed"], weight_position=wp, sequential=sequential, videos_per_block=n_picks)
+    chosen = select_autofill_picks(ranked, n_picks, allow_same_video)
+    order = chosen + [c for c in ranked if all(c is not x for x in chosen)]
+    picks, used = [], set()
+    for c in order:
+        if len(picks) >= n_picks:
+            break
+        if not allow_same_video and c["video_id"] in used:
+            continue
+        try:
+            picks.append(carve_span(queues, c["video_id"], c["scene_id"], c["window_offset_sec"],
+                                    c["window_duration_sec"], sequential))
+        except ValueError:
+            continue
+        used.add(c["video_id"])
+    if repeat_fallbacks is not None and repeat_fallback_videos(picks, prev_block_videos, w.get("avoid_repeat")):
+        repeat_fallbacks.add(i)
+    return picks
+
+
 def match_scenes_to_track(
     segments: list[dict],
     queues: dict,
@@ -4166,6 +4219,8 @@ def match_scenes_to_track(
     repeat_fallbacks: set = None,
 
     block_roles: list = None,
+    track: dict = None,
+    shape_matches: int = 12,
 ) -> tuple:
     """repeat_fallbacks: if a set is given, 0-based indices of blocks where
     'Avoid repeating previous block' had to fall back to a repeat are added to it.
@@ -4249,7 +4304,26 @@ def match_scenes_to_track(
 
         slots = []
         used_videos = set()
-        for _ in range(n_picks):
+        if track is not None and n_picks > 0:
+            # 🎵 Shape matching (the same search and weighting as Manual step-through's
+            # ⚡⚡ Auto-fill ALL): every block-length window of every available scene is
+            # scored against this block's music shape, then ranked by the Auto-fill weights.
+            for pick in _auto_shape_picks(i, seg, n_picks, queues, sequential, excluded_here,
+                                          excluded_for_block(queues, global_excluded, role_filter),
+                                          role_filter, segments, confirmed_so_far, prev_block_videos,
+                                          allow_same_video, weighting, track, shape_matches,
+                                          repeat_fallbacks):
+                slots.append({
+                    "chain": [pick], "video_id": pick["video_id"], "scene_id": pick["scene_id"],
+                    "tags": sorted(pick["tags"]), "motion_norm": pick["motion_norm"],
+                    "thumbnail": pick["thumbnail"], "clip_duration_sec": pick["clip_duration_sec"],
+                    "offset_into_scene_sec": pick["offset_into_scene_sec"],
+                    "clip_start_sec": pick["clip_start_sec"],
+                })
+                used_videos.add(pick["video_id"])
+        # Any slot shape matching couldn't fill (no window long enough, or no motion
+        # curves) is filled the original way — a chain of clips by motion.
+        for _ in range(n_picks - len(slots)):
             avoid = used_videos if not allow_same_video else set()
             chain, unfilled = fill_slot(target, seg_duration, queues, sequential,
                                          excluded_here, excluded_for_block(queues, global_excluded, role_filter),
@@ -5520,7 +5594,7 @@ with _mt[0]:
 
 _autofill_disabled = matching_mode not in ("Manual step-through", "Auto", "Choreography")
 _is_auto_mode = matching_mode == "Auto"
-_no_shape_score_mode = matching_mode in ("Auto", "Choreography")  # neither computes a per-frame shape score
+_no_shape_score_mode = matching_mode == "Choreography"  # it doesn't compute a per-frame shape score
 _PRESET_CUSTOM = "Custom"
 
 
@@ -5795,17 +5869,47 @@ if _story_on:
                       for r in _plan_roles_used], hide_index=True, use_container_width=True)
 
 if matching_mode == "Auto":
-    timeline, clip_count_shortfall, duration_shortfall_sec = match_scenes_to_track(
-        segments, queues,
+    # The shape search is real work, so the plan is remembered and only worked out
+    # again when something that changes it changes (settings, videos, footage
+    # edits in the Reviewer, Swap / Reject / Remove…).
+    def _cat_mtime(v):
+        try:
+            return CStore.catalogue_path(v).stat().st_mtime
+        except OSError:
+            return 0.0
+    _auto_sig = hashlib.sha1(json.dumps([
+        track_id, [(round(sg["start"], 3), round(sg["end"], 3), round(sg.get("intensity", 0), 4)) for sg in segments],
+        sorted(selected_videos), sorted(tag_filter), sorted((v, list(r) if r else None) for v, r in effective_time_ranges().items()),
         min_clips, max_clips, ramp_start, ramp_end, allow_same_video, sequential_mode,
-        st.session_state["segment_exclusions"], st.session_state["segment_clip_reduction"],
-        st.session_state["global_excluded_scenes"],
-        vary_count, int(count_seed), min_clip_len_sec,
-        intro_blocks_0based, outro_blocks_0based,
-        weight_shape, weight_random, avoid_repeat, weight_spread, weight_motion, autofill_seed,
-        weight_position=weight_position, repeat_fallbacks=(_auto_repeat_fallbacks := set()),
-        block_roles=plan_block_roles,
-    )
+        sorted((k, sorted(map(list, v))) for k, v in st.session_state["segment_exclusions"].items()),
+        sorted(st.session_state["segment_clip_reduction"].items()),
+        sorted(map(list, st.session_state["global_excluded_scenes"])),
+        vary_count, int(count_seed), min_clip_len_sec, sorted(intro_blocks_0based), sorted(outro_blocks_0based),
+        weight_shape, weight_random, avoid_repeat, weight_spread, weight_motion, autofill_seed, weight_position,
+        plan_block_roles, sorted(st.session_state.get("clip_count_skip") or []),
+        bool(st.session_state.get("autofill_v2", True)), bool(st.session_state.get("intro_outro_exclusive")),
+        bool(st.session_state.get("story_reserve", True)), [(v, _cat_mtime(v)) for v in sorted(selected_videos)],
+    ], default=str).encode()).hexdigest()
+    _auto_cache = st.session_state.get("_auto_plan_cache")
+    if _auto_cache and _auto_cache["sig"] == _auto_sig:
+        timeline, clip_count_shortfall, duration_shortfall_sec = _auto_cache["result"]
+        _auto_repeat_fallbacks = set(_auto_cache["fallbacks"])
+    else:
+        with st.spinner("Matching clips to the music's shape…"):
+            timeline, clip_count_shortfall, duration_shortfall_sec = match_scenes_to_track(
+                segments, queues,
+                min_clips, max_clips, ramp_start, ramp_end, allow_same_video, sequential_mode,
+                st.session_state["segment_exclusions"], st.session_state["segment_clip_reduction"],
+                st.session_state["global_excluded_scenes"],
+                vary_count, int(count_seed), min_clip_len_sec,
+                intro_blocks_0based, outro_blocks_0based,
+                weight_shape, weight_random, avoid_repeat, weight_spread, weight_motion, autofill_seed,
+                weight_position=weight_position, repeat_fallbacks=(_auto_repeat_fallbacks := set()),
+                block_roles=plan_block_roles, track=track,
+            )
+        st.session_state["_auto_plan_cache"] = {
+            "sig": _auto_sig, "result": (timeline, clip_count_shortfall, duration_shortfall_sec),
+            "fallbacks": sorted(_auto_repeat_fallbacks)}
     if _auto_repeat_fallbacks:
         st.warning(repeat_fallback_message([i + 1 for i in sorted(_auto_repeat_fallbacks)]))
 
