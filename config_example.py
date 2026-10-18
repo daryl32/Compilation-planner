@@ -43,6 +43,12 @@ WHITELISTED_EMAILS = [
 # PROXY_DIR = _BASE / "proxies"
 
 # ---------------------------------------------------------------------------
+# Optional: where the motion-curve cache is kept (curve_cache.py). Must NOT be
+# inside Google Drive. Default: ~/.cache/media-planner/curves-<id>
+# ---------------------------------------------------------------------------
+# CURVE_CACHE_DIR = Path.home() / ".cache" / "media-planner" / "curves"
+
+# ---------------------------------------------------------------------------
 # Optional: the My Drive folder holding your music (Media Library → Audio →
 # "Check for new tracks" lists it; must be shared with the service account)
 # ---------------------------------------------------------------------------

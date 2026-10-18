@@ -429,7 +429,7 @@ def find_shape_candidates(
         if span["video_id"] not in video_curves_cache:
             video_curves_cache[span["video_id"]] = load_motion_curves_for_video(span["video_id"])
         curve = video_curves_cache[span["video_id"]].get(span["scene_id"])
-        if not curve or not curve.get("values"):
+        if not curve or curve.get("values") is None or len(curve["values"]) == 0:
             missing_curve_videos.add(span["video_id"])
             continue
 
@@ -1336,7 +1336,7 @@ def cand_key(c: dict) -> str:
 def _clip_curve(video_id: str, scene_id: int, offset_sec: float, duration_sec: float):
     """(values, fps) of a clip's slice of its scene's motion curve, or (None, None)."""
     curve = load_motion_curves_for_video(video_id).get(scene_id)
-    if not curve or not curve.get("values"):
+    if not curve or curve.get("values") is None or len(curve["values"]) == 0:
         return None, None
     fps = float(curve["fps"])
     vals = np.asarray(curve["values"], dtype=float)

@@ -38,6 +38,7 @@ def _install_config() -> None:
     cfg.APP_ENV = "test"
     cfg.DRIVE_WRITES = False
     cfg.WHITELISTED_EMAILS = ["tester@example.com"]
+    cfg.CURVE_CACHE_DIR = DATA / ".curve_cache"
     sys.modules["config"] = cfg
 
 
