@@ -52,6 +52,7 @@ from core.footage import (_tc_to_seconds, _overlap_with_range, get_candidate_spa
                           role_needs, role_scarcity, consume_span, limit_queue_before, split_span_at,
                           skip_span, carve_span)
 from core.picking import position_closeness, select_autofill_picks, _stable_random_unit, repeat_fallback_videos
+from diagnostics import timed as _timed   # 🩺 step timings for the Server page
 
 # st.fragment (Streamlit 1.37+; was st.experimental_fragment in 1.33-1.36) lets
 # part of the page rerun on its own instead of the whole script re-executing on
@@ -108,6 +109,15 @@ except ImportError:
 from page_setup import (page_setup, push_file_with_oauth, APP_VERSION, drive_token,
                         OAUTH_AVAILABLE as _OAUTH_AVAILABLE, DRIVE_SESSION_KEY as _OAUTH_SESSION_KEY)
 page_setup("Compilation Planner", "pages/1_Compilation_Planner.py")
+_PAGE_T0 = time.perf_counter()   # 🩺 whole-page run time — see _record_page_run
+
+
+def _record_page_run() -> None:
+    """🩺 How long this full run of the page took, for the Server page's timings
+    (fragment reruns and runs that stop early — e.g. no track yet — aren't counted)."""
+    import diagnostics as _diag
+    _diag.record("Planner page (full run)", time.perf_counter() - _PAGE_T0,
+                 str(st.session_state.get("ui_section", ""))[:2].strip())
 # The background Drive sync timer may have pulled new catalogues/audio since
 # the caches were filled — reload them once if so.
 refresh_caches_after_sync()
@@ -1872,7 +1882,8 @@ def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list,
         if cache and cache["key"] == cache_key:
             video_matches = cache["ranking"]["video_matches"]   # only the seed changed — no re-scoring
         else:
-            video_matches = compute_video_rankings(track, tag_filter, _ranges, _weights, _experimental)
+            with _timed("Video ranking", f"{len(_ranges)} ranges"):
+                video_matches = compute_video_rankings(track, tag_filter, _ranges, _weights, _experimental)
             if allowed is not None:   # 👤 actor / 🏷️ video tag filter
                 video_matches = [v for v in video_matches if v["video_id"] in allowed]
         if random_seed is not None:
@@ -4278,11 +4289,13 @@ if ui_section == SECTION_AUDIO:
     render_split_screen_settings()
     render_audio_settings_section(track)
     step_nav(nxt=SECTION_STORY)
+    _record_page_run()
     st.stop()
 
 if ui_section == SECTION_STORY:
     render_story_map_section(track)
     step_nav(back=SECTION_AUDIO, nxt=SECTION_VIDEOS)
+    _record_page_run()
     st.stop()
 
 if ui_section == SECTION_VIDEOS:
@@ -4300,6 +4313,7 @@ if ui_section == SECTION_VIDEOS:
             st.rerun()
     render_video_selection_section(track, all_video_ids, all_tag_options, catalogues)
     step_nav(back=SECTION_STORY, nxt=SECTION_MATCH)
+    _record_page_run()
     st.stop()
 
 tag_filter = list(st.session_state.get("committed_tag_filter", []))
@@ -4497,8 +4511,9 @@ if not queues:
 
 total_footage_sec = sum(span["remaining_sec"] for spans in queues.values() for span in spans)
 
-segments = build_segments(track, seg_cfg)
-apply_segment_intensity(segments, track, density_contrast)
+with _timed("Cutting the track", seg_cfg["method"]):
+    segments = build_segments(track, seg_cfg)
+    apply_segment_intensity(segments, track, density_contrast)
 if not track.get("hires"):
     if seg_cfg["method"] == SEG_ADAPTIVE:
         st.warning("This track was analysed before the 30 Hz onset signals existed, so cuts use the older, "
@@ -4643,7 +4658,8 @@ if matching_mode == "Auto":
         timeline, clip_count_shortfall, duration_shortfall_sec = _auto_cache["result"]
         _auto_repeat_fallbacks = set(_auto_cache["fallbacks"])
     else:
-        with st.spinner("Matching clips to the music's shape…"):
+        with st.spinner("Matching clips to the music's shape…"), \
+                _timed("Auto matching", f"{len(segments)} blocks, {len(selected_videos)} videos"):
             timeline, clip_count_shortfall, duration_shortfall_sec = match_scenes_to_track(
                 segments, queues,
                 min_clips, max_clips, ramp_start, ramp_end, allow_same_video, sequential_mode,
@@ -5765,10 +5781,11 @@ else:
         if cache and cache["key"] == search_key:
             candidates, missing_curve_videos = cache["candidates"], cache["missing"]
         else:
-            candidates, missing_curve_videos = find_shape_candidates(
-                seg, queues, sequential_mode, st.session_state["segment_exclusions"].get(current_block, set()),
-                _adv_excl, block_audio_curve, int(max_shape_matches),
-            )
+            with _timed("Manual: block shape search", f"{len(selected_videos)} videos"):
+                candidates, missing_curve_videos = find_shape_candidates(
+                    seg, queues, sequential_mode, st.session_state["segment_exclusions"].get(current_block, set()),
+                    _adv_excl, block_audio_curve, int(max_shape_matches),
+                )
             if adv_role_filter:
                 # Also offer this block's best role clips (they may not be among the top shape matches).
                 _role_c, _ = find_shape_candidates(
@@ -6149,3 +6166,5 @@ if versions:
                         st.rerun()
 else:
     st.caption("No previews rendered yet for this track.")
+
+_record_page_run()

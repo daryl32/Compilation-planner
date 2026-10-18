@@ -33,6 +33,69 @@ if _msg:
     st.success(_msg)
 
 # ---------------------------------------------------------------------------
+# 🩺 Diagnostics — the whole server, memory over the week, how long things take
+# ---------------------------------------------------------------------------
+import diagnostics as DG
+import library_common as LC
+
+
+def render_diagnostics() -> None:
+    st.subheader("🩺 Diagnostics")
+    mem, cpu_info = DG.system_memory(), DG.cpu()
+    history = DG.memory_history(7)
+    try:
+        disk_pct = SG.disk_usage()["pct"]
+    except Exception:
+        disk_pct = None
+    with st.container(border=True):
+        if mem is None and cpu_info is None:
+            st.caption("Server figures are only available on the server.")
+        for kind, text in DG.verdict(mem, cpu_info, history, disk_pct):
+            {"warn": st.warning, "info": st.info, "ok": st.success}[kind](text)
+        if mem:
+            c = st.columns(4)
+            c[0].metric("Server RAM used", f"{mem['used']:,.0f} MB", help=f"of {mem['total']:,.0f} MB")
+            c[1].metric("Available", f"{mem['available']:,.0f} MB")
+            c[2].metric("Swap used", f"{mem['swap_used']:,.0f} MB",
+                        help=f"of {mem['swap_total']:,.0f} MB — memory parked on disk; much of it means RAM is short")
+            if cpu_info:
+                c[3].metric("CPU load (5 min)", f"{cpu_info['load5']:.2f}",
+                            help=f"{cpu_info['cores']} cores · 1 min {cpu_info['load1']:.2f} · "
+                                 f"15 min {cpu_info['load15']:.2f}. Above the core count = overloaded.")
+            st.progress(min(mem["used"] / max(mem["total"], 1), 1.0),
+                        text=f"RAM {mem['used'] / max(mem['total'], 1):.0%} used")
+        procs = DG.app_processes()
+        if procs:
+            st.markdown("**What's using the server's memory**")
+            for label, mb, n in procs[:10]:
+                rc = st.columns([3, 1, 4])
+                rc[0].markdown(label + (f" ×{n}" if n > 1 else ""))
+                rc[1].markdown(f"{mb:,.0f} MB")
+                rc[2].progress(min(mb / max((mem or {}).get("total", mb) or 1, 1), 1.0))
+        if history:
+            st.markdown("**This app's memory, last 7 days** (peak and typical per day)")
+            import pandas as pd
+            df = pd.DataFrame(history).set_index("day")[["peak_mb", "median_mb"]]
+            df.columns = ["Peak MB", "Typical MB"]
+            st.bar_chart(df, stack=False, height=220)
+            clears = sum(d["clears"] for d in history)
+            if clears:
+                st.caption(f"Hit the {LC.MEMORY_LIMIT_MB:,.0f} MB limit and cleared caches {clears} time(s).")
+        timings = DG.timing_summary(7)
+        if timings:
+            st.markdown("**How long things take** (last 7 days, seconds)")
+            st.dataframe(
+                [{"Step": t["step"], "Runs": t["runs"], "Typical": round(t["median"], 2),
+                  "Slow (90%)": round(t["p90"], 2), "Slowest": round(t["max"], 2), "Last": round(t["last"], 2)}
+                 for t in timings],
+                hide_index=True, use_container_width=True)
+        else:
+            st.caption("Step timings appear here once the planner has been used.")
+
+
+render_diagnostics()
+
+# ---------------------------------------------------------------------------
 # Memory
 # ---------------------------------------------------------------------------
 import library_common as LC
