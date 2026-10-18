@@ -269,7 +269,21 @@ def shape_candidate_cases(ns) -> dict:
     return out
 
 
+def with_core(ns):
+    """The page namespace, falling back to core/ for helpers the page no longer
+    imports itself (so the same cases run before and after the refactor). The
+    page's own definitions — including its wrappers — win."""
+    from collections import ChainMap
+    try:
+        import core.segmentation, core.autotune, core.shape, core.footage, core.picking  # noqa: E401
+    except ImportError:          # code from before core/ existed
+        return ns
+    return ChainMap(ns, *(vars(m) for m in (core.segmentation, core.autotune, core.shape, core.footage,
+                                             core.picking)))
+
+
 def run_all(ns) -> dict:
+    ns = with_core(ns)
     out = {}
     for fn in (segmentation_cases, autotune_cases, shape_cases, footage_cases, shape_candidate_cases,
                match_cases):
