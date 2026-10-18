@@ -25,6 +25,13 @@ jobs:
           cache: pip
       - name: Install
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libgl1 libglib2.0-0 ffmpeg
           pip install -r requirements.txt "streamlit[auth]" pytest
       - name: Test
-        run: python -m pytest
+        run: |
+          set -o pipefail
+          python -m pytest -rfE 2>&1 | tee pytest.txt || {
+            # Failures as annotations, so they show on the commit without opening the log.
+            grep -E "^(FAILED|ERROR)" pytest.txt | head -20 | sed 's/^/::error::/'
+            exit 1
+          }
