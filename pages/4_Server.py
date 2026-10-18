@@ -137,7 +137,11 @@ def render_parity_check() -> None:
                 st.rerun()
             st.caption("A restart or idle shut-down of this test copy stops it — run it again if so.")
             return
-        if not live.exists():
+        try:
+            live_ok = live.exists()
+        except OSError:
+            live_ok = False
+        if not live_ok:
             st.caption(f"The live app's code isn't at {live} (set LIVE_REPO_DIR in config.py).")
         elif st.button("▶️ Run the comparison"):
             log.parent.mkdir(parents=True, exist_ok=True)

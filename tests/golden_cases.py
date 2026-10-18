@@ -20,8 +20,15 @@ from tests.support import DATA
 ROUND = 9
 
 
+_DATA_STR = str(DATA)
+
+
 def plain(x):
-    """JSON-safe, order-stable copy with floats rounded (numpy included)."""
+    """JSON-safe, order-stable copy with floats rounded (numpy included), and
+    the test library's folder written as <DATA> so snapshots don't depend on
+    where the repo is checked out."""
+    if isinstance(x, str) and _DATA_STR in x:
+        return x.replace(_DATA_STR, "<DATA>")
     if isinstance(x, dict):
         return {str(k): plain(v) for k, v in sorted(x.items(), key=lambda kv: str(kv[0]))}
     if isinstance(x, (list, tuple)):

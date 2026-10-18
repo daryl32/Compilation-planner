@@ -40,6 +40,15 @@ except Exception:
 
 # render_preview.colab_to_local puts every Drive original under here on Linux.
 ORIGINALS_ROOT = Path("/root/data")
+
+
+def _exists(path: Path) -> bool:
+    """Path.exists that is False (not an error) when the folder can't be read —
+    e.g. /root for a user other than root."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
 DATA_ROOT = CATALOGUE_DIR.parent
 KEEP_DOWNLOADS_DAYS = float(getattr(config, "KEEP_DOWNLOADS_DAYS", 3))
 
@@ -77,7 +86,7 @@ def fmt_bytes(n) -> str:
 # ---------------------------------------------------------------------------
 
 def disk_usage(path: Path = None) -> dict:
-    u = shutil.disk_usage(str(path or (ORIGINALS_ROOT if ORIGINALS_ROOT.exists() else DATA_ROOT)))
+    u = shutil.disk_usage(str(path or (ORIGINALS_ROOT if _exists(ORIGINALS_ROOT) else DATA_ROOT)))
     return {"total": u.total, "used": u.used, "free": u.free, "pct": 100.0 * u.used / u.total}
 
 
@@ -111,7 +120,11 @@ def usage_breakdown() -> list:
     orig = downloaded_originals()
     rows.append(("Downloaded originals (videos & music)", None, sum(f["size"] for f in orig),
                  "Temporary — streamed or downloaded again when needed"))
-    if Path("/root/data-dev").exists() and Path("/root/data-dev").resolve() != DATA_ROOT.resolve():
+    try:
+        _has_dev = Path("/root/data-dev").exists()
+    except OSError:                 # /root not readable by this user
+        _has_dev = False
+    if _has_dev and Path("/root/data-dev").resolve() != DATA_ROOT.resolve():
         rows.append(("Test copy's data", Path("/root/data-dev"), None,
                      "Refreshed by deploy/refresh_dev_data.sh"))
     if Path("/var/log/journal").exists():
@@ -141,7 +154,7 @@ def _last_used(p: Path) -> float:
 def downloaded_originals() -> list:
     """Original videos / music under /root/data that came from Google Drive:
     [{"path", "size", "last_used", "kind"}], oldest-used first."""
-    if not cleanup_allowed() or not ORIGINALS_ROOT.exists():
+    if not cleanup_allowed() or not _exists(ORIGINALS_ROOT):
         return []
     app = _app_folders()
     found = []
@@ -222,7 +235,7 @@ def temp_files() -> list:
     frames = tmp / "reviewer_frames"
     if frames.exists():
         out += [p for p in frames.glob("*.jpg")]
-    if ORIGINALS_ROOT.exists():
+    if _exists(ORIGINALS_ROOT):
         out += [p for p in ORIGINALS_ROOT.rglob("*.part")]
     day_ago = time.time() - 86400
     for p in tmp.glob("tmp*"):

@@ -574,5 +574,9 @@ def push_directory_to_drive(local_dir: Path, drive_subfolder: str,
 
 
 def credentials_available() -> bool:
-    """Check if the service account credentials file exists."""
-    return Path(CREDENTIALS_PATH).exists()
+    """Check if the service account credentials file exists (False when it
+    can't be checked, e.g. /root isn't readable by this user)."""
+    try:
+        return Path(CREDENTIALS_PATH).exists()
+    except OSError:
+        return False
