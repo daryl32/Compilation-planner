@@ -49,7 +49,7 @@ from core.autotune import AUDIO_STYLES, AUDIO_STYLE_CUSTOM
 import core.targets as CTGT
 import core.cut_edits as CED
 import core.matching as CMATCH
-from core.matching import prefer_role, widen_for_repeat_rule, cand_key, why_key
+from core.matching import prefer_role, widen_for_repeat_rule, cand_key, why_key, format_mmss
 from cut_editor import cut_editor as _cut_editor_widget, media_url as _media_url
 from core.shape import SHAPE_MATCH_POINTS, resample_curve, shape_score, get_block_audio_curve
 from core.footage import (_tc_to_seconds, _overlap_with_range, get_candidate_spans, has_role, role_supply,
@@ -188,13 +188,6 @@ def seconds_to_time(sec: float) -> datetime.time:
 
 def time_to_seconds(t: datetime.time) -> float:
     return t.hour * 3600 + t.minute * 60 + t.second
-
-
-def format_mmss(sec: float) -> str:
-    sec = max(0, int(round(sec)))
-    h, rem = divmod(sec, 3600)
-    m, s = divmod(rem, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
 def find_best_motion_window(video_id: str, window_len: float) -> tuple:
@@ -356,46 +349,7 @@ def match_scenes_to_track(*args, **kwargs) -> tuple:
     return CMATCH.match_scenes_to_track(*args, ctx=plan_context(), **kwargs)
 
 
-
-
-
-
-
-
-
-
-
-
-# ---------------------------------------------------------------------------
-# Advanced Shape Matching: compare a candidate clip's frame-by-frame motion
-# curve to a block's audio energy curve, point for point, rather than a
-# single motion-vs-intensity average. Needs the per-scene motion_curve field
-# from cell3_updated.py's compute_motion_curve (run backfill_motion_curve.py
-# in Colab to add it to catalogues processed before this feature existed).
-# ---------------------------------------------------------------------------
-
-# (A per-position search-step constant used to live here — the search is now vectorized and
-#  exhaustive, checking every frame position at once, so the speed/precision compromise it existed
-#  for is gone; see find_best_shape_window.)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 WHY_KEY = "autofill_why"
-
-
-
-
 
 
 def flash_repeat_fallback(blocks: list) -> None:
@@ -419,10 +373,6 @@ def show_repeat_fallback_flash() -> None:
         st.warning(msg)
         if hasattr(st, "toast"):
             st.toast(msg, icon="🔁")
-
-
-
-
 
 
 @fragment
@@ -989,7 +939,6 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
 # ✨ More like this — similar videos, similar clips, swap for similar
 # (similarity.py does the scoring: tags + movement, no AI model)
 # ---------------------------------------------------------------------------
-
 
 
 def _clip_curve(video_id: str, scene_id: int, offset_sec: float, duration_sec: float):
@@ -2747,14 +2696,6 @@ def clips_for_intensity(intensity: float, min_clips: int, max_clips: int,
 def allowed_clip_count(n: int, min_clips: int, max_clips: int) -> int:
     """core.segmentation.allowed_clip_count with the 'Skip these counts' setting."""
     return CSEG.allowed_clip_count(n, min_clips, max_clips, skip=st.session_state.get("clip_count_skip"))
-
-
-
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------

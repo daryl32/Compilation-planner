@@ -42,7 +42,7 @@ class PlanContext:
     time_ranges: dict | Callable = field(default_factory=dict)  # {video_id: (start, end)} (or a function giving it)
     duration_of: Callable = lambda _vid: 0.0                  # video length in seconds
     curves_of: Callable = lambda _vid: {}                     # {scene_id: {"fps", "values"}} per video
-    catalogue_dir: Path | None = None            # for the per-second motion summaries (autofill)
+    catalogue_dir: Path | None = None            # per-second motion summaries (autofill); None = without them
     why_store: dict | Callable | None = None     # 🔎 Why these picks? — filled in when given (dict or function)
     role_chips: Callable = lambda _c: ""         # how a clip's roles are written in labels
 
@@ -436,7 +436,8 @@ def _rank_v2(candidates, current_block, segments, confirmed, queues, prev_block_
         avoid_repeat=avoid_repeat, seed=random_seed, position_targets=position_targets,
         position_score=lambda c: position_closeness(c, position_targets or {}, seg_dur),
         random_unit=_stable_random_unit, motion_scale=AF.MotionScale(queues),
-        window_motion_of=lambda vid, a, b: AF.window_motion(AF.summary_for(pctx.catalogue_dir, vid), a, b),
+        window_motion_of=lambda vid, a, b: (AF.window_motion(AF.summary_for(pctx.catalogue_dir, vid), a, b)
+                                         if pctx.catalogue_dir is not None else None),
     )
     store = pctx.why_store() if callable(pctx.why_store) else pctx.why_store
     if store is None:
