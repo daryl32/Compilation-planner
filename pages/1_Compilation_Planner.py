@@ -480,7 +480,7 @@ def find_shape_candidates(
             "window_duration_sec": block_duration,
             "score": round(best_score, 3),
             "motion_norm": span["motion_norm"],
-            "curve_slice": values[best_start_frame:best_start_frame + window_frames],
+            "curve_slice": np.array(values[best_start_frame:best_start_frame + window_frames]),  # own copy — not tied to the curve cache's file
             "fps": fps,
             "tags": span["tags"],
             "thumbnail": span["thumbnail"],
@@ -1342,7 +1342,7 @@ def _clip_curve(video_id: str, scene_id: int, offset_sec: float, duration_sec: f
     vals = np.asarray(curve["values"], dtype=float)
     a = int(round(offset_sec * fps))
     b = a + max(1, int(round(duration_sec * fps)))
-    return vals[a:b], fps
+    return np.array(vals[a:b]), fps      # own copy — not tied to the curve cache's file
 
 
 @shared_cache

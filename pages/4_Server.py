@@ -100,6 +100,7 @@ render_diagnostics()
 # 🧪 Test copy only: compare this code's cutting & matching with the live app's
 # ---------------------------------------------------------------------------
 def render_parity_check() -> None:
+    import os
     import subprocess
     import sys
     from pathlib import Path
@@ -115,30 +116,43 @@ def render_parity_check() -> None:
                    "copy's code and with the live app's code, on this copy's data, and checks the results are "
                    "identical. Use it before pushing a change that shouldn't alter results. Takes a few minutes "
                    "and uses the CPU while it runs.")
-        running = st.session_state.get("_parity_pid")
+        pid_file = data / "logs" / "parity.pid"
+        running = None
+        try:
+            pid = int(pid_file.read_text())
+            os.kill(pid, 0)                     # still running? (any page, any session)
+            try:                                # finished but not yet reaped → done
+                if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                    raise ProcessLookupError
+            except ChildProcessError:
+                pass                            # not our child — another page started it
+            if "Z" in Path(f"/proc/{pid}/stat").read_text().split(")")[-1].split()[:1]:
+                raise ProcessLookupError
+            running = pid
+        except (OSError, ValueError, IndexError):
+            pass
         if running:
-            try:
-                os_done = subprocess.run(["kill", "-0", str(running)], capture_output=True).returncode != 0
-            except Exception:
-                os_done = True
-            if not os_done:
-                st.info("⏳ Running… press 🔄 to check.")
-                if st.button("🔄 Check again"):
-                    st.rerun()
-            else:
-                st.session_state.pop("_parity_pid", None)
+            st.info("⏳ Running — this takes a few minutes. Press 🔄 to check.")
+            if st.button("🔄 Check again"):
+                st.rerun()
+            st.caption("A restart or idle shut-down of this test copy stops it — run it again if so.")
+            return
         if not live.exists():
             st.caption(f"The live app's code isn't at {live} (set LIVE_REPO_DIR in config.py).")
-        elif not st.session_state.get("_parity_pid") and st.button("▶️ Run the comparison"):
+        elif st.button("▶️ Run the comparison"):
             log.parent.mkdir(parents=True, exist_ok=True)
+            report.unlink(missing_ok=True)
             with open(log, "w") as f:
                 proc = subprocess.Popen([sys.executable, str(here / "deploy" / "check_parity.py"), str(live),
                                          str(here), "--data", str(data)],
                                         stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
-            st.session_state["_parity_pid"] = proc.pid
+            pid_file.write_text(str(proc.pid))
             st.rerun()
         if report.exists():
             st.code(report.read_text(), language=None)
+        elif log.exists() and log.stat().st_size:
+            st.error("The last comparison stopped without a report. Its output:")
+            st.code(log.read_text()[-3000:], language=None)
 
 
 if LC.IS_TEST:

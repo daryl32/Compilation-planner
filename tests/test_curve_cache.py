@@ -37,7 +37,8 @@ def test_second_load_uses_cache_and_rebuilds_on_change(tmp_path):
     f = tmp_path / "v2.json"
     _write(f, cat)
     CC.load(f, tmp_path / "c")
-    npy = tmp_path / "c" / "v2.npy"
+    data_name = lambda: json.loads((tmp_path / "c" / "v2.idx.json").read_text())["data"]  # noqa: E731
+    npy = tmp_path / "c" / data_name()
     m1 = npy.stat().st_mtime_ns
     CC.load(f, tmp_path / "c")
     assert npy.stat().st_mtime_ns == m1                       # reused
@@ -45,6 +46,30 @@ def test_second_load_uses_cache_and_rebuilds_on_change(tmp_path):
     _write(f, cat)
     got = CC.load(f, tmp_path / "c")
     assert list(got[0]["values"]) == [9.0, 8.0, 7.0]           # rebuilt
+    assert data_name() != npy.name and not npy.exists()       # new data file, old one removed
+    assert len(list((tmp_path / "c").glob("*.npy"))) == 1
+
+
+@pytest.mark.parametrize("damage", ["garbage", "bad_scenes", "out_of_range", "missing_data"])
+def test_damaged_cache_rebuilds(tmp_path, damage):
+    cat = make_video(26, "v6", 4)
+    f = tmp_path / "v6.json"
+    _write(f, cat)
+    CC.load(f, tmp_path / "c")
+    idx = tmp_path / "c" / "v6.idx.json"
+    meta = json.loads(idx.read_text())
+    if damage == "garbage":
+        idx.write_text("{not json")
+    elif damage == "bad_scenes":
+        meta["scenes"] = [[0, 10]]
+        idx.write_text(json.dumps(meta))
+    elif damage == "out_of_range":
+        meta["scenes"][0][2] = 10 ** 9
+        idx.write_text(json.dumps(meta))
+    else:
+        (tmp_path / "c" / meta["data"]).unlink()
+    got = CC.load(f, tmp_path / "c")
+    assert np.array_equal(got[0]["values"], np.asarray(cat["scenes"][0]["motion_curve"]["values"]))
 
 
 def test_scene_ids_keep_their_type_and_missing_curves(tmp_path):

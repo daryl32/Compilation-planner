@@ -26,13 +26,17 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+PROC = Path("/proc")
+
 from config import CATALOGUE_DIR
 
 LOG_DIR = CATALOGUE_DIR.parent / "logs"
+# Timings are only logged on the server: on the laptop LOG_DIR is inside Google
+# Drive, and a file that changes on every page run must never sync.
+TIMINGS_ENABLED = os.name != "nt" and PROC.exists()
 MEMORY_LOG = LOG_DIR / "memory.csv"
 TIMINGS_LOG = LOG_DIR / "timings.csv"
 _TIMINGS_MAX_BYTES = 2_000_000
-PROC = Path("/proc")
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +174,10 @@ _lock = threading.Lock()
 
 
 def record(step: str, seconds: float, detail: str = "", path: Path = None) -> None:
-    """Append one timing. Never raises — timing must not break a page."""
+    """Append one timing. Never raises — timing must not break a page. Does
+    nothing off the server (see TIMINGS_ENABLED) unless a path is given."""
+    if path is None and not TIMINGS_ENABLED:
+        return
     path = path or TIMINGS_LOG
     try:
         with _lock:
