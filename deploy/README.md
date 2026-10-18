@@ -14,8 +14,10 @@ A push to `main` deploys production; a push to `dev` deploys the test copy
 (`/root/webhook.py`, from `deploy/webhook.py`). Other branches are ignored.
 
 ## Workflow
-1. Commit to `dev` → test at the dev address.
-2. Happy → merge `dev` into `main` → production updates.
+1. Commit to `dev` → test at the dev address. GitHub runs the tests (`tests/`) on the push.
+2. For changes that shouldn't alter results: Server page → 🧪 *Same results as the live app?* on the
+   test copy (or `python3 deploy/check_parity.py` as root) compares both copies' code on real data.
+3. Happy → merge `dev` into `main` → production updates.
 
 ## Scripts (run on the server as root)
 - `setup_switch.sh` — one-time setup of the sidebar's **🔀 Live / test copy** switch:

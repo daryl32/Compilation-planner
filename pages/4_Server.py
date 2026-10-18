@@ -95,6 +95,55 @@ def render_diagnostics() -> None:
 
 render_diagnostics()
 
+
+# ---------------------------------------------------------------------------
+# 🧪 Test copy only: compare this code's cutting & matching with the live app's
+# ---------------------------------------------------------------------------
+def render_parity_check() -> None:
+    import subprocess
+    import sys
+    from pathlib import Path
+    import config
+    here = Path(__file__).resolve().parents[1]
+    live = Path(getattr(config, "LIVE_REPO_DIR", "/root/Compilation-planner"))
+    data = LC.CATALOGUE_DIR.parent
+    report = data / "logs" / "parity_report.txt"
+    log = data / "logs" / "parity_run.log"
+    st.subheader("🧪 Same results as the live app?")
+    with st.container(border=True):
+        st.caption("Cuts every track with all four methods, runs 🎯 Auto-detect and Auto matching with THIS "
+                   "copy's code and with the live app's code, on this copy's data, and checks the results are "
+                   "identical. Use it before pushing a change that shouldn't alter results. Takes a few minutes "
+                   "and uses the CPU while it runs.")
+        running = st.session_state.get("_parity_pid")
+        if running:
+            try:
+                os_done = subprocess.run(["kill", "-0", str(running)], capture_output=True).returncode != 0
+            except Exception:
+                os_done = True
+            if not os_done:
+                st.info("⏳ Running… press 🔄 to check.")
+                if st.button("🔄 Check again"):
+                    st.rerun()
+            else:
+                st.session_state.pop("_parity_pid", None)
+        if not live.exists():
+            st.caption(f"The live app's code isn't at {live} (set LIVE_REPO_DIR in config.py).")
+        elif not st.session_state.get("_parity_pid") and st.button("▶️ Run the comparison"):
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with open(log, "w") as f:
+                proc = subprocess.Popen([sys.executable, str(here / "deploy" / "check_parity.py"), str(live),
+                                         str(here), "--data", str(data)],
+                                        stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+            st.session_state["_parity_pid"] = proc.pid
+            st.rerun()
+        if report.exists():
+            st.code(report.read_text(), language=None)
+
+
+if LC.IS_TEST:
+    render_parity_check()
+
 # ---------------------------------------------------------------------------
 # Memory
 # ---------------------------------------------------------------------------
