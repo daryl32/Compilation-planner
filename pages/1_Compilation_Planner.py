@@ -3091,6 +3091,7 @@ def _apply_project_load_dict(data: dict) -> list:
     for k in PROJECT_SIMPLE_KEYS:
         if k in data:
             st.session_state[k] = data[k]
+    st.session_state.pop("role_clips_mode", None)       # worked out again from the project's own settings
     if "cut_edits" not in data:
         st.session_state.pop("cut_edits", None)       # a project without hand edits
     _bump_cut_edit_rev()                               # the ✂️ editor reloads its cuts
@@ -3692,7 +3693,19 @@ ensure_audio_profile(load_track(track_id), track_id)
 # saved projects / the recovery file) whichever step you're on. Everything else
 # reads them from session_state, never from the widget's return value.
 # ---------------------------------------------------------------------------
+# 🎭 Role clips: one 3-way control for the two settings underneath (they stay in projects as they were).
+ROLE_CLIP_MODES = {"anywhere": "Anywhere", "saved": "Saved for their parts", "only": "Only in their parts"}
+_ROLE_CLIP_SETTINGS = {"anywhere": (False, False), "saved": (True, False), "only": (True, True)}
+if st.session_state.get("role_clips_mode") in _ROLE_CLIP_SETTINGS:
+    st.session_state["story_reserve"], st.session_state["intro_outro_exclusive"] = \
+        _ROLE_CLIP_SETTINGS[st.session_state["role_clips_mode"]]
+else:
+    st.session_state["role_clips_mode"] = (
+        "only" if st.session_state.get("intro_outro_exclusive") else
+        "saved" if st.session_state.get("story_reserve", True) else "anywhere")
+
 STEP_WIDGET_KEYS = [
+    "role_clips_mode",
     "matching_mode", "max_shape_matches", "max_chor_videos", "prefer_intro_outro", "intro_outro_exclusive",
     "sequential_mode", "allow_same_video", "use_story_map", "story_reserve",
     "split_screen_enabled", "min_clips", "max_clips", "clip_count_skip", "ramp_range", "density_contrast",
@@ -3777,25 +3790,28 @@ def render_matching_mode_settings() -> None:
     c = st.columns(3)
     c[0].toggle("Keep each video's clips in order", key="sequential_mode",
                 help="A video's scenes are only ever used in their original chronological order (the VSE "
-                     "add-on's 'Keep Sequential Order') — other videos can still interleave around them.")
-    c[1].toggle("Allow one video twice in a split-screen block", key="allow_same_video",
-                help="Lets a split-screen block use more than one clip from the same video.")
+                     "add-on's 'Keep Sequential Order') — other videos can still interleave around them. "
+                     "How far a pick may move through each video: ⚖️ Auto-fill weights → Move through each "
+                     "video in order (shown once this is applied).")
+    if st.session_state.get("split_screen_enabled"):
+        c[1].toggle("Allow one video twice in a split-screen block", key="allow_same_video",
+                    help="Lets a split-screen block use more than one clip from the same video.")
     has_map = bool(current_story_map(st.session_state.get("track_id")))
-    sc = st.columns(3)
+    roles_in_play = (has_map and st.session_state.get("use_story_map", True)) or st.session_state.get("prefer_intro_outro")
+    sc = st.columns([1, 2])
     sc[0].toggle("🎭 Use the story map", key="use_story_map", disabled=not has_map,
                  help="Each block prefers clips marked with its story map part's role (🎬 Intro, 🌙 Slow, "
                       "💥 Action, 🏁 Outro, your own) — falling back to normal picks where a video has none. "
-                      "In order (sequential) mode a role clip is only taken within the normal skip allowance."
+                      "While it's on it decides every block's role, so the 🎬 Intro / Outro tab isn't used."
                       + ("" if has_map else " This track has no story map yet (🎭 1. Story map)."))
-    sc[1].toggle("Keep role clips for their parts", key="story_reserve", disabled=not has_map,
-                 help="Automatic picks outside a role's parts avoid clips marked with that role, so they're "
-                      "still there when their part comes — unless nothing else is left.")
-    if has_map and st.session_state.get("use_story_map", True):
-        sc[2].caption("🎭 The story map sets each block's role — the Intro / Outro tab isn't used.")
-    c[2].toggle("Prefer Intro/Outro-tagged clips", key="prefer_intro_outro",
-                help="Intro/Outro blocks (🎬 Intro/Outro tab — default: first and last block) draw from a "
-                     "video's clips marked Intro / Outro in the Reviewer, for videos that have any; a video "
-                     "with none offers its normal clips there.")
+    sc[1].radio("Role clips", list(ROLE_CLIP_MODES), key="role_clips_mode", horizontal=True,
+                format_func=ROLE_CLIP_MODES.get, disabled=not roles_in_play,
+                help="How strictly clips marked with a role (by the story map, or Intro / Outro) stay in their "
+                     "own parts.  Anywhere: they're preferred in their parts but free to be used elsewhere.  "
+                     "Saved for their parts: automatic picks elsewhere avoid them, so they're still there when "
+                     "their part comes — unless nothing else is left (story map only).  Only in their parts: a "
+                     "hard rule in every mode, even what you pick by hand; in such a part a video with clips of "
+                     "that role offers only those (even out of order in sequential mode).")
 
 
 # ---------------------------------------------------------------------------
@@ -4101,13 +4117,15 @@ with _mt[1]:
         "Controls Auto-fill's automatic picks only — the candidate grid stays sorted by raw shape score for "
         "manual browsing.")
     _hc = st.columns([2, 3])
-    _v2 = _hc[0].toggle(
-        "✨ Improved auto-fill", key="autofill_v2", disabled=_autofill_disabled,
-        help="On: weights are compared on the same scale (each slider is a share of the decision), "
-             "motion is matched for the exact part of the scene used on a fairer scale, balance "
-             "uses each video's fair share, Variety picks among the best few, and Auto mode fills "
-             "intro/outro and the most intense blocks first (except in sequential mode). "
-             "Off: the original scoring, to compare.")
+    _v2 = bool(st.session_state.get("autofill_v2", True))
+    if not _v2:
+        # Always on now; only a project saved with it off shows the switch, so it can be turned back on.
+        _v2 = _hc[0].toggle(
+            "✨ Improved auto-fill", key="autofill_v2", disabled=_autofill_disabled,
+            help="This project was saved with the original scoring. On: weights are compared on the same "
+                 "scale (each slider is a share of the decision), motion is matched for the exact part of the "
+                 "scene used, balance uses each video's fair share, Variety picks among the best few, and Auto "
+                 "mode fills intro/outro and the most intense blocks first (except in sequential mode).")
     _hc[1].selectbox(
         "Preset", list(AF.PRESETS) + [_PRESET_CUSTOM], key="autofill_preset",
         disabled=_autofill_disabled,
@@ -4133,14 +4151,6 @@ with _mt[1]:
         st.toggle("Never repeat the previous block's videos", key="avoid_repeat", disabled=_autofill_disabled,
                   help="(C) A hard rule: automatic picks never reuse a video from the neighbouring "
                        "block unless no other video has footage for that spot (you'll be warned).")
-        st.toggle("Role clips only in their blocks", key="intro_outro_exclusive",
-                  disabled=not (prefer_intro_outro or (_story_regions_now := bool(
-                      current_story_map(track_id))) and st.session_state.get("use_story_map", True)),
-                  help="A hard rule: clips marked with a role in use (the story map's roles, or Intro / Outro) "
-                       "are only used in blocks of that role — in every mode, including what you pick by hand. "
-                       "In such a block, a video that has clips with that role offers only those (even out of "
-                       "order in sequential mode). Videos with no marked clips aren't affected. Needs the story "
-                       "map or 'Prefer Intro/Outro-tagged clips' on (🎛️ Mode & order).")
     with _wt_cols[2]:
         if sequential_mode:
             st.slider("Move through each video in order", 0.0, 5.0, step=0.1, key="weight_position",
@@ -4153,12 +4163,10 @@ with _mt[1]:
                   help="(B) 0 = always the top-scoring clip. Higher = picks more often from the next "
                        "best few instead, for variety (Improved auto-fill), or adds random noise "
                        "(original scoring). Reproducible — the same seed gives the same picks.")
-        _rc = st.columns([3, 2])
-        _rc[0].number_input("Seed", 0, 99999, key="autofill_seed", disabled=_autofill_disabled,
-                            help="Change to reroll Variety without touching anything else.")
-        _rc[1].form_submit_button("🎲 Reroll", on_click=_reroll_and_match, disabled=_autofill_disabled,
-                                  use_container_width=True,
-                                  help="Next seed — a different draw with the same settings (and matches).")
+        st.form_submit_button("🎲 Reroll", on_click=_reroll_and_match, disabled=_autofill_disabled,
+                              use_container_width=True,
+                              help=f"A different Variety draw with the same settings — and matches straight away "
+                                   f"(draw {int(st.session_state.get('autofill_seed', 42))}).")
 
 # Save weight values to their shadow copy every time this section renders —
 # mirrors audio_settings_shadow so values survive switching to another section.
@@ -4255,13 +4263,16 @@ def story_tag(i: int) -> str:
 # ---------------------------------------------------------------------------
 intro_blocks_0based: set = set()
 outro_blocks_0based: set = set()
-if _story_regions and st.session_state.get("use_story_map", True):
-    _mt[2].caption("🎭 The story map is setting each block's role (🎛️ Mode & order → Use the story map), so "
-                   "these Intro / Outro blocks aren't used.")
-elif not st.session_state.get("prefer_intro_outro"):
-    _mt[2].caption("Turn on **Prefer Intro/Outro-tagged clips** (🎛️ Mode & order) to choose which blocks use the "
-                   "clips marked Intro / Outro in the Reviewer.")
-if st.session_state.get("prefer_intro_outro"):
+_story_rules = bool(_story_regions) and bool(st.session_state.get("use_story_map", True))
+with _mt[2]:
+    st.toggle("Prefer Intro/Outro-tagged clips", key="prefer_intro_outro", disabled=_story_rules,
+              help="For tracks without a story map (or with it off): the blocks you choose below draw from "
+                   "each video's clips marked Intro / Outro in the Reviewer, where a video has any; a video "
+                   "with none offers its normal clips there.")
+    if _story_rules:
+        st.caption("🎭 The story map is in charge of every block's role, its Intro and Outro parts included — "
+                   "these settings aren't used while it's on (🎛️ Mode & order → Use the story map).")
+if st.session_state.get("prefer_intro_outro") and not _story_rules:
     with _mt[2]:
         st.caption("Which block(s) draw from each video's intro/outro-tagged clips (tag scenes in "
                    "app.py). Add blocks alongside the defaults, or remove a default and pick others "

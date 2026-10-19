@@ -178,3 +178,40 @@ def test_changed_videos_keep_the_old_plan_until_apply():
     assert any(b.label == "💾 Save plan" for b in at.button)
     used = {c["video_id"] for e in at.session_state["_auto_plan_cache"]["result"][0] for c in e["scenes"]}
     assert used <= {"vid_a", "vid_b"}
+
+
+def test_matching_controls_cleanup():
+    """One 'Role clips' control for the two role settings; Reroll without a Seed box; Improved auto-fill
+    only shown on a project saved with it off; the split-screen option only with split screen on; the
+    Intro / Outro tab owns its toggle and says when the story map is in charge."""
+    from tests.apptest_util import errors, press_match
+    at = _matching_app()
+    assert not errors(at), errors(at)
+    assert at.radio(key="role_clips_mode").disabled               # no story map, Intro / Outro off: no role clips
+    at.session_state["prefer_intro_outro"] = True
+    at.run()
+    keys = {w.key for w in at.toggle}
+    assert "autofill_v2" not in keys and "intro_outro_exclusive" not in keys and "story_reserve" not in keys
+    assert "allow_same_video" not in keys                         # split screen is off
+    assert not any(w.key == "autofill_seed" for w in at.number_input)
+    assert any(b.label == "🎲 Reroll" for b in at.button)
+    assert at.radio(key="role_clips_mode").value == "saved"       # the defaults: reserve on, strict off
+    at.radio(key="role_clips_mode").set_value("only")
+    assert press_match(at) and not errors(at), errors(at)
+    assert at.session_state["intro_outro_exclusive"] is True and at.session_state["story_reserve"] is True
+    at.radio(key="role_clips_mode").set_value("anywhere")
+    assert press_match(at) and not errors(at), errors(at)
+    assert at.session_state["intro_outro_exclusive"] is False and at.session_state["story_reserve"] is False
+    # 🎬 Intro / Outro: the toggle lives here (no story map on this track, so it's usable)
+    assert not at.toggle(key="prefer_intro_outro").disabled
+
+
+def test_old_project_settings_show_through():
+    from tests.apptest_util import errors
+    at = _matching_app()
+    at.session_state["autofill_v2"] = False                       # a project saved with the original scoring
+    at.session_state["split_screen_enabled"] = True
+    at.run()
+    assert not errors(at), errors(at)
+    keys = {w.key for w in at.toggle}
+    assert "autofill_v2" in keys and "allow_same_video" in keys
