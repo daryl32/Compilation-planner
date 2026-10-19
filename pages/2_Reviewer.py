@@ -334,7 +334,12 @@ def video_paths() -> list:
         paths.append(Path(colab_to_local(data.get("source_path", ""))))
     except Exception:
         pass
-    return [p for p in paths if p and Path(p).exists()]
+    def _here(p) -> bool:
+        try:
+            return bool(p) and Path(p).exists()
+        except OSError:          # e.g. a folder this process can't read
+            return False
+    return [p for p in paths if _here(p)]
 
 
 # ⭐ Master thumbnail — the picture used for this video in the Media Library
