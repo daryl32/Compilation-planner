@@ -111,8 +111,12 @@ def page_plans(actors_tagged):
     return _run_page(False)
 
 
+def _data(at, sequential=False):
+    return at.session_state["rec_results"][("song_full", 3, sequential)]
+
+
 def _results(at, sequential=False):
-    return at.session_state["rec_results"][("song_full", sequential)]["results"]
+    return _data(at, sequential)["results"]
 
 
 def test_page_finds_five_plans(page_plans):
@@ -150,25 +154,24 @@ def test_page_finds_five_plans(page_plans):
     a, b = (set(x.lower() for x in ACTORS[vid]) for vid in v["videos"])
     assert not (a & b), v["videos"]
     assert v["style"] not in {plans[m]["style"] for m in ("shape", "story", "overall")}
-    assert sum(b.label == "🎬 Open" for b in at.button) == 5
+    assert sum(1 for b in at.button if (b.key or "").startswith("open_song_full_")) == 5
 
 
 def test_results_kept_on_disk(page_plans):
-    files = list(DATA.glob("**/recommendations/*.json"))
-    assert files, "no saved recommendations"
-    data = [json.loads(f.read_text()) for f in files]
-    assert any(d.get("track_id") == "song_full" and len(d.get("results") or []) == 5 for d in data)
+    import rec_library as RL
+    data = RL.load_results("song_full", 3, False)
+    assert data and len(data["results"]) == 5 and data["insights"]["videos"]
 
 
 def test_wildcard_rolls_again(page_plans):
     at = page_plans
     before = [r["plan"] for r in _results(at)]
-    seed = at.session_state["rec_results"][("song_full", False)]["seed"]
+    seed = _data(at)["seed"]
     [b for b in at.button if b.label == "🎲 Roll again"][0].click().run()
     from tests.apptest_util import errors
     assert not errors(at), errors(at)
     after = [r["plan"] for r in _results(at)]
-    assert at.session_state["rec_results"][("song_full", False)]["seed"] == seed + 1
+    assert _data(at)["seed"] == seed + 1
     assert after[:4] == before[:4]                         # only the wildcard changes
     assert after[4]["mode"] == "wildcard"
 
@@ -204,9 +207,7 @@ def _check_opens(at, sequential=False, modes=None):
             continue
         at.session_state["_open_recommended_plan"] = None
         at.run()                                # a full page again (the last run stopped at switch_page)
-        buttons = [b for b in at.button if b.label == "🎬 Open"]
-        assert len(buttons) == sum(1 for x in results if x["plan"])
-        buttons[[x["mode"] for x in results if x["plan"]].index(r["mode"])].click().run()
+        [b for b in at.button if b.key == f"open_song_full_{r['mode']}"][0].click().run()
         opened = at.session_state["_open_recommended_plan"]   # AppTest can't follow st.switch_page
         assert opened["track_id"] == "song_full" and opened["videos"] == r["plan"]["videos"]
         assert _open_and_export(opened) == r["plan"]["picks"], (r["mode"], r["plan"]["variant"])

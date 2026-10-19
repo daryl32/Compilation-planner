@@ -26,7 +26,7 @@ A push to `main` deploys production; a push to `dev` deploys the test copy
   a switched-off copy shows a page with links instead of 502 (safe to re-run).
 - `setup_dev.sh` — one-time setup of the test copy (safe to re-run).
 - `refresh_dev_data.sh` — replace the test copy's data with a fresh copy of production's.
-- `install_timers.sh` — production's Drive sync and nightly preview-copy timers.
+- `install_timers.sh` — production's Drive sync, nightly preview-copy and nightly 🔮 recommendation-search timers.
 
 ## Handy commands
 ```

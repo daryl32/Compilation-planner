@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Installs two systemd timers on the server (run once, as root):
+# Installs three systemd timers on the server (run once, as root; safe to re-run):
 #   mediaplanner-sync     — Drive → server sync every 12 hours (auto_sync.py)
 #   mediaplanner-proxies  — nightly fast-preview copies at 03:30 (make_proxies.py)
+#   mediaplanner-recs     — nightly 🔮 recommendation searches at 04:45, only what's changed (jobs.py)
 #
 #   sudo bash /root/Compilation-planner/deploy/install_timers.sh
 #
@@ -74,8 +75,33 @@ Persistent=true
 WantedBy=timers.target
 UNIT
 
+cat > /etc/systemd/system/mediaplanner-recs.service <<UNIT
+[Unit]
+Description=Media Planner: nightly recommendation searches (only what's changed)
+
+[Service]
+Type=oneshot
+WorkingDirectory=$APP_DIR
+ExecStart=$PYTHON $APP_DIR/jobs.py --nightly
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=6h
+UNIT
+
+cat > /etc/systemd/system/mediaplanner-recs.timer <<UNIT
+[Unit]
+Description=Media Planner: nightly recommendation searches
+
+[Timer]
+OnCalendar=*-*-* 04:45
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
 systemctl daemon-reload
-systemctl enable --now mediaplanner-sync.timer mediaplanner-proxies.timer
+systemctl enable --now mediaplanner-sync.timer mediaplanner-proxies.timer mediaplanner-recs.timer
 systemctl start mediaplanner-sync.service || true
 echo
 systemctl list-timers 'mediaplanner-*' --no-pager
