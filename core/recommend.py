@@ -15,8 +15,9 @@ How it works
   1. Fingerprint every video (once, cached by the page): every window of every
      scene at a ladder of lengths (0.75 s … 20 s), each one's motion SHAPE
      (24 points, z-scored) and motion LEVEL (0–1 for the video).
-  2. Cut the track in every cutting style (core/styles.py; Smart also calmer and
-     busier) and fingerprint each block the same way from the music energy.
+  2. Cut the track: 📐 / 🎭 / 🏆 all use Smart at normal pace; 🥊 Verses searches the
+     other cutting styles (core/styles.py); fingerprint each block the same way
+     from the music energy.
   3. Score every video against every block (best window of the nearest length):
      shape = correlation, level = 1 − |motion level − block intensity|; story =
      how much of the song's need for each role the videos' role footage covers.
@@ -362,7 +363,7 @@ def score_timeline(track: dict, segments: list, timeline: list, weights: list, p
     picks don't carry them); with any, Overall = ⅓ shape + ⅓ motion + ⅓ story (else ½ + ½)."""
     block_roles = block_roles or [None] * len(segments)
     roles_of = roles_of or (lambda _v, _s: ())
-    shape, inten, comb, story = [], [], [], []
+    shape, inten, comb, story, per_story = [], [], [], [], []
     for sg, entry, role in zip(segments, timeline, block_roles):
         slots = entry.get("scenes") or []
         if not slots:
@@ -371,6 +372,7 @@ def score_timeline(track: dict, segments: list, timeline: list, weights: list, p
             comb.append(0.0)
             if role:
                 story.append(0.0)
+            per_story.append(0.0 if role else None)
             continue
         p = slots[0]["chain"][0]
         c = curves_of(p["video_id"]).get(p["scene_id"])
@@ -389,8 +391,10 @@ def score_timeline(track: dict, segments: list, timeline: list, weights: list, p
         if role:
             st = 1.0 if role in (roles_of(p["video_id"], p["scene_id"]) or ()) else 0.0
             story.append(st)
+            per_story.append(100.0 * st)
             comb.append((sh + it + st) / 3)
         else:
+            per_story.append(None)
             comb.append(0.5 * sh + 0.5 * it)
     w = np.asarray(weights, dtype=float)
     shape_pct = 100 * float(np.mean(shape)) if shape else 0.0
@@ -403,7 +407,9 @@ def score_timeline(track: dict, segments: list, timeline: list, weights: list, p
             "intensity": round(inten_pct, 1), "story": None if story_pct is None else round(story_pct, 1),
             "action": round(100 * float(np.mean(act)), 1) if act else None,
             "weakest_block": weakest, "weakest": round(100 * comb[weakest], 1) if comb else None,
-            "per_block": [round(100 * x, 1) for x in comb], "action_blocks": [i for i, x in enumerate(weights) if x > 1.0],
+            "per_block": [round(100 * x, 1) for x in comb],
+            "per_block_shape": [round(100 * x, 1) for x in shape],
+            "per_block_story": per_story, "action_blocks": [i for i, x in enumerate(weights) if x > 1.0],
             "story_blocks": [i for i, r in enumerate(block_roles) if r]}
 
 
@@ -420,7 +426,8 @@ MODES = [
      "The best balance of shape + motion + story — then fine-tuned by swapping videos while the real matcher "
      "keeps scoring it higher."),
     ("verses",   "🥊 Verses",
-     "Two similar videos with different actors, head to head — in a cutting style none of the top three use."),
+     "Two similar videos with different actors, head to head — in a cutting style other than the top three's "
+     "🧠 Smart."),
     ("wildcard", "🎲 Wildcard",
      "A random cutting style and random videos, matched as well as they can be (shape + motion + story)."),
 ]
@@ -428,9 +435,10 @@ MODE_IDS = [m[0] for m in MODES]
 MODE_LABELS = {m[0]: m[1] for m in MODES}
 MODE_HELP = {m[0]: m[2] for m in MODES}
 
-# Every cutting style at normal pace, plus Smart one step calmer and busier.
-VARIANTS = [("smart", -1), ("smart", 0), ("smart", 1), ("cinematic", 0), ("beat", 0), ("energy", 0),
-            ("drop", 0), ("vocal", 0), ("hyper", 0)]
+# 📐 / 🎭 / 🏆 all use Smart at normal pace (so they compare like for like); 🥊 Verses picks
+# from the other styles (normal pace); 🎲 Wildcard rolls any style and pace.
+TOP_STYLE = ("smart", 0)
+VARIANTS = [TOP_STYLE, ("cinematic", 0), ("beat", 0), ("energy", 0), ("drop", 0), ("vocal", 0), ("hyper", 0)]
 CHECKS = {"shape": 4, "story": 4, "overall": 5}   # leading candidates run through the real matcher
 SWAP_BUDGET = 10                                  # Best overall: one-video swaps tried on the best plan
 VERSES_SEEDS = 3                                  # Verses: top picks tried
@@ -487,12 +495,14 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
                             "timeline": timeline, "segments": v.segments, "_variant": v}
         return checked[key]
 
-    def candidates(mode: str, per_variant: int = 3) -> list:
+    top_v = by_key[TOP_STYLE]
+
+    def candidates(mode: str) -> list:
+        """The top three modes all use the one Smart cut (TOP_STYLE)."""
         out = []
-        for v in variants:
-            value_of, w = objective(v, mode, role_secs)
-            for plan in greedy_sets(vids, value_of, w, n_videos, per_variant):
-                out.append((plan["estimate"], v, plan["videos"]))
+        value_of, w = objective(top_v, mode, role_secs)
+        for plan in greedy_sets(vids, value_of, w, n_videos, max(CHECKS.values()) + 1):
+            out.append((plan["estimate"], top_v, plan["videos"]))
         out.sort(key=lambda c: -c[0])
         return out
 
@@ -519,12 +529,21 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
                 chosen[mode] = dict(p, mode=mode)
                 return
 
-    # 🏆 Best overall first (it has first claim on a plan), then fine-tune it with video swaps.
+    def is_taken(p) -> bool:
+        return (p["style"], p["pace"], tuple(p["videos"])) in taken
+
+    # 📐 and 🎭 claim their best plans first (each card leads with its own score), then
+    # 🏆 Best overall takes the best of the rest and fine-tunes it with video swaps.
+    shape_plans = run_mode("shape")
+    story_plans = run_mode("story") if story_on else []
     overall = run_mode("overall")
-    if overall:
-        best = overall[0]
+    take("shape", shape_plans)
+    if story_on:
+        take("story", story_plans)
+    free = [p for p in overall + story_plans + shape_plans if not is_taken(p)]
+    if free:
+        best = max(free, key=lambda p: p["scores"]["overall"])
         bv = best["_variant"]
-        vi = {vid: i for i, vid in enumerate(vids)}
         value_of, w = objective(bv, "overall", role_secs)
         alone = sorted(range(len(vids)), key=lambda k: -float(value_of([k]) @ w))
         pool = [vids[k] for k in alone if vids[k] not in best["videos"]]
@@ -538,17 +557,13 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
                     tick(f"{MODE_LABELS['overall']}: fine-tuning ({done + 1}/{SWAP_BUDGET})…")
                     trial = check(bv, [v for v in best["videos"] if v != out_v] + [in_v], "overall", best["estimate"])
                     done += 1
-                    if trial["scores"]["overall"] > best["scores"]["overall"] + 0.05:
+                    if not is_taken(trial) and trial["scores"]["overall"] > best["scores"]["overall"] + 0.05:
                         best, improved = trial, True
                         pool = [v for v in pool if v != in_v] + [out_v]
                         break
                 if improved or done >= SWAP_BUDGET:
                     break
-        overall = sorted({id(p): p for p in overall + [best]}.values(), key=lambda p: -p["scores"]["overall"])
-        take("overall", overall)
-    take("shape", run_mode("shape"))
-    if story_on:
-        take("story", run_mode("story"))
+        take("overall", [best])
 
     out = []
     for mode in ("shape", "story", "overall"):
@@ -587,7 +602,7 @@ def _verses(variants, vids, role_secs, actors, similar_of, top3, check, tick) ->
         return {"mode": "verses", "plan": None,
                 "note": "Verses needs videos tagged with at least two different actors — add them in the Reviewer "
                         "(🎬 Video details)."}
-    used_styles = {p["style"] for p in top3 if p}
+    used_styles = {p["style"] for p in top3 if p} | {TOP_STYLE[0]}
     styles = [v for v in variants if v.style not in used_styles] or variants
     # one variant per remaining style (normal pace first)
     seen, pick_from = set(), []

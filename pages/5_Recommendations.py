@@ -28,7 +28,7 @@ page_setup("Recommendations", "pages/5_Recommendations.py", title="🔮 Recommen
 
 RESULTS_DIR = curve_cache.default_cache_dir(CATALOGUE_DIR).parent / "recommendations"
 DEFAULT_VIDEOS = 4
-RESULTS_VERSION = 2          # bump when what's stored changes (older results are searched again)
+RESULTS_VERSION = 3          # bump when what's stored changes (older results are searched again)
 
 
 # ---------------------------------------------------------------------------
@@ -223,15 +223,25 @@ def open_plan(track_id: str, plan: dict, rank: int) -> None:
 # Drawing a plan
 # ---------------------------------------------------------------------------
 
-def _strip(scores: dict) -> go.Figure:
-    vals = scores["per_block"]
-    act = set(scores["action_blocks"])
-    colours = ["#2e9e5b" if v >= 70 else "#e8a317" if v >= 50 else "#d9534f" for v in vals]
-    fig = go.Figure(go.Bar(x=list(range(1, len(vals) + 1)), y=vals, marker_color=colours,
+def _strip(scores: dict, which: str = "overall") -> go.Figure:
+    """Per-block bars: "overall" (combined), "shape", or "story" (role blocks only: hit 100 / miss 0)."""
+    vals = {"shape": scores.get("per_block_shape"), "story": scores.get("per_block_story")}.get(which) \
+        or scores["per_block"]
+    shown = [0.0 if v is None else v for v in vals]
+    act = set(scores["action_blocks"]) if which == "overall" else set()
+    colours = ["rgba(128,128,128,0.25)" if v is None else "#2e9e5b" if v >= 70 else "#e8a317" if v >= 50
+               else "#d9534f" for v in vals]
+    if which == "story":
+        shown = [100.0 if v is None else v for v in vals]      # no-role blocks as faint full bars
+        colours = ["rgba(128,128,128,0.18)" if v is None else "#2e9e5b" if v else "#d9534f" for v in vals]
+    hover = "Block %{x}: %{customdata}<extra></extra>"
+    custom = ["no story part" if v is None else (("✅ role clip" if v else "❌ not a role clip") if which == "story"
+                                                 else f"{v:.0f}%") for v in vals]
+    fig = go.Figure(go.Bar(x=list(range(1, len(vals) + 1)), y=shown, marker_color=colours, customdata=custom,
                            marker_line_color=["#222" if i in act else "rgba(0,0,0,0)" for i in range(len(vals))],
                            marker_line_width=[2 if i in act else 0 for i in range(len(vals))],
-                           hovertemplate="Block %{x}: %{y:.0f}%<extra></extra>"))
-    if scores.get("weakest_block") is not None:
+                           hovertemplate=hover))
+    if which == "overall" and scores.get("weakest_block") is not None:
         fig.add_annotation(x=scores["weakest_block"] + 1, y=vals[scores["weakest_block"]], text="▼",
                            showarrow=False, yshift=10, font=dict(size=12),
                            hovertext=f"Weakest block ({scores['weakest_block'] + 1})")
@@ -265,7 +275,9 @@ def render_result(track_id: str, rank: int, result: dict) -> None:
             st.info(result.get("note") or "No plan found.")
             return
         sc = plan["scores"]
-        h[0].markdown(f"{title} · {sc['overall']:.0f}%")
+        # What each card leads with: 📐 shape, 🎭 story, the rest overall.
+        lead = {"shape": ("shape", "shape"), "story": ("story", "story")}.get(mode, ("overall", "overall"))
+        h[0].markdown(title)
         bits = [plan["variant"], f"{len(plan['videos'])} videos"]
         if plan.get("story"):
             bits.append("🎭 story map on")
@@ -276,19 +288,19 @@ def render_result(track_id: str, rank: int, result: dict) -> None:
         if mode == "verses" and plan.get("actors"):
             a, b = (", ".join(plan["actors"].get(v) or ["?"]) for v in plan["videos"][:2])
             st.markdown(f"**👤 {a}  vs  👤 {b}**")
-        m = st.columns(5)
-        m[0].metric("Shape", _pct(sc["shape"]), help="How closely each clip's motion rises and falls with "
-                    "its block's music — every block counts equally.")
-        m[1].metric("Motion", _pct(sc["intensity"]), help=f"How well each clip's motion level matches its "
-                    f"block's intensity — drops and action parts count {REC.DROP_WEIGHT:g}×.")
-        m[2].metric("Story", _pct(sc.get("story")), help="Story-map parts (🎬 Intro / 🌙 Slow / 💥 Action / "
-                    "🏁 Outro) whose clip is marked with that role. — = no story parts in this track.")
-        m[3].metric("Action", _pct(sc["action"]),
-                    help="Motion match over the drops and action parts only (outlined in the strip).")
-        m[4].metric("Weakest", _pct(sc["weakest"]),
-                    help=f"Block {(sc['weakest_block'] or 0) + 1} — the lowest-scoring block, so a high "
-                         f"average can't hide a weak spot.")
-        st.plotly_chart(_strip(sc), width="stretch", key=f"strip_{track_id}_{mode}",
+        helps = {"overall": "⅓ shape + ⅓ motion + ⅓ story (½ + ½ when the track has no story parts).",
+                 "shape": "How closely each clip's motion rises and falls with its block's music — every block "
+                          "counts equally.",
+                 "intensity": f"How well each clip's motion level matches its block's intensity — drops and "
+                              f"action parts count {REC.DROP_WEIGHT:g}×.",
+                 "story": "Story-map parts (🎬 Intro / 🌙 Slow / 💥 Action / 🏁 Outro) whose clip is marked with "
+                          "that role. — = no story parts in this track."}
+        names = {"overall": "Overall", "shape": "Shape", "intensity": "Motion", "story": "Story"}
+        show = [lead[0]] if mode in ("shape", "story") else ["overall", "shape", "intensity", "story"]
+        m = st.columns(len(show) if len(show) > 1 else 4)
+        for col, k in zip(m, show):
+            col.metric(names[k], _pct(sc.get(k)), help=helps[k])
+        st.plotly_chart(_strip(sc, lead[0]), width="stretch", key=f"strip_{track_id}_{mode}",
                         config={"displayModeBar": False})
         cols = st.columns(min(len(plan["videos"]), 8) or 1)
         for c, vid in zip(cols * 2, plan["videos"]):

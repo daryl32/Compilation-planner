@@ -140,6 +140,11 @@ def test_page_finds_five_plans(page_plans):
     # modes 1–3 are different plans
     keys = {(p["style"], p["pace"], tuple(p["videos"])) for m, p in plans.items() if m in ("shape", "story", "overall")}
     assert len(keys) == 3
+    # the top three all use the same Smart cut
+    assert {(plans[m]["style"], plans[m]["pace"]) for m in ("shape", "story", "overall")} == {("smart", 0)}
+    for p in plans.values():
+        sc = p["scores"]
+        assert len(sc["per_block_shape"]) == len(sc["per_block_story"]) == len(sc["per_block"])
     # 🥊 Verses: different actors, a cutting style none of the top three use
     v = plans["verses"]
     a, b = (set(x.lower() for x in ACTORS[vid]) for vid in v["videos"])
