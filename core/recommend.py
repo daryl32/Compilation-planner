@@ -402,10 +402,12 @@ def score_timeline(track: dict, segments: list, timeline: list, weights: list, p
     story_pct = 100 * float(np.mean(story)) if story else None
     overall = (shape_pct + inten_pct + story_pct) / 3 if story_pct is not None else 0.5 * shape_pct + 0.5 * inten_pct
     act = [x for x, wi in zip(inten, weights) if wi > 1.0]
+    act_story = [x for x, r in zip(per_story, block_roles) if r == "action" and x is not None]
     weakest = int(np.argmin(comb)) if comb else None
     return {"overall": round(overall, 1), "shape": round(shape_pct, 1),
             "intensity": round(inten_pct, 1), "story": None if story_pct is None else round(story_pct, 1),
             "action": round(100 * float(np.mean(act)), 1) if act else None,
+            "action_story": round(float(np.mean(act_story)), 1) if act_story else None,
             "weakest_block": weakest, "weakest": round(100 * comb[weakest], 1) if comb else None,
             "per_block": [round(100 * x, 1) for x in comb],
             "per_block_shape": [round(100 * x, 1) for x in shape],
@@ -447,7 +449,7 @@ VERSES_POOL = 5                                   # Verses: similar videos (diff
 
 def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: int = 4, story_regions: list = None,
                     role_seconds: dict = None, roles_of=None, actors: dict = None, similar_of=None,
-                    sequential: bool = False, wildcard_seed: int = 0, progress=None) -> list:
+                    sequential: bool = False, wildcard_seed: int = 0, progress=None, insights: dict = None) -> list:
     """The five recommendations for `track`, in MODES order: [{"mode", "plan" (or None), "note"}].
 
     prints: {video_id: VideoPrint}. match(segments, video_ids, block_roles, sequential) runs the
@@ -458,7 +460,8 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
     roles_of(video_id, scene_id) → that scene's role ids (for the Story score).
     actors: {video_id: [names]}; similar_of(video_id) → [(similarity, reason, video_id)] best first.
     Each plan: {"mode", "variant", "style", "pace", "method", "settings", "videos", "story",
-    "sequential", "estimate", "scores", "timeline", "segments"} (+ "actors" for Verses)."""
+    "sequential", "estimate", "scores", "timeline", "segments"} (+ "actors" for Verses).
+    insights: a dict to fill with what the feeds need (see library_insights)."""
     progress = progress or (lambda f, t: None)
     role_seconds = role_seconds or {}
     actors = actors or {}
@@ -496,6 +499,8 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
         return checked[key]
 
     top_v = by_key[TOP_STYLE]
+    if insights is not None:
+        insights.update(library_insights(top_v, role_secs))
 
     def candidates(mode: str) -> list:
         """The top three modes all use the one Smart cut (TOP_STYLE)."""
@@ -590,6 +595,51 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
             r["plan"] = {k: v for k, v in r["plan"].items() if k != "_variant"}
             r["plan"]["mode"] = r["mode"]
     return out
+
+
+def library_insights(v: Variant, role_secs: list) -> dict:
+    """What the 🧩 Hidden gems / 🕳️ Gaps / 🆕 spotlight feeds need from one track's search (its
+    Smart cut): each video's fit on its own (0–1, shape + motion + story, as Best overall
+    judges it), and each block's best fit anywhere in the library."""
+    value_of, w = objective(v, "overall", role_secs)
+    wsum = max(float(w.sum()), 1e-9)
+    solo = {vid: round(float(value_of([k]) @ w) / wsum, 4) for k, vid in enumerate(v.vids)}
+    best = np.max(v.S, axis=0) if len(v.vids) else np.zeros(len(v.segments))
+    blocks = [{"len": round(sg["end"] - sg["start"], 2), "intensity": round(float(sg.get("intensity", 0.5)), 3),
+               "role": r, "best": round(float(b), 3)} for sg, r, b in zip(v.segments, v.roles, best)]
+    return {"variant": v.label, "videos": solo, "blocks": blocks,
+            "need": {r: round(x, 1) for r, x in v.need().items()}}
+
+
+def plan_with_video(track: dict, prints: dict, video_id: str, *, match, curves_of, n_videos: int = 4,
+                    story_regions: list = None, role_seconds: dict = None, roles_of=None,
+                    sequential: bool = False) -> dict | None:
+    """🆕 Spotlight: the best plan for `track` that includes `video_id` (Smart, normal pace):
+    the video plus the videos that complete it best (shape + motion + story), checked with
+    the real matcher. None if the video has no motion data."""
+    if video_id not in prints:
+        return None
+    v = make_variant(track, *TOP_STYLE, prints, story_regions)
+    role_secs = [(role_seconds or {}).get(vid, {}) for vid in v.vids]
+    value_of, w = objective(v, "overall", role_secs)
+    wsum = max(float(w.sum()), 1e-9)
+    seed = v.vids.index(video_id)
+    chosen = [seed]
+    while len(chosen) < min(n_videos, len(v.vids)):
+        base = float(value_of(chosen) @ w) / wsum
+        gains = [(float(value_of(chosen + [k]) @ w) / wsum - base, k) for k in range(len(v.vids)) if k not in chosen]
+        if not gains:
+            break
+        chosen.append(max(gains)[1])
+    videos = sorted(v.vids[k] for k in chosen)
+    use_story = v.story_active
+    timeline = match(v.segments, videos, list(v.roles) if use_story else None, sequential)
+    scale = {vid: p.scale for vid, p in prints.items()}
+    return {"mode": "spotlight", "variant": v.label, "style": v.style, "pace": v.pace, "method": v.method,
+            "settings": v.settings, "videos": videos, "story": use_story, "sequential": bool(sequential),
+            "estimate": float(value_of(chosen) @ w) / wsum, "featured": video_id,
+            "scores": score_timeline(track, v.segments, timeline, v.weights, scale, curves_of, v.roles, roles_of),
+            "timeline": timeline, "segments": v.segments}
 
 
 def _shared_actor(a: list, b: list) -> bool:
@@ -696,4 +746,5 @@ def print_size_mb(prints: dict) -> float:
 
 __all__ = ["VideoPrint", "fingerprint_video", "block_weights", "cut_variant", "block_prints", "score_matrix",
            "choose_sets", "greedy_sets", "score_timeline", "recommend_modes", "reroll_wildcard", "make_variant",
+           "library_insights", "plan_with_video",
            "library_signature", "VARIANTS", "MODES", "DROP_WEIGHT"]

@@ -887,7 +887,12 @@ def run_worker() -> None:
 
             say("starting")
             try:
-                _process(job, say)
+                # One heavy job at a time (heavy_slot.py): waits for a recommendation search
+                # that's mid-track; recommendation searches wait for queued audio.
+                from heavy_slot import heavy_slot
+                with heavy_slot("audio analysis", on_wait=lambda _h: say("waiting for a recommendation search "
+                                                                         "to finish its track")):
+                    _process(job, say)
                 state, msg = "done", "finished"
             except _Stopped:
                 st = _read_json(p["status"], {})
