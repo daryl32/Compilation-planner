@@ -17,8 +17,11 @@ from __future__ import annotations
 import numpy as np
 
 PER_TRACK = 2            # at most this many plans from one track in a feed (variety)
+PER_VIDEO = 3            # …and any one video in at most this many plans of a feed
+REPEAT_PENALTY = 4.0     # points off a plan for each time one of its videos is already in the feed
 GEM_TOP_TRACKS = 5       # a video's fit = its average over its best this-many tracks
-WEAK_FIT = 0.60          # a kind of block whose best library fit averages below this is a gap
+WEAK_FIT = 0.60          # (old results without depth) best-fit threshold
+GAP_MARGIN = 0.05        # a kind of block is a gap when its depth is this far below the library average
 MIN_GAP_BLOCKS = 5
 
 
@@ -31,17 +34,29 @@ def _plans(results: dict):
 
 
 def _ranked(items: list, key, n: int) -> list:
-    """Best first, no plan twice, at most PER_TRACK per track."""
-    out, seen, per = [], set(), {}
-    for tid, plan in sorted(items, key=lambda x: -key(x[1])):
-        k = (tid, plan.get("style"), plan.get("pace"), tuple(plan.get("videos") or ()))
-        if k in seen or per.get(tid, 0) >= PER_TRACK:
-            continue
-        seen.add(k)
-        per[tid] = per.get(tid, 0) + 1
-        out.append({"track_id": tid, "plan": plan, "score": round(key(plan), 1)})
-        if len(out) >= n:
+    """Best first — but varied: no plan twice, at most PER_TRACK per track and PER_VIDEO per video, and
+    each next pick loses REPEAT_PENALTY points for every time one of its videos is already in the feed,
+    so the feed doesn't show the same few strong videos ten times over."""
+    out, seen, per_track, per_video = [], set(), {}, {}
+    pool = [(tid, p) for tid, p in items]
+    while pool and len(out) < n:
+        best, best_val = None, None
+        for i, (tid, plan) in enumerate(pool):
+            k = (tid, plan.get("style"), plan.get("pace"), tuple(plan.get("videos") or ()))
+            vids = plan.get("videos") or []
+            if k in seen or per_track.get(tid, 0) >= PER_TRACK or any(per_video.get(v, 0) >= PER_VIDEO for v in vids):
+                continue
+            val = key(plan) - REPEAT_PENALTY * sum(per_video.get(v, 0) for v in vids)
+            if best_val is None or val > best_val:
+                best, best_val = i, val
+        if best is None:
             break
+        tid, plan = pool.pop(best)
+        seen.add((tid, plan.get("style"), plan.get("pace"), tuple(plan.get("videos") or ())))
+        per_track[tid] = per_track.get(tid, 0) + 1
+        for v in plan.get("videos") or []:
+            per_video[v] = per_video.get(v, 0) + 1
+        out.append({"track_id": tid, "plan": plan, "score": round(key(plan), 1)})
     return out
 
 
@@ -109,8 +124,9 @@ def gaps(results: dict, role_supply: dict, role_names: dict = None) -> dict:
     roles: per story role the tracks use — how many tracks, typical seconds needed per track,
       seconds of footage marked with it (role_supply: {role: seconds}) and how many tracks'
       worth that is; status "none" / "short" / "ok".
-    blocks: kinds of block (intensity × length) whose best fit anywhere in the library averages
-      under WEAK_FIT — worst first."""
+    blocks: kinds of block (intensity × length) that few of your videos suit — by depth (how well the
+      5th-best video fits), against the library-wide average; the hardest three are always listed,
+      "gap" when clearly below the average. Worst first."""
     role_names = role_names or {}
     need = {}
     blocks = []
@@ -130,17 +146,20 @@ def gaps(results: dict, role_supply: dict, role_names: dict = None) -> dict:
                       "status": "none" if have <= 0 else "short" if cover < 1.5 else "ok"})
     roles.sort(key=lambda x: (x["cover"], -x["tracks"]))
     kinds = []
+    measure = "depth" if blocks and all("depth" in b for _, b in blocks) else "best"
+    overall = float(np.mean([b[measure] for _, b in blocks])) if blocks else 0.0
     for lo, hi, iname in INTENSITY_BANDS:
         for llo, lhi, lname in LENGTH_BANDS:
             sel = [(t, b) for t, b in blocks if lo <= b["intensity"] < hi and llo <= b["len"] < lhi]
             if len(sel) < MIN_GAP_BLOCKS:
                 continue
-            fit = float(np.mean([b["best"] for _, b in sel]))
-            if fit < WEAK_FIT:
-                kinds.append({"label": f"{iname}, {lname}", "blocks": len(sel), "tracks": len({t for t, _ in sel}),
-                              "fit": round(100 * fit, 1)})
+            fit = float(np.mean([b[measure] for _, b in sel]))
+            kinds.append({"label": f"{iname}, {lname}", "blocks": len(sel), "tracks": len({t for t, _ in sel}),
+                          "fit": round(100 * fit, 1), "vs_avg": round(100 * (fit - overall), 1),
+                          "gap": fit < overall - GAP_MARGIN})
     kinds.sort(key=lambda k: k["fit"])
-    return {"roles": roles, "blocks": kinds}
+    return {"roles": roles, "blocks": kinds[:3] if kinds else [], "average": round(100 * overall, 1),
+            "measure": measure}
 
 
 __all__ = ["top_plans", "best_action", "action_score", "video_fits", "hidden_gems", "gaps"]

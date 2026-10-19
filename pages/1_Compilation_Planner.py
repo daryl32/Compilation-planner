@@ -1983,6 +1983,37 @@ def add_cut_markers(fig, segments: list) -> None:
                                      line=dict(color=_colour, width=1, dash="dot"), hoverinfo="skip"))
 
 
+def block_chart(track: dict, segments: list, marks: dict = None, height: int = 220):
+    """The track's energy with every cut, each block numbered along the top — for choosing blocks by
+    number. marks: {block index: (label, colour)} shades those blocks."""
+    fig = go.Figure()
+    if track.get("hires"):
+        _rate = float(track["hires"]["rate"])
+        fig.add_trace(go.Scatter(x=[i / _rate for i in range(len(track["hires"]["rms"]))], y=track["hires"]["rms"],
+                                 mode="lines", line=dict(color="rgba(100,150,255,0.55)", width=1), hoverinfo="skip"))
+    else:
+        fig.add_trace(go.Scatter(x=[e["time"] for e in track["energy_envelope"]],
+                                 y=[e["energy"] for e in track["energy_envelope"]], mode="lines",
+                                 line=dict(color="rgba(100,150,255,0.55)"), hoverinfo="skip"))
+    add_cut_markers(fig, segments)
+    step = max(1, len(segments) // 40)          # label every block on short plans, every few on long ones
+    for i, sg in enumerate(segments):
+        mark = (marks or {}).get(i)
+        if mark:
+            fig.add_vrect(x0=sg["start"], x1=sg["end"], fillcolor=mark[1], opacity=0.25, line_width=0, layer="below")
+        if i % step == 0 or mark or i == len(segments) - 1:
+            fig.add_annotation(x=(sg["start"] + sg["end"]) / 2, y=1.0, yref="paper", text=str(i + 1),
+                               showarrow=False, font=dict(size=10), yanchor="bottom")
+    fig.add_trace(go.Scatter(x=[(sg["start"] + sg["end"]) / 2 for sg in segments], y=[0.02] * len(segments),
+                             mode="markers", marker=dict(size=14, opacity=0), showlegend=False,
+                             customdata=[[i + 1, sg["start"], sg["end"]] for i, sg in enumerate(segments)],
+                             hovertemplate="Block %{customdata[0]}: %{customdata[1]:.1f}s → %{customdata[2]:.1f}s"
+                                           "<extra></extra>"))
+    fig.update_layout(height=height, margin=dict(t=24, b=10, l=10, r=10), showlegend=False,
+                      yaxis=dict(showticklabels=False, title=None), xaxis_title=None)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
 @fragment
 def render_audio_settings_section(track: dict) -> None:
     """Step 0: all segmentation dials plus a live audio chart — so you can
@@ -4258,6 +4289,10 @@ if st.session_state.get("prefer_intro_outro"):
         if _both:
             st.caption(f"Block(s) {', '.join(str(b + 1) for b in sorted(_both))} are marked as both — "
                       f"intro takes priority there.")
+        _io_roles = SR.roles_by_id()
+        block_chart(track, segments, {**{i: ("outro", _io_roles["outro"]["colour"]) for i in outro_blocks_0based},
+                                      **{i: ("intro", _io_roles["intro"]["colour"]) for i in intro_blocks_0based}})
+        st.caption("Shaded: the intro and outro blocks as last applied (▶️ Apply & match to update).")
 
 # 🎭 Each block's role for this plan: from the story map when it's in use, else the
 # Intro/Outro blocks above (exactly as before), else none.

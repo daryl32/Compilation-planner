@@ -34,13 +34,20 @@ def nightly():
     for vid, names in ACTORS.items():
         meta.setdefault(vid, {})["actors"] = names
     save_library_meta(meta)
-    seen = RL.update_seen()                                   # first time: everything counts as old
-    assert all(v.startswith("1970") for v in seen.values())
-    seen["vid_f"] = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)).isoformat()
-    RL.SEEN_FILE.write_text(json.dumps(seen))
+    # Drive added dates (catalogue_store.ADDED_DATES_FILE): vid_f arrived yesterday, the rest long ago
+    import catalogue_store as CStore
+    added_before = CStore.ADDED_DATES_FILE.read_text() if CStore.ADDED_DATES_FILE.exists() else None
+    now = datetime.datetime.now(datetime.timezone.utc)
+    CStore.ADDED_DATES_FILE.write_text(json.dumps(
+        {stem: (now - datetime.timedelta(days=1 if slim["video_id"] == "vid_f" else 400)).isoformat()
+         for stem, slim in CStore.video_index().items()}))
     first = J.changed_jobs()
     info = J.run_nightly()
     yield {"first": first, "info": info}
+    if added_before is None:
+        CStore.ADDED_DATES_FILE.unlink(missing_ok=True)
+    else:
+        CStore.ADDED_DATES_FILE.write_text(added_before)
     if before is None:
         LIBRARY_META_FILE.unlink(missing_ok=True)
     else:
@@ -170,7 +177,27 @@ def test_feeds_hidden_gems_and_gaps():
     by = {r["role"]: r for r in g["roles"]}
     assert by["intro"]["status"] == "none" and by["action"]["status"] == "short"
     assert g["roles"][0]["role"] == "intro"                                   # the worst first
-    assert [k["label"] for k in g["blocks"]] == ["Intense, short shots (under 1.5 s)"]
+    assert g["blocks"][0]["label"] == "Intense, short shots (under 1.5 s)" and g["blocks"][0]["gap"]
+    assert not g["blocks"][-1]["gap"]
+    # with depth (the 5th-best fit), that's what's measured
+    for t in res.values():
+        for b in t["insights"]["blocks"]:
+            b["depth"] = b["best"] - 0.1
+    g2 = F.gaps(res, {"action": 20.0})
+    assert g2["measure"] == "depth" and g2["blocks"][0]["label"] == "Intense, short shots (under 1.5 s)"
+
+
+def test_feeds_vary_the_videos():
+    """A feed doesn't show the same few videos in every plan."""
+    import core.feeds as F
+    res = {f"t{i}": {"results": [{"plan": _plan("overall", 90 - i, videos=("a", "b", "c", "d"))},
+                                 {"plan": _plan("shape", 80 - i, videos=(f"x{i}", f"y{i}", "a", f"z{i}"))}]}
+           for i in range(8)}
+    top = F.top_plans(res, 10)
+    from collections import Counter
+    counts = Counter(v for item in top for v in item["plan"]["videos"])
+    assert max(counts.values()) <= F.PER_VIDEO
+    assert len(counts) >= 10
 
 
 # ---------------------------------------------------------------------------

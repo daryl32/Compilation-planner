@@ -441,7 +441,8 @@ MODE_HELP = {m[0]: m[2] for m in MODES}
 # from the other styles (normal pace); 🎲 Wildcard rolls any style and pace.
 TOP_STYLE = ("smart", 0)
 VARIANTS = [TOP_STYLE, ("cinematic", 0), ("beat", 0), ("energy", 0), ("drop", 0), ("vocal", 0), ("hyper", 0)]
-CHECKS = {"shape": 4, "story": 4, "overall": 5}   # leading candidates run through the real matcher
+CHECKS = {"shape": 4, "story": 4, "overall": 5}
+DEPTH_RANK = 5                                    # 🕳️ Gaps: a block's depth = the 5th-best video's fit   # leading candidates run through the real matcher
 SWAP_BUDGET = 10                                  # Best overall: one-video swaps tried on the best plan
 VERSES_SEEDS = 3                                  # Verses: top picks tried
 VERSES_POOL = 5                                   # Verses: similar videos (different actors) per top pick
@@ -605,8 +606,13 @@ def library_insights(v: Variant, role_secs: list) -> dict:
     wsum = max(float(w.sum()), 1e-9)
     solo = {vid: round(float(value_of([k]) @ w) / wsum, 4) for k, vid in enumerate(v.vids)}
     best = np.max(v.S, axis=0) if len(v.vids) else np.zeros(len(v.segments))
+    # depth: how well the DEPTH_RANK-th best video fits — high when many videos suit the block, low when
+    # only one or two do (so the same clips keep coming back there). The best fit alone is nearly always high.
+    k = min(DEPTH_RANK, len(v.vids))
+    depth = np.sort(v.S, axis=0)[-k] if k else np.zeros(len(v.segments))
     blocks = [{"len": round(sg["end"] - sg["start"], 2), "intensity": round(float(sg.get("intensity", 0.5)), 3),
-               "role": r, "best": round(float(b), 3)} for sg, r, b in zip(v.segments, v.roles, best)]
+               "role": r, "best": round(float(b), 3), "depth": round(float(d), 3)}
+              for sg, r, b, d in zip(v.segments, v.roles, best, depth)]
     return {"variant": v.label, "videos": solo, "blocks": blocks,
             "need": {r: round(x, 1) for r, x in v.need().items()}}
 

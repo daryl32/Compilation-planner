@@ -40,7 +40,7 @@ PRINTS_DIR = BASE_DIR / "prints"
 SPOTLIGHT_DIR = RESULTS_DIR / "spotlight"
 SEEN_FILE = RESULTS_DIR / "seen_videos.json"
 DEFAULT_VIDEOS = 4
-RESULTS_VERSION = 4          # bump when what's stored changes (older results are searched again)
+RESULTS_VERSION = 5          # bump when what's stored changes (older results are searched again)
 PRINTS_VERSION = 1           # bump when fingerprints change
 NEW_DAYS = 14                # a video counts as new (🆕 spotlight) for this many days
 SPOTLIGHT_TRACKS = 3         # ready-made plans per new video
@@ -365,9 +365,17 @@ def update_seen(now: datetime.datetime = None) -> dict:
 
 
 def new_videos(seen: dict = None, now: datetime.datetime = None) -> list:
-    """Videos first seen in the last NEW_DAYS days, newest first: [(video_id, first_seen)]."""
-    seen = update_seen(now) if seen is None else seen
+    """Videos added in the last NEW_DAYS days, newest first: [(video_id, added ISO)]. The added date is
+    when the video arrived on Google Drive (the same date the planner's 🆕 badge uses); the first-seen
+    record is only the fallback for videos the Drive dates don't cover."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
+    added = CStore.added_times()
+    if added:
+        cutoff = now.timestamp() - NEW_DAYS * 86400
+        out = [(vid, datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).isoformat(timespec="seconds"))
+               for vid, ts in added.items() if ts >= cutoff]
+        return sorted(out, key=lambda x: x[1], reverse=True)
+    seen = update_seen(now) if seen is None else seen
     cats = CStore.all_catalogues()
     out = []
     for vid, iso in seen.items():
