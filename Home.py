@@ -16,7 +16,7 @@ page_setup("Media Planner", "Home.py")
 
 st.divider()
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
     st.subheader("📁 Media Library")
@@ -37,3 +37,8 @@ with col4:
     st.subheader("🖥️ Server")
     st.write("See what's using the server's disk and clear temporary files.")
     st.page_link("pages/4_Server.py", label="Open Server →")
+
+with col5:
+    st.subheader("🔮 Recommendations")
+    st.write("The best videos and cut settings for a track, found across your whole library.")
+    st.page_link("pages/5_Recommendations.py", label="Open Recommendations →")

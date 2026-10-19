@@ -12,7 +12,7 @@ from tests.golden_cases import plain
 from tests.test_golden import _first_diff
 
 PAGES = ["Home.py", "pages/1_Compilation_Planner.py", "pages/2_Reviewer.py",
-         "pages/3_Media_Library.py", "pages/4_Server.py"]
+         "pages/3_Media_Library.py", "pages/4_Server.py", "pages/5_Recommendations.py"]
 
 
 @pytest.mark.parametrize("page", PAGES)
