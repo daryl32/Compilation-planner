@@ -26,7 +26,6 @@ import os
 import re
 
 from config import CATALOGUE_DIR
-from library_common import mark_pending
 
 ROLES_FILE = CATALOGUE_DIR / "scene_roles.json"
 ROLES_STEM = ROLES_FILE.stem
@@ -108,6 +107,7 @@ def _save_custom(custom: list) -> None:
     tmp = ROLES_FILE.with_name(ROLES_FILE.name + ".tmp")
     tmp.write_text(json.dumps({"roles": custom}, indent=2))
     os.replace(tmp, ROLES_FILE)
+    from library_common import mark_pending   # here, so reading roles never needs Streamlit
     mark_pending(ROLES_STEM)
 
 
