@@ -3466,6 +3466,7 @@ def _open_recommended_plan(plan: dict) -> None:
     for k, v in plan["settings"].items():
         ss[k] = v
     ss["audio_style"] = AUDIO_STYLE_CUSTOM          # these settings exactly — don't re-tune over them
+    ss["cut_style"] = "custom"                      # 🎨 style row shows Custom (the plan's own settings)
     ss["_audio_appscope"] = {k: ss[k] for k in AUDIO_SETTINGS_KEYS if k in ss}
     ss["committed_selected_videos"] = list(plan["videos"])
     for vid in plan["videos"]:
