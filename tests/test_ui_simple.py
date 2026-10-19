@@ -99,8 +99,13 @@ def test_matching_step_layout():
     assert not errors(at), errors(at)
     assert at.radio(key="matching_mode").options == ["Auto", "Manual step-through", "Choreography"]
     assert any(e.label.startswith("⚙️ Matching settings") and "weights" in e.label for e in at.expander)
-    assert [t.label for t in at.tabs][:4] == ["🎛️ Mode & order", "⚖️ Auto-fill weights", "🎬 Intro / Outro",
-                                              "🧹 Resets"]
+    assert [t.label for t in at.tabs][:3] == ["🎛️ Mode & order", "⚖️ Auto-fill weights", "🎬 Intro / Outro"]
+    # nothing is matched until ▶️ Match
+    assert not any(b.label == "💾 Save plan" for b in at.button)
+    assert any("press **▶️ Match**" in i.value for i in at.info)
+    from tests.apptest_util import press_match
+    assert press_match(at)
+    assert not errors(at), errors(at)
     assert any(c.value.startswith("**") and "segments**" in c.value for c in at.caption)
     assert len(at.warning) <= 1                                   # problems, if any, in one box
     labels = [b.label for b in at.button]
@@ -110,3 +115,66 @@ def test_matching_step_layout():
         at.radio(key="matching_mode").set_value(mode).run()
         assert not errors(at), (mode, errors(at))
         assert any("segments**" in c.value for c in at.caption)
+
+
+def _matching_app():
+    from tests.apptest_util import page_app
+    at = page_app(PLANNER)
+    state = {"track_id": "song_full", "committed_selected_videos": ["vid_a", "vid_b", "vid_c"],
+             "ui_section": "🎬 3. Matching & Export"}
+    for v in ("vid_a", "vid_b", "vid_c"):
+        state[f"select_video_{v}"] = True
+    for k, v in state.items():
+        at.session_state[k] = v
+    at.run()
+    return at
+
+
+def test_settings_wait_for_apply_and_match():
+    """⚙️ settings are a form: nothing changes until ▶️ Apply & match; a preset picked there sets its
+    sliders on Apply; Swap on the plan applies at once."""
+    from tests.apptest_util import errors, press_match
+    at = _matching_app()
+    assert press_match(at) and not errors(at), errors(at)
+    assert any(b.label == "💾 Save plan" for b in at.button)
+    sig = at.session_state["_auto_plan_cache"]["sig"]
+    before = at.session_state["weight_random"]
+    at.slider(key="weight_random").set_value(3.0)              # changed in the form, not applied
+    at.run()
+    assert at.session_state["weight_random"] == before
+    assert at.session_state["_auto_plan_cache"]["sig"] == sig
+    at.slider(key="weight_random").set_value(3.0)
+    assert press_match(at) and not errors(at), errors(at)        # ▶️ Apply & match
+    assert at.session_state["weight_random"] == 3.0
+    assert at.session_state["autofill_preset"] == "Custom"
+    assert at.session_state["_auto_plan_cache"]["sig"] != sig
+    # a preset picked in the form sets its sliders on Apply
+    at.selectbox(key="autofill_preset").set_value("Maximum variety")
+    assert press_match(at) and not errors(at), errors(at)
+    import autofill as AF
+    for k, v in AF.PRESETS["Maximum variety"].items():
+        assert at.session_state[k] == v, k
+    assert at.session_state["autofill_preset"] == "Maximum variety"
+    # 🔄 Swap on a card applies straight away (no ▶️ needed)
+    sig = at.session_state["_auto_plan_cache"]["sig"]
+    [b for b in at.button if (b.key or "").startswith("swap_")][0].click().run()
+    assert not errors(at), errors(at)
+    assert at.session_state["_auto_plan_cache"]["sig"] != sig
+    assert any(b.label == "💾 Save plan" for b in at.button)
+
+
+def test_changed_videos_keep_the_old_plan_until_apply():
+    from tests.apptest_util import errors, press_match
+    at = _matching_app()
+    press_match(at)
+    old = at.session_state["_auto_plan_cache"]["result"][0]
+    at.session_state["committed_selected_videos"] = ["vid_a", "vid_b"]      # changed on the Videos step
+    at.run()
+    assert not errors(at), errors(at)
+    assert any("This is the last plan" in w.value for w in at.warning)    # old plan, marked out of date
+    assert not any(b.label == "💾 Save plan" for b in at.button)            # Save / Render wait
+    assert at.session_state["_auto_plan_cache"]["result"][0] == old
+    assert press_match(at) and not errors(at), errors(at)
+    assert any(b.label == "💾 Save plan" for b in at.button)
+    used = {c["video_id"] for e in at.session_state["_auto_plan_cache"]["result"][0] for c in e["scenes"]}
+    assert used <= {"vid_a", "vid_b"}

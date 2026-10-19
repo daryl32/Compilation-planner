@@ -39,3 +39,12 @@ def errors(at) -> list:
     out = [f"EXCEPTION: {e.value}" for e in at.exception]
     out += [f"ERROR: {e.value}" for e in at.error]
     return out
+
+
+def press_match(at) -> bool:
+    """🎬 Matching & Export: press ▶️ Match / Apply & match if it's there (Auto builds nothing until
+    then). Returns whether it was pressed."""
+    go = [b for b in at.button if b.label in ("▶️ Match", "▶️ Apply & match")]
+    if go:
+        go[0].click().run()
+    return bool(go)

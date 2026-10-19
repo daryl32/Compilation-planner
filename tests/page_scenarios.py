@@ -70,6 +70,9 @@ def run_scenario(conf: dict) -> dict:
         errs = errors(at)
         if errs:
             problems[section] = errs
+    from tests.apptest_util import press_match
+    press_match(at)
+    problems.update({"match": errors(at)} if errors(at) else {})
     save = [b for b in at.button if b.label == "💾 Save plan"]
     plan = None
     if save:

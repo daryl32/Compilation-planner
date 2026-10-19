@@ -3457,6 +3457,7 @@ if _recover_file.exists():
 _reopen = st.session_state.pop("_reopen_project", None)
 if _reopen:
     _reopen_warnings = _apply_project_load_dict(_reopen["data"])
+    st.session_state["_match_pressed"] = True      # you asked for this plan — build it without ▶️ Match
     # Make the app-scope audio snapshot agree with what was just loaded.
     _appscope = st.session_state.get("_audio_appscope", {})
     _appscope.update({k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state})
@@ -3552,6 +3553,7 @@ def _open_recommended_plan(plan: dict) -> None:
     ss["_project_notices"] = [("success", f"🔮 Opened {plan.get('label') or 'the recommended plan'} as a new "
                                           "project." + _story_note)]
     ss["_rec_opened"] = True
+    ss["_match_pressed"] = True                     # you asked for this plan — build it without ▶️ Match
 
 
 if st.session_state.get("_open_recommended_plan"):
@@ -3981,8 +3983,31 @@ _summary = " · ".join(x for x in (
     else "",
     f"{len(st.session_state['global_excluded_scenes'])} rejected" if st.session_state["global_excluded_scenes"] else "",
 ) if x)
-with st.expander(f"⚙️ Matching settings  ·  {_summary}", expanded=False):
-    _mt = st.tabs(["🎛️ Mode & order", "⚖️ Auto-fill weights", "🎬 Intro / Outro", "🧹 Resets"])
+# ⚙️ The settings are a form: changing them reloads nothing until ▶️ Match / Apply & match. In Auto
+# mode nothing is matched until you press it the first time, nor after the videos or cuts change
+# (see _match_allowed below); Swap / Reject / Remove on a confirmed plan still apply straight away.
+
+
+def _press_match() -> None:
+    st.session_state["_match_pressed"] = True
+
+
+def _reroll_and_match() -> None:
+    _reroll()
+    _press_match()
+
+
+_has_plan = bool(st.session_state.get("_match_confirmed_setup"))
+with st.form("match_settings", border=False):
+    with st.expander(f"⚙️ Matching settings  ·  {_summary}", expanded=False):
+        _mt = st.tabs(["🎛️ Mode & order", "⚖️ Auto-fill weights", "🎬 Intro / Outro"])
+    _fc = st.columns([1.4, 3])
+    _fc[0].form_submit_button("▶️ Apply & match" if _has_plan else "▶️ Match", type="primary",
+                              use_container_width=True, on_click=_press_match,
+                              help="Builds the plan with these settings. Change as many settings as you like "
+                                   "first — nothing reloads until you press this.")
+    _fc[1].caption("Change any ⚙️ settings, then press ▶️ to update the plan." if _has_plan else
+                   "Check the ⚙️ settings, then press ▶️ Match to build the plan.")
 with _mt[0]:
     render_matching_mode_settings()
 
@@ -4025,10 +4050,16 @@ def _weight_shares(v2: bool) -> str:
     return "  ·  ".join(f"{label} **{100 * w / total:.0f}%**" for label, w in parts if w > 0)
 
 
-# The preset name only stays if the sliders still hold its values.
+# A preset newly picked in the form: set its sliders (before they're drawn this run). Then the
+# preset name only stays if the sliders still hold its values (a slider moved → Custom).
+if st.session_state.get("autofill_preset") != st.session_state.get("_preset_seen"):
+    if st.session_state.get("_preset_seen") is not None:
+        _apply_preset()
+    st.session_state["_preset_seen"] = st.session_state.get("autofill_preset")
 _preset_vals = AF.PRESETS.get(st.session_state.get("autofill_preset"))
 if _preset_vals and any(abs(float(st.session_state.get(k, v)) - v) > 1e-6 for k, v in _preset_vals.items()):
     st.session_state["autofill_preset"] = _PRESET_CUSTOM
+    st.session_state["_preset_seen"] = _PRESET_CUSTOM
 
 with _mt[1]:
     _what_weights_do = (
@@ -4047,7 +4078,7 @@ with _mt[1]:
              "intro/outro and the most intense blocks first (except in sequential mode). "
              "Off: the original scoring, to compare.")
     _hc[1].selectbox(
-        "Preset", list(AF.PRESETS) + [_PRESET_CUSTOM], key="autofill_preset", on_change=_apply_preset,
+        "Preset", list(AF.PRESETS) + [_PRESET_CUSTOM], key="autofill_preset",
         disabled=_autofill_disabled,
         help="A starting point for the sliders below. Moving a slider switches this to Custom. "
              + _what_weights_do)
@@ -4057,15 +4088,15 @@ with _mt[1]:
     with _wt_cols[0]:
         if not _no_shape_score_mode:
             st.slider("Match the music's shape", 0.0, 5.0, step=0.1, key="weight_shape",
-                      disabled=_autofill_disabled, on_change=_mark_custom,
+                      disabled=_autofill_disabled,
                       help="(A) How much the clip's frame-by-frame shape match with the music drives the pick.")
         st.slider("Match the energy level", 0.0, 5.0, step=0.1, key="weight_motion",
-                  disabled=_autofill_disabled, on_change=_mark_custom,
+                  disabled=_autofill_disabled,
                   help="(E) Prefers clips whose motion suits this block's intensity — calm footage for "
                        "quiet parts, busy footage for the drops.")
     with _wt_cols[1]:
         st.slider("Use all videos evenly", 0.0, 5.0, step=0.1, key="weight_spread",
-                  disabled=_autofill_disabled, on_change=_mark_custom,
+                  disabled=_autofill_disabled,
                   help="(D) Favours videos that are behind their fair share of the plan (by how much "
                        "usable footage they have), so no single video dominates.")
         st.toggle("Never repeat the previous block's videos", key="avoid_repeat", disabled=_autofill_disabled,
@@ -4082,20 +4113,21 @@ with _mt[1]:
     with _wt_cols[2]:
         if sequential_mode:
             st.slider("Move through each video in order", 0.0, 5.0, step=0.1, key="weight_position",
-                      disabled=_autofill_disabled, on_change=_mark_custom,
+                      disabled=_autofill_disabled,
                       help="(F) Sequential mode: gives each video a beginning, middle and end — each use "
                            "prefers its own part of the video. Also sets how far a pick may skip ahead "
                            "within a video, never so far that it could run short before the plan ends.")
         st.slider("Variety", 0.0, 5.0, step=0.1, key="weight_random",
-                  disabled=_autofill_disabled, on_change=_mark_custom,
+                  disabled=_autofill_disabled,
                   help="(B) 0 = always the top-scoring clip. Higher = picks more often from the next "
                        "best few instead, for variety (Improved auto-fill), or adds random noise "
                        "(original scoring). Reproducible — the same seed gives the same picks.")
         _rc = st.columns([3, 2])
         _rc[0].number_input("Seed", 0, 99999, key="autofill_seed", disabled=_autofill_disabled,
                             help="Change to reroll Variety without touching anything else.")
-        _rc[1].button("🎲 Reroll", on_click=_reroll, disabled=_autofill_disabled, use_container_width=True,
-                      help="Next seed — a different draw with the same settings.")
+        _rc[1].form_submit_button("🎲 Reroll", on_click=_reroll_and_match, disabled=_autofill_disabled,
+                                  use_container_width=True,
+                                  help="Next seed — a different draw with the same settings (and matches).")
 
 # Save weight values to their shadow copy every time this section renders —
 # mirrors audio_settings_shadow so values survive switching to another section.
@@ -4128,16 +4160,14 @@ if st.session_state.get("planner_state_key") != state_key:
         st.session_state["segment_clip_reduction"] = {}
         st.session_state["global_excluded_scenes"] = set()
 
-if _mt[3].button("Reset manual clip overrides",
-                 help="Clears Auto mode's per-block Swap / Reject / Remove changes and every clip rejected "
-                      "from this plan."):
+def _reset_overrides() -> None:
     st.session_state["segment_exclusions"] = {}
     st.session_state["segment_clip_reduction"] = {}
     st.session_state["global_excluded_scenes"] = set()
-    st.rerun()
 
-if st.session_state["global_excluded_scenes"]:
-    _mt[3].caption(f"{len(st.session_state['global_excluded_scenes'])} clip(s) permanently rejected from this plan.")
+
+_has_overrides = bool(st.session_state["segment_exclusions"] or st.session_state["segment_clip_reduction"]
+                      or st.session_state["global_excluded_scenes"])
 
 queues = build_footage_queues(tuple(selected_videos), tuple(tag_filter), effective_time_ranges())
 if not queues:
@@ -4288,8 +4318,39 @@ if matching_mode == "Auto":
         bool(st.session_state.get("autofill_v2", True)), bool(st.session_state.get("intro_outro_exclusive")),
         bool(st.session_state.get("story_reserve", True)), [(v, _cat_mtime(v)) for v in sorted(selected_videos)],
     ], default=str).encode()).hexdigest()
+    # What the plan is built FROM (videos, cuts, ranges, story map…) — not the ⚙️ settings (they only
+    # change through ▶️) nor Swap / Reject / Remove (they apply at once to a confirmed plan).
+    _setup_sig = hashlib.sha1(json.dumps([
+        track_id, [(round(sg["start"], 3), round(sg["end"], 3), round(sg.get("intensity", 0), 4)) for sg in segments],
+        sorted(selected_videos), sorted(tag_filter), sorted((v, list(r) if r else None) for v, r in effective_time_ranges().items()),
+        min_clips, max_clips, ramp_start, ramp_end, vary_count, int(count_seed), min_clip_len_sec,
+        current_story_map(track_id), sorted(st.session_state.get("clip_count_skip") or []),
+        [(v, _cat_mtime(v)) for v in sorted(selected_videos)],
+    ], default=str).encode()).hexdigest()
+    _bounds = [(round(sg["start"], 3), round(sg["end"], 3)) for sg in segments]
+    if st.session_state.pop("_match_pressed", False):
+        st.session_state["_match_confirmed_setup"] = _setup_sig
+    _match_allowed = st.session_state.get("_match_confirmed_setup") == _setup_sig
     _auto_cache = st.session_state.get("_auto_plan_cache")
-    if _auto_cache and _auto_cache["sig"] == _auto_sig:
+    _plan_stale = False
+    if not _match_allowed:
+        if _auto_cache and _auto_cache.get("bounds") == _bounds:
+            # The last plan, kept for comparison until ▶️ Apply & match.
+            timeline, clip_count_shortfall, duration_shortfall_sec = _auto_cache["result"]
+            _auto_repeat_fallbacks = set(_auto_cache["fallbacks"])
+            _plan_stale = True
+        else:
+            with _status_slot:
+                if _auto_cache or st.session_state.get("_match_confirmed_setup"):
+                    st.warning("⚠️ The videos or the cuts have changed since the last plan — press **▶️ Apply & "
+                               "match** to build it again.")
+                else:
+                    st.info(f"**{len(segments)} segments** · {len(selected_videos)} videos · "
+                            f"{total_footage_sec / 60:.0f} min of usable footage — press **▶️ Match** to build the "
+                            f"plan.")
+            _record_page_run()
+            st.stop()
+    elif _auto_cache and _auto_cache["sig"] == _auto_sig:
         timeline, clip_count_shortfall, duration_shortfall_sec = _auto_cache["result"]
         _auto_repeat_fallbacks = set(_auto_cache["fallbacks"])
     else:
@@ -4308,7 +4369,7 @@ if matching_mode == "Auto":
             )
         st.session_state["_auto_plan_cache"] = {
             "sig": _auto_sig, "result": (timeline, clip_count_shortfall, duration_shortfall_sec),
-            "fallbacks": sorted(_auto_repeat_fallbacks)}
+            "fallbacks": sorted(_auto_repeat_fallbacks), "bounds": _bounds}
     if _auto_repeat_fallbacks:
         _note(repeat_fallback_message([i + 1 for i in sorted(_auto_repeat_fallbacks)]))
 
@@ -4325,6 +4386,9 @@ if matching_mode == "Auto":
               f"scene in the library was exhausted at that point. Widen your video/tag selection.")
     if not clip_count_shortfall and duration_shortfall_sec <= 0.5:
         _status_line += f" · ✅ every segment filled, no gaps ({total_picks} slots)"
+    if _plan_stale:
+        _notes.insert(0, "**This is the last plan** — the videos have changed since. Press **▶️ Apply & match** "
+                         "to update it (Save and Render wait until then).")
 
 elif matching_mode == "Choreography":
     # ---------------------------------------------------------------------------
@@ -4556,7 +4620,15 @@ elif matching_mode == "Manual step-through":
                     f"{total_footage_sec / 60:.0f} min of usable footage · {len(confirmed)} block(s) confirmed")
 
 with _status_slot:
-    st.caption(_status_line)
+    if _has_overrides:
+        _sc = st.columns([4, 1.4])
+        _sc[0].caption(_status_line)
+        _n_rej = len(st.session_state["global_excluded_scenes"])
+        _sc[1].button("🧹 Reset clip changes", on_click=_reset_overrides, use_container_width=True,
+                      help="Clears Auto mode's per-block Swap / Reject / Remove changes"
+                           + (f" and the {_n_rej} clip(s) rejected from this plan." if _n_rej else "."))
+    else:
+        st.caption(_status_line)
     if _notes:
         st.warning(_notes[0] if len(_notes) == 1 else
                    f"**{len(_notes)} things to check**\n\n" + "\n".join(f"- {n}" for n in _notes))
@@ -5614,6 +5686,11 @@ if _cut_edits():
     export_plan["segmentation"]["hand_edited_cuts"] = True    # ✂️ cuts edited in the cut editor
 
 # 🏁 Finish: render a preview, save the plan, download it — together in one bar.
+if matching_mode == "Auto" and _plan_stale:
+    st.divider()
+    st.caption("🏁 Save and Render come back once the plan is up to date (▶️ Apply & match above).")
+    _record_page_run()
+    st.stop()
 st.divider()
 st.subheader("Finish", help="🎬 Render a preview to watch the plan · 💾 Save the plan for the Blender add-on "
                             "(and Google Drive) · ⬇️ download the plan's JSON.")
