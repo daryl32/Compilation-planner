@@ -49,6 +49,7 @@ from core.autotune import AUDIO_STYLES, AUDIO_STYLE_CUSTOM
 import core.targets as CTGT
 import core.cut_edits as CED
 import core.matching as CMATCH
+import core.styles as CSTY
 from core.matching import prefer_role, widen_for_repeat_rule, cand_key, why_key, format_mmss
 from cut_editor import cut_editor as _cut_editor_widget, media_url as _media_url
 from core.shape import SHAPE_MATCH_POINTS, resample_curve, shape_score, get_block_audio_curve
@@ -1536,7 +1537,7 @@ def resolve_video_selection(track: dict, tag_filter: tuple, all_video_ids: list,
 
 
 AUDIO_SETTINGS_KEYS = [
-    "segmentation_method", "beats_per_bar", "audio_style", "sc_focus",
+    "segmentation_method", "beats_per_bar", "audio_style", "sc_focus", "cut_style", "cut_style_pace",
     "change_window_secs", "change_threshold", "min_segment_sec", "max_segment_sec",
     "react_to_hits", "hit_threshold", "snap_secs",
     "fast_energy_thresh", "fast_max_bars", "fast_cooldown_bars",
@@ -1580,7 +1581,72 @@ CUT_FOCUS = {
 def _mark_audio_custom() -> None:
     """A dial was moved by hand: stop auto-tuning over it."""
     st.session_state["audio_style"] = AUDIO_STYLE_CUSTOM
+    st.session_state["cut_style"] = "custom"       # 🎨 no longer exactly the style's recipe
     st.session_state.pop("aim_report", None)     # 🎯 its dial values no longer apply
+
+
+def _mark_style_custom() -> None:
+    """A Smart dial was moved by hand: the 🎨 style no longer describes the settings."""
+    st.session_state["cut_style"] = "custom"
+
+
+def _method_changed() -> None:
+    _mark_style_custom()
+    _audio_retune_if_paced()
+
+
+def _beats_per_bar_changed() -> None:
+    """A style's recipe depends on the bar length, so it's worked out again; otherwise as before."""
+    if st.session_state.get("cut_style") in CSTY.STYLES:
+        _apply_cut_style()
+    else:
+        _audio_retune_if_paced()
+
+
+def _apply_cut_style() -> None:
+    """🎨 Style or its pace changed: set the method and every dial from the style's recipe
+    for this track (core/styles.py)."""
+    style = st.session_state.get("cut_style", "custom")
+    if style not in CSTY.STYLES:
+        st.session_state.pop("style_report", None)
+        return
+    track = load_track(st.session_state["track_id"])
+    method, settings, notes = CSTY.style_settings(track, style, int(st.session_state.get("cut_style_pace", 0)),
+                                                  int(st.session_state.get("beats_per_bar", 4)))
+    st.session_state["segmentation_method"] = method
+    for k, v in settings.items():
+        st.session_state[k] = v
+    st.session_state["audio_style"] = AUDIO_STYLE_CUSTOM     # the style owns the dials — no pace re-tune over them
+    appscope = st.session_state.get("_audio_appscope", {})
+    appscope.update({k: st.session_state[k] for k in ["segmentation_method", "audio_style", "cut_style",
+                                                      "cut_style_pace", *settings] if k in AUDIO_SETTINGS_KEYS})
+    st.session_state["_audio_appscope"] = appscope
+    st.session_state["style_report"] = {"track_id": st.session_state["track_id"], "notes": notes}
+    st.session_state.pop("aim_report", None)
+
+
+def _render_style_row(_v) -> None:
+    """🎨 Cutting style + Pace — the quick way in; the method and dials below stay editable."""
+    opts = ["custom"] + list(CSTY.STYLES)
+    cur = _v("cut_style") if _v("cut_style") in opts else "custom"
+    with st.container(border=True):
+        c = st.columns([3, 2])
+        style = c[0].selectbox(
+            "🎨 Cutting style", opts, index=opts.index(cur), key="cut_style", on_change=_apply_cut_style,
+            format_func=lambda k: "✏️ My own settings" if k == "custom"
+            else CSTY.STYLES[k]["label"],
+            help="Pick the feel and the app sets the cutting method and all its dials for this track. You can "
+                 "still change anything below (it then shows ✏️ My own settings).")
+        c[1].select_slider("Pace", options=[-2, -1, 0, 1, 2], value=int(_v("cut_style_pace") or 0),
+                           key="cut_style_pace", format_func=CSTY.PACE_LABELS.get, on_change=_apply_cut_style,
+                           disabled=style == "custom",
+                           help="Each step halves or doubles how often the style cuts.")
+        if style != "custom":
+            st.caption(CSTY.STYLES[style]["help"])
+            rep = st.session_state.get("style_report")
+            if rep and rep.get("track_id") == st.session_state.get("track_id"):
+                for n in rep["notes"][1:]:
+                    st.caption("• " + n)
 
 
 def _audio_retune_if_paced() -> None:
@@ -1600,7 +1666,7 @@ def _pace_row(_pc, _styles, _style_now) -> None:
     """Cutting pace preset + Re-tune (every method except Smart)."""
     _pc[0].selectbox(
         "Cutting pace", _styles, index=_styles.index(_style_now), key="audio_style",
-        on_change=_audio_retune_if_paced,
+        on_change=_method_changed,
         format_func=lambda x: {"Calm": "🌊 Calm — a cut every ~4 bars",
                                "Balanced": "⚖️ Balanced — every ~2 bars",
                                "Energetic": "🔥 Energetic — every bar",
@@ -1630,6 +1696,7 @@ def _aim_adaptive() -> None:
     for k, v in res["settings"].items():
         st.session_state[k] = v
     st.session_state["audio_style"] = AUDIO_STYLE_CUSTOM      # your own settings now — don't re-tune over them
+    st.session_state["cut_style"] = "custom"
     appscope = st.session_state.get("_audio_appscope", {})
     appscope.update({k: v for k, v in res["settings"].items() if k in AUDIO_SETTINGS_KEYS})
     appscope["audio_style"] = AUDIO_STYLE_CUSTOM
@@ -1773,6 +1840,8 @@ def _render_cut_editor(track: dict) -> None:
 def _smart_reset() -> None:
     for k, v in SM.DEFAULTS.items():
         st.session_state[k] = v
+    st.session_state["cut_style"] = "smart"        # = the 🧠 Smart style at normal pace
+    st.session_state["cut_style_pace"] = 0
 
 
 _PACE_LABELS = {-2: "much calmer", -1: "calmer", 0: "auto", 1: "busier", 2: "much busier"}
@@ -1781,7 +1850,7 @@ _PACE_LABELS = {-2: "much calmer", -1: "calmer", 0: "auto", 1: "busier", 2: "muc
 def _render_smart_cut_settings(track: dict, _v) -> None:
     """Controls and the per-section breakdown for the Smart method. Smart tunes
     itself to the track; these only dial it in (the cutting-pace presets don't apply)."""
-    _custom = {}
+    _custom = dict(on_change=_mark_style_custom)
     a = track.get("analysis") or {}
     if not a:
         st.info("This track only has the basic analysis — Smart works from its beats and loudness. Add the "
@@ -1938,13 +2007,14 @@ def render_audio_settings_section(track: dict) -> None:
         return st.session_state.get(key, _shadow.get(key, DIAL_DEFAULTS.get(key)))
 
     st.subheader("How the music is cut")
+    _render_style_row(_v)
     _seg_options = [SEG_SMART, SEG_SCORED, SEG_ADAPTIVE, SEG_RHYTHM]
     _seg_default = _v("segmentation_method")
     segmentation_method = st.radio(
         "Method", _seg_options,
         index=_seg_options.index(_seg_default) if _seg_default in _seg_options else 0,
         key="segmentation_method", format_func=lambda m: SEG_LABELS.get(m, m), horizontal=True,
-        on_change=_audio_retune_if_paced,
+        on_change=_method_changed,
         help="🧠 Smart: reads the song's structure and intensity and sets its own cutting rhythm — a "
              "steady pace per section on the bar / beat grid, faster when the music is bigger, speeding up "
              "into drops, with cuts at every section change. 🎯 Best musical moments: scores every beat for how good a cut it would be (bar lines, "
@@ -1965,7 +2035,7 @@ def render_audio_settings_section(track: dict) -> None:
         _pace_row(_pc, _styles, _style_now)
     _pc[2].number_input(
         "Beats per bar", min_value=2, max_value=12, value=int(_v("beats_per_bar")), key="beats_per_bar",
-        on_change=_audio_retune_if_paced,
+        on_change=_beats_per_bar_changed,
         help="4 = common time (most pop/rock/EDM). Use 3 for a waltz, 6 for 6/8, etc.",
     )
     if st.session_state.get("auto_tune_report"):
@@ -2736,6 +2806,8 @@ DIAL_DEFAULTS = {
     # Segmentation — Adaptive
     "segmentation_method": "Smart (self-tuning)",   # = SEG_SMART
     "audio_style": "Balanced",    # cutting pace preset; dials follow the track unless Custom
+    "cut_style": "custom",        # 🎨 cutting style (core/styles.py); "custom" = choose the method yourself
+    "cut_style_pace": 0,
     "sc_focus": "Balanced",       # Scored cuts: "What to cut on" mix
     "beats_per_bar": 4,
     "change_window_secs": 2.0,
