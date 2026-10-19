@@ -24,7 +24,8 @@ import core.recommend as REC
 import jobs as J
 import rec_library as RL
 import scene_roles as SR
-from library_common import safe_image, scene_thumbnail_path
+import core.footage as CFOOT
+from library_common import library_ranges, master_thumbnail_path, safe_image, scene_thumbnail_path
 from page_setup import page_setup
 
 page_setup("Recommendations", "pages/5_Recommendations.py", title="🔮 Recommendations")
@@ -84,8 +85,30 @@ def _strip(scores: dict, which: str = "overall") -> go.Figure:
 
 
 def _thumb(video_id: str):
-    cat = CStore.all_catalogues().get(video_id) or {}
-    for s in cat.get("scenes", []):
+    """The video's picture, as the planner's video list chooses it: the ⭐ master thumbnail
+    chosen in the Reviewer, else the usable scene (not excluded, inside the library range)
+    nearest the middle of the range."""
+    scenes = (CStore.all_catalogues().get(video_id) or {}).get("scenes", [])
+    master = master_thumbnail_path(video_id, scenes)
+    if master is not None:
+        return master
+    rng = library_ranges().get(video_id)
+    usable = []
+    for s in scenes:
+        if s.get("excluded"):
+            continue
+        try:
+            a, b = CFOOT._overlap_with_range(CFOOT._tc_to_seconds(s["start_tc"]), CFOOT._tc_to_seconds(s["end_tc"]),
+                                             rng)
+        except (KeyError, ValueError):
+            continue
+        if a is not None:
+            usable.append((a, b, s))
+    if not usable:
+        return None
+    mid = (usable[0][0] + usable[-1][1]) / 2 if not rng else (rng[0] + rng[1]) / 2
+    for _, _, s in sorted(usable, key=lambda u: 0.0 if u[0] <= mid <= u[1] else min(abs(u[0] - mid),
+                                                                                     abs(u[1] - mid))):
         p = scene_thumbnail_path(video_id, s)
         if p:
             return p

@@ -227,3 +227,46 @@ def test_background_panel_queues_changed_tracks(nightly):
     finally:
         J.cancel_queued()
         J._paths()["pause"].unlink(missing_ok=True)
+
+
+def test_thumbnails_skip_excluded_and_out_of_range_scenes():
+    """The page's video pictures: the ⭐ master if chosen, else a usable scene (never an
+    excluded one, never outside the library range) from the middle of the range."""
+    import catalogue_store as CStore
+    from config import CATALOGUE_DIR
+    from tests.support import load_page
+    from library_common import load_library_meta, save_library_meta
+    ns = load_page(PAGE)
+    vid = "vid_b"                                        # fixture: scene 2 is excluded
+    scenes = CStore.all_catalogues()[vid]["scenes"]
+    made = []
+    for s in scenes:
+        s.setdefault("thumbnail_paths", [f"/content/x/{vid}_scene{s['scene_id']}.jpg"])
+        p = CATALOGUE_DIR / "thumbnails" / vid / s["thumbnail_paths"][0].split("/")[-1]
+        if not p.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"jpg")
+            made.append(p)
+    meta_before = load_library_meta()
+    try:
+        name_of = {s["thumbnail_paths"][0].split("/")[-1]: s for s in scenes}
+        excluded = scenes[2]
+        assert excluded.get("excluded")
+        # a range around the excluded scene: the pick must still be a usable scene inside it
+        from core.footage import _tc_to_seconds
+        a, b = _tc_to_seconds(excluded["start_tc"]) - 0.5, _tc_to_seconds(excluded["end_tc"]) + 0.5
+        import library_common as LC
+        LC.set_library_range(vid, (a, b))
+        t = ns["_thumb"](vid)
+        assert t is not None
+        pick = name_of[t.name]
+        assert not pick.get("excluded")
+        pa, pb = _tc_to_seconds(pick["start_tc"]), _tc_to_seconds(pick["end_tc"])
+        assert pb > a and pa < b                         # overlaps the range
+        # ⭐ the master thumbnail wins
+        LC.set_master_thumbnail(vid, scenes[5]["scene_id"])
+        assert ns["_thumb"](vid).name == scenes[5]["thumbnail_paths"][0].split("/")[-1]
+    finally:
+        save_library_meta(meta_before)
+        for p in made:
+            p.unlink(missing_ok=True)
