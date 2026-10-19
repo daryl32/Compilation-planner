@@ -82,3 +82,31 @@ def test_story_step_still_opens_in_simple_when_sent_there():
     at.run()
     assert not errors(at), errors(at)
     assert at.radio(key="ui_section").value == "🎭 1. Story map"
+
+
+def test_matching_step_layout():
+    """🎬 Matching keeps every option (mode switch, all settings tabs) in both views, with one status
+    line, real problems together in one box, and a Finish bar."""
+    from tests.apptest_util import errors, page_app
+    at = page_app(PLANNER, advanced=False)
+    state = {"track_id": "song_full", "committed_selected_videos": ["vid_a", "vid_b"],
+             "ui_section": "🎬 3. Matching & Export"}
+    for v in ("vid_a", "vid_b"):
+        state[f"select_video_{v}"] = True
+    for k, v in state.items():
+        at.session_state[k] = v
+    at.run()
+    assert not errors(at), errors(at)
+    assert at.radio(key="matching_mode").options == ["Auto", "Manual step-through", "Choreography"]
+    assert any(e.label.startswith("⚙️ Matching settings") and "weights" in e.label for e in at.expander)
+    assert [t.label for t in at.tabs][:4] == ["🎛️ Mode & order", "⚖️ Auto-fill weights", "🎬 Intro / Outro",
+                                              "🧹 Resets"]
+    assert any(c.value.startswith("**") and "segments**" in c.value for c in at.caption)
+    assert len(at.warning) <= 1                                   # problems, if any, in one box
+    labels = [b.label for b in at.button]
+    assert "🎬 Render Preview" in labels and "💾 Save plan" in labels
+    # every mode still works from the same switch
+    for mode in ("Manual step-through", "Choreography", "Auto"):
+        at.radio(key="matching_mode").set_value(mode).run()
+        assert not errors(at), (mode, errors(at))
+        assert any("segments**" in c.value for c in at.caption)

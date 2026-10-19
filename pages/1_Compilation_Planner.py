@@ -3718,18 +3718,22 @@ def render_split_screen_settings() -> None:
                   help="If footage left to fill a slot is shorter than this, extend the previous clip instead.")
 
 
+def render_mode_picker() -> str:
+    """How clips are chosen — at the top of the 🎬 Matching step."""
+    return st.radio(
+        "How clips are chosen", ["Auto", "Manual step-through", "Choreography"], key="matching_mode",
+        horizontal=True,
+        help="Auto: the algorithm picks the best-matching clip per segment automatically.  "
+             "Manual step-through: pick from the best shape-matched candidates one block at a time.  "
+             "Choreography: one column per source video — see the auto pick for each, then override with "
+             "any available clip from that video via a timecode dropdown.")
+
+
 def render_matching_mode_settings() -> None:
     """🎛️ Mode tab of the 🎬 Matching step's settings."""
-    c = st.columns([2, 1])
+    mode = st.session_state.get("matching_mode", "Auto")
+    c = st.columns([1, 2])
     with c[0]:
-        mode = st.radio(
-            "How clips are chosen", ["Auto", "Manual step-through", "Choreography"], key="matching_mode",
-            horizontal=True,
-            help="Auto: the algorithm picks the best-matching clip per segment automatically.  "
-                 "Manual step-through: pick from the best shape-matched candidates one block at a time.  "
-                 "Choreography: one column per source video — see the auto pick for each, then override with "
-                 "any available clip from that video via a timecode dropdown.")
-    with c[1]:
         if mode == "Manual step-through":
             st.number_input("Candidates shown per block", min_value=1, max_value=30, key="max_shape_matches",
                             help="How many of the best-scoring clips are offered per block.")
@@ -3954,9 +3958,30 @@ if not selected_videos:
     step_nav(back=SECTION_VIDEOS)
     st.stop()
 
-# ⚙️ Matching settings — every setting for this step in one panel. All three tabs
-# are drawn on every run (st.tabs runs each body), so nothing is dropped.
-with st.container(border=True):
+# How clips are chosen, then one status line (filled in once the plan is worked out), then
+# ⚙️ Matching settings — every setting for this step, folded away with a summary. All the
+# tabs are drawn on every run (st.tabs runs each body, an expander's content always runs),
+# so nothing is dropped.
+_notes = []     # things worth knowing about this plan — shown together in one box under the status line
+
+
+def _note(text: str) -> None:
+    _notes.append(text)
+
+
+render_mode_picker()
+_status_slot = st.container()
+_has_map_now = bool(current_story_map(track_id))
+_summary = " · ".join(x for x in (
+    f"{st.session_state.get('autofill_preset', 'Balanced')} weights",
+    ("🎭 story map on" if _has_map_now and st.session_state.get("use_story_map", True) else
+     "story map off" if _has_map_now else ""),
+    "in order" if sequential_mode else "",
+    "intro / outro clips" if prefer_intro_outro and not (_has_map_now and st.session_state.get("use_story_map", True))
+    else "",
+    f"{len(st.session_state['global_excluded_scenes'])} rejected" if st.session_state["global_excluded_scenes"] else "",
+) if x)
+with st.expander(f"⚙️ Matching settings  ·  {_summary}", expanded=False):
     _mt = st.tabs(["🎛️ Mode & order", "⚖️ Auto-fill weights", "🎬 Intro / Outro", "🧹 Resets"])
 with _mt[0]:
     render_matching_mode_settings()
@@ -4006,15 +4031,13 @@ if _preset_vals and any(abs(float(st.session_state.get(k, v)) - v) > 1e-6 for k,
     st.session_state["autofill_preset"] = _PRESET_CUSTOM
 
 with _mt[1]:
-    if _is_auto_mode:
-        st.caption("In Auto mode these weights drive EVERY pick directly. On a marked intro/outro "
-                   "block, clips actually tagged are still preferred first.")
-    elif matching_mode == "Choreography":
-        st.caption("Drives a column's '⭐ Auto pick', Confirm & Next's Auto columns and Auto-fill ALL — "
-                   "ticking a clip yourself always overrides these.")
-    else:
-        st.caption("Controls Auto-fill's automatic picks only — the candidate grid stays sorted by raw "
-                   "shape score for manual browsing.")
+    _what_weights_do = (
+        "In Auto mode these weights drive EVERY pick directly. On a marked intro/outro block, clips actually "
+        "tagged are still preferred first." if _is_auto_mode else
+        "Drives a column's '⭐ Auto pick', Confirm & Next's Auto columns and Auto-fill ALL — ticking a clip "
+        "yourself always overrides these." if matching_mode == "Choreography" else
+        "Controls Auto-fill's automatic picks only — the candidate grid stays sorted by raw shape score for "
+        "manual browsing.")
     _hc = st.columns([2, 3])
     _v2 = _hc[0].toggle(
         "✨ Improved auto-fill", key="autofill_v2", disabled=_autofill_disabled,
@@ -4026,7 +4049,8 @@ with _mt[1]:
     _hc[1].selectbox(
         "Preset", list(AF.PRESETS) + [_PRESET_CUSTOM], key="autofill_preset", on_change=_apply_preset,
         disabled=_autofill_disabled,
-        help="A starting point for the sliders below. Moving a slider switches this to Custom.")
+        help="A starting point for the sliders below. Moving a slider switches this to Custom. "
+             + _what_weights_do)
     st.caption("Share of each pick: " + _weight_shares(_v2))
 
     _wt_cols = st.columns(3)
@@ -4127,12 +4151,12 @@ with _timed("Cutting the track", seg_cfg["method"]):
     apply_segment_intensity(segments, track, density_contrast)
 if not track.get("hires"):
     if seg_cfg["method"] == SEG_ADAPTIVE:
-        st.warning("This track was analysed before the 30 Hz onset signals existed, so cuts use the older, "
-                   "looser method. Re-run audio_pipeline.py in Colab to upgrade it.")
+        _note("This track was analysed before the 30 Hz onset signals existed, so cuts use the older, "
+              "looser method. Re-run audio_pipeline.py in Colab to upgrade it.")
     else:
-        st.warning("Rhythm Engine needs the 30 Hz onset signals to compute bar energies, which this track "
-                   "doesn't have — it's being treated as one single segment. Re-run audio_pipeline.py in "
-                   "Colab to upgrade it, or switch to Adaptive segmentation for now.")
+        _note("Rhythm Engine needs the 30 Hz onset signals to compute bar energies, which this track "
+              "doesn't have — it's being treated as one single segment. Re-run audio_pipeline.py in "
+              "Colab to upgrade it, or switch to Adaptive segmentation for now.")
 recommended_counts = [
     clips_for_intensity(sg["intensity"], min_clips, max_clips, ramp_start, ramp_end, False, None)
     for sg in segments
@@ -4226,7 +4250,7 @@ if _story_on:
     _missing = [r for r in _plan_roles_used if _supply.get(r, 0.0) < 0.05]
     if _missing:
         _blk = {r: [i + 1 for i, x in enumerate(plan_block_roles) if x == r] for r in _missing}
-        st.warning("🎭 No clips marked " + " / ".join(SR.label(r, _story_roles) for r in _missing)
+        _note("🎭 No clips marked " + " / ".join(SR.label(r, _story_roles) for r in _missing)
                    + " in the selected videos — those parts use normal picks (blocks "
                    + "; ".join(f"{SR.label(r, _story_roles)}: {', '.join(map(str, b[:12]))}"
                                + ("…" if len(b) > 12 else "") for r, b in _blk.items())
@@ -4286,27 +4310,21 @@ if matching_mode == "Auto":
             "sig": _auto_sig, "result": (timeline, clip_count_shortfall, duration_shortfall_sec),
             "fallbacks": sorted(_auto_repeat_fallbacks)}
     if _auto_repeat_fallbacks:
-        st.warning(repeat_fallback_message([i + 1 for i in sorted(_auto_repeat_fallbacks)]))
+        _note(repeat_fallback_message([i + 1 for i in sorted(_auto_repeat_fallbacks)]))
 
     split_count = sum(1 for e in timeline if e["split_screen"])
     total_picks = sum(len(e["scenes"]) for e in timeline)
-    st.caption(f"{track_id}  |  {track['bpm']} BPM  |  {format_mmss(track['duration_sec'])}  |  "
-               f"{len(timeline)} segments ({split_count} split-screen)  |  "
-               f"{total_footage_sec:.0f}s of usable footage across {len(selected_videos)} videos" +
-               ("  |  sequential order" if sequential_mode else ""))
-
+    _status_line = (f"**{len(timeline)} segments**" + (f" ({split_count} split-screen)" if split_count else "")
+                    + f" · {len(selected_videos)} videos · {total_footage_sec / 60:.0f} min of usable footage"
+                    + (" · in order" if sequential_mode else ""))
     if clip_count_shortfall:
-        st.warning(
-            f"Ran out of usable footage {clip_count_shortfall} time(s) — some segments have fewer "
-            f"clips than requested. Widen your video/tag selection for a fuller plan."
-        )
+        _note(f"Ran out of usable footage {clip_count_shortfall} time(s) — some segments have fewer "
+              f"clips than requested. Widen your video/tag selection for a fuller plan.")
     if duration_shortfall_sec > 0.5:
-        st.warning(
-            f"{duration_shortfall_sec:.1f}s total across the plan could NOT be filled at all — every "
-            f"scene in the library was exhausted at that point. Widen your video/tag selection."
-        )
+        _note(f"{duration_shortfall_sec:.1f}s total across the plan could NOT be filled at all — every "
+              f"scene in the library was exhausted at that point. Widen your video/tag selection.")
     if not clip_count_shortfall and duration_shortfall_sec <= 0.5:
-        st.caption(f"Every segment fully and continuously filled, no freezes or gaps ({total_picks} total slots).")
+        _status_line += f" · ✅ every segment filled, no gaps ({total_picks} slots)"
 
 elif matching_mode == "Choreography":
     # ---------------------------------------------------------------------------
@@ -4373,8 +4391,8 @@ elif matching_mode == "Choreography":
         for pick in chor_confirmed.get(chor_editing, []):
             split_span_at(queues, pick["video_id"], pick["scene_id"], pick["offset_into_scene_sec"])
         if chor_invalidated:
-            st.warning(f"{len(chor_invalidated)} confirmed clip(s) in other blocks no longer match the "
-                       f"available footage (a setting changed) — check those blocks after this edit.")
+            _note(f"{len(chor_invalidated)} confirmed clip(s) in other blocks no longer match the "
+                  f"available footage (a setting changed) — check those blocks after this edit.")
 
     # Replay confirmed blocks to keep queues accurate for the current block
     for i in (range(chor_block) if chor_editing is None else ()):
@@ -4388,8 +4406,8 @@ elif matching_mode == "Choreography":
                 chor_invalidated.append((i, pick["video_id"], pick["scene_id"]))
         chor_confirmed[i] = still_valid
     if chor_invalidated and chor_editing is None:
-        st.warning(f"{len(chor_invalidated)} previously confirmed clip(s) are no longer available "
-                   f"(a setting changed) and were removed — revisit those blocks.")
+        _note(f"{len(chor_invalidated)} previously confirmed clip(s) are no longer available "
+              f"(a setting changed) and were removed — revisit those blocks.")
 
     # Build timeline for the chart (real picks for confirmed, empty for the rest)
     timeline = []
@@ -4407,9 +4425,8 @@ elif matching_mode == "Choreography":
 
     clip_count_shortfall = 0
     duration_shortfall_sec = 0.0
-    st.caption(f"{track_id}  |  {track['bpm']} BPM  |  {format_mmss(track['duration_sec'])}  |  "
-               f"{len(segments)} segments  |  {total_footage_sec:.0f}s of usable footage across "
-               f"{len(selected_videos)} videos  |  Choreography")
+    _status_line = (f"**{len(segments)} segments** · {len(selected_videos)} videos · "
+                    f"{total_footage_sec / 60:.0f} min of usable footage · {len(chor_confirmed)} block(s) confirmed")
 
 elif matching_mode == "Manual step-through":
     # ---------------------------------------------------------------------------
@@ -4504,8 +4521,8 @@ elif matching_mode == "Manual step-through":
             for i in range(adv_editing + 1, adv_frontier) for p in confirmed.get(i, [])
         ))
     if invalidated:
-        st.warning(f"{len(invalidated)} previously-confirmed/skipped item(s) are no longer available "
-                   f"(a setting changed since) and were removed — revisit those blocks with Previous.")
+        _note(f"{len(invalidated)} previously-confirmed/skipped item(s) are no longer available "
+              f"(a setting changed since) and were removed — revisit those blocks with Previous.")
 
     # Also replay any skips already made for the CURRENT block (from earlier
     # reruns while still on it — e.g. you skipped, then ticked a checkbox,
@@ -4535,9 +4552,14 @@ elif matching_mode == "Manual step-through":
                       for p in picks],
         })
 
-    st.caption(f"{track_id}  |  {track['bpm']} BPM  |  {format_mmss(track['duration_sec'])}  |  "
-               f"{len(segments)} segments  |  {total_footage_sec:.0f}s of usable footage across "
-               f"{len(selected_videos)} videos  |  Manual step-through")
+    _status_line = (f"**{len(segments)} segments** · {len(selected_videos)} videos · "
+                    f"{total_footage_sec / 60:.0f} min of usable footage · {len(confirmed)} block(s) confirmed")
+
+with _status_slot:
+    st.caption(_status_line)
+    if _notes:
+        st.warning(_notes[0] if len(_notes) == 1 else
+                   f"**{len(_notes)} things to check**\n\n" + "\n".join(f"- {n}" for n in _notes))
 
 # ---------------------------------------------------------------------------
 # Live visualization
@@ -4620,20 +4642,18 @@ for _r in (_story_regions or []):
                       layer="below", annotation_text=f"{_role['emoji']} {_role['name']}",
                       annotation_position="top left", annotation_font_size=11)
 st.plotly_chart(fig, use_container_width=True)
-if _story_regions:
-    st.caption("🎭 Shaded: the story map's parts (🎭 1. Story map). Each block card says which part it's in.")
 
 # ---------------------------------------------------------------------------
 # Timeline table + thumbnails preview
 # ---------------------------------------------------------------------------
 
 if matching_mode == "Auto":
-    st.subheader("Matched timeline")
-    st.caption(
-        "🔄 **Swap** — replace with a different clip here; the original can still be used elsewhere.  "
-        "🚫 **Reject** — replace it here too, but permanently ban the original from the whole plan.  "
-        "✕ **Remove** — delete this slot (fewer simultaneous clips); the original can still be used elsewhere."
-    )
+    st.subheader("Matched timeline", help=(
+        "🔄 Swap — replace with a different clip here; the original can still be used elsewhere.  "
+        "🚫 Reject — replace it here too, but permanently ban the original from the whole plan.  "
+        "✕ Remove — delete this slot (fewer simultaneous clips); the original can still be used elsewhere."
+        + ("  🎭 The chart's shading is the story map's parts; each block card says which part it's in."
+           if _story_regions else "")))
     preview_count = blocks_to_show("Segments to preview below", "auto_preview_count", len(timeline))
 
     for entry in timeline[:preview_count]:
@@ -5559,8 +5579,6 @@ def render_why_panel(timeline: list, segments: list) -> None:
 
 render_why_panel(timeline, segments)
 
-st.subheader("Export")
-
 # Attach resolved local file paths so the Blender add-on can load footage
 # and audio directly, without re-deriving them from the catalogues.
 for _entry in timeline:
@@ -5595,7 +5613,30 @@ export_plan = {
 if _cut_edits():
     export_plan["segmentation"]["hand_edited_cuts"] = True    # ✂️ cuts edited in the cut editor
 
-if st.button("💾 Save plan"):
+# 🏁 Finish: render a preview, save the plan, download it — together in one bar.
+st.divider()
+st.subheader("Finish", help="🎬 Render a preview to watch the plan · 💾 Save the plan for the Blender add-on "
+                            "(and Google Drive) · ⬇️ download the plan's JSON.")
+_fin = st.columns([2, 1.5, 1.5, 0.7])
+_render_clicked = _fin[0].button("🎬 Render Preview", type="primary", use_container_width=True)
+_save_clicked = _fin[1].button("💾 Save plan", use_container_width=True)
+_fin[2].download_button(
+    "⬇️ Download plan", data=json.dumps(export_plan, indent=2), file_name=f"{track_id}_plan.json",
+    mime="application/json", use_container_width=True, help="The plan as JSON, for the Blender add-on.")
+_stream_sources = False
+with _fin[3].popover("⚙️", use_container_width=True, help="Render options"):
+    if _DRIVE_SYNC_AVAILABLE:
+        _stream_sources = st.toggle(
+            "Stream original videos from Google Drive", value=True, key="render_stream_sources",
+            help="On: videos and the track that aren't on the server are read straight from Google Drive "
+                 "while rendering — only the seconds each clip uses are fetched, and nothing is stored. "
+                 "If a stream fails, that file is downloaded instead. Off: every missing file is "
+                 "downloaded to the server first (the old way).",
+        )
+    else:
+        st.caption("Rendering uses the files on this machine.")
+
+if _save_clicked:
     PLANS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = PLANS_DIR / f"{track_id}_plan.json"
     out_path.write_text(json.dumps(export_plan, indent=2))
@@ -5610,18 +5651,9 @@ if st.button("💾 Save plan"):
     else:
         st.success(f"Saved locally: {out_path.name}")
 
-st.download_button(
-    "Download plan as JSON",
-    data=json.dumps(export_plan, indent=2),
-    file_name=f"{track_id}_plan.json",
-    mime="application/json",
-)
-
 # ---------------------------------------------------------------------------
 # Render preview — versioned, stored in Drive, viewable side-by-side
 # ---------------------------------------------------------------------------
-
-st.subheader("Preview")
 
 PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
 safe_track_id = sanitize_filename(track_id)
@@ -5677,17 +5709,7 @@ def ensure_render_sources_local() -> list:
     return errors
 
 
-_stream_sources = False
-if _DRIVE_SYNC_AVAILABLE:
-    _stream_sources = st.toggle(
-        "Stream original videos from Google Drive", value=True, key="render_stream_sources",
-        help="On: videos and the track that aren't on the server are read straight from Google Drive "
-             "while rendering — only the seconds each clip uses are fetched, and nothing is stored. "
-             "If a stream fails, that file is downloaded instead. Off: every missing file is "
-             "downloaded to the server first (the old way).",
-    )
-
-if st.button("🎬 Render Preview", type="primary"):
+if _render_clicked:
     if not _stream_sources:
         _src_errors = ensure_render_sources_local()
         if _src_errors:
