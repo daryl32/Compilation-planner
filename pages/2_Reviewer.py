@@ -1206,6 +1206,11 @@ def quick_role_grid(ids: list) -> None:
                 hint = SR.motion_hint(motion_rank(sc))
                 st.caption(f"**{SE.scene_label(sc)}** · {fmt_dur(SE.scene_duration(sc))}"
                            + (" · 🚫" if sc.get("excluded") else ""))
+                # Motion score (re-measured for each part when a scene is split) and where it sits in
+                # this video. A split part with no curve of its own still has the pre-split score.
+                copied = sc.get("split_from") is not None and not (sc.get("motion_curve") or {}).get("values") \
+                    and sc.get("motion_measured") != "reviewer"
+                st.caption(motion_text(sc) + (" · from before the split" if copied else ""))
                 # Marked roles as solid badges (green = saved, orange = not saved yet); a motion
                 # suggestion only as faint grey italics, so the two can't be mixed up.
                 saved = set(SR.scene_roles(sc))
@@ -1218,6 +1223,20 @@ def quick_role_grid(ids: list) -> None:
                 st.button(("✓ " if on else "＋ ") + (_roles[role]["emoji"] if role else ""),
                           key=f"rev_qr_t_{selected}_{sid}", type="primary" if on else "secondary",
                           use_container_width=True, disabled=not role, on_click=_qr_toggle, args=(sid,))
+                # ✂️ / ⚡ without leaving quick marking (unsaved role clicks stay pending; the parts
+                # keep this scene's saved roles and each gets its own motion score).
+                ec = st.columns(2)
+                if ec[0].button("✂️", key=f"rev_qr_split_{selected}_{sid}", use_container_width=True,
+                                help="Split… — place the cuts by hand."):
+                    st.session_state["rev_open_dialog"] = (selected, sid, False)
+                    st.rerun(scope="app")
+                if ec[1].button("⚡", key=f"rev_qr_auto_{selected}_{sid}", use_container_width=True,
+                                disabled=sid not in auto_ids,
+                                help=(f"Auto split into parts of about {auto_target_sec:g}s (↩️ undo on its card "
+                                      "outside quick marking)." if sid in auto_ids else
+                                      f"Auto split is offered on scenes over {1.5 * auto_target_sec:g}s (sidebar "
+                                      "⚡ Auto split sets the target).")):
+                    do_split(sid, SE.auto_split_points(scene_by_id[sid], auto_target_sec))
     if changed:
         st.caption(f"✏️ {len(changed)} unsaved change(s) — 💾 Save above.")
 
