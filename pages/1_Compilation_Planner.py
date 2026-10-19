@@ -2228,6 +2228,16 @@ def render_audio_simple(track: dict) -> None:
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     line, notes = _audio_status(track, segs)
     st.caption(line + (f"  ·  also in use: {', '.join(notes)} (🛠️ Advanced to change)" if notes else ""))
+    regions = current_story_map(st.session_state.get("track_id"))
+    n_parts = sum(1 for r in regions or [] if r.get("role"))
+    if regions and n_parts and st.session_state.get("use_story_map", True):
+        st.caption(f"🎭 Using this track's story map — {n_parts} part(s) with a role. Edit it in 🛠️ Advanced → "
+                   "🎭 Story map, or in the Media Library.")
+    elif regions and n_parts:
+        st.caption("🎭 This track's story map is switched off for this project (🛠️ Advanced → Matching → Mode).")
+    else:
+        st.caption("🎭 No story map saved for this track — clips aren't steered by role. Make one in 🛠️ Advanced "
+                   "→ 🎭 Story map, or in the Media Library.")
     st.session_state["audio_settings_shadow"] = {
         k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state
     }
@@ -2533,7 +2543,8 @@ def _clear_video_selection():
 
 
 @fragment
-def render_video_selection_section(track: dict, all_video_ids: list, all_tag_options: list, catalogues: dict) -> None:
+def render_video_selection_section(track: dict, all_video_ids: list, all_tag_options: list, catalogues: dict,
+                                   simple: bool = False) -> None:
     """Tag filter, Select all recommended / Clear, and the whole video list
     with checkboxes and time-range pickers — as a fragment, so ticking a
     checkbox, opening/closing a range picker, dragging its slider, or
@@ -2544,24 +2555,27 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
     session_state already holds whatever was last set here."""
     memory_check("Video selection")
     autosave_now()
-    top_cols = st.columns([5, 2, 2, 2])
-    with top_cols[0]:
-        tag_filter = st.multiselect(
-            "Restrict to tags (optional)", all_tag_options, key="tag_filter",
-            default=[t for t in st.session_state.get("committed_tag_filter", []) if t in all_tag_options],
-            help="Only scenes carrying at least one of these tags are used — this also changes which videos "
-                 "are recommended below.",
-        )
-    with top_cols[1]:
-        st.write("")
-        st.button("✅ Select all recommended", on_click=_select_all_recommended, use_container_width=True,
+    if simple:
+        # 🛠️ Simple: no scene-tag filter widget — the one set in Advanced still applies (and the status says so).
+        tag_filter = [t for t in st.session_state.get("committed_tag_filter", []) if t in all_tag_options]
+        top_cols = st.columns([2, 2, 2])
+        _bc = top_cols
+    else:
+        top_cols = st.columns([5, 2, 2, 2])
+        with top_cols[0]:
+            tag_filter = st.multiselect(
+                "Restrict to tags (optional)", all_tag_options, key="tag_filter",
+                default=[t for t in st.session_state.get("committed_tag_filter", []) if t in all_tag_options],
+                help="Only scenes carrying at least one of these tags are used — this also changes which videos "
+                     "are recommended below.",
+            )
+        _bc = top_cols[1:]
+        for c in _bc:
+            c.write("")
+    _bc[0].button("✅ Select all recommended", on_click=_select_all_recommended, use_container_width=True,
                   help=f"Tick the top {RECOMMENDED_COUNT} best-matching videos listed below.")
-    with top_cols[2]:
-        st.write("")
-        st.button("Clear selection", on_click=_clear_video_selection, use_container_width=True)
-    with top_cols[3]:
-        st.write("")
-        st.button("🎲 Randomize", on_click=_randomize_top_videos, use_container_width=True,
+    _bc[1].button("Clear selection", on_click=_clear_video_selection, use_container_width=True)
+    _bc[2].button("🎲 Randomize", on_click=_randomize_top_videos, use_container_width=True,
                   help=f"Replace the top list with {RECOMMENDED_COUNT} videos picked purely at random from the "
                        f"whole library (ignores the ranking weights). Press again for a different set.")
 
@@ -2579,7 +2593,8 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
     if _allowed is not None:
         st.caption(f"👤🏷️ {len(_allowed)} of {len(all_video_ids)} videos match — the recommendations and the "
                    f"'add another video' list only include those. Videos you've already ticked stay ticked.")
-    render_ranking_weights(tag_filter)
+    if not simple:
+        render_ranking_weights(tag_filter)
     info = resolve_video_selection(track, tuple(tag_filter), all_video_ids, _allowed)
     video_matches = info["video_matches"]
     st.session_state["recommended_ids"] = info["top_ids"]
@@ -2595,7 +2610,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
         "Overall energy (highest first)":    lambda v: -v["level_pct"],
         "Total video length (longest first)": lambda v: -get_video_duration(v["video_id"]),
     }
-    sort_by = st.selectbox(
+    sort_by = list(_SORT_OPTIONS)[0] if simple else st.selectbox(
         "Sort top videos by",
         list(_SORT_OPTIONS.keys()),
         index=0,
@@ -2613,16 +2628,15 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                    f"the ranking weights aren't used. Match scores are still shown for reference." +
                    (f"  |  filtered to tags: {', '.join(tag_filter)}" if tag_filter else ""))
     else:
-        st.subheader(f"Best-matching videos (top {RECOMMENDED_COUNT})")
-        st.caption(f"Ranked by match score — see ⚙️ Ranking weights above for what counts" +
-                   (f"  |  filtered to tags: {', '.join(tag_filter)}" if tag_filter else ""))
-    st.caption(
-        "✅ marks a recommended video. ☑ is your actual selection — nothing is selected until you tick it "
-        "(or use Select all recommended above), and it stays as you set it even if re-sorting moves the "
-        "video. 🎚️ opens a range picker to restrict a video to just a portion of its footage. "
-        "📚 is the video's Media Library range (used by default); 🎚️ next to a time is a range "
-        "set here, which overrides the library range for this project only."
-    )
+        _legend = ("✅ marks a recommended video. ☑ is your actual selection — nothing is selected until you tick it "
+                   "(or use Select all recommended above), and it stays as you set it even if re-sorting moves the "
+                   "video. ✨ finds similar videos. 🎚️ opens a range picker to restrict a video to just a portion of "
+                   "its footage (🛠️ Advanced). 📚 is the video's Media Library range (used by default); 🎚️ next to a "
+                   "time is a range set here, which overrides the library range for this project only.")
+        st.subheader(f"Best-matching videos (top {RECOMMENDED_COUNT})", help=_legend)
+        if tag_filter:
+            st.caption(f"Only scenes tagged: {', '.join(tag_filter)}"
+                       + (" (set in 🛠️ Advanced)" if simple else ""))
     _lib_ranges = library_ranges()
     _added = CStore.added_times()
     _new_ids = sorted((v for v in all_video_ids if v in _added and CStore.is_new_video(_added[v])),
@@ -2659,26 +2673,30 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
             if match:
                 st.write(f"{title} — match **{match['score']:.0f}%**  |  "
                          f"{match['matching_scene_count']} scenes · {format_mmss(match['usable_sec'])} usable{range_tag}")
-                st.caption(format_match_breakdown(match, bool(st.session_state.get("ranking_experimental")),
-                                                  tag_filter))
+                if not simple:
+                    st.caption(format_match_breakdown(match, bool(st.session_state.get("ranking_experimental")),
+                                                      tag_filter))
             else:
                 st.write(f"{title} — no scenes match the current tag filter / time range{range_tag}")
             _rs = (match or {}).get("role_sec") or _role_secs_now.get(video_id) or {}
+            _vd = _details.get(video_id) or {}
+            _bits = []
+            if _vd.get("actors"):
+                _bits.append("👤 " + ", ".join(_vd["actors"]))
+            if _vd.get("tags"):
+                _bits.append("🏷️ " + ", ".join(_vd["tags"]))
             if _rs:
                 _rb = SR.roles_by_id()
-                st.caption("🎭 " + "  ·  ".join(f"{SR.label(r, _rb)} {format_mmss(v)}"
-                                                for r, v in sorted(_rs.items(), key=lambda kv: -kv[1])))
-            _vd = _details.get(video_id) or {}
-            if _vd.get("actors") or _vd.get("tags"):
-                st.caption(("👤 " + ", ".join(_vd.get("actors", [])) if _vd.get("actors") else "")
-                           + ("  ·  " if _vd.get("actors") and _vd.get("tags") else "")
-                           + ("🏷️ " + ", ".join(_vd.get("tags", [])) if _vd.get("tags") else ""))
+                _bits.append("🎭 " + "  ·  ".join(f"{SR.label(r, _rb)} {format_mmss(v)}"
+                                                  for r, v in sorted(_rs.items(), key=lambda kv: -kv[1])))
+            if _bits:
+                st.caption("  ·  ".join(_bits))
         with row_cols[3]:
             if st.button("✨", key=f"sim_toggle_{video_id}", help="Find videos similar to this one"):
                 st.session_state["show_similar_videos"] = (
                     None if st.session_state.get("show_similar_videos") == video_id else video_id)
                 rerun_fragment()
-            if st.button("🎚️", key=f"range_toggle_{video_id}", help="Set a time range for this video"):
+            if not simple and st.button("🎚️", key=f"range_toggle_{video_id}", help="Set a time range for this video"):
                 # One picker open at a time: each open picker embeds a full video player,
                 # which is the heaviest thing on this page to re-render.
                 _was_open = st.session_state["show_range_picker"].get(video_id, False)
@@ -2714,7 +2732,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                                   disabled=_is_sel, on_click=_add_video_to_selection, args=(_vid,),
                                   use_container_width=True)
 
-        if st.session_state["show_range_picker"].get(video_id):
+        if not simple and st.session_state["show_range_picker"].get(video_id):
             with st.container(border=True):
                 _action = render_range_picker(
                     video_id, catalogues[video_id]["source_path"], duration, current_range,
@@ -2788,10 +2806,10 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
     st.session_state["committed_selected_videos"] = selected_now
     st.session_state["committed_tag_filter"] = tag_filter
     if not selected_now:
-        st.info("No videos selected yet. Tick the videos you want above, use **Select all recommended**, or add "
-                "others from the dropdown — switch to the Matching & Export tab once you're ready.")
+        st.caption("☑ No videos selected yet — tick them above, use **Select all recommended**, or add others from "
+                   "the dropdown.")
     else:
-        st.success(f"{len(selected_now)} video(s) selected. Go on to **🎬 Matching & Export** (below) when ready.")
+        st.caption(f"✅ **{len(selected_now)} video(s) selected** — next: 🎬 Matching & Export.")
 
 
 # ---------------------------------------------------------------------------
@@ -2836,7 +2854,7 @@ catalogues = load_all_catalogues()
 all_video_ids = sorted(catalogues.keys())
 all_tag_options = sorted({t for cat in catalogues.values() for s in cat["scenes"] for t in s.get("tags", [])})
 total_excluded = sum(1 for cat in catalogues.values() for s in cat["scenes"] if s.get("excluded"))
-if total_excluded:
+if total_excluded and st.session_state.get("ui_advanced"):
     st.caption(f"{total_excluded} scene(s) excluded from planning (e.g. intros) and ignored throughout.")
 
 # (The tag filter, Select all recommended / Clear buttons, and video list used to render here —
@@ -3836,7 +3854,7 @@ def step_nav(back: str = None, nxt: str = None) -> None:
 # recovery file keep working) styled as steps, with a status line under each.
 st.markdown("""<style>
 .st-key-stepnav .stElementContainer, .st-key-stepnav .stRadio { width: 100% !important; }
-.st-key-stepnav [role="radiogroup"] { display: grid !important; grid-template-columns: repeat(4, 1fr); gap: .5rem;
+.st-key-stepnav [role="radiogroup"] { display: grid !important; grid-auto-columns: 1fr; grid-auto-flow: column; gap: .5rem;
   width: 100%; }
 .st-key-stepnav [role="radiogroup"] > div { margin: 0 !important; border-radius: .6rem;
   border: 1px solid rgba(128,128,128,.35); background: rgba(128,128,128,.06); }
@@ -3853,19 +3871,25 @@ import ui_mode
 _sw = st.columns([6, 1])
 _advanced = ui_mode.switch(_sw[1])
 with st.container(key="stepnav"):
+    # 🛠️ Simple uses the track's saved story map without showing its step (it still opens when
+    # something sends you to it, e.g. Media Library → 🎭 Edit story map).
+    _steps = (SECTIONS if _advanced or st.session_state.get("ui_section") == SECTION_STORY
+              else [x for x in SECTIONS if x != SECTION_STORY])
     ui_section = st.radio(
-        "Section", SECTIONS,
+        "Section", _steps,
         horizontal=True, key="ui_section", label_visibility="collapsed",
     )
 with st.container(key="stepstatus"):
-    for _col, _txt in zip(st.columns(4), _step_status()):
+    _status = [t for x, t in zip(SECTIONS, _step_status()) if x in _steps]
+    for _col, _txt in zip(st.columns(len(_steps)), _status):
         _col.caption(_txt)
+_BACK_FROM_VIDEOS = SECTION_STORY if _advanced else SECTION_AUDIO
 
 if ui_section == SECTION_AUDIO:
     render_track_picker()
     if not _advanced:
         render_audio_simple(track)
-        step_nav(nxt=SECTION_STORY)
+        step_nav(nxt=SECTION_VIDEOS)
         _record_page_run()
         st.stop()
     _ac = st.columns([1, 2])
@@ -3887,7 +3911,7 @@ if ui_section == SECTION_STORY:
 
 if ui_section == SECTION_VIDEOS:
     _n_lib_ranges = len(library_ranges())
-    if _n_lib_ranges or st.session_state["video_time_ranges"]:
+    if _advanced and (_n_lib_ranges or st.session_state["video_time_ranges"]):
         _rc = st.columns([3, 1])
         _rc[0].caption(" · ".join(x for x in (
             f"📚 {_n_lib_ranges} video(s) have a Media Library range" if _n_lib_ranges else "",
@@ -3898,8 +3922,8 @@ if ui_section == SECTION_VIDEOS:
                                                                     help="Back to the Media Library ranges."):
             st.session_state["video_time_ranges"] = {}
             st.rerun()
-    render_video_selection_section(track, all_video_ids, all_tag_options, catalogues)
-    step_nav(back=SECTION_STORY, nxt=SECTION_MATCH)
+    render_video_selection_section(track, all_video_ids, all_tag_options, catalogues, simple=not _advanced)
+    step_nav(back=_BACK_FROM_VIDEOS, nxt=SECTION_MATCH)
     _record_page_run()
     st.stop()
 
