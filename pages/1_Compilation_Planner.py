@@ -3472,11 +3472,18 @@ def _open_recommended_plan(plan: dict) -> None:
     for vid in plan["videos"]:
         ss[f"select_video_{vid}"] = True
     ss["matching_mode"] = "Auto"
-    ss["use_story_map"] = False                     # the recommendation was scored without story roles
+    ss["sequential_mode"] = bool(plan.get("sequential"))
+    # The story map exactly as the plan was scored: on with the regions it used, or off.
+    _story = bool(plan.get("story")) and bool(plan.get("story_regions"))
+    ss["use_story_map"] = _story
+    if _story:
+        ss[STORY_KEY] = {"track_id": plan["track_id"], "regions": plan["story_regions"], "v": 1, "edited": False}
     ss["ui_section"] = SECTION_MATCH
+    _story_note = (" It uses the 🎭 story map it was scored with." if _story else
+                   " The 🎭 story map is off so the plan is exactly the one recommended — turn it on under "
+                   "🎛️ Mode if you like.")
     ss["_project_notices"] = [("success", f"🔮 Opened {plan.get('label') or 'the recommended plan'} as a new "
-                                          "project. The 🎭 story map is off so the plan is exactly the one "
-                                          "recommended — turn it on under 🎛️ Mode if you like.")]
+                                          "project." + _story_note)]
     ss["_rec_opened"] = True
 
 

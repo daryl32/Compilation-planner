@@ -164,3 +164,36 @@ def rank_similar_videos(ref_id: str, videos: dict, idf: dict, top: int = 5) -> l
         out.append((sim, _reason(shared, movement), vid))
     out.sort(key=lambda r: -r[0])
     return out[:top]
+
+
+def library_video_inputs(catalogues: dict, time_ranges: dict, catalogue_dir, tag_filter: tuple = ()) -> dict:
+    """{video_id: {"tag_seconds", "level", "dynamics", "punch"}} for rank_similar_videos —
+    each video's usable footage (library range + tag filter applied). The same inputs the
+    planner's ✨ Similar videos panel builds."""
+    import video_ranking as VR
+    from core.footage import _overlap_with_range, _tc_to_seconds
+    wanted = {t.lower() for t in tag_filter}
+    videos = {}
+    for vid, cat in catalogues.items():
+        summary = VR.load_summary(catalogue_dir, vid)
+        if summary is None:
+            continue
+        rng = time_ranges.get(vid)
+        feats = VR.video_features(summary, {sc["scene_id"]: sc for sc in cat["scenes"]}, rng, tuple(tag_filter))
+        if not feats:
+            continue
+        tag_seconds = {}
+        for sc in cat["scenes"]:
+            if sc.get("excluded"):
+                continue
+            a, b = _overlap_with_range(_tc_to_seconds(sc["start_tc"]), _tc_to_seconds(sc["end_tc"]), rng)
+            if a is None:
+                continue
+            tags = sc.get("tags", [])
+            if wanted and not (wanted & {t.lower() for t in tags}):
+                continue
+            for t in tags:
+                tag_seconds[t] = tag_seconds.get(t, 0.0) + (b - a)
+        videos[vid] = {"tag_seconds": tag_seconds, "level": feats["level"],
+                       "dynamics": feats["dynamics"], "punch": feats["punch"]}
+    return videos
