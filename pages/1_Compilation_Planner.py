@@ -2113,9 +2113,9 @@ def render_audio_settings_section(track: dict) -> None:
 
     # ---- Live preview chart ------------------------------------------------
     st.divider()
-    st.subheader("Preview: cut points on the audio signal")
-    st.caption("Adjust dials above and the chart updates immediately. "
-               "Scene match dots appear on the Matching & Export step once clips are assigned.")
+    st.subheader("Preview: cut points on the audio signal",
+                 help="Updates as you move the dials. Scene match dots appear on the Matching & Export step "
+                      "once clips are assigned.")
 
     # Build segments from current widget values for the preview
     _dc = st.session_state.get("density_contrast", 1.0)
@@ -2168,17 +2168,66 @@ def render_audio_settings_section(track: dict) -> None:
         legend=dict(orientation="h", y=-0.28),
     )
     st.plotly_chart(afig, use_container_width=True)
-    _bar = CS.bar_sec(track, int(st.session_state.get("beats_per_bar", 4)))
-    _bars = np.asarray(CS.bar_lines(track, int(st.session_state.get("beats_per_bar", 4))), dtype=float)
-    _cuts = [sg["start"] for sg in _segs[1:]]
-    _on_bar = (sum(1 for c in _cuts if len(_bars) and np.min(np.abs(_bars - c)) < 0.12) / len(_cuts)) if _cuts else 0.0
-    st.caption(f"**{len(_segs)} segments** · a cut every {track['duration_sec'] / max(len(_segs), 1) / _bar:.1f} bars "
-               f"on average ({track['duration_sec'] / max(len(_segs), 1):.1f}s) · {_on_bar:.0%} of cuts on a bar line  "
-               f"|  {CS.beat_grid(track)[1]:.0f} BPM  |  next: **🎭 Story map**, when you're happy with the cuts.")
+    st.caption(_audio_status(track, _segs)[0])
 
     # Save the shadow copy every call — this is what actually survives the round trip to
     # another section (plain session_state, not tied to any widget), and is what the explicit
     # value=/index= above restore from on re-entry.
+    st.session_state["audio_settings_shadow"] = {
+        k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state
+    }
+
+
+def _audio_status(track: dict, segs: list) -> tuple:
+    """(status line, notes) for the 🎵 step: how the cuts land, plus anything set elsewhere that changes
+    them (hand-edited cuts, split screen, own settings) — so Simple never hides what's in effect."""
+    _bar = CS.bar_sec(track, int(st.session_state.get("beats_per_bar", 4)))
+    _bars = np.asarray(CS.bar_lines(track, int(st.session_state.get("beats_per_bar", 4))), dtype=float)
+    _cuts = [sg["start"] for sg in segs[1:]]
+    _on_bar = (sum(1 for c in _cuts if len(_bars) and np.min(np.abs(_bars - c)) < 0.12) / len(_cuts)) if _cuts else 0.0
+    avg = track["duration_sec"] / max(len(segs), 1)
+    line = (f"**{len(segs)} segments** · a cut every {avg / _bar:.1f} bars ({avg:.1f}s) on average · "
+            f"{_on_bar:.0%} on a bar line · {CS.beat_grid(track)[1]:.0f} BPM")
+    notes = []
+    e = st.session_state.get("cut_edits")
+    if isinstance(e, dict) and e.get("track_id") == st.session_state.get("track_id") and e.get("cuts") is not None:
+        notes.append("✂️ your hand-edited cuts")
+    if st.session_state.get("split_screen_enabled"):
+        notes.append(f"🔀 split screen {st.session_state['min_clips']}–{st.session_state['max_clips']} clips")
+    if st.session_state.get("cut_style", "custom") == "custom":
+        notes.append("✏️ your own cutting settings")
+    return line, notes
+
+
+def render_audio_simple(track: dict) -> None:
+    """🎵 Step 0, Simple view: the cutting style + pace and where the cuts land. Every dial,
+    split screen and the ✂️ cut editor are in the Advanced view; their settings still apply."""
+    autosave_now()
+    _shadow = st.session_state.get("audio_settings_shadow", {})
+
+    def _v(key):
+        return st.session_state.get(key, _shadow.get(key, DIAL_DEFAULTS.get(key)))
+
+    _render_style_row(_v)
+    segs = planned_segments(track, segmentation_settings())
+    apply_segment_intensity(segs, track, st.session_state.get("density_contrast", 1.0))
+    fig = go.Figure()
+    if track.get("hires"):
+        _rate = float(track["hires"]["rate"])
+        fig.add_trace(go.Scatter(x=[i / _rate for i in range(len(track["hires"]["rms"]))], y=track["hires"]["rms"],
+                                 mode="lines", name="Energy", line=dict(color="rgba(100,150,255,0.55)", width=1),
+                                 hoverinfo="skip"))
+    else:
+        fig.add_trace(go.Scatter(x=[e["time"] for e in track["energy_envelope"]],
+                                 y=[e["energy"] for e in track["energy_envelope"]], mode="lines", name="Energy",
+                                 line=dict(color="rgba(100,150,255,0.55)"), hoverinfo="skip"))
+    add_analysis_overlays(fig, track)
+    add_cut_markers(fig, segs)
+    fig.update_layout(height=260, margin=dict(t=10, b=10, l=10, r=10), showlegend=False,
+                      xaxis_title=None, yaxis=dict(showticklabels=False, title=None))
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    line, notes = _audio_status(track, segs)
+    st.caption(line + (f"  ·  also in use: {', '.join(notes)} (🛠️ Advanced to change)" if notes else ""))
     st.session_state["audio_settings_shadow"] = {
         k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state
     }
@@ -3800,6 +3849,9 @@ st.markdown("""<style>
 .st-key-stepstatus { margin-top: -.6rem; }
 .st-key-stepstatus [data-testid="stCaptionContainer"] { padding: 0 .9rem; }
 </style>""", unsafe_allow_html=True)
+import ui_mode
+_sw = st.columns([6, 1])
+_advanced = ui_mode.switch(_sw[1])
 with st.container(key="stepnav"):
     ui_section = st.radio(
         "Section", SECTIONS,
@@ -3811,14 +3863,17 @@ with st.container(key="stepstatus"):
 
 if ui_section == SECTION_AUDIO:
     render_track_picker()
+    if not _advanced:
+        render_audio_simple(track)
+        step_nav(nxt=SECTION_STORY)
+        _record_page_run()
+        st.stop()
     _ac = st.columns([1, 2])
-    _ac[0].button("🎯 Auto-detect settings for this track", on_click=_run_auto_tune, type="primary",
-                  use_container_width=True,
+    _ac[0].button("🎯 Auto-detect settings", on_click=_run_auto_tune, use_container_width=True,
                   help="Analyses this track's tempo, energy and hits, then sets the cutting and split-screen "
                        "settings. Adjust anything afterwards to fine-tune.")
-    _ac[1].caption("Pick how the music is cut into blocks and check where the cuts land. Split screen "
-                   "(below) sets how many clips each block shows.")
-    render_split_screen_settings()
+    with _ac[1]:
+        render_split_screen_settings()
     render_audio_settings_section(track)
     step_nav(nxt=SECTION_STORY)
     _record_page_run()
