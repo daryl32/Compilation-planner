@@ -5,9 +5,10 @@ Media Library — two libraries, picked at the top of the page:
   Audio:  search, filter and sort the music tracks, see their energy shape
           and play them; analyse new tracks (and add the extra cut-finding
           analysis to existing ones) on the server.
-  Analytics: what your rated renders say about the planner settings behind
-          them — one card per area of settings, with an insight and a
-          suggestion each (read-only; nothing feeds back into the planner).
+  Analytics: 📚 Library — progress (split pass, review, roles, actors), actors,
+          role footage vs what your tracks need, clip lengths vs blocks
+          (library_analytics.py); ⭐ Render ratings — what your rated renders say
+          about the planner settings behind them (read-only).
   Renders: the saved Render Preview MP4s — track, length, the videos and clips
           each one used, the planner settings behind it; play, rate, keep,
           download its plan, delete, and clean up old ones.
@@ -1584,7 +1585,263 @@ def _draw_chart(chart: dict, key: str) -> None:
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=key)
 
 
+# ---------------------------------------------------------------------------
+# 📚 Library analytics (library_analytics.py does the sums)
+# ---------------------------------------------------------------------------
+
+def _lib_signature() -> tuple:
+    """Changes whenever a catalogue, the library details (ranges, actors, ⭐), a track or a story map does."""
+    files = []
+    for f in [*CS.catalogue_paths(), CATALOGUE_DIR / "library_meta.json", CATALOGUE_DIR / "story_maps.json",
+              CATALOGUE_DIR / "scene_roles.json", *AUDIO_DIR.glob("*.json")]:
+        try:
+            files.append((f.name, f.stat().st_mtime))
+        except OSError:
+            continue
+    return tuple(sorted(files))
+
+
+@st.cache_data(max_entries=4, show_spinner="Reading your tracks…")
+def _track_needs_and_blocks(signature: tuple) -> tuple:
+    """({track_id: {role: seconds its story map gives the role}}, [block lengths]) — each track's saved
+    story map (else the one the wizard suggests) and its 🧠 Smart (normal pace) cuts, as the
+    recommender's top three plans use."""
+    import rec_library as RL
+    from core.segmentation import build_segments
+    from core.styles import style_settings
+    needs, blocks = {}, []
+    for tid in RL.list_tracks():
+        try:
+            track = RL.load_track(tid)
+        except (OSError, ValueError):
+            continue
+        regions, _ = RL.story_for(tid, track)
+        need = {}
+        for r in regions or []:
+            if r.get("role"):
+                need[r["role"]] = need.get(r["role"], 0.0) + float(r["end"]) - float(r["start"])
+        needs[tid] = need
+        try:
+            method, settings, _ = style_settings(track, "smart", 0)
+            blocks += [sg["end"] - sg["start"] for sg in build_segments(track, {"method": method, "beats_per_bar": 4,
+                                                                                 **settings})]
+        except Exception:      # a track the cutter can't read — leave its blocks out
+            pass
+    return needs, blocks
+
+
+@st.cache_data(max_entries=4, show_spinner="Working out the library's numbers…")
+def _library_numbers(signature: tuple, renders_sig: tuple) -> dict:
+    import library_analytics as LA
+    import rec_library as RL
+    import scene_roles as SR
+    from render_analytics import to_row
+    cats = CS.all_catalogues()
+    ranges, details, masters = library_ranges(), video_details(), master_thumbnail_scenes()
+    usage = RL.video_usage()
+    ratings = {}
+    for r in load_renders(renders_sig):
+        row = to_row(r)
+        if row["rating"]:
+            for vid in set(row["videos"]):
+                ratings.setdefault(vid, []).append(row["rating"])
+    prog = LA.progress(cats, ranges, details, masters, SR.scene_roles, usage)
+    needs, blocks = _track_needs_and_blocks(signature)
+    profile = LA.length_profile(cats, ranges, blocks)
+    return {
+        "progress": prog,
+        "actors": LA.actor_stats(cats, ranges, details, SR.scene_roles, usage, ratings),
+        "roles": LA.role_balance(prog["rows"], needs, details),
+        "role_next": {r: LA.role_candidates(cats, ranges, prog["rows"], r) for r in LA.HINT_ROLES},
+        "lengths": profile,
+        "mixed": LA.mixed_motion_clips(cats, ranges, CS.motion_curves),
+        "tracks": len(needs),
+    }
+
+
+def _hbars(labels: list, series: list, x_title: str, height: int = None, stacked: bool = False,
+           percent: bool = False):
+    """Horizontal bars, one row per label; series = [(name, values, colour)]."""
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    for name, vals, colour in series:
+        fig.add_trace(go.Bar(y=labels, x=vals, name=name, orientation="h", marker_color=colour,
+                             hovertemplate="%{y} · " + name + ": %{x:.0f}" + ("%" if percent else "") + "<extra></extra>"))
+    fig.update_layout(barmode="stack" if stacked else "group", showlegend=len(series) > 1,
+                      legend=dict(orientation="h", y=-0.25, x=0))
+    _chart_layout(fig, height or (60 + 34 * len(labels)), x_title)
+    fig.update_layout(showlegend=len(series) > 1)
+    fig.update_yaxes(autorange="reversed")
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+
+
+_SECOND = "#e8a317"   # second series (reads on light and dark backgrounds)
+_CALM, _MED, _BUSY = "#76b7b2", "#9c9c9c", "#e15759"
+
+
+def _mins(sec: float) -> str:
+    return f"{sec / 60:.1f} min" if sec >= 90 else f"{sec:.0f}s"
+
+
+def _lib_progress(nums: dict) -> None:
+    p = nums["progress"]
+    t = p["totals"]
+    n = max(t["videos"], 1)
+    m = st.columns(4)
+    m[0].metric("✂️ Split pass", f"{t['split_done']}/{t['videos']}",
+                help="Videos with no usable clip over 45s left (split, or never needed it). "
+                     f"{t['split_started']} more are started (some long clips still to go).")
+    m[1].metric("🎭 Role marking", f"{t['roles_started']}/{t['videos']}",
+                help="Videos with at least one scene marked with a role.")
+    m[2].metric("👤 Actors", f"{t['actors']}/{t['videos']}")
+    m[3].metric("👀 Reviewed", f"{t['reviewed_pct']}%", help="Usable clips marked reviewed, across the library.")
+    st.progress(t["split_done"] / n, text=f"✂️ Split pass — {t['split_done']} of {t['videos']} videos done"
+                                         + (f", {t['split_started']} started" if t["split_started"] else ""))
+    st.progress(t["roles_started"] / n, text=f"🎭 Role marking — {t['roles_started']} of {t['videos']} videos started")
+    st.caption(f"{t['minutes']:.0f} minutes of usable footage · library ranges on {t['ranges']} videos · "
+               f"⭐ picture chosen on {t['masters']}")
+    c = st.columns(2)
+    with c[0], st.container(border=True):
+        st.markdown("**✂️ Split next** — most long clips (over 45s) left")
+        if p["next_split"]:
+            for r in p["next_split"]:
+                st.markdown(f"- **{r['video_id']}** — {r['long_left']} long clip(s) · {r['minutes']:.0f} min")
+        else:
+            st.caption("No usable clip over 45s anywhere. ✅")
+    with c[1], st.container(border=True):
+        st.markdown("**🎭 Role-mark next** — the most footage, and the most used lately")
+        if p["next_roles"]:
+            for r in p["next_roles"]:
+                st.markdown(f"- **{r['video_id']}** — {r['clips']} clips · {r['minutes']:.0f} min")
+        else:
+            st.caption("Every video has some roles marked. ✅")
+    icon = {"done": "✅", "not needed": "✅", "started": "🟡", "to do": "⬜"}
+    st.dataframe([{"Video": r["video_id"], "Clips": r["clips"], "Usable min": r["minutes"],
+                   "✂️ Split": f"{icon[r['split']]} {r['split']}", "Long left": r["long_left"],
+                   "Reviewed": r["reviewed_pct"], "Roles": r["roles_pct"],
+                   "👤 Actors": ", ".join(r["actors"]) or "—", "Range": "✅" if r["has_range"] else "—",
+                   "⭐": "✅" if r["has_master"] else "—"} for r in p["rows"]],
+                 hide_index=True, width="stretch",
+                 column_config={"Reviewed": st.column_config.ProgressColumn("Reviewed", format="%d%%", min_value=0,
+                                                                            max_value=100),
+                                "Roles": st.column_config.ProgressColumn("Roles", format="%d%%", min_value=0,
+                                                                         max_value=100,
+                                                                         help="Usable clips with a role")})
+
+
+def _lib_actors(nums: dict) -> None:
+    import library_analytics as LA
+    import scene_roles as SR
+    stats = nums["actors"]
+    if not stats:
+        st.info("No actors yet — add them in the Reviewer (🎬 Video details).")
+        return
+    for line in LA.actor_insights(stats):
+        st.markdown(f"- {line}")
+    st.markdown("**Usable footage per actor**")
+    _hbars([a["actor"] for a in stats], [("Usable minutes", [a["minutes"] for a in stats], _SERIES)], "Minutes")
+    st.markdown("**Motion profile** — share of each actor's footage in the library's calmest, middle and busiest "
+                "third")
+    _hbars([a["actor"] for a in stats], [("Calm", [a["calm_pct"] for a in stats], _CALM),
+                                         ("Medium", [a["medium_pct"] for a in stats], _MED),
+                                         ("Busy", [a["busy_pct"] for a in stats], _BUSY)],
+           "% of footage", stacked=True, percent=True)
+    roles = SR.roles_by_id()
+    used_roles = sorted({r for a in stats for r in a["roles"]})
+    st.dataframe([{"Actor": a["actor"], "Videos": a["n_videos"], "Usable min": a["minutes"], "Clips": a["clips"],
+                   **{SR.label(r, roles): _mins(a["roles"].get(r, 0.0)) if a["roles"].get(r) else "—"
+                      for r in used_roles},
+                   "Recent uses": a["uses"],
+                   "Avg render ★": f"{a['rating']:.1f} ({a['rated']})" if a["rating"] is not None else "—"}
+                  for a in stats], hide_index=True, width="stretch")
+    st.caption("A video with two actors counts for both. Recent uses = appearances in your recent saved projects "
+               "and renders; ★ = average rating of rated renders that used the actor's videos.")
+
+
+def _lib_roles(nums: dict) -> None:
+    import scene_roles as SR
+    roles = SR.roles_by_id()
+    rows = [r for r in nums["roles"] if r["status"] != "not needed" or r["have_sec"]]
+    if not rows:
+        st.info("No story parts in your tracks yet, and no roles marked.")
+        return
+    st.caption(f"What's marked in the Reviewer vs what your {nums['tracks']} tracks' story maps ask for (the saved "
+               "story map, else the one the wizard suggests). A typical track's need is its median.")
+    _hbars([SR.label(r["role"], roles) for r in rows],
+           [("Marked footage (min)", [r["have_sec"] / 60 for r in rows], _SERIES),
+            ("A typical track needs (min)", [r["need_sec"] / 60 for r in rows], _SECOND)], "Minutes")
+    status = {"none": "❌ none marked", "short": "⚠️ short", "ok": "✅", "not needed": "— no track uses it"}
+    st.dataframe([{"Role": SR.label(r["role"], roles), "Marked": _mins(r["have_sec"]), "From videos": r["videos"],
+                   "Tracks using it": r["tracks"], "Typical need": _mins(r["need_sec"]),
+                   "Tracks' worth": "—" if r["tracks_worth"] is None else f"{r['tracks_worth']:.1f}",
+                   "": status[r["status"]]} for r in rows], hide_index=True, width="stretch")
+    st.caption("Tracks' worth = marked footage ÷ a typical track's need. Under 1.5 the same clips keep coming back "
+               "in those parts — the planner and recommender fall back to unmarked clips there.")
+    with st.expander("👤 Marked footage by actor"):
+        for r in rows:
+            if r["by_actor"]:
+                st.markdown(f"**{SR.label(r['role'], roles)}** — " + " · ".join(f"{a} {_mins(s)}"
+                                                                              for a, s in r["by_actor"].items()))
+    st.markdown("**Where to find more** — videos with no roles yet, with the most footage the motion hints "
+                "would suggest (the same 💡 hints quick marking shows)")
+    c = st.columns(len(nums["role_next"]) or 1)
+    for col, (role, items) in zip(c, nums["role_next"].items()):
+        with col, st.container(border=True):
+            st.markdown(f"**{SR.label(role, roles)}**")
+            if not items:
+                st.caption("Nothing left to suggest.")
+            for it in items:
+                st.markdown(f"- **{it['video_id']}** — {it['clips']} clip(s), {_mins(it['seconds'])}")
+
+
+def _lib_lengths(nums: dict) -> None:
+    import library_analytics as LA
+    prof = nums["lengths"]
+    for line in LA.length_insights(prof):
+        st.markdown(f"- {line}")
+    st.markdown("**Clip lengths vs block lengths**")
+    st.caption(f"Share of your usable footage in clips of each length ({prof['clips']} clips), against the share of "
+               f"blocks of that length when your {nums['tracks']} tracks are cut with 🧠 Smart ({prof['blocks']} "
+               "blocks).")
+    bins = prof["bins"]
+    _hbars([b["label"] for b in bins], [("Footage (%)", [b["footage_pct"] for b in bins], _SERIES),
+                                        ("Blocks (%)", [b["blocks_pct"] for b in bins], _SECOND)], "%", percent=True)
+    st.markdown("**🎢 Long clips with the biggest motion swings** — calm and busy footage in one clip, so one role "
+                "or one exclude switch can't fit all of it. The best ones to ✂️ split next.")
+    if not nums["mixed"]:
+        st.caption(f"No usable clip of {LA.MIXED_MIN_SEC:g}s or more with a motion curve.")
+        return
+    st.dataframe([{"Video": m["video_id"], "Clip": m["scene_id"], "Starts at": format_mmss(m["start"]),
+                   "Length": f"{m['seconds']:.0f}s", "Swing": m["swing"]} for m in nums["mixed"]],
+                 hide_index=True, width="stretch",
+                 column_config={"Swing": st.column_config.NumberColumn(
+                     "Swing", format="%.1f×", help="Busiest second minus calmest second, as a multiple of the "
+                                                   "library's typical motion.")})
+
+
+def render_library_analytics():
+    nums = _library_numbers(_lib_signature(), _renders_signature())
+    tabs = st.tabs(["📋 Progress", "👤 Actors", "🎭 Roles", "📏 Clip lengths"])
+    with tabs[0]:
+        _lib_progress(nums)
+    with tabs[1]:
+        _lib_actors(nums)
+    with tabs[2]:
+        _lib_roles(nums)
+    with tabs[3]:
+        _lib_lengths(nums)
+
+
 def render_analytics_tab():
+    which = st.radio("Analytics", ["📚 Library", "⭐ Render ratings"], horizontal=True, key="ana_kind",
+                     label_visibility="collapsed")
+    if which == "📚 Library":
+        render_library_analytics()
+    else:
+        render_rating_analytics()
+
+
+def render_rating_analytics():
     from render_analytics import build_cards
     renders = load_renders(_renders_signature())
     c = st.columns([2, 5])
