@@ -1205,10 +1205,16 @@ def quick_role_grid(ids: list) -> None:
                     st.caption("🖼️ no picture")
                 hint = SR.motion_hint(motion_rank(sc))
                 st.caption(f"**{SE.scene_label(sc)}** · {fmt_dur(SE.scene_duration(sc))}"
-                           + (" · 🚫" if sc.get("excluded") else "")
-                           + (f" · 💡{_roles[hint]['emoji']}" if hint in _roles and hint not in cur else "")
-                           + ("  \n" + " ".join(_roles[r]["emoji"] if r in _roles else "🏷️" for r in cur)
-                              if cur else ""))
+                           + (" · 🚫" if sc.get("excluded") else ""))
+                # Marked roles as solid badges (green = saved, orange = not saved yet); a motion
+                # suggestion only as faint grey italics, so the two can't be mixed up.
+                saved = set(SR.scene_roles(sc))
+                if cur:
+                    st.markdown(" ".join(
+                        (":green-badge[✅ " if r in saved else ":orange-badge[✏️ ")
+                        + (SR.label(r, _roles) if r in _roles else f"🏷️ {r}") + "]" for r in cur))
+                if hint in _roles and hint not in cur:
+                    st.caption(f":gray[*💡 suggests {SR.label(hint, _roles)}*]")
                 st.button(("✓ " if on else "＋ ") + (_roles[role]["emoji"] if role else ""),
                           key=f"rev_qr_t_{selected}_{sid}", type="primary" if on else "secondary",
                           use_container_width=True, disabled=not role, on_click=_qr_toggle, args=(sid,))
