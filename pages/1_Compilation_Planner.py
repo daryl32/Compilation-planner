@@ -51,6 +51,7 @@ import core.targets as CTGT
 import core.cut_edits as CED
 import core.matching as CMATCH
 import core.styles as CSTY
+import core.sequential as SEQ
 from core.matching import prefer_role, widen_for_repeat_rule, cand_key, why_key, format_mmss
 from cut_editor import cut_editor as _cut_editor_widget, media_url as _media_url
 from core.shape import SHAPE_MATCH_POINTS, resample_curve, shape_score, get_block_audio_curve
@@ -383,7 +384,7 @@ def render_choreography_block(
     seg_idx: int, seg: dict, selected_videos: list, max_chor_videos: int,
     rec_count: int, queues: dict, sequential_mode: bool, global_excluded: set,
     catalogues: dict, prev_block_videos: set = None, video_stats: dict = None,
-    role_filter: str = None, weighting: dict = None, track: dict = None,
+    role_filter: str = None, weighting: dict = None, track: dict = None, planned: dict = None,
 ) -> None:
     """One block's choreography grid: one column per source video (up to
     max_chor_videos).  Each column has:
@@ -419,6 +420,9 @@ def render_choreography_block(
     exactly what Confirm & Next will actually do. None falls back to plain
     closest-motion-match.
 
+    planned: {video_id: pick} — the 📍 planned path's clips for this block (in order); a planned
+    video's column shows its planned clip as the Auto pick.
+
     Overrides are stored in session_state["chor_overrides"][seg_idx][video_id]
     as (scene_id, offset_sec).  Pick state lives in
     session_state["chor_pick_{seg_idx}_{video_id}"] as a bool, same pattern
@@ -437,8 +441,13 @@ def render_choreography_block(
                                                          global_excluded, role_filter=role_filter,
                                                          role_reach=_reach)
                      for vid in selected_videos}
+    planned = planned or {}
+    _pclips = {vid: planned_clip(queues, p, block_duration) for vid, p in planned.items()}
+    _pclips = {vid: c for vid, c in _pclips.items() if c is not None and vid in _clips_by_vid}
+    for vid, c in _pclips.items():
+        _clips_by_vid[vid] = clips_with_planned(_clips_by_vid[vid], c)
     eligible = [vid for vid in selected_videos if _clips_by_vid[vid]]
-    shown = eligible[:max_chor_videos]
+    shown = chor_shown(eligible, _pclips, max_chor_videos)
     hidden = len(eligible) - len(shown)
 
     if not shown:
@@ -459,6 +468,22 @@ def render_choreography_block(
     )
 
     overrides = st.session_state.setdefault("chor_overrides", {}).setdefault(seg_idx, {})
+    if _pclips:
+        _pl_cols = st.columns([2, 3])
+        with _pl_cols[0]:
+            if st.button(f"📍 Use the planned picks ({len(_pclips)})", key=f"chor_use_plan_{seg_idx}",
+                         use_container_width=True,
+                         help="Tick the planned path's videos (each on its planned clip) and untick the rest. "
+                              "Each video's clips are planned for all its remaining blocks together, in order, "
+                              "so none runs short later — picking something else plans the rest again."):
+                for vid in shown:
+                    st.session_state[f"chor_pick_{seg_idx}_{vid}"] = vid in _pclips
+                    if vid in _pclips:
+                        overrides.pop(vid, None)
+                rerun_fragment()
+        with _pl_cols[1]:
+            st.caption("📍 **Planned path:** " + ", ".join(f"`{v}`" for v in _pclips)
+                       + " — their Auto picks are the planned clips.")
     chor_cols = st.columns(len(shown))
     highlight_keys = []
     _show_clip = {}  # video_id -> (clip shown, all its clips, index) for the preview panel
@@ -490,6 +515,8 @@ def render_choreography_block(
                     display_clip = next((c for c in clips
                                         if c["scene_id"] == current_key[0]
                                         and abs(c["offset_sec"] - current_key[1]) < 0.1), None)
+                if display_clip is None and video_id in _pclips:
+                    display_clip = next((c for c in clips if c.get("planned")), None)   # 📍
                 if display_clip is None and clips:
                     # "Auto" is selected: show what it would actually pick on Confirm,
                     # not just the chronologically-first clip (which could be a
@@ -570,7 +597,8 @@ def render_choreography_block(
                               help="Drag to skip through this video's trimmed clips")
 
                 if display_clip is not None:
-                    auto_tag = "⭐ Auto pick — " if current_key is None else ""
+                    auto_tag = (("📍 Planned pick — " if display_clip.get("planned") else "⭐ Auto pick — ")
+                                if current_key is None else "📍 " if display_clip.get("planned") else "")
                     role_suffix = f"  {role_chips(display_clip)}" if display_clip.get("roles") else ""
                     pos = f"  ·  {sel_idx + 1}/{len(clips)}" if sel_idx is not None else ""
                     st.caption(
@@ -797,8 +825,13 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                 sequential=autofill_weights.get("sequential", False),
                 videos_per_block=recommended_count,
             )
-            chosen = select_autofill_picks(ranked, recommended_count,
-                                           autofill_weights.get("allow_same_video", False))
+            _plan = [c for c in candidates if c.get("planned")]
+            if _plan:
+                # 📍 In order: the planned path's clips (it already weighed everything above).
+                chosen = _plan
+            else:
+                chosen = select_autofill_picks(ranked, recommended_count,
+                                               autofill_weights.get("allow_same_video", False))
             chosen_keys = {cand_key(c) for c in chosen}
             for c in candidates:
                 st.session_state[f"adv_pick_{current_block}_{cand_key(c)}"] = cand_key(c) in chosen_keys
@@ -835,6 +868,8 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
             with box:
                 if is_repeat:
                     st.caption("🔵 same video as previous block")
+                if c.get("planned"):
+                    st.caption("📍 on the planned path")
                 if c.get("similar"):
                     st.caption(f"✨ {c['similar']}% like {c['similar_to']} — {c['similar_reason']}")
                 if c.get("roles"):
@@ -4244,8 +4279,8 @@ with _mt[1]:
                            "order, so a video can never run short halfway. 0 = each clip is simply the best fit "
                            "to its block's music (still in order). Higher = the clips are also pulled into an "
                            "even walk through the whole video, beginning → middle → end. "
-                           "(Manual step-through and Choreography: how far a pick may skip ahead within a video, "
-                           "and the pull towards its beginning, middle and end.)")
+                           "Manual step-through and Choreography plan the same way from the block you're on — "
+                           "the 📍 planned clips — and plan the rest again whenever you pick something else.")
         st.slider("Variety", 0.0, 5.0, step=0.1, key="weight_random",
                   disabled=_autofill_disabled,
                   help="(B) 0 = always the top-scoring clip. Higher = picks more often from the next "
@@ -4429,6 +4464,148 @@ if _story_on:
                        "": ("✅" if _supply.get(r, 0) >= _needs.get(r, 0)
                             else "⚠️ short" if _supply.get(r, 0) > 0 else "❌ none")}
                       for r in _plan_roles_used], hide_index=True, use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# 📍 The planned path (in order, Manual step-through and Choreography): the same
+# "plan each video's clips for all its blocks together" Auto uses, from the block
+# you're on to the end — each clip inside one scene, as these modes pick. It's
+# worked out again only when you pick something the plan didn't (or a setting
+# changes): following it keeps the rest of it valid.
+# ---------------------------------------------------------------------------
+
+def _queues_fp(q: dict) -> str:
+    """What footage is still free — a planned path is only good for the footage it was planned on."""
+    return hashlib.sha1(json.dumps(sorted(
+        (v, sp["scene_id"], round(float(sp["offset_sec"]), 1), round(float(sp["remaining_sec"]), 1))
+        for v, spans in q.items() for sp in spans), default=str).encode()).hexdigest()
+
+
+def planned_ahead(from_block: int, q: dict) -> dict:
+    """{block: [pick, …]} for blocks from_block onward — the planned path on the footage in q
+    (as it stands when from_block is reached). {} when not in order."""
+    import copy
+    import dataclasses
+    if not sequential_mode or track is None or from_block >= len(segments):
+        return {}
+    excl = st.session_state["segment_exclusions"]
+    base = hashlib.sha1(json.dumps([
+        track_id, [(round(sg["start"], 3), round(sg["end"], 3), round(sg.get("intensity", 0), 4)) for sg in segments],
+        sorted(q), min_clips, max_clips, ramp_start, ramp_end, allow_same_video, min_clip_len_sec,
+        sorted((k, sorted(map(list, v))) for k, v in excl.items()),
+        sorted(map(list, st.session_state["global_excluded_scenes"])),
+        sorted(intro_blocks_0based), sorted(outro_blocks_0based), weight_shape, weight_random, avoid_repeat,
+        weight_spread, weight_motion, autofill_seed, weight_position, plan_block_roles,
+        bool(st.session_state.get("autofill_v2", True)), bool(st.session_state.get("intro_outro_exclusive")),
+        bool(st.session_state.get("story_reserve", True)),
+    ], default=str).encode()).hexdigest()
+    fp = _queues_fp(q)
+    cache = st.session_state.get("_planned_path")
+    if cache and cache["base"] == base and cache["expect"].get(from_block) == fp:
+        return {b: p for b, p in cache["picks"].items() if b >= from_block}
+    segs = segments[from_block:]
+    work = copy.deepcopy(q)
+    ctx = dataclasses.replace(plan_context(), planned_sequential=True, plan_within_scenes=True)
+    with st.spinner("📍 Planning each video's path through the rest of the track…"), \
+            _timed("Planned path", f"from block {from_block + 1}, {len(segs)} blocks"):
+        tl, _, _ = CMATCH.match_scenes_to_track(
+            segs, work, min_clips, max_clips, ramp_start, ramp_end, allow_same_video, True,
+            {k - from_block: v for k, v in excl.items() if k >= from_block}, {},
+            st.session_state["global_excluded_scenes"], False, int(count_seed), min_clip_len_sec,
+            {b - from_block for b in intro_blocks_0based if b >= from_block},
+            {b - from_block for b in outro_blocks_0based if b >= from_block},
+            weight_shape, weight_random, avoid_repeat, weight_spread, weight_motion, autofill_seed,
+            weight_position=weight_position, repeat_fallbacks=set(),
+            block_roles=list(plan_block_roles[from_block:]), track=track, ctx=ctx)
+    picks = SEQ.planned_picks(tl, segs, offset=from_block)
+    # The footage each later block will see if the plan is followed — so following it reuses it.
+    sim, expect = copy.deepcopy(q), {from_block: fp}
+    for b in range(from_block, len(segments)):
+        dur = segments[b]["end"] - segments[b]["start"]
+        kept = []
+        for p in picks.get(b, []):
+            try:
+                carve_span(sim, p["video_id"], p["scene_id"], p["offset_into_scene_sec"], dur, True)
+                kept.append(p)
+            except ValueError:
+                pass
+        picks[b] = kept
+        expect[b + 1] = _queues_fp(sim)
+    st.session_state["_planned_path"] = {"base": base, "expect": expect, "picks": picks}
+    return picks
+
+
+def _planned_span(q: dict, p: dict, dur: float):
+    """(span, offset in scene) of the free footage holding planned pick p, or (None, None)."""
+    for sp in q.get(p["video_id"], []):
+        if sp["scene_id"] != p["scene_id"]:
+            continue
+        lo, hi = float(sp["offset_sec"]), float(sp["offset_sec"]) + float(sp["remaining_sec"])
+        off = float(p["offset_into_scene_sec"])
+        # (within carve_span's snap — a frame either way, as the plan's own carving allows)
+        if lo - 0.05 <= off and off + dur <= hi + 0.05:
+            return sp, max(lo, min(off, hi - dur))
+    return None, None
+
+
+def planned_candidates(picks: list, q: dict, seg: dict, audio_curve) -> list:
+    """Manual step-through: the planned picks as candidate cards (marked 📍)."""
+    dur = seg["end"] - seg["start"]
+    out = []
+    for p in picks:
+        sp, off = _planned_span(q, p, dur)
+        if sp is None:
+            continue
+        vals, fps = _clip_curve(p["video_id"], p["scene_id"], off, dur)
+        score = 0.0
+        if vals is not None and len(vals) and audio_curve is not None and len(audio_curve):
+            score = float(CMATCH.find_best_shape_window(vals, len(vals), audio_curve)[0])
+        out.append({
+            "video_id": sp["video_id"], "scene_id": sp["scene_id"], "scene_start_sec": sp["scene_start_sec"],
+            "window_offset_sec": off, "window_duration_sec": dur, "score": round(score, 3),
+            "motion_norm": sp["motion_norm"],
+            "curve_slice": vals if vals is not None else np.array([]), "fps": fps or 25.0,
+            "tags": sp["tags"], "thumbnail": sp["thumbnail"],
+            "intro_candidate": sp.get("intro_candidate", False),
+            "outro_candidate": sp.get("outro_candidate", False),
+            "roles": sp.get("roles", []), "planned": True,
+        })
+    return out
+
+
+def with_planned(candidates: list, planned: list) -> list:
+    """The grid's candidates with the planned ones in (a planned clip replaces the same scene's card)."""
+    keys = {cand_key(c) for c in planned}
+    rest = [c for c in candidates if not c.get("similar") and cand_key(c) not in keys]
+    return (sorted(planned + rest, key=lambda c: -c["score"])            # rank stays the shape-score order
+            + [c for c in candidates if c.get("similar")])
+
+
+def planned_clip(q: dict, p: dict, dur: float):
+    """Choreography: planned pick p as one of its video's trimmed clips (marked 📍), or None."""
+    sp, off = _planned_span(q, p, dur)
+    if sp is None:
+        return None
+    abs_start = sp["scene_start_sec"] + off
+    role_tag = f"  {role_chips(sp)}" if sp.get("roles") else ""
+    return {**sp, "offset_sec": off, "abs_start": abs_start, "planned": True,
+            "label": f"📍 Scene {sp['scene_id']}  {format_mmss(abs_start)} – {format_mmss(abs_start + dur)}"
+                     f"  motion {sp['motion_norm']:.2f}{role_tag}"}
+
+
+def clips_with_planned(clips: list, pclip) -> list:
+    """A video's trimmed clips with its planned clip in its place in time (replacing one at the same spot)."""
+    if pclip is None:
+        return clips
+    rest = [c for c in clips if not (c["scene_id"] == pclip["scene_id"]
+                                     and abs(c["offset_sec"] - pclip["offset_sec"]) < 0.1)]
+    return sorted(rest + [pclip], key=lambda c: c["abs_start"])
+
+
+def chor_shown(eligible: list, planned_vids, n: int) -> list:
+    """The columns shown: the planned path's videos first (so they always get one), then the rest."""
+    first = [v for v in eligible if v in planned_vids]
+    return (first + [v for v in eligible if v not in planned_vids])[:max(n, len(first))]
+
 
 if matching_mode == "Auto":
     # The shape search is real work, so the plan is remembered and only worked out
@@ -5056,6 +5233,10 @@ elif matching_mode == "Choreography":
                     f"confirm those blocks first."
                 )
 
+        # 📍 In order: the planned path's clip for each of its videos in this block.
+        _chor_plan = ({p["video_id"]: p for p in planned_ahead(chor_block, queues).get(chor_block, [])}
+                      if sequential_mode and chor_editing is None else {})
+
         if chor_editing is None and st.button(f"⚡⚡ Auto-fill ALL remaining blocks ({len(segments) - chor_block} left)",
                      key="chor_autofill_all",
                      help="Automatically fills every block from here to the end using each block's own "
@@ -5067,6 +5248,30 @@ elif matching_mode == "Choreography":
                 seg_b = segments[b]
                 block_duration_b = seg_b["end"] - seg_b["start"]
                 rec_b = recommended_counts[b]
+                if sequential_mode:
+                    # 📍 Follow the planned path; a block it can't fill falls back to the picks below.
+                    _placed_b = []
+                    for _p in planned_ahead(b, queues).get(b, []):
+                        _pc = planned_clip(queues, _p, block_duration_b)
+                        if _pc is None:
+                            continue
+                        try:
+                            _placed_b.append(carve_span(queues, _p["video_id"], _pc["scene_id"], _pc["offset_sec"],
+                                                        block_duration_b, True))
+                        except ValueError:
+                            continue
+                        st.session_state[f"chor_pick_{b}_{_p['video_id']}"] = True
+                        st.session_state.setdefault("chor_overrides", {}).setdefault(b, {})[_p["video_id"]] = \
+                            (_pc["scene_id"], _pc["offset_sec"])
+                    if _placed_b:
+                        for vid in selected_videos:
+                            if all(vid != q["video_id"] for q in _placed_b):
+                                st.session_state[f"chor_pick_{b}_{vid}"] = False
+                        _prev_b = {p["video_id"] for p in chor_confirmed.get(b - 1, [])} if b > 0 else set()
+                        if repeat_fallback_videos(_placed_b, _prev_b, avoid_repeat):
+                            _chor_rep_fallbacks.append(b + 1)
+                        chor_confirmed[b] = _placed_b
+                        continue
                 seg_target_b = seg_b.get("intensity", seg_b["energy"])
 
                 role_filter_b = plan_block_roles[b]
@@ -5197,7 +5402,9 @@ elif matching_mode == "Choreography":
                                        excluded_for_block(queues, st.session_state["global_excluded_scenes"],
                                                           chor_role_filter),
                                        role_filter=chor_role_filter, role_reach=_chor_reach)]
-                shown_videos = eligible_videos[:int(max_chor_videos)]
+                _pcs = {v: planned_clip(queues, p, block_duration) for v, p in _chor_plan.items()}
+                _pcs = {v: c for v, c in _pcs.items() if c is not None}
+                shown_videos = chor_shown(eligible_videos, _pcs, int(max_chor_videos))
                 seg_target = seg.get("intensity", seg["energy"])
 
                 # Confirm only the ticked columns (checkbox state drives this, not position)
@@ -5210,6 +5417,7 @@ elif matching_mode == "Choreography":
                         queues, video_id, block_duration, sequential_mode,
                         excluded_for_block(queues, st.session_state["global_excluded_scenes"], chor_role_filter),
                         role_filter=chor_role_filter, role_reach=_chor_reach)
+                    clips = clips_with_planned(clips, _pcs.get(video_id))
                     if not clips:
                         continue
 
@@ -5222,6 +5430,10 @@ elif matching_mode == "Choreography":
                             continue
                         use_scene_id = target["scene_id"]
                         use_offset = target["offset_sec"]
+                    elif video_id in _pcs:
+                        # 📍 Auto on a planned video: its planned clip.
+                        use_scene_id = _pcs[video_id]["scene_id"]
+                        use_offset = _pcs[video_id]["offset_sec"]
                     else:
                         # Auto: weighted pick, same Auto-fill weighting used everywhere else
                         # (A has no effect here — Choreography has no shape score). Sequential
@@ -5283,7 +5495,7 @@ elif matching_mode == "Choreography":
             chor_rec_count, queues, sequential_mode,
             excluded_for_block(queues, st.session_state["global_excluded_scenes"], chor_role_filter), catalogues,
             chor_prev_block_videos, chor_video_stats, chor_role_filter, chor_weighting,
-            track=track,
+            track=track, planned=_chor_plan,
         )
 
 else:
@@ -5394,6 +5606,23 @@ else:
             for b in range(current_block, len(segments)):
                 seg_b = segments[b]
                 audio_curve_b = get_block_audio_curve(track, seg_b["start"], seg_b["end"])
+                if sequential_mode:
+                    # 📍 In order: follow the planned path; a block it can't fill falls back below.
+                    _pl_b = planned_candidates(planned_ahead(b, queues).get(b, []), queues, seg_b, audio_curve_b)
+                    _placed_b = []
+                    for c in _pl_b:
+                        try:
+                            _placed_b.append(carve_span(queues, c["video_id"], c["scene_id"],
+                                                        c["window_offset_sec"], c["window_duration_sec"], True))
+                            st.session_state[f"adv_pick_{b}_{cand_key(c)}"] = True
+                        except ValueError:
+                            pass
+                    if _placed_b:
+                        _prev_b = {p["video_id"] for p in confirmed.get(b - 1, [])} if b > 0 else set()
+                        if repeat_fallback_videos(_placed_b, _prev_b, avoid_repeat):
+                            _adv_rep_fallbacks.append(b + 1)
+                        confirmed[b] = _placed_b
+                        continue
                 _excl_b = st.session_state["segment_exclusions"].get(b, set())
                 _rf_b = plan_block_roles[b]
                 _global_excl = excluded_for_block(queues, st.session_state["global_excluded_scenes"], _rf_b)
@@ -5648,6 +5877,16 @@ else:
             st.session_state[f"adv_search_cache_{current_block}"] = {
                 "key": search_key, "candidates": candidates, "missing": missing_curve_videos,
             }
+
+        # 📍 In order: the planned path's clips for this block join the grid (Auto-fill ticks them).
+        _adv_planned = (planned_candidates(planned_ahead(current_block, queues).get(current_block, []),
+                                           queues, seg, block_audio_curve)
+                        if sequential_mode and adv_editing is None else [])
+        if _adv_planned:
+            candidates = with_planned(candidates, _adv_planned)
+            st.caption(f"📍 **Planned path:** {len(_adv_planned)} clip(s) here — each video's clips are planned "
+                       f"for all its remaining blocks together, so none runs short later. ⚡ Auto-fill ticks them; "
+                       f"picking something else plans the rest again.")
 
         # Marked intro/outro blocks surface their tagged candidates first rather than
         # hiding the rest — you're already choosing by hand here, so a highlight that

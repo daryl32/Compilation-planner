@@ -46,6 +46,7 @@ class PlanContext:
     why_store: dict | Callable | None = None     # 🔎 Why these picks? — filled in when given (dict or function)
     role_chips: Callable = lambda _c: ""         # how a clip's roles are written in labels
     planned_sequential: bool = False             # in-order Auto: plan each video's path in one go (core/sequential.py)
+    plan_within_scenes: bool = False             # …with every clip inside one scene (📍 planned path, step modes)
 
 
 def _skip_budget(c: PlanContext, available_windows, remaining_blocks, weight_position, n_videos=1) -> int:
@@ -781,7 +782,7 @@ def match_scenes_to_track(
             exclusive_roles=pctx.locked_roles if pctx.intro_outro_exclusive else (),
             segment_exclusions=segment_exclusions, global_excluded=global_excluded,
             follow=max(0.0, min(1.0, float(weight_position) / 5.0)), weight_shape=weight_shape,
-            weight_motion=weight_motion)
+            weight_motion=weight_motion, cross_scenes=not pctx.plan_within_scenes)
         return timeline, csf, dsf
     segment_exclusions = segment_exclusions or {}
     segment_clip_reduction = segment_clip_reduction or {}
