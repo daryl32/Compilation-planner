@@ -29,6 +29,7 @@ import similarity as SIM
 import cut_scoring as CS
 import smart_cuts as SM
 import story_map as STM
+import story_map_editor as SME
 import scene_roles as SR
 from audio_charts import add_analysis_overlays
 import preview_snippets
@@ -2339,10 +2340,6 @@ def _story_set(regions: list, edited: bool = True, source: str = None) -> None:
     st.session_state.pop("sm_play", None)
 
 
-def _story_suggest(analysis: dict, cut_times: list) -> None:
-    _story_set(STM.snap(STM.suggest(analysis, SR.all_roles()), cut_times))
-
-
 def _story_use(choice: str) -> None:
     """🗺️ Map for this project: the track's default, a named map, or keep this project's own."""
     tid = st.session_state.get("track_id")
@@ -2376,63 +2373,6 @@ def _story_update_named(name: str) -> None:
     STM.save_named(st.session_state.get("track_id"), name, regions)
     _story_set(regions, edited=False, source=f"named:{name}")
     st.session_state["_story_saved_msg"] = f"📁 “{name}” updated."
-
-
-def _story_role_changed(i: int, key: str) -> None:
-    _story_set(STM.set_role(current_story_map(st.session_state["track_id"]), i, st.session_state.get(key)))
-
-
-def _story_edit(fn, *args) -> None:
-    _story_set(fn(current_story_map(st.session_state["track_id"]), *args))
-
-
-def _story_boundary_changed(i: int, key: str) -> None:
-    _story_edit(STM.move_boundary, i, float(st.session_state[key]))
-
-
-def _story_snap_one(i: int, cut_times: list) -> None:
-    """📐 on one line: move it onto the nearest cut."""
-    regions = current_story_map(st.session_state["track_id"])
-    t = regions[i]["end"]
-    inner = [c for c in cut_times if regions[i]["start"] < c < regions[i + 1]["end"]]
-    if inner:
-        _story_edit(STM.move_boundary, i, min(inner, key=lambda c: abs(c - t)))
-
-
-def _story_play(i: int) -> None:
-    st.session_state["sm_play"] = None if st.session_state.get("sm_play") == i else i
-
-
-def _story_chart(track: dict, regions: list, segs: list, roles: dict, playing) -> go.Figure:
-    fig = go.Figure()
-    if track.get("hires"):
-        rate = float(track["hires"]["rate"])
-        rms = np.asarray(track["hires"]["rms"], dtype=float)
-        k = max(1, int(rate * 0.5))
-        sm = np.convolve(rms, np.ones(k) / k, mode="same")
-        sm = sm / max(float(sm.max()), 1e-9)
-        fig.add_trace(go.Scatter(x=np.arange(len(sm)) / rate, y=sm, mode="lines", name="Loudness",
-                                 line=dict(color="rgba(80,120,220,0.85)", width=1.5), hoverinfo="skip"))
-    xs, ys = [], []
-    for sg in segs[1:]:
-        xs += [sg["start"], sg["start"], None]
-        ys += [0, 1.05, None]
-    if xs:
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name="Cuts (blocks)", hoverinfo="skip",
-                                 line=dict(color="rgba(128,128,128,0.35)", width=1)))
-    for i, r in enumerate(regions):
-        role = roles.get(r["role"]) if r["role"] else None
-        colour = role["colour"] if role else "#bbbbbb"
-        fig.add_vrect(x0=r["start"], x1=r["end"], fillcolor=colour,
-                      opacity=0.32 if role else 0.06, line_width=2 if i == playing else 0,
-                      line_color="#222222", layer="below")
-        if role:
-            fig.add_annotation(x=(r["start"] + r["end"]) / 2, y=1.12, text=f"{role['emoji']} {role['name']}",
-                               showarrow=False, font=dict(size=12))
-    fig.update_layout(height=300, margin=dict(t=30, b=10, l=10, r=10), showlegend=False,
-                      xaxis=dict(title="Time (s)", range=[0, float(track["duration_sec"])]),
-                      yaxis=dict(visible=False, range=[0, 1.2]))
-    return fig
 
 
 def render_story_map_picker(track_id: str) -> None:
@@ -2485,7 +2425,6 @@ def render_story_map_section(track: dict) -> None:
     duration = float(track["duration_sec"])
     segs = planned_segments(track, segmentation_settings())
     cut_times = [sg["start"] for sg in segs] + [duration]
-    roles = SR.roles_by_id()
     analysis = _story_analysis(track_id, bpb, _track_mtime(track_id))
 
     st.subheader("🎭 Story map")
@@ -2498,138 +2437,38 @@ def render_story_map_section(track: dict) -> None:
         old = st.session_state.get(STORY_KEY)
         if isinstance(old, dict) and old.get("regions"):
             st.info(f"The story map you had was for **{old.get('track_id')}** — this track needs its own.")
-        c = st.columns([2, 2, 3])
-        c[0].button("✨ Suggest a story map from the song", type="primary", use_container_width=True,
-                    on_click=_story_suggest, args=(analysis, cut_times))
-        c[1].button("Start with an empty map", use_container_width=True,
-                    on_click=lambda: _story_set(STM.blank(duration)))
-        c[2].caption("Or skip this step — without a story map the planner works as before.")
+        SME.render_empty(duration, analysis, cut_times, set_regions=_story_set, ns="sm")
         return
 
     render_story_map_picker(track_id)
-    tc = st.columns([2, 2, 2, 3])
-    tc[0].button("✨ Suggest again", use_container_width=True, on_click=_story_suggest, args=(analysis, cut_times),
-                 help="Replaces this project's map with a fresh suggestion from the song (your edits are lost). "
-                      "The track's saved maps aren't touched.")
-    tc[1].button("🧹 Clear the map", use_container_width=True, on_click=lambda: _story_set(STM.blank(duration)),
-                 help="One region, no role — then split and set roles yourself.")
-    tc[2].button("📐 Line up with the cuts", use_container_width=True,
-                 on_click=lambda: _story_edit(STM.snap, cut_times),
-                 help="Moves every boundary onto the nearest cut, so no block straddles two parts. "
-                      "Useful after changing the audio settings.")
-    lead = tc[3].toggle("▶ starts 2s early", key="sm_lead_in",
-                        help="Hear what leads into each part, not just the part itself.")
-    snap = tc[3].toggle("Handles snap to cuts", key="sm_snap",
-                        help="On: the lines between parts stop only on the cut points. Off: they move freely "
-                             "(0.1s steps) to line up with the audio curve — 📐 next to a line snaps just that "
-                             "one to its nearest cut.")
+    SME.render_editor(track, segs, ns="sm", get_regions=lambda: current_story_map(st.session_state["track_id"]),
+                      set_regions=_story_set, version=st.session_state[STORY_KEY].get("v", 0),
+                      analysis=analysis, play=lambda r, lead, key: _story_play_audio(track, r, lead, key))
 
-    playing = st.session_state.get("sm_play")
-    st.plotly_chart(_story_chart(track, regions, segs, roles, playing), use_container_width=True,
-                    key=f"sm_chart_{st.session_state[STORY_KEY].get('v', 0)}")
 
-    # Totals per role
-    tot = STM.totals(regions, segs)
-    if tot:
-        st.markdown("  ·  ".join(f"{SR.label(r, roles)} **{format_mmss(v['sec'])}** ({v['blocks']} block"
-                                 f"{'s' if v['blocks'] != 1 else ''})" for r, v in tot.items()))
-    unknown = sorted({r["role"] for r in regions if r["role"] and r["role"] not in roles})
-    if unknown:
-        st.warning("Some parts use a role that's been deleted: " + ", ".join(unknown))
-
-    v = st.session_state[STORY_KEY].get("v", 0)
-    role_opts = [None, *roles, *unknown]
-    block_role = STM.block_roles(regions, segs)
-    for i, r in enumerate(regions):
-        role = roles.get(r["role"]) if r["role"] else None
-        n_blocks = sum(1 for sg in segs if r["start"] <= (sg["start"] + sg["end"]) / 2 < r["end"])
-        with st.container(border=True):
-            rc = st.columns([0.12, 1.5, 1.8, 3.2, 0.9, 0.9, 0.9])
-            rc[0].markdown(f'<div style="width:18px;height:46px;border-radius:4px;background:'
-                           f'{role["colour"] if role else "#cccccc"};"></div>', unsafe_allow_html=True)
-            rc[1].markdown(f"**{format_mmss(r['start'])} – {format_mmss(r['end'])}**  \n"
-                           f":gray[{r['end'] - r['start']:.0f}s · {n_blocks} block{'s' if n_blocks != 1 else ''}]")
-            rk = f"sm_role_{v}_{i}"
-            rc[2].selectbox("Role", role_opts, index=role_opts.index(r["role"]) if r["role"] in role_opts else 0,
-                            key=rk, format_func=lambda x: "— no role" if x is None else SR.label(x, roles),
-                            label_visibility="collapsed", on_change=_story_role_changed, args=(i, rk))
-            with rc[3]:
-                if r.get("why"):
-                    st.caption(("✏️ " if r["why"] == "set by you" else "💡 ") + r["why"])
-                alt = r.get("alt")
-                if alt and alt.get("role") in roles and alt["role"] != r["role"]:
-                    st.button(f"↔ {SR.label(alt['role'], roles)} instead", key=f"sm_alt_{v}_{i}",
-                              on_click=_story_edit, args=(STM.set_role, i, alt["role"]),
-                              help="The runner-up for this part of the song.")
-            rc[4].button("⏹ Stop" if playing == i else "▶ Play", key=f"sm_play_{v}_{i}", use_container_width=True,
-                         on_click=_story_play, args=(i,))
-            inner = [t for t in cut_times if r["start"] < t < r["end"]]
-            mid = min(inner, key=lambda t: abs(t - (r["start"] + r["end"]) / 2)) if inner else None
-            rc[5].button("✂️ Split", key=f"sm_split_{v}_{i}", use_container_width=True, disabled=mid is None,
-                         on_click=_story_edit, args=(STM.split, i, mid),
-                         help="Split into two at the cut nearest the middle (then move the line below).")
-            rc[6].button("🔗 Join ↓", key=f"sm_merge_{v}_{i}", use_container_width=True,
-                         disabled=i == len(regions) - 1, on_click=_story_edit, args=(STM.merge_next, i),
-                         help="Join with the next part (keeps this part's role).")
-
-            if playing == i:
-                audio_path, missing = _local_media(track.get("source_path", ""))
-                if missing:
-                    st.warning(f"Needs {Path(colab_to_local(missing)).name} on the server first.")
-                    if _DRIVE_SYNC_AVAILABLE and "MyDrive/" in missing and st.button(
-                            "⬇️ Download the track from Google Drive", key=f"sm_dl_{v}_{i}"):
-                        bar = st.progress(0.0, text="Downloading…")
-                        err = download_source_video(missing.split("MyDrive/", 1)[1], Path(colab_to_local(missing)),
-                                                    progress_callback=lambda p: bar.progress(min(p, 1.0)))
-                        bar.empty()
-                        if err:
-                            st.error(f"Download failed: {err}")
-                        else:
-                            st.rerun()
-                else:
-                    with st.spinner("Cutting the music…"):
-                        clip, err = preview_snippets.make_audio_snippet(
-                            PREVIEW_DIR / "snippets", audio_path, r["start"], r["end"] - r["start"],
-                            lead_in=2.0 if lead else 0.0)
-                    if err:
-                        st.error(f"Couldn't cut the music: {err}")
-                    else:
-                        st.audio(str(clip), autoplay=True)
-
-        # The handle between this part and the next: free (0.1s steps) or on the cuts.
-        if i + 1 < len(regions):
-            nxt = regions[i + 1]
-            bk = f"sm_line_{v}_{i}_{'s' if snap else 'f'}"
-            _lab = lambda x: SR.label(x, roles) if x else "no role"
-            on_cut = any(abs(c - r["end"]) < 0.05 for c in cut_times)
-            lc = st.columns([1.3, 3.6, 0.4])
-            lc[0].caption(f"↕ Where {_lab(r['role'])} ends and {_lab(nxt['role'])} begins"
-                          + ("" if on_cut else "  ·  :orange[between cuts]"))
-            if snap:
-                opts = sorted({t for t in cut_times if r["start"] < t < nxt["end"]} | {r["end"]})
-                if len(opts) > 1:
-                    lc[1].select_slider(
-                        "Line between these parts", opts, value=r["end"], key=bk,
-                        format_func=lambda t: f"{format_mmss(t)} ({t:.1f}s)", label_visibility="collapsed",
-                        on_change=_story_boundary_changed, args=(i, bk),
-                        help="Drag to move where one part ends and the next begins — it stops on the cuts.")
+def _story_play_audio(track: dict, r: dict, lead: bool, key: str) -> None:
+    """▶ on a story map part: cut that stretch of the song (2s early if asked) and play it."""
+    audio_path, missing = _local_media(track.get("source_path", ""))
+    if missing:
+        st.warning(f"Needs {Path(colab_to_local(missing)).name} on the server first.")
+        if _DRIVE_SYNC_AVAILABLE and "MyDrive/" in missing and st.button(
+                "⬇️ Download the track from Google Drive", key=f"{key}_dl"):
+            bar = st.progress(0.0, text="Downloading…")
+            err = download_source_video(missing.split("MyDrive/", 1)[1], Path(colab_to_local(missing)),
+                                        progress_callback=lambda p: bar.progress(min(p, 1.0)))
+            bar.empty()
+            if err:
+                st.error(f"Download failed: {err}")
             else:
-                lo = math.ceil((r["start"] + 0.1) * 10) / 10
-                hi = math.floor((nxt["end"] - 0.1) * 10) / 10
-                if hi > lo:
-                    lc[1].slider(
-                        "Line between these parts", min_value=float(lo), max_value=float(hi),
-                        value=float(min(max(round(r["end"], 1), lo), hi)), step=0.1, format="%.1fs", key=bk,
-                        label_visibility="collapsed", on_change=_story_boundary_changed, args=(i, bk),
-                        help="Drag to line the change up with the audio curve (arrow keys move it 0.1s). "
-                             "📐 snaps it to the nearest cut.")
-            lc[2].button("📐", key=f"sm_snap1_{v}_{i}", disabled=on_cut, on_click=_story_snap_one,
-                         args=(i, cut_times), help="Snap this line to the nearest cut.")
-
-    st.divider()
-    n_role = sum(1 for x in block_role if x)
-    st.caption(f"{n_role} of {len(segs)} blocks have a role. Times are kept in seconds, so changing the "
-               "audio settings later keeps the map where it is (📐 lines it up with the new cuts).")
+                st.rerun()
+        return
+    with st.spinner("Cutting the music…"):
+        clip, err = preview_snippets.make_audio_snippet(PREVIEW_DIR / "snippets", audio_path, r["start"],
+                                                        r["end"] - r["start"], lead_in=2.0 if lead else 0.0)
+    if err:
+        st.error(f"Couldn't cut the music: {err}")
+    else:
+        st.audio(str(clip), autoplay=True)
 
 
 def _select_all_recommended():

@@ -104,3 +104,69 @@ def test_edit_a_map_that_came_from_nowhere(clean_maps):
     [b for b in at.button if b.label == "🧹 Clear the map"][0].click().run()
     assert not errors(at), errors(at)
     assert any(b.label == "📁 Save" for b in at.button)
+
+
+# --- 🎭 Media Library: the full-page editor (20 Oct) ------------------------------------------------
+def _library_app():
+    from tests.apptest_util import page_app
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎵 Audio"
+    at.run()
+    return at
+
+
+def _btn(at, label):
+    return [b for b in at.button if b.label == label][0]
+
+
+def test_library_editor_edits_and_saves_the_tracks_maps(clean_maps):
+    STM = clean_maps
+    from tests.apptest_util import errors
+    STM.save_map("song_full", R2)
+    at = _library_app()
+    assert not errors(at), errors(at)
+    at.button(key="aud_story_edit_song_full").click().run()
+    assert not errors(at), errors(at)
+    # the editor replaces the list (no planner hop), editing the default
+    assert at.session_state["aud_sm_edit"]["track_id"] == "song_full"
+    assert any(b.label == "← Back to tracks" for b in at.button)
+    assert not any(b.key and b.key.startswith("aud_story_edit_") for b in at.button)
+    assert at.session_state["aud_sm_edit"]["regions"] == R2
+    # an edit isn't saved until 💾 Save
+    _btn(at, "🔗 Join").click().run()
+    assert not errors(at), errors(at)
+    assert at.session_state["aud_sm_focus"] == ("part", 0)
+    assert STM.saved_map("song_full") == R2
+    assert any(b.label == "← Back without saving" for b in at.button)
+    _btn(at, "💾 Save").click().run()
+    assert not errors(at), errors(at)
+    assert len(STM.saved_map("song_full")) == 1
+    # save as a named map, then it can be made the default / deleted
+    _btn(at, "🧹 Clear the map").click().run()
+    [t for t in at.text_input if t.label == "Name"][0].set_value("Blank").run()
+    _btn(at, "📁 Save").click().run()
+    assert not errors(at), errors(at)
+    assert "Blank" in STM.track_maps("song_full")["named"]
+    assert at.session_state["aud_sm_edit"]["target"] == "named:Blank"
+    _btn(at, "🗑️ Delete this map").click().run()
+    assert not errors(at), errors(at)
+    assert "Blank" not in STM.track_maps("song_full")["named"]
+    _btn(at, "← Back to tracks").click().run()
+    assert not errors(at), errors(at)
+    assert "aud_sm_edit" not in at.session_state
+
+
+def test_library_editor_makes_a_first_map(clean_maps):
+    STM = clean_maps
+    from tests.apptest_util import errors
+    at = _library_app()
+    at.button(key="aud_story_edit_song_full").click().run()
+    assert not errors(at), errors(at)
+    _btn(at, "✨ Suggest a story map from the song").click().run()
+    assert not errors(at), errors(at)
+    assert at.session_state["aud_sm_edit"]["dirty"] and not STM.saved_map("song_full")
+    # the pinned graph is there with the cards
+    assert any(b.label == "✂️ Split" for b in at.button)
+    _btn(at, "💾 Save").click().run()
+    assert not errors(at), errors(at)
+    assert STM.saved_map("song_full")
