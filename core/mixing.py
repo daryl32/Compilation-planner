@@ -13,7 +13,7 @@ all stretched to one tempo.
                     "part": "full" | "instrumental" | "vocals", "uid": "…"}, …],
         "layers": [{"track": tid, "part": "vocals", "start": s, "end": e, "gain_db": 0.0,
                     "on": piece uid, "offset_bars": bars into that piece}, …],
-                                            # 🎤 played OVER the pieces (stems from make_stems_local.py)
+                                            # 🎤 played OVER the pieces (stems from analyse_audio_local.py)
         "bpm": target BPM or None (None = every piece at its own tempo),
         "shift": {tid: semitones},          # 🎹 pitch shift per track (key matching)
         "xfade_same": beats, "xfade_other": beats,   # crossfade at joins

@@ -527,7 +527,7 @@ def _remove_layer(uid: str) -> None:
 
 def _part_stems_row(p: dict, t: dict, tracks_all: dict, summaries: dict) -> None:
     """🎤 Under a mashup part: what plays (full song / instrumental / vocals — stems from
-    make_stems.bat on the laptop), and vocals from another track laid over it."""
+    run_audio_analysis.bat on the laptop), and vocals from another track laid over it."""
     import mixer
     has = mixer.has_stems(t)
     with st.container(key=f"mxm_stems_{p['uid']}"):
@@ -540,15 +540,15 @@ def _part_stems_row(p: dict, t: dict, tracks_all: dict, summaries: dict) -> None
         p["part"] = c[0].selectbox("Play", list(PART_LABELS), key=pk, format_func=PART_LABELS.get,
                                    disabled=not has, label_visibility="collapsed",
                                    help="What of this track plays here. Instrumental / vocals need its stems "
-                                        "(make_stems.bat on the laptop)." if has
-                                   else "This track has no stems yet — split it with make_stems.bat on the laptop "
+                                        "(run_audio_analysis.bat on the laptop)." if has
+                                   else "This track has no stems yet — run run_audio_analysis.bat on the laptop (it makes stems) "
                                         "to play just its instrumental or vocals.")
         singers = [tid for tid, s_ in tracks_all.items() if s_.get("stems")]
         with c[1].popover("🎤 Vocals over…", use_container_width=True, disabled=not singers):
             _add_layer_form(p, t, singers, summaries)
         mine = [ly for ly in _layers() if ly["on"] == p["uid"]]
         if not singers:
-            c[2].caption("No tracks with stems yet — make_stems.bat on the laptop.")
+            c[2].caption("No tracks with stems yet — run_audio_analysis.bat on the laptop.")
         for ly in mine:
             lc = st.columns([5, 2, 1], vertical_alignment="center")
             lc[0].caption(f"🎤 {ly['track']} vocals {format_mmss(ly['start'])}–{format_mmss(ly['end'])}"
@@ -774,8 +774,8 @@ def _suggestions(summaries: dict) -> None:
         swaps = MX.suggest_pairs(infos, top=12, need_stems=True)
         if not swaps:
             n = sum(1 for x in infos if x["stems"])
-            st.info("Vocal swaps need tracks split into vocals + instrumental — run **make_stems.bat** on the "
-                    f"laptop (it splits them on the GPU and saves them to Google Drive). {n} track(s) have stems.")
+            st.info("Vocal swaps need tracks split into vocals + instrumental — run **run_audio_analysis.bat** on the "
+                    f"laptop (it makes stems on the GPU along with the analysis and saves them to Google Drive). {n} track(s) have stems.")
         for i, r in enumerate(swaps):
             _suggestion_row(r, i, vocal_swap=True)
 

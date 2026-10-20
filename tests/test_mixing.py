@@ -439,32 +439,62 @@ def test_mix_page_suggestions_start_a_vocal_swap(mixlib):
     assert at.get("audio")
 
 
-def test_make_stems_local_plans_and_notes_stems(mixlib, monkeypatch, tmp_path):
+def test_local_analysis_does_only_what_each_track_is_missing(mixlib, monkeypatch, tmp_path):
+    """run_audio_analysis.bat → analyse_audio_local.py: new tracks get everything; analysed
+    ones only their missing parts (stems, key…) from one Demucs pass."""
     import numpy as np_
-    import config
-    import make_stems_local as MS
     import analyse_audio_local as AL
     import audio_analysis as AA
     lib = tmp_path / "Audio-Library"
     lib.mkdir()
-    (lib / "mix_song_c.m4a").write_bytes(Path(mixlib["tracks"]["mix_song_c"]["source_path"]).read_bytes())
-    monkeypatch.setattr(MS, "AUDIO_DIR", mixlib["audio_dir"])
+    src = Path(mixlib["tracks"]["mix_song_c"]["source_path"])
+    (lib / "mix_song_c.m4a").write_bytes(src.read_bytes())
+    (lib / "brand_new.m4a").write_bytes(src.read_bytes())
+    audio_dir = mixlib["audio_dir"]
+    monkeypatch.setattr(AL, "AUDIO_DIR", audio_dir)
     monkeypatch.setattr(AL, "drive_root", lambda: tmp_path)
-    monkeypatch.setattr(MS, "AA", AA)
-    monkeypatch.setattr(MS, "LOCAL_TEMP_DIR", tmp_path / "tmp")
-    # the test songs already have stems → nothing to do unless --redo
-    assert MS.plan(lib, None, False) == []
-    jobs = MS.plan(lib, "song_c", True)
-    assert [tid for _, tid in jobs] == ["mix_song_c"]
-    fake = np_.zeros((44100, 2), dtype=np_.float32)
-    monkeypatch.setattr(AA, "separate_stems", lambda path: (fake, fake, 44100))
-    js = mixlib["audio_dir"] / "mix_song_c.json"
+    monkeypatch.setattr(AL, "AA", AA, raising=False)
+    monkeypatch.setattr(AL, "LOCAL_TEMP_DIR", tmp_path / "tmp")
+    calls = []
+
+    def fake_sep(path):
+        calls.append(Path(path).name)
+        y = AA.decode_audio(path, sr=44100, channels=2)
+        return (0.3 * y).astype(np_.float32), (0.7 * y).astype(np_.float32), 44100
+    monkeypatch.setattr(AA, "separate_stems", fake_sep)
+    monkeypatch.setattr(AA, "beat_this_available", lambda: False)
+
+    js = audio_dir / "mix_song_c.json"
     before = js.read_text()
+    track = json.loads(before)
+    track.pop("stems")                                     # an analysed track without stems
+    track["analysis"]["vocals"] = None
+    js.write_text(json.dumps(track))
     try:
-        MS.run(*jobs[0])
+        kw = dict(demucs=True, stems=True)
+        assert AL.missing_parts(track, **kw) == {"vocals", "stems"}
+        assert AL.missing_parts(None, **kw) == {"new", "key", "vocals", "stems"}
+        assert AL.missing_parts({**track, "stems": {"vocals": "v", "instrumental": "i"},
+                                 "analysis": {**track["analysis"], "vocals": [0.1]}}, **kw) == set()
+        jobs = {tid: parts for _, tid, parts in AL.plan_jobs(lib, None, **kw)}
+        assert jobs == {"mix_song_c": {"vocals", "stems"}, "brand_new": {"new", "key", "vocals", "stems"}}
+
+        f = lib / "mix_song_c.m4a"
+        AL.run_job(f, "mix_song_c", jobs["mix_song_c"], "Audio-Library/mix_song_c.m4a", True)
         made = json.loads(js.read_text())
         assert made["stems"]["vocals"] == "/content/drive/MyDrive/scene-labeling/stems/mix_song_c/vocals.m4a"
         assert (tmp_path / "scene-labeling" / "stems" / "mix_song_c" / "instrumental.m4a").exists()
-        assert made["analysis"] and made["bpm"]                     # the rest of the track JSON is kept
+        assert made["analysis"]["vocals"] and made["analysis"]["methods"]["vocals"] == "demucs"
+        assert made["beat_times"] == track["beat_times"]          # beats untouched
+        assert calls == ["mix_song_c.m4a"]                         # one Demucs pass
+        assert AL.missing_parts(made, **kw) == set()
+
+        AL.run_job(lib / "brand_new.m4a", "brand_new", jobs["brand_new"], "Audio-Library/brand_new.m4a", True)
+        new = json.loads((audio_dir / "brand_new.json").read_text())
+        assert new["source_path"] == "/content/drive/MyDrive/Audio-Library/brand_new.m4a"
+        assert new["analysis"]["vocals"] and new["key"]["camelot"] == "8B" and new["stems"]
+        assert calls == ["mix_song_c.m4a", "brand_new.m4a"]       # Demucs once for analysis + stems
+        assert AL.missing_parts(new, **kw) == set()
     finally:
         js.write_text(before)
+        (audio_dir / "brand_new.json").unlink(missing_ok=True)

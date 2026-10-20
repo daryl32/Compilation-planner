@@ -95,7 +95,7 @@ def install(audio_dir: Path, files_dir: Path) -> dict:
             continue
         track = {"track_id": tid, "source_path": str(path),
                  **AA.analyse_file(path, with_vocals=False)}
-        # 🎤 stems as make_stems_local.py notes them: the song itself stands in for the
+        # 🎤 stems as analyse_audio_local.py notes them: the song itself stands in for the
         # instrumental, a synthetic melody for the vocals
         voc = synth_vocals(files_dir / "stems" / tid / "vocals.m4a", bpm, root, sum(n for _, n in layout))
         inst = files_dir / "stems" / tid / "instrumental.m4a"

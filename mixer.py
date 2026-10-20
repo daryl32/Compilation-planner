@@ -55,7 +55,7 @@ STEM_PARTS = ("vocals", "instrumental")
 
 
 def has_stems(track: dict) -> bool:
-    """🎤 Split into vocals + instrumental by make_stems_local.py (on the laptop's GPU)."""
+    """🎤 Split into vocals + instrumental by analyse_audio_local.py (on the laptop's GPU)."""
     st = track.get("stems") or {}
     return all(st.get(p) for p in STEM_PARTS)
 
@@ -78,7 +78,7 @@ def ensure_local(track: dict, progress=None, parts=("full",)) -> str | None:
     for part in parts:
         ref = _drive_ref(track, part)
         if part in STEM_PARTS and not ref:
-            return f"{track.get('track_id')}: no {part} stem yet — split it with make_stems.bat on the laptop."
+            return f"{track.get('track_id')}: no {part} stem yet — run run_audio_analysis.bat on the laptop (it makes stems)."
         path = local_path(track, part)
         if path.exists():
             continue

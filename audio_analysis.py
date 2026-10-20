@@ -515,22 +515,29 @@ def vocal_curve(path, n_out: int) -> np.ndarray | None:
             sources = apply_model(model, wav[None], device=TORCH_DEVICE, split=True, overlap=0.1, progress=False)[0]
         sources = sources.cpu()
         vocals = sources[model.sources.index("vocals")].mean(0).numpy()
-        hop = int(model.samplerate / OUT_RATE)
-        nfr = len(vocals) // hop
-        v = np.sqrt(np.mean(vocals[:nfr * hop].reshape(nfr, hop) ** 2, axis=1))
-        v = _norm01(v, 99.0)
-        if len(v) < n_out:
-            v = np.pad(v, (0, n_out - len(v)))
-        return v[:n_out]
+        return vocal_curve_from(vocals, int(model.samplerate), n_out)
     except Exception:
         traceback.print_exc()
         return None
 
 
+def vocal_curve_from(vocals: np.ndarray, sr: int, n_out: int) -> np.ndarray:
+    """Vocal loudness at OUT_RATE (0–1) from a vocal stem (mono, or (n, channels))."""
+    if vocals.ndim > 1:
+        vocals = vocals.mean(axis=1)
+    hop = max(1, int(sr / OUT_RATE))
+    nfr = len(vocals) // hop
+    v = np.sqrt(np.mean(vocals[:nfr * hop].astype(np.float64).reshape(nfr, hop) ** 2, axis=1))
+    v = _norm01(v, 99.0)
+    if len(v) < n_out:
+        v = np.pad(v, (0, n_out - len(v)))
+    return v[:n_out]
+
+
 def separate_stems(path) -> tuple:
     """🎤 Split a song into (vocals, instrumental, sample rate) with Demucs (htdemucs):
     float32 arrays (n, 2); instrumental = drums + bass + other. For 🎚️ mashups that put one
-    track's vocals over another's instrumental. Slow on CPU — make_stems_local.py runs it on
+    track's vocals over another's instrumental. Slow on CPU — analyse_audio_local.py runs it on
     the laptop's GPU. Raises RuntimeError when Demucs isn't installed."""
     try:
         import torch  # type: ignore
@@ -588,14 +595,17 @@ def _r(x, nd: int = 2) -> list:
 
 
 def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocals: bool = True,
-                 progress=None, model_beats: bool = False, beat_hint: dict = None) -> dict:
+                 progress=None, model_beats: bool = False, beat_hint: dict = None,
+                 vocal_stem: tuple = None) -> dict:
     """Analyse one audio file. existing: the track's current catalogue (Colab),
     whose beats/energy are kept. Returns a dict of fields to merge into the
     track JSON: always "analysis" and "key"; for a new track also the core fields.
     model_beats: for a new track, take the beat grid from beat_this too (when
     installed) instead of the built-in tracker — used by the local GPU script.
     beat_hint: {"beat_times", "downbeats"} already known exactly — a 🎚️ mix made
-    from analysed tracks carries its sources' beats and bar lines over."""
+    from analysed tracks carries its sources' beats and bar lines over.
+    vocal_stem: (vocals array, sample rate) from separate_stems() — the vocals are taken
+    from it instead of running Demucs again (the laptop script separates once for both)."""
     say = progress or (lambda msg: None)
     say("decoding audio")
     y = decode_audio(path)
@@ -700,7 +710,10 @@ def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocal
                                           section_starts=[x["start"] for x in sections])
 
     vocals = vocal_starts = vocal_ends = None
-    if with_vocals and demucs_available():
+    if vocal_stem is not None:
+        vocals = vocal_curve_from(vocal_stem[0], int(vocal_stem[1]), n_out)
+        vocal_starts, vocal_ends = vocal_phrases(vocals)
+    elif with_vocals and demucs_available():
         say("separating vocals (slow)")
         v = vocal_curve(path, n_out)
         if v is not None:
