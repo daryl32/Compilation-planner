@@ -32,7 +32,7 @@ def test_quick_marking_cards_split_and_show_motion(tmp_path):
         assert not errors(at), errors(at)
         assert at.session_state["rev_quick_roles"] is True            # still in quick marking
         assert len(cards()) > n
-        assert any("split into" in s.value for s in at.success)
+        assert any("split into" in t.value for t in at.toast)        # saved messages are toasts now
         # ✂️ opens the split dialog
         [b for b in at.button if (b.key or "").startswith("rev_qr_split_")][0].click().run()
         assert not errors(at), errors(at)

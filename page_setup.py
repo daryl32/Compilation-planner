@@ -381,3 +381,18 @@ def page_setup(name: str, page_path: str, *, title: str = None, anchor: str = No
     st.title(title or name, anchor=anchor)
     mb = memory_check(name)
     _sidebar(page_path, mb)
+
+
+def top_button(anchor: str) -> None:
+    """A round ⬆️ button that floats in the bottom-right corner on long pages and
+    jumps back to the page heading (page_setup(..., anchor=anchor)). Always in
+    reach — no scrolling to the bottom to find it (iPad friendly)."""
+    st.markdown(
+        f'<a href="#{anchor}" target="_self" class="mp-top-btn" title="Back to the top">⬆️</a>'
+        "<style>.mp-top-btn{position:fixed;right:1.2rem;bottom:1.4rem;z-index:999990;width:3rem;height:3rem;"
+        "display:flex;align-items:center;justify-content:center;border-radius:50%;font-size:1.35rem;"
+        "text-decoration:none!important;background:rgba(127,127,127,.22);"
+        "backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);"
+        "border:1px solid rgba(128,128,128,.45);box-shadow:0 2px 10px rgba(0,0,0,.18);opacity:.92}"
+        ".mp-top-btn:hover{opacity:1;box-shadow:0 3px 14px rgba(0,0,0,.28)}</style>",
+        unsafe_allow_html=True)
