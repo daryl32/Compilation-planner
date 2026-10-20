@@ -1767,25 +1767,115 @@ def _keep_cut_edits(sig: str) -> None:
         e["base_sig"] = sig
 
 
+def _keep_new_with_locks(sig: str, base_cuts: list, duration: float) -> None:
+    """♻️ The new settings' cuts, with this project's 🔒 locked cuts kept where they are."""
+    e = _cut_edits()
+    if not e:
+        return
+    locked = CED.clean_locked(e.get("locked"), e["cuts"])
+    cuts = CED.merge_locked(base_cuts, locked, duration)
+    st.session_state["cut_edits"] = {**e, "cuts": cuts, "locked": locked, "base_sig": sig}
+    _bump_cut_edit_rev()
+
+
+_STYLE_CUTS_CACHE = "_ced_style_cuts"
+
+
+def _style_cuts(track: dict, tid: str, style: str, pace: int, bpb: int) -> list:
+    """The cut times a 🎨 cutting style would make on this whole track (kept per session)."""
+    key = (tid, float(track["duration_sec"]), style, int(pace), int(bpb))
+    cache = st.session_state.setdefault(_STYLE_CUTS_CACHE, {})
+    if key not in cache:
+        method, settings, _ = CSTY.style_settings(track, style, int(pace), int(bpb))
+        cache[key] = CED.base_cut_times(build_segments(track, {"method": method, "beats_per_bar": int(bpb),
+                                                               **settings}))
+        while len(cache) > 12:
+            cache.pop(next(iter(cache)))
+    return cache[key]
+
+
+def _idea_cuts(track: dict, tid: str, bpb: int) -> list:
+    """👻 Candidate cuts: the current style one step busier, Smart busier and On the beat."""
+    style, pace = st.session_state.get("cut_style", "custom"), int(st.session_state.get("cut_style_pace", 0))
+    out = []
+    if style in CSTY.STYLES and pace < 2:
+        out += _style_cuts(track, tid, style, pace + 1, bpb)
+    out += _style_cuts(track, tid, "smart", 1, bpb)
+    out += _style_cuts(track, tid, "beat", 0, bpb)
+    return out
+
+
+def _set_cut_edits(tid: str, cuts: list, locked: list, sig: str, base_cuts: list) -> None:
+    """Store this project's cuts (or drop the edit when it's exactly the method's, unlocked)."""
+    e = _cut_edits(tid)
+    locked = CED.clean_locked(locked, cuts)
+    if not locked and not CED.diff(base_cuts, cuts)["added"] and len(cuts) == len(base_cuts):
+        st.session_state.pop("cut_edits", None)       # back to exactly the method's cuts
+    else:
+        st.session_state["cut_edits"] = {"track_id": tid, "cuts": cuts, "locked": locked,
+                                         "base_sig": e.get("base_sig", sig) if e else sig}
+
+
+def _recut_region(track: dict, tid: str, sig: str, base_cuts: list, bpb: int, rng) -> None:
+    """🎨 Re-cut the picked part (rng = (start, end), as the slider showed it) in the picked
+    style (🔒 locked cuts stay)."""
+    if not isinstance(rng, (list, tuple)) or len(rng) != 2 or rng[1] <= rng[0]:
+        return
+    e = _cut_edits(tid)
+    cuts = e["cuts"] if e else base_cuts
+    locked = CED.clean_locked((e or {}).get("locked"), cuts)
+    style, pace = st.session_state.get("ced_rstyle", "hyper"), int(st.session_state.get("ced_rpace", 0))
+    region_cuts = _style_cuts(track, tid, style, pace, bpb)
+    new = CED.recut_region(cuts, region_cuts, rng[0], rng[1], float(track["duration_sec"]), locked)
+    _set_cut_edits(tid, new, locked, sig, base_cuts)
+    st.session_state["ced_recut_msg"] = (f"🎨 Re-cut {format_mmss(rng[0])}–{format_mmss(rng[1])} as "
+                                         f"{CSTY.STYLES[style]['label']} ({CSTY.PACE_LABELS[pace]}) — "
+                                         f"↶ Undo in the editor puts it back.")
+    _bump_cut_edit_rev()
+
+
+def _ab_keep(tid: str, cuts: list) -> None:
+    st.session_state["cut_ab"] = {"track_id": tid, "A": list(cuts)}
+
+
+def _ab_swap(tid: str, sig: str, base_cuts: list) -> None:
+    """⇄ Put the A cuts back in the editor; what's there now becomes A."""
+    ab = st.session_state.get("cut_ab")
+    if not ab or ab.get("track_id") != tid:
+        return
+    e = _cut_edits(tid)
+    now = e["cuts"] if e else base_cuts
+    _set_cut_edits(tid, list(ab["A"]), (e or {}).get("locked") or [], sig, base_cuts)
+    st.session_state["cut_ab"] = {"track_id": tid, "A": list(now)}
+    _bump_cut_edit_rev()
+
+
 def _render_cut_editor(track: dict) -> None:
-    """✂️ Listen and edit the cuts — see cut_editor.py."""
+    """✂️ Listen and edit the cuts — see cut_editor.py. Extras: 🔒 lock cuts, 🎨 re-cut a part in
+    another style, 👻 ideas to tap in, ⚖️ compare with a kept set (A)."""
     tid = st.session_state["track_id"]
     cfg = segmentation_settings()
     sig = CED.settings_signature(cfg)
     bpb = int(st.session_state.get("beats_per_bar", 4))
+    duration = float(track["duration_sec"])
     base_cuts = CED.base_cut_times(build_segments(track, cfg))
     e = _cut_edits(tid)
     st.subheader("✂️ Listen and edit the cuts")
     if e and e.get("base_sig") != sig:
         d = CED.diff(base_cuts, e["cuts"])
+        n_locked = len(CED.clean_locked(e.get("locked"), e["cuts"]))
         with st.container(border=True):
             st.warning(f"You edited these cuts by hand, then changed the cutting settings. The plan still uses "
                        f"your edited cuts ({len(e['cuts']) + 1} segments) — the new settings would give "
                        f"{len(base_cuts) + 1}, with {len(d['added'])} of your cuts not among them.")
-            bc = st.columns(2)
+            bc = st.columns(3 if n_locked else 2)
             bc[0].button("✋ Keep my edited cuts", on_click=_keep_cut_edits, args=(sig,), use_container_width=True)
-            bc[1].button("♻️ Use the new settings (drop my edits)", on_click=_drop_cut_edits,
-                         use_container_width=True)
+            if n_locked:
+                bc[1].button(f"♻️ New settings + my {n_locked} 🔒 cut(s)", on_click=_keep_new_with_locks,
+                             args=(sig, base_cuts, duration), use_container_width=True, type="primary",
+                             help="The new settings' cuts, with your locked cuts kept exactly where they are.")
+            bc[-1].button("♻️ Use the new settings (drop my edits)", on_click=_drop_cut_edits,
+                          use_container_width=True)
 
     audio_url = ""
     audio_path, missing = _local_media(track.get("source_path", ""))
@@ -1814,29 +1904,98 @@ def _render_cut_editor(track: dict) -> None:
         _bump_cut_edit_rev()
     rev = int(st.session_state["cut_edit_rev"])
     cuts_now = e["cuts"] if e else base_cuts
+    locked_now = CED.clean_locked((e or {}).get("locked"), cuts_now)
+    ab = st.session_state.get("cut_ab")
+    ab = ab if isinstance(ab, dict) and ab.get("track_id") == tid else None
+    show_ideas = bool(st.session_state.get("ced_ideas"))
+    ghosts = CED.ghost_cuts(_idea_cuts(track, tid, bpb), cuts_now, duration) if show_ideas else []
+    region = st.session_state.get("ced_region") if st.session_state.get("ced_region_on") else None
     val = _cut_editor_widget(track, tid, cuts=cuts_now, base_cuts=base_cuts,
                              beats=CS.beat_grid(track)[0], bars=CS.bar_lines(track, bpb), doc_rev=rev,
-                             audio_url=audio_url)
+                             audio_url=audio_url, locked=locked_now, ghosts=ghosts,
+                             compare=ab["A"] if ab else None, region=region)
     if isinstance(val, dict) and val.get("edited") and int(val.get("doc_rev", -1)) == rev:
-        new = CED.clean_cuts(val.get("cuts") or [], float(track["duration_sec"]))
-        if new != cuts_now:
-            if not CED.diff(base_cuts, new)["added"] and len(new) == len(base_cuts):
-                st.session_state.pop("cut_edits", None)       # back to exactly the method's cuts
-            else:
-                st.session_state["cut_edits"] = {"track_id": tid, "cuts": new,
-                                                 "base_sig": e.get("base_sig", sig) if e else sig}
+        new = CED.clean_cuts(val.get("cuts") or [], duration)
+        new_locked = CED.clean_locked(val.get("locked") or [], new)
+        if new != cuts_now or new_locked != locked_now:
+            _set_cut_edits(tid, new, new_locked, sig, base_cuts)
             e = _cut_edits(tid)
+            cuts_now, locked_now = (e["cuts"], e.get("locked") or []) if e else (base_cuts, [])
+    elif isinstance(val, dict) and val.get("region") and val.get("nonce") != st.session_state.get("_ced_region_nonce"):
+        # ▭ This view as the part: snap to the nearest bar lines for the slider below.
+        st.session_state["_ced_region_nonce"] = val.get("nonce")
+        lines = _region_lines(track, bpb)
+        a, b = val["region"]
+        st.session_state["ced_region"] = (min(lines, key=lambda x: abs(x - a)), min(lines, key=lambda x: abs(x - b)))
+        st.session_state["ced_region_on"] = True
+        st.session_state["ced_region_open"] = True
+
     if e:
         d = CED.diff(base_cuts, e["cuts"])
         ec = st.columns([4, 2])
         ec[0].caption(f"✏️ **Edited by hand:** {len(e['cuts']) + 1} segments — {len(d['added'])} cut(s) added or "
-                      f"moved, {len(d['removed'])} of the method's removed. Saved with this project. "
-                      f"🟠 = your cuts · 🔵 = the method's · dashed = removed.")
+                      f"moved, {len(d['removed'])} of the method's removed"
+                      + (f", {len(locked_now)} 🔒 locked" if locked_now else "")
+                      + ". Saved with this project.",
+                      help="🟠 your cuts · 🔵 the method's · 🟩 locked · dashed = removed · 👻 dotted = ideas · "
+                           "purple ticks along the top = the kept set A.")
         ec[1].button("↺ Undo all edits", on_click=_drop_cut_edits, use_container_width=True,
                      help="Drops your hand edits for this track (Undo in the editor can't bring them back).")
     else:
         st.caption("▶ Play and listen — tap ✂️ *Cut here* on the beat, drag a cut to move it, or select one and "
                    "🗑 remove it. Your edits are saved with this project.")
+    msg = st.session_state.pop("ced_recut_msg", None)
+    if msg:
+        st.toast(msg)
+
+    # Extras: 👻 ideas · ⚖️ compare · 🎨 re-cut a part
+    xc = st.columns([1.3, 1.3, 1.6], vertical_alignment="center")
+    xc[0].toggle("👻 Show ideas", key="ced_ideas",
+                 help="Faint dotted lines where other cutting styles (this one busier, 🧠 Smart busier and "
+                      "🥁 On the beat) would cut — tap one in the editor to make it a cut.")
+    if ab:
+        xc[1].button("⇄ Swap with A", key="ced_ab_swap", on_click=_ab_swap, args=(tid, sig, base_cuts),
+                     use_container_width=True,
+                     help="Puts the kept set (A) back in the editor and keeps what's there now as A — listen to "
+                          "one, swap, listen to the other.")
+    else:
+        xc[1].button("📌 Keep as A", key="ced_ab_keep", on_click=_ab_keep, args=(tid, cuts_now),
+                     use_container_width=True,
+                     help="Keep these cuts as set A, then try something else and compare (A shows as purple ticks "
+                          "along the top of the editor).")
+    if ab:
+        sa, sb = CED.cut_stats(ab["A"], duration), CED.cut_stats(cuts_now, duration)
+        diff_n = len(CED.diff(ab["A"], cuts_now)["added"]) + len(CED.diff(ab["A"], cuts_now)["removed"])
+        xc[2].markdown(f"⚖️ **A** {sa['segments']} segments, avg {sa['average']:.1f}s · **now** {sb['segments']}, "
+                       f"avg {sb['average']:.1f}s · {diff_n} cut(s) differ",
+                       help=f"Shortest / longest — A: {sa['shortest']:.1f}s / {sa['longest']:.1f}s · now: "
+                            f"{sb['shortest']:.1f}s / {sb['longest']:.1f}s.")
+        xc[1].button("✕ Forget A", key="ced_ab_forget", use_container_width=True,
+                     on_click=lambda: st.session_state.pop("cut_ab", None))
+    with st.expander("🎨 Re-cut a part in another style", expanded=bool(st.session_state.pop("ced_region_open", False))):
+        lines = _region_lines(track, bpb)
+        if not isinstance(st.session_state.get("ced_region"), (list, tuple)) or \
+                any(x not in lines for x in st.session_state["ced_region"]):
+            st.session_state["ced_region"] = (lines[0], lines[min(len(lines) - 1, 8)])
+        part = st.select_slider("Part of the track", options=lines, key="ced_region", format_func=format_mmss,
+                         help="On bar lines. Or zoom the editor to the part and press ▭ This view as the part.")
+        st.session_state.setdefault("ced_region_on", False)
+        st.toggle("Shade it in the editor", key="ced_region_on")
+        rc = st.columns([2, 1.4, 1.6], vertical_alignment="bottom")
+        st.session_state.setdefault("ced_rstyle", "hyper")
+        st.session_state.setdefault("ced_rpace", 0)
+        rc[0].selectbox("Style", list(CSTY.STYLES), key="ced_rstyle", format_func=lambda k: CSTY.STYLES[k]["label"])
+        rc[1].selectbox("Pace", list(CSTY.PACE_LABELS), key="ced_rpace", format_func=lambda k: CSTY.PACE_LABELS[k])
+        rc[2].button("🎨 Re-cut this part", key="ced_recut", type="primary", use_container_width=True,
+                     on_click=_recut_region, args=(track, tid, sig, base_cuts, bpb, part),
+                     help="Replaces the cuts inside the part with the style's — 🔒 locked cuts stay, and the "
+                          "rest of the track is untouched. ↶ Undo in the editor takes it back.")
+
+
+def _region_lines(track: dict, bpb: int) -> list:
+    """Times the re-cut part can start / end on: the track's start and end, and its bar lines."""
+    dur = round(float(track["duration_sec"]), 3)
+    return sorted({0.0, dur, *[round(float(b), 3) for b in CS.bar_lines(track, bpb) if 0 < float(b) < dur]})
 
 
 def _smart_reset() -> None:

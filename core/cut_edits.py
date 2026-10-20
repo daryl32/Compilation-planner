@@ -117,3 +117,62 @@ def settings_signature(cfg: dict) -> str:
             return [norm(x) for x in v]
         return str(v)
     return json.dumps({k: norm(v) for k, v in cfg.items()}, sort_keys=True)
+
+
+# ---------------------------------------------------------------------------
+# 🔒 Locked cuts, 🎨 re-cutting a region, 👻 ideas, ⚖️ A/B — the cut editor extras
+# ---------------------------------------------------------------------------
+
+LOCK_CLEAR = 0.35     # seconds — a new method cut this close to a locked one gives way to it
+
+
+def clean_locked(locked, cuts: list, tol: float = SAME_CUT) -> list:
+    """The locked times that are still cuts (snapped to the cut they belong to)."""
+    out = []
+    for t in locked or []:
+        j = _near(float(t), cuts, tol)
+        if j is not None and cuts[j] not in out:
+            out.append(cuts[j])
+    return sorted(out)
+
+
+def merge_locked(new_cuts: list, locked: list, duration: float, clear: float = LOCK_CLEAR) -> list:
+    """A fresh set of cuts (e.g. the method's after the settings changed) with the 🔒 locked
+    cuts kept exactly where they are; any new cut within `clear` seconds of one gives way."""
+    locked = [float(t) for t in locked or []]
+    kept = [t for t in new_cuts if all(abs(t - l) > clear for l in locked)]
+    return clean_cuts(locked + kept, duration)
+
+
+def recut_region(cuts: list, region_cuts: list, start: float, end: float, duration: float,
+                 locked: list = ()) -> list:
+    """🎨 Re-cut a part of the track: the cuts inside [start, end) are replaced by
+    `region_cuts` that fall inside it; cuts outside the region and 🔒 locked cuts stay."""
+    start, end = float(min(start, end)), float(max(start, end))
+    inside = lambda t: start - 1e-6 <= t < end - 1e-6          # noqa: E731
+    outside = [t for t in cuts if not inside(t)]
+    new = [t for t in region_cuts if inside(t)]
+    keep_locked = [t for t in locked or [] if inside(t)]
+    new = [t for t in new if all(abs(t - l) > LOCK_CLEAR for l in keep_locked)]
+    return clean_cuts(outside + keep_locked + new, duration)
+
+
+def ghost_cuts(candidates, cuts: list, duration: float, min_gap: float = MIN_GAP) -> list:
+    """👻 Ideas: candidate cut times (from other styles / a busier pace) that aren't already
+    cuts — tap one in the editor to accept it."""
+    out = []
+    for t in sorted({round(float(c), 3) for c in candidates or []}):
+        if not (EDGE < t < duration - EDGE):
+            continue
+        if _near(t, cuts, min_gap) is not None or (out and t - out[-1] < min_gap):
+            continue
+        out.append(t)
+    return out
+
+
+def cut_stats(cuts: list, duration: float) -> dict:
+    """⚖️ For comparing two cut sets: segment count and lengths."""
+    bounds = [0.0] + sorted(cuts) + [float(duration)]
+    lens = np.diff(bounds)
+    return {"segments": len(lens), "average": float(lens.mean()) if len(lens) else 0.0,
+            "shortest": float(lens.min()) if len(lens) else 0.0, "longest": float(lens.max()) if len(lens) else 0.0}
