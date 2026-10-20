@@ -27,7 +27,8 @@ from core import keys as K
 from core import mixing as MX
 from library_common import format_mmss
 
-MODES = ["📏 Extend / shorten", "🧩 Mashup", "📂 Saved mixes"]
+MODES = ["📏 Extend / shorten", "🧩 Mashup", "💡 Suggestions", "📂 Saved mixes"]
+PART_LABELS = {"full": "Full song", "instrumental": "Instrumental", "vocals": "Vocals only"}
 XF_SAME = {"Very short (⅛ beat)": 0.125, "Short (¼ beat)": 0.25, "Half a beat": 0.5, "One beat": 1.0}
 XF_OTHER = {"¼ beat": 0.25, "1 beat": 1.0, "2 beats": 2.0, "1 bar": 4.0, "2 bars": 8.0}
 PALETTE = ["rgba(99,132,255,{a})", "rgba(255,140,60,{a})", "rgba(46,184,120,{a})", "rgba(200,90,200,{a})",
@@ -74,18 +75,21 @@ def _key_text(key: dict | None, shift: int = 0) -> str:
     return f"{key['name']} ({key['camelot']})"
 
 
-def _audio_ready(track_ids, ns: str) -> bool:
-    """True when every track's audio file is on the server; otherwise offers to
-    fetch them from Google Drive."""
+def _audio_ready(needs, ns: str) -> bool:
+    """True when every file the mix plays is on the server; otherwise offers to fetch them
+    from Google Drive. needs: track ids (the full songs) or {track_id: {"full", "vocals", …}}."""
     import mixer
-    missing = [tid for tid in track_ids if (t := full_track(tid)) and not mixer.local_path(t).exists()]
+    needs = needs if isinstance(needs, dict) else {tid: {"full"} for tid in needs}
+    missing = [(tid, part) for tid, parts in needs.items() for part in sorted(parts)
+               if (t := full_track(tid)) and not mixer.local_path(t, part).exists()]
     if not missing:
         return True
-    st.info(f"🎵 {len(missing)} track(s) need fetching from Google Drive first: " + ", ".join(missing))
+    st.info(f"🎵 {len(missing)} file(s) need fetching from Google Drive first: "
+            + ", ".join(tid + ("" if part == "full" else f" ({part})") for tid, part in missing))
     if st.button(f"⬇️ Fetch the audio ({len(missing)})", key=f"{ns}_fetch", type="primary"):
         bar = st.progress(0.0, text="Downloading from Google Drive…")
-        for i, tid in enumerate(missing):
-            err = mixer.ensure_local(full_track(tid),
+        for i, (tid, part) in enumerate(missing):
+            err = mixer.ensure_local(full_track(tid), parts=(part,),
                                      progress=lambda p, i=i: bar.progress(min(1.0, (i + min(p, 1.0)) / len(missing))))
             if err:
                 st.error(err)
@@ -177,6 +181,12 @@ def _timeline(recipe: dict, tracks: dict, sims: dict, energy: list = None) -> di
                       annotation_text=(f"{p['track'][:18]} " if len(colour_of) > 1 else "")
                       + f"{format_mmss(p['start'])}–{format_mmss(p['end'])}",
                       annotation_position="top left", annotation_font_size=10)
+    for ly in lay.get("layers") or []:
+        colour_of.setdefault(ly["track"], PALETTE[len(colour_of) % len(PALETTE)])
+        fig.add_vrect(x0=ly["out_start"], x1=ly["out_end"], y0=0.78, y1=1.0, line_width=0,
+                      fillcolor=colour_of[ly["track"]].format(a=0.55), layer="above",
+                      annotation_text=f"🎤 {ly['track'][:16]}", annotation_position="bottom left",
+                      annotation_font_size=10)
     for at, colour, text in _join_notes(lay, recipe, tracks, sims):
         fig.add_vline(x=at, line=dict(color=colour, width=2, dash="dot"))
     if recipe.get("trim_to") and recipe["trim_to"] < lay["duration"]:
@@ -212,7 +222,7 @@ def _preview_and_save(recipe: dict, tracks: dict, sims: dict, default_name: str,
         status.append(f"⚠️ {len(weak)} rough join(s)")
     st.caption("  ·  ".join(status))
 
-    if not _audio_ready(tracks, ns):
+    if not _audio_ready(mixer.parts_needed(recipe), ns):
         return
     pv_path = mixer.preview_path(recipe)
     pv = st.session_state.get(f"{ns}_pv") or {}
@@ -507,13 +517,95 @@ def _add_part(tracks: dict, summaries: dict) -> None:
         st.rerun()
 
 
+def _layers() -> list:
+    return st.session_state.setdefault("mxm_layers", [])
+
+
+def _remove_layer(uid: str) -> None:
+    st.session_state["mxm_layers"] = [ly for ly in _layers() if ly["uid"] != uid]
+
+
+def _part_stems_row(p: dict, t: dict, tracks_all: dict, summaries: dict) -> None:
+    """🎤 Under a mashup part: what plays (full song / instrumental / vocals — stems from
+    make_stems.bat on the laptop), and vocals from another track laid over it."""
+    import mixer
+    has = mixer.has_stems(t)
+    with st.container(key=f"mxm_stems_{p['uid']}"):
+        c = st.columns([2, 2, 3], vertical_alignment="center")
+        pk = f"mxm_part_{p['uid']}"
+        pending = st.session_state.setdefault("_mxm_part_pending", {}).pop(p["uid"], None)
+        if pending and has:
+            st.session_state[pk] = pending          # e.g. instrumental once vocals were laid over it
+        st.session_state.setdefault(pk, p.get("part", "full") if has else "full")
+        p["part"] = c[0].selectbox("Play", list(PART_LABELS), key=pk, format_func=PART_LABELS.get,
+                                   disabled=not has, label_visibility="collapsed",
+                                   help="What of this track plays here. Instrumental / vocals need its stems "
+                                        "(make_stems.bat on the laptop)." if has
+                                   else "This track has no stems yet — split it with make_stems.bat on the laptop "
+                                        "to play just its instrumental or vocals.")
+        singers = [tid for tid, s_ in tracks_all.items() if s_.get("stems")]
+        with c[1].popover("🎤 Vocals over…", use_container_width=True, disabled=not singers):
+            _add_layer_form(p, t, singers, summaries)
+        mine = [ly for ly in _layers() if ly["on"] == p["uid"]]
+        if not singers:
+            c[2].caption("No tracks with stems yet — make_stems.bat on the laptop.")
+        for ly in mine:
+            lc = st.columns([5, 2, 1], vertical_alignment="center")
+            lc[0].caption(f"🎤 {ly['track']} vocals {format_mmss(ly['start'])}–{format_mmss(ly['end'])}"
+                          + (f", from bar {int(ly['offset_bars']) + 1} of the part" if ly.get("offset_bars") else ""))
+            gk = f"mxm_lgain_{ly['uid']}"
+            st.session_state.setdefault(gk, float(ly.get("gain_db") or 0.0))
+            ly["gain_db"] = lc[1].number_input("Vocal level (dB)", -12.0, 12.0, step=1.0, key=gk,
+                                               label_visibility="collapsed", help="Level of these vocals (dB)")
+            lc[2].button("🗑", key=f"mxm_lrm_{ly['uid']}", on_click=_remove_layer, args=(ly["uid"],))
+
+
+def _add_layer_form(p: dict, host: dict, singers: list, summaries: dict) -> None:
+    base = summaries.get(p["track"])
+    if base:
+        ranked = {r["track_id"]: r for r in _partners(base, {k: summaries[k] for k in singers if k in summaries})}
+        singers = sorted(singers, key=lambda x: -ranked.get(x, {"score": -1})["score"])
+    else:
+        ranked = {}
+    k = f"mxm_ltrack_{p['uid']}"
+    if st.session_state.get(k) not in singers:
+        st.session_state[k] = singers[0]
+    tid = st.selectbox("Whose vocals", singers, key=k,
+                       format_func=lambda x: x + (f"  —  fits {ranked[x]['score'] * 100:.0f} %" if x in ranked else ""))
+    tr = full_track(tid)
+    if tr is None:
+        return
+    g = MX.grid(tr)
+    secs = g["sections"]
+    best = MX.best_section(tr, "vocals")
+    labels = [f"{i + 1}. {s_['label']}  {format_mmss(s_['start'])}–{format_mmss(s_['end'])}"
+              + ("  🎤" if s_ is best else "") for i, s_ in enumerate(secs)]
+    si = st.selectbox("Section", range(len(secs)), key=f"mxm_lsec_{p['uid']}_{tid}",
+                      index=secs.index(best) if best in secs else 0, format_func=lambda i: labels[i],
+                      help="🎤 = the section with the most singing.")
+    off = st.number_input("Start how many bars into the part", 0, 64, 0, key=f"mxm_loff_{p['uid']}")
+    if st.button("➕ Add these vocals", key=f"mxm_ladd_{p['uid']}", type="primary", use_container_width=True):
+        import mixer
+        sec = secs[si]
+        _layers().append({"uid": f"{time.time():.6f}", "on": p["uid"], "track": tid, "part": "vocals",
+                          "start": MX.snap_to_bar(g, sec["start"]), "end": MX.snap_to_bar(g, sec["end"]),
+                          "offset_bars": int(off), "gain_db": 0.0})
+        if mixer.has_stems(host):           # their vocals over this part's music
+            st.session_state["_mxm_part_pending"][p["uid"]] = "instrumental"
+        st.rerun()
+
+
 def _mashup(summaries: dict) -> None:
     tracks_all = _mixable(summaries)
     if len(tracks_all) < 1:
         st.info("No analysed tracks yet.")
         return
     parts = _parts()
-    used = list(dict.fromkeys(p["track"] for p in parts))
+    for p in parts:
+        p.setdefault("uid", f"{time.time():.6f}-{id(p)}")
+        p.setdefault("part", "full")
+    layers = _layers()
+    used = list(dict.fromkeys([p["track"] for p in parts] + [ly["track"] for ly in layers]))
     tracks = {tid: full_track(tid) for tid in used}
     if any(t is None for t in tracks.values()):
         st.error("A track in this mashup is no longer in the library.")
@@ -572,7 +664,8 @@ def _mashup(summaries: dict) -> None:
         with st.container(border=True):
             c = st.columns([5, 2, 1, 1, 1])
             c[0].markdown(f"**{i + 1}. {p['track']}** — {format_mmss(p['start'])}–{format_mmss(p['end'])} "
-                          f"({format_mmss((p['end'] - p['start']) / speed)})")
+                          f"({format_mmss((p['end'] - p['start']) / speed)})"
+                          + ("" if p.get("part", "full") == "full" else f" · {PART_LABELS[p['part']].lower()}"))
             bits = [_key_text(t.get("key"), shift.get(p["track"], 0))]
             if abs(speed - 1) > 1e-3:
                 bits.append(f"tempo {(speed - 1) * 100:+.1f} %" + (" ⚠️" if MX.stretch_note(speed) else ""))
@@ -588,6 +681,7 @@ def _mashup(summaries: dict) -> None:
             c[2].button("↑", key=f"mxm_up_{p['uid']}", on_click=_move, args=(i, -1), disabled=i == 0)
             c[3].button("↓", key=f"mxm_dn_{p['uid']}", on_click=_move, args=(i, 1), disabled=i == len(parts) - 1)
             c[4].button("🗑", key=f"mxm_rm_{p['uid']}", on_click=_remove, args=(i,))
+            _part_stems_row(p, t, tracks_all, summaries)
         prev = p
 
     with st.expander(f"🤝 Good partners for {parts[0]['track']}"):
@@ -598,16 +692,106 @@ def _mashup(summaries: dict) -> None:
                        + f", tempo {(r['speed'] - 1) * 100:+.1f} %")
 
     recipe = {"id": st.session_state.get("mxm_id"), "kind": "mashup",
-              "pieces": [{k: p[k] for k in ("track", "start", "end", "gain_db")} for p in parts],
+              "pieces": [{k: p[k] for k in ("track", "start", "end", "gain_db", "part", "uid")} for p in parts],
+              "layers": [{k: ly.get(k) for k in ("track", "part", "start", "end", "gain_db", "on", "offset_bars")}
+                         for ly in layers if any(ly["on"] == p["uid"] for p in parts)],
               "bpm": bpm, "shift": {k: v for k, v in shift.items() if v},
               "xfade_same": 0.25, "xfade_other": XF_OTHER[st.session_state.get("mxm_xf", "1 bar")],
               "fade_in": float(st.session_state.get("mxm_fin", 0.0)),
               "fade_out": float(st.session_state.get("mxm_fout", 2.0)),
               "level_match": bool(st.session_state.get("mxm_level", True)),
-              "settings": {"parts": parts}}
+              "settings": {"parts": parts, "layers": layers}}
     name = " + ".join(used[:3]) + (" …" if len(used) > 3 else "")
     _preview_and_save(recipe, tracks, {}, f"{name} (mashup)"[:90], "mxm")
     st.button("🧹 Start a new mashup", key="mxm_clear", on_click=_clear, args=("mxm",))
+
+
+# ---------------------------------------------------------------------------
+# 💡 Suggestions — tracks that should mash up well
+# ---------------------------------------------------------------------------
+
+def _infos(summaries: dict) -> list:
+    out = []
+    for tid, t in _mixable(summaries).items():
+        e = t.get("energy") or []
+        out.append({"track_id": tid, "bpm": t.get("bpm"), "key": t.get("key"),
+                    "energy": float(np.mean(e)) if e else 0.5, "stems": bool(t.get("stems"))})
+    return out
+
+
+def _start_suggestion(a: str, b: str, vocal_swap: bool) -> None:
+    """Fill the 🧩 Mashup editor with a suggested pair and switch to it: a's loudest section
+    then b's (or, for a vocal swap, a's loudest section as instrumental with b's most-sung
+    section's vocals over it), at a's tempo, b's key fitted to a's."""
+    ta, tb = full_track(a), full_track(b)
+    if ta is None or tb is None:
+        return
+    _clear("mxm")
+    ga, gb = MX.grid(ta), MX.grid(tb)
+    sa = MX.best_section(ta, "energy")
+    uid_a = f"S{time.time():.6f}"
+    part_a = {"track": a, "start": MX.snap_to_bar(ga, sa["start"]), "end": MX.snap_to_bar(ga, sa["end"]),
+              "gain_db": 0.0, "uid": uid_a, "part": "instrumental" if vocal_swap else "full"}
+    parts, layers = [part_a], []
+    if vocal_swap:
+        sb = MX.best_section(tb, "vocals")
+        speed_b, _ = MX.tempo_factor(gb["bpm"], ga["bpm"])
+        speed_a = 1.0
+        room = (part_a["end"] - part_a["start"]) / speed_a * speed_b      # b-seconds that fit over a's part
+        start_b = MX.snap_to_bar(gb, sb["start"])
+        end_b = min(MX.snap_to_bar(gb, sb["end"]), start_b + room)
+        layers.append({"uid": f"L{time.time():.6f}", "on": uid_a, "track": b, "part": "vocals",
+                       "start": start_b, "end": end_b, "offset_bars": 0, "gain_db": 0.0})
+    else:
+        sb = MX.best_section(tb, "energy")
+        parts.append({"track": b, "start": MX.snap_to_bar(gb, sb["start"]), "end": MX.snap_to_bar(gb, sb["end"]),
+                      "gain_db": 0.0, "uid": f"S{time.time():.6f}b", "part": "full"})
+    st.session_state["mxm_parts"] = parts
+    st.session_state["mxm_layers"] = layers
+    for p in parts:
+        st.session_state[f"mxm_part_{p['uid']}"] = p["part"]
+    st.session_state["mxm_bpm"] = round(float(ta.get("bpm") or 120.0), 1)
+    st.session_state["mxm_match"] = True
+    st.session_state[f"mxm_shift_{b}"] = K.best_shift(ta.get("key"), tb.get("key"))
+    st.session_state["mx_mode"] = MODES[1]
+
+
+def _suggestions(summaries: dict) -> None:
+    infos = _infos(summaries)
+    if len(infos) < 2:
+        st.info("Needs at least two analysed tracks.")
+        return
+    n_keys = sum(1 for i in infos if i["key"])
+    st.caption("Tracks that should mash up well — keys that sit together on the Camelot wheel (with a small pitch "
+               "shift if that helps), tempos within a few percent, similar energy. Tap one to start it in 🧩 Mashup.",
+               help=None if n_keys == len(infos) else f"{len(infos) - n_keys} track(s) have no key yet — "
+                                                         "🎵 Audio → 🔬 Audio analysis → 🎹 Find the key.")
+    tabs = st.tabs(["🤝 Pairs", "🎤 Vocal swaps"])
+    with tabs[0]:
+        for i, r in enumerate(MX.suggest_pairs(infos, top=12)):
+            _suggestion_row(r, i, vocal_swap=False)
+    with tabs[1]:
+        swaps = MX.suggest_pairs(infos, top=12, need_stems=True)
+        if not swaps:
+            n = sum(1 for x in infos if x["stems"])
+            st.info("Vocal swaps need tracks split into vocals + instrumental — run **make_stems.bat** on the "
+                    f"laptop (it splits them on the GPU and saves them to Google Drive). {n} track(s) have stems.")
+        for i, r in enumerate(swaps):
+            _suggestion_row(r, i, vocal_swap=True)
+
+
+def _suggestion_row(r: dict, i: int, vocal_swap: bool) -> None:
+    with st.container(border=True, key=f"mx_sug_{'v' if vocal_swap else 'p'}_{i}"):
+        c = st.columns([5, 1.6], vertical_alignment="center")
+        title = (f"🎤 **{r['track_id']}** vocals over **{r['a']}**" if vocal_swap
+                 else f"**{r['a']}**  +  **{r['b']}**")
+        badge = "green" if r["score"] >= 0.75 else "orange" if r["score"] >= 0.55 else "gray"
+        c[0].markdown(f":{badge}-badge[fits {r['score'] * 100:.0f} %] {title}")
+        bits = [r["key_label"] + (f" (shift {r['shift']:+d} st)" if r["shift"] else ""),
+                f"tempo {(r['speed'] - 1) * 100:+.1f} %"]
+        c[0].caption(" · ".join(bits))
+        c[1].button("🧩 Start it", key=f"mx_sug_go_{'v' if vocal_swap else 'p'}_{i}", use_container_width=True,
+                    on_click=_start_suggestion, args=(r["a"], r["b"], vocal_swap))
 
 
 # ---------------------------------------------------------------------------
@@ -645,8 +829,13 @@ def _open(rec: dict) -> None:
         _clear("mxm")
         st.session_state["mxm_id"] = rec["id"]
         st.session_state["mxm_name"] = rec.get("name", "")
-        st.session_state["mxm_parts"] = [{**p, "uid": f"{i}-{time.time():.6f}"}
-                                         for i, p in enumerate(rec.get("pieces") or [])]
+        parts = [{"part": "full", **p, "uid": p.get("uid") or f"{i}-{time.time():.6f}"}
+                 for i, p in enumerate(rec.get("pieces") or [])]
+        st.session_state["mxm_parts"] = parts
+        for p in parts:
+            st.session_state[f"mxm_part_{p['uid']}"] = p.get("part") or "full"
+        st.session_state["mxm_layers"] = [{"part": "vocals", "gain_db": 0.0, **ly, "uid": f"L{i}-{time.time():.6f}"}
+                                          for i, ly in enumerate(rec.get("layers") or [])]
         st.session_state["mxm_match"] = rec.get("bpm") is not None
         if rec.get("bpm"):
             st.session_state["mxm_bpm"] = float(rec["bpm"])
@@ -710,5 +899,7 @@ def render(summaries: dict) -> None:
         _extend(summaries)
     elif mode == MODES[1]:
         _mashup(summaries)
+    elif mode == MODES[2]:
+        _suggestions(summaries)
     else:
         _saved(summaries)

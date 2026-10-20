@@ -524,6 +524,35 @@ def vocal_curve(path, n_out: int) -> np.ndarray | None:
         return None
 
 
+def separate_stems(path) -> tuple:
+    """🎤 Split a song into (vocals, instrumental, sample rate) with Demucs (htdemucs):
+    float32 arrays (n, 2); instrumental = drums + bass + other. For 🎚️ mashups that put one
+    track's vocals over another's instrumental. Slow on CPU — make_stems_local.py runs it on
+    the laptop's GPU. Raises RuntimeError when Demucs isn't installed."""
+    try:
+        import torch  # type: ignore
+        from demucs.apply import apply_model  # type: ignore
+        from demucs.pretrained import get_model  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"Demucs isn't installed: {e}")
+    torch.set_num_threads(max(1, (os.cpu_count() or 2) - 1))
+    model = get_model("htdemucs")
+    model.eval()
+    sr = int(model.samplerate)
+    y = decode_audio(path, sr=sr, channels=2).T.copy()
+    wav = torch.from_numpy(y)
+    ref = wav.mean(0)
+    mean, std = ref.mean(), ref.std() + 1e-8
+    with torch.no_grad():
+        sources = apply_model(model, ((wav - mean) / std)[None], device=TORCH_DEVICE, split=True, overlap=0.25,
+                              progress=False)[0]
+    sources = (sources.cpu() * std + mean).numpy()          # back to the original level
+    vi = model.sources.index("vocals")
+    vocals = sources[vi]
+    inst = sum(sources[i] for i in range(len(model.sources)) if i != vi)
+    return vocals.T.astype(np.float32), inst.T.astype(np.float32), sr
+
+
 def vocal_phrases(v: np.ndarray, rate: float = OUT_RATE, on: float = 0.18, off: float = 0.10,
                   min_on: float = 0.6, min_off: float = 0.35) -> tuple:
     """Starts / ends of sung phrases from the vocal curve (hysteresis)."""

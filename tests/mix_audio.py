@@ -57,6 +57,29 @@ SONGS = {
 }
 
 
+def synth_vocals(path: Path, bpm: float, root: int, bars: int) -> Path:
+    """A 'sung' line for the stem tests: a melody of held notes in the song's key, a phrase
+    every two bars with gaps between — stands in for a Demucs vocal stem."""
+    beat = 60.0 / bpm
+    notes = [12, 14, 16, 14, 12, 11, 12, 7]
+    out = []
+    for b in range(bars):
+        t = np.arange(int(round(4 * beat * SR))) / SR
+        y = np.zeros_like(t)
+        if b % 2 == 0:
+            for k in range(4):
+                n = notes[(b + k) % len(notes)]
+                seg = (t >= k * beat) & (t < (k + 0.85) * beat)
+                y[seg] = 0.4 * np.sin(2 * np.pi * _midi(root + 60 + n) * t[seg])
+        out.append(y)
+    y = np.concatenate(out).astype(np.float32)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "f32le", "-ar", str(SR), "-ac", "2", "-i", "-",
+                    "-c:a", "aac", "-b:a", "160k", str(path)],
+                   input=np.stack([y, y], 1).tobytes(), check=True)
+    return path
+
+
 def install(audio_dir: Path, files_dir: Path) -> dict:
     """Write the songs' audio into files_dir and analysed catalogues into
     audio_dir (as the server's analysis would). Returns {track_id: track}."""
@@ -72,6 +95,12 @@ def install(audio_dir: Path, files_dir: Path) -> dict:
             continue
         track = {"track_id": tid, "source_path": str(path),
                  **AA.analyse_file(path, with_vocals=False)}
+        # 🎤 stems as make_stems_local.py notes them: the song itself stands in for the
+        # instrumental, a synthetic melody for the vocals
+        voc = synth_vocals(files_dir / "stems" / tid / "vocals.m4a", bpm, root, sum(n for _, n in layout))
+        inst = files_dir / "stems" / tid / "instrumental.m4a"
+        inst.write_bytes(path.read_bytes())
+        track["stems"] = {"vocals": str(voc), "instrumental": str(inst), "model": "test"}
         js.write_text(json.dumps(track))
         out[tid] = track
     return out

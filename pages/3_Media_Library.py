@@ -407,6 +407,7 @@ def load_audio_library(signature: tuple) -> dict:
             "drops": list((t.get("analysis") or {}).get("drops") or []),
             "key": t.get("key"),
             "mix": t.get("mix"),
+            "stems": all((t.get("stems") or {}).get(p) for p in ("vocals", "instrumental")),
         }
     return tracks
 
@@ -731,6 +732,8 @@ def render_audio():
                     info.append(f"{t['bpm']:.0f} BPM")
                 if t.get("key"):
                     info.append(f"🎹 {t['key']['name']} ({t['key']['camelot']})")
+                if t.get("stems"):
+                    info.append("🎤 stems")
                 info.append(f"energy variation {t['variance']:.2f}")
                 if t["hit_rate"]:
                     info.append(f"{t['hit_rate']:.1f} hits/min")

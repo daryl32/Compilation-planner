@@ -358,3 +358,113 @@ def test_mix_page_saved_mixes_reopen(mixlib):
     finally:
         MS.delete(ext["id"])
         MS.delete(mash["id"])
+
+
+# ---------------------------------------------------------------------------
+# 🎤 Stems, vocal layers and 💡 suggestions
+# ---------------------------------------------------------------------------
+
+def test_layout_places_layers_in_bars_of_their_part():
+    g = _grid()
+    rec = {"bpm": 132.0,
+           "pieces": [{"track": "x", "start": 0.0, "end": 16.0, "uid": "p1"},
+                      {"track": "x", "start": 16.0, "end": 48.0, "uid": "p2"}],
+           "layers": [{"track": "x", "part": "vocals", "start": 32.0, "end": 64.0, "on": "p2", "offset_bars": 2},
+                      {"track": "x", "part": "vocals", "start": 0.0, "end": 8.0, "on": "gone"}]}
+    lay = MX.layout(rec, {"x": g})
+    assert len(lay["layers"]) == 1                       # a layer on a part that's gone is dropped
+    ly = lay["layers"][0]
+    speed = 132.0 / 120.0
+    assert ly["out_start"] == pytest.approx(16.0 / speed + 2 * 2.0 / speed)   # 2 bars into part 2
+    assert ly["out_end"] <= lay["duration"] + 1e-9       # never runs past the end of the mix
+
+
+def test_best_section_and_suggest_pairs(mixlib):
+    t = mixlib["tracks"]["mix_song_c"]
+    loud = MX.best_section(t, "energy")
+    assert loud["end"] - loud["start"] >= 4 * MX.grid(t)["bar_len"] - 0.1
+    infos = [{"track_id": "a", "bpm": 120, "key": K.key_from(0, "major"), "energy": 0.5, "stems": True},
+             {"track_id": "b", "bpm": 121, "key": K.key_from(7, "major"), "energy": 0.5, "stems": True},
+             {"track_id": "c", "bpm": 90, "key": K.key_from(6, "major"), "energy": 0.9, "stems": False}]
+    pairs = MX.suggest_pairs(infos)
+    assert {pairs[0]["a"], pairs[0]["b"]} == {"a", "b"} and len(pairs) == 3
+    swaps = MX.suggest_pairs(infos, need_stems=True)
+    assert all({s_["a"], s_["b"]} == {"a", "b"} for s_ in swaps) and len(swaps) == 2
+
+
+def test_render_vocals_over_another_tracks_instrumental(mixlib):
+    import mixer
+    t = mixlib["tracks"]
+    gc = MX.grid(t["mix_song_c"])
+    rec = {"bpm": 120.0, "level_match": False,
+           "pieces": [{"track": "mix_song_c", "start": 0.0, "end": MX.snap_to_bar(gc, 16.0), "part": "instrumental",
+                       "uid": "p1"}],
+           "layers": [{"track": "mix_song_a", "part": "vocals", "start": 0.0, "end": 8.0, "on": "p1",
+                       "offset_bars": 1, "gain_db": 0.0}]}
+    assert mixer.parts_needed(rec) == {"mix_song_c": {"instrumental"}, "mix_song_a": {"vocals"}}
+    info = mixer.render(rec, {k: t[k] for k in ("mix_song_c", "mix_song_a")}, mixlib["root"] / "voc.m4a")
+    ly = info["layout"]["layers"][0]
+    assert ly["out_start"] == pytest.approx(gc["bar_len"], abs=0.01)
+    y = mixer.decode(mixlib["root"] / "voc.m4a")
+    inst = mixer.decode(mixer.local_path(t["mix_song_c"], "instrumental"))
+    voc = mixer.decode(mixer.local_path(t["mix_song_a"], "vocals"), speed=120.0 / 126.0)
+    # before the vocals come in: just the instrumental; once they're in: the mix minus the instrumental
+    # is the (stretched) vocal line
+    a = int(0.2 * mixer.SR)
+    assert np.corrcoef(y[a:a + mixer.SR // 2, 0], inst[a:a + mixer.SR // 2, 0])[0, 1] > 0.98
+    s0 = int((ly["out_start"] + 0.3) * mixer.SR)
+    rest = y[s0:s0 + mixer.SR, 0] - inst[s0:s0 + mixer.SR, 0]
+    v0 = int(0.3 * mixer.SR)
+    assert np.corrcoef(rest, voc[v0:v0 + mixer.SR, 0])[0, 1] > 0.9
+
+
+def test_mix_page_suggestions_start_a_vocal_swap(mixlib):
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎚️ Mix"
+    at.session_state["mx_mode"] = "💡 Suggestions"
+    at.run()
+    assert not errors(at), errors(at)
+    go = [b for b in at.button if (b.key or "").startswith("mx_sug_go_v_")]
+    assert go, "no vocal swap suggestions"
+    go[0].click().run()
+    assert not errors(at), errors(at)
+    assert at.session_state["mx_mode"] == "🧩 Mashup"
+    parts, layers = at.session_state["mxm_parts"], at.session_state["mxm_layers"]
+    assert len(parts) == 1 and parts[0]["part"] == "instrumental"
+    assert len(layers) == 1 and layers[0]["on"] == parts[0]["uid"] and layers[0]["track"] != parts[0]["track"]
+    assert any("🎤" in c.value and "vocals" in c.value for c in at.caption)
+    at.button(key="mxm_preview").click().run()
+    assert not errors(at), errors(at)
+    assert at.get("audio")
+
+
+def test_make_stems_local_plans_and_notes_stems(mixlib, monkeypatch, tmp_path):
+    import numpy as np_
+    import config
+    import make_stems_local as MS
+    import analyse_audio_local as AL
+    import audio_analysis as AA
+    lib = tmp_path / "Audio-Library"
+    lib.mkdir()
+    (lib / "mix_song_c.m4a").write_bytes(Path(mixlib["tracks"]["mix_song_c"]["source_path"]).read_bytes())
+    monkeypatch.setattr(MS, "AUDIO_DIR", mixlib["audio_dir"])
+    monkeypatch.setattr(AL, "drive_root", lambda: tmp_path)
+    monkeypatch.setattr(MS, "AA", AA)
+    monkeypatch.setattr(MS, "LOCAL_TEMP_DIR", tmp_path / "tmp")
+    # the test songs already have stems → nothing to do unless --redo
+    assert MS.plan(lib, None, False) == []
+    jobs = MS.plan(lib, "song_c", True)
+    assert [tid for _, tid in jobs] == ["mix_song_c"]
+    fake = np_.zeros((44100, 2), dtype=np_.float32)
+    monkeypatch.setattr(AA, "separate_stems", lambda path: (fake, fake, 44100))
+    js = mixlib["audio_dir"] / "mix_song_c.json"
+    before = js.read_text()
+    try:
+        MS.run(*jobs[0])
+        made = json.loads(js.read_text())
+        assert made["stems"]["vocals"] == "/content/drive/MyDrive/scene-labeling/stems/mix_song_c/vocals.m4a"
+        assert (tmp_path / "scene-labeling" / "stems" / "mix_song_c" / "instrumental.m4a").exists()
+        assert made["analysis"] and made["bpm"]                     # the rest of the track JSON is kept
+    finally:
+        js.write_text(before)

@@ -9,7 +9,11 @@ all stretched to one tempo.
 
     recipe = {
         "id": "mix_…", "name": "…", "kind": "extend" | "mashup",
-        "pieces": [{"track": tid, "start": s, "end": e, "gain_db": 0.0, "label": "…"}, …],
+        "pieces": [{"track": tid, "start": s, "end": e, "gain_db": 0.0, "label": "…",
+                    "part": "full" | "instrumental" | "vocals", "uid": "…"}, …],
+        "layers": [{"track": tid, "part": "vocals", "start": s, "end": e, "gain_db": 0.0,
+                    "on": piece uid, "offset_bars": bars into that piece}, …],
+                                            # 🎤 played OVER the pieces (stems from make_stems_local.py)
         "bpm": target BPM or None (None = every piece at its own tempo),
         "shift": {tid: semitones},          # 🎹 pitch shift per track (key matching)
         "xfade_same": beats, "xfade_other": beats,   # crossfade at joins
@@ -165,7 +169,25 @@ def layout(recipe: dict, grids: dict) -> dict:
         # never longer than the shorter piece allows
         xf = min(xf, 0.9 * (a["out_end"] - a["out_start"]), 0.9 * (b["out_end"] - b["out_start"]))
         joins.append({"at": b["out_start"], "xfade": max(xf, 0.01), "same_track": same})
-    return {"pieces": out, "duration": t, "bpm": out_bpm, "joins": joins,
+    layers = []
+    by_uid = {p.get("uid"): p for p in out if p.get("uid")}
+    for ly in recipe.get("layers") or []:
+        host = by_uid.get(ly.get("on"))
+        if host is None or ly["track"] not in grids:
+            continue
+        g = grids[ly["track"]]
+        speed, eff = tempo_factor(g["bpm"], target)
+        start, end = max(0.0, float(ly["start"])), min(float(ly["end"]), g["duration"])
+        hg = grids[host["track"]]
+        offset = (float(ly["offset_bars"]) * hg["bar_len"] / host["speed"] if ly.get("offset_bars") is not None
+                  else float(ly.get("offset") or 0.0))       # bars of the host part, or output seconds
+        at = host["out_start"] + max(0.0, offset)
+        if end - start < 0.05 or at >= t:
+            continue
+        length = min((end - start) / speed, t - at)
+        layers.append({**ly, "start": start, "end": start + length * speed, "speed": speed, "src_bpm": g["bpm"],
+                       "eff_bpm": eff, "out_start": at, "out_end": at + length})
+    return {"pieces": out, "duration": t, "bpm": out_bpm, "joins": joins, "layers": layers,
             "beats": _dedupe(beats_out, 0.3 * beat_len(out_bpm)),
             "bars": _dedupe(bars_out, 1.5 * beat_len(out_bpm))}
 
@@ -394,3 +416,55 @@ def partner_score(a: dict, b: dict, keys_mod=None) -> dict:
     score = 0.45 * key_score - 0.08 * abs(shift) + 0.4 * tempo + 0.15 * e
     return {"track_id": b["track_id"], "score": round(max(0.0, score), 3), "speed": speed, "shift": shift,
             "key_label": key_label, "key_score": key_score, "tempo_score": round(tempo, 2)}
+
+
+# ---------------------------------------------------------------------------
+# 💡 Mashup suggestions
+# ---------------------------------------------------------------------------
+
+def best_section(track: dict, by: str = "energy") -> dict:
+    """The section to lead a suggested mashup with: the loudest ("energy") or the one with
+    the most singing ("vocals", from the vocal analysis; falls back to energy). Short
+    sections (under 4 bars) are passed over when there's anything longer."""
+    g = grid(track)
+    secs = g["sections"]
+    long_enough = [s for s in secs if s["end"] - s["start"] >= 4 * g["bar_len"] - 0.05] or secs
+    if by == "vocals":
+        a = track.get("analysis") or {}
+        v = a.get("vocals")
+        if v:
+            rate = float(a.get("rate", 30))
+            v = np.asarray(v, dtype=float)
+
+            def sing(s):
+                seg = v[int(s["start"] * rate):int(s["end"] * rate)]
+                return float(seg.mean()) if len(seg) else 0.0
+            return max(long_enough, key=sing)
+    return max(long_enough, key=lambda s: s["energy"])
+
+
+def suggest_pairs(infos: list, top: int = 12, need_stems: bool = False) -> list:
+    """Best (a, b) track pairs for a mashup, by partner_score in both directions, best first.
+    infos: [{"track_id", "bpm", "key", "energy", "stems": bool}]. need_stems: only pairs where
+    b has stems (b's vocals go over a's instrumental), and a has an instrumental too."""
+    out = []
+    for a in infos:
+        for b in infos:
+            if a["track_id"] >= b["track_id"] and not need_stems:
+                continue
+            if a["track_id"] == b["track_id"]:
+                continue
+            if need_stems and not (a.get("stems") and b.get("stems")):
+                continue
+            ab = partner_score(a, b)
+            if not need_stems:
+                ba = partner_score(b, a)
+                if ba["score"] > ab["score"]:
+                    ab, a_, b_ = ba, b, a
+                else:
+                    a_, b_ = a, b
+            else:
+                a_, b_ = a, b
+            out.append({"a": a_["track_id"], "b": b_["track_id"], **ab})
+    out.sort(key=lambda x: -x["score"])
+    return out[:top]

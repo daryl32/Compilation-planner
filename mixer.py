@@ -51,26 +51,57 @@ def cache_dir() -> Path:
     return d
 
 
-def local_path(track: dict) -> Path:
+STEM_PARTS = ("vocals", "instrumental")
+
+
+def has_stems(track: dict) -> bool:
+    """🎤 Split into vocals + instrumental by make_stems_local.py (on the laptop's GPU)."""
+    st = track.get("stems") or {}
+    return all(st.get(p) for p in STEM_PARTS)
+
+
+def _drive_ref(track: dict, part: str = "full") -> str:
+    if part in STEM_PARTS:
+        return ((track.get("stems") or {}).get(part)) or ""
+    return track.get("source_path") or ""
+
+
+def local_path(track: dict, part: str = "full") -> Path:
+    """Where the track's audio (or one of its 🎤 stems) is on this machine."""
     from render_preview import colab_to_local
-    return Path(colab_to_local(track.get("source_path") or ""))
+    return Path(colab_to_local(_drive_ref(track, part)))
 
 
-def ensure_local(track: dict, progress=None) -> str | None:
-    """Make sure the track's audio file is on this machine (downloads it from
-    Google Drive when it isn't). Returns an error message, or None."""
-    path = local_path(track)
-    if path.exists():
-        return None
-    src = track.get("source_path") or ""
-    if "MyDrive/" not in src:
-        return f"{track.get('track_id')}: audio file not found ({path})"
-    try:
-        from drive_sync import download_source_video
-    except Exception as e:
-        return f"Google Drive isn't available here: {e}"
-    err = download_source_video(src.split("MyDrive/", 1)[1], path, progress_callback=progress)
-    return f"{track.get('track_id')}: download failed — {err}" if err else None
+def ensure_local(track: dict, progress=None, parts=("full",)) -> str | None:
+    """Make sure the track's audio file (and the stems in `parts`) are on this machine —
+    downloads them from Google Drive when they aren't. Returns an error message, or None."""
+    for part in parts:
+        ref = _drive_ref(track, part)
+        if part in STEM_PARTS and not ref:
+            return f"{track.get('track_id')}: no {part} stem yet — split it with make_stems.bat on the laptop."
+        path = local_path(track, part)
+        if path.exists():
+            continue
+        if "MyDrive/" not in ref:
+            return f"{track.get('track_id')}: audio file not found ({path})"
+        try:
+            from drive_sync import download_source_video
+        except Exception as e:
+            return f"Google Drive isn't available here: {e}"
+        err = download_source_video(ref.split("MyDrive/", 1)[1], path, progress_callback=progress)
+        if err:
+            return f"{track.get('track_id')}: download failed — {err}"
+    return None
+
+
+def parts_needed(recipe: dict) -> dict:
+    """{track_id: {parts}} — which files a recipe plays (the full song and/or its stems)."""
+    out = {}
+    for p in recipe.get("pieces") or []:
+        out.setdefault(p["track"], set()).add(p.get("part") or "full")
+    for ly in recipe.get("layers") or []:
+        out.setdefault(ly["track"], set()).add(ly.get("part") or "vocals")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -226,24 +257,34 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
         warnings.append("This server's ffmpeg has no rubberband filter — using the simpler atempo stretch "
                         "(fine for small changes).")
 
-    # 1. decode each (track, speed, shift) once
+    # 1. decode each (track, speed, shift, part) once
     audio, loud = {}, {}
-    for p in lay["pieces"]:
-        key = (p["track"], round(p["speed"], 6), float(shifts.get(p["track"], 0) or 0))
+
+    def key_of(p, default_part="full"):
+        return (p["track"], round(p["speed"], 6), float(shifts.get(p["track"], 0) or 0),
+                p.get("part") or default_part)
+
+    for p, default_part in [*[(p, "full") for p in lay["pieces"]], *[(ly, "vocals") for ly in lay.get("layers") or []]]:
+        key = key_of(p, default_part)
         if key in audio:
             continue
-        say(f"reading {p['track']}")
-        audio[key] = decode(local_path(tracks[p["track"]]), key[1], key[2])
-        loud[key] = MX.loudness_db(audio[key], SR)
+        say(f"reading {p['track']}" + ("" if key[3] == "full" else f" ({key[3]})"))
+        audio[key] = decode(local_path(tracks[p["track"]], key[3]), key[1], key[2])
+        if key[3] != "vocals":
+            loud[key] = MX.loudness_db(audio[key], SR)
         note = MX.stretch_note(p["speed"])
-        if note:
+        if note and f"{p['track']}: {note}" not in warnings:
             warnings.append(f"{p['track']}: {note}")
 
-    # 2. level matching: every track to the loudest track's level (within limits)
+    # 2. level matching: every track to the loudest track's level (within limits). A vocal
+    #    layer gets its own track's correction (vocals alone are quieter than a full mix).
     gains = {}
-    if recipe.get("level_match", True) and len(loud) > 1:
+    if recipe.get("level_match", True) and len({k[0] for k in loud}) > 1:
         ref = max(loud.values())
         gains = {k: float(np.clip(ref - v, -LEVEL_LIMIT_DB, LEVEL_LIMIT_DB)) for k, v in loud.items()}
+    track_gain = {}
+    for k, v in gains.items():
+        track_gain.setdefault(k[0], v)
 
     # 3. lay the pieces out with crossfades centred on the joins
     say("joining the pieces")
@@ -252,7 +293,7 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
     out = np.zeros((n_out, CH), dtype=np.float32)
     joins = lay["joins"]
     for k, p in enumerate(lay["pieces"]):
-        key = (p["track"], round(p["speed"], 6), float(shifts.get(p["track"], 0) or 0))
+        key = key_of(p)
         y = audio[key]
         avail = len(y) / SR
         head = joins[k - 1]["xfade"] / 2 if k > 0 else 0.0
@@ -283,6 +324,25 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
         end = min(n_out, at + len(seg))
         out[at:end] += seg[:end - at]
 
+    # 3b. 🎤 layers (e.g. one track's vocals) over the pieces, with short fades at both ends
+    for ly in lay.get("layers") or []:
+        key = key_of(ly, "vocals")
+        y = audio[key]
+        a_t, b_t = ly["start"] / ly["speed"], ly["end"] / ly["speed"]
+        seg = y[int(round(a_t * SR)):int(round(b_t * SR))].copy()
+        if not len(seg):
+            continue
+        gain_db = gains.get(key, track_gain.get(ly["track"], 0.0)) + float(ly.get("gain_db") or 0.0)
+        if abs(gain_db) > 1e-3:
+            seg *= np.float32(10 ** (gain_db / 20))
+        n = min(len(seg) // 2, int(0.5 * MX.beat_len(lay["bpm"]) * SR))
+        if n:
+            seg[:n] *= _ramp(n, False, True)[:, None]
+            seg[len(seg) - n:] *= _ramp(n, False, False)[:, None]
+        at = int(round(ly["out_start"] * SR))
+        end = min(n_out, at + len(seg))
+        out[at:end] += seg[:end - at]
+
     # 4. length, fades, level
     trim = recipe.get("trim_to")
     length = min(total, float(trim)) if trim else total
@@ -307,7 +367,7 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
             "beats": [b for b in lay["beats"] if b < length - 0.05],
             "bars": [b for b in lay["bars"] if b < length - 0.05],
             "energy": [round(float(x), 3) for x in rms], "warnings": warnings, "layout": lay,
-            "levels_db": {k[0]: round(v, 1) for k, v in gains.items()}}
+            "levels_db": {k[0] + ("" if k[3] == "full" else f" ({k[3]})"): round(v, 1) for k, v in gains.items()}}
 
 
 def preview_path(recipe: dict) -> Path:
@@ -321,7 +381,7 @@ def preview_path(recipe: dict) -> Path:
                 f.unlink()
         except OSError:
             pass
-    body = json.dumps({k: recipe.get(k) for k in ("pieces", "bpm", "shift", "xfade_same", "xfade_other",
+    body = json.dumps({k: recipe.get(k) for k in ("pieces", "layers", "bpm", "shift", "xfade_same", "xfade_other",
                                                    "fade_in", "fade_out", "level_match", "trim_to")},
                       sort_keys=True, default=str)
     return d / f"{hashlib.sha1(body.encode()).hexdigest()[:16]}{'.mp3' if has_mp3() else '.m4a'}"
