@@ -214,13 +214,17 @@ def nightly_status() -> dict:
 def changed_jobs() -> list:
     """Track jobs for every track whose stored results (default settings) are missing or out of
     date, then spotlight jobs for new videos whose spotlight is missing or out of date."""
-    state = RL.library_state()
+    import story_map as STM
     jobs = []
+    tracks = {}
     for tid in RL.list_tracks():
         try:
-            track = RL.load_track(tid)
+            tracks[tid] = RL.load_track(tid)
         except (OSError, ValueError):
             continue
+        STM.ensure_default(tid, tracks[tid])    # 🎭 tracks analysed before default maps existed get one
+    state = RL.library_state()
+    for tid, track in tracks.items():
         story, _ = RL.story_for(tid, track)
         sig = RL.signature(tid, RL.DEFAULT_VIDEOS, False, story, state)
         if RL.load_results(tid, RL.DEFAULT_VIDEOS, False, sig) is None:

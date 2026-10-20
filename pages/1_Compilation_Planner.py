@@ -2278,7 +2278,8 @@ def render_audio_simple(track: dict) -> None:
 # Step 1: Story map — which parts of the song call for which scene role
 # (story_map.py for the logic; scene_roles.py for the roles)
 # ---------------------------------------------------------------------------
-STORY_KEY = "story_map"   # {"track_id", "regions": [...], "v": edit counter, "edited": bool}
+STORY_KEY = "story_map"   # {"track_id", "regions": [...], "v": edit counter, "edited": bool,
+                          #  "source": "default" | "named:<name>" | "project" — which map this project uses}
 SECTION_AUDIO = "🎵 0. Audio Settings"
 SECTION_STORY = "🎭 1. Story map"
 SECTION_VIDEOS = "📼 2. Videos & Time Ranges"
@@ -2310,28 +2311,70 @@ def current_story_map(track_id: str):
             return None
     saved = STM.saved_map(track_id) if track_id else None
     if saved:
-        st.session_state[STORY_KEY] = {"track_id": track_id, "regions": saved, "v": 1, "edited": False}
+        st.session_state[STORY_KEY] = {"track_id": track_id, "regions": saved, "v": 1, "edited": False,
+                                       "source": "default"}
         return saved
     return None
 
 
-def _story_set(regions: list, edited: bool = True) -> None:
+def _story_source() -> str:
     sm = st.session_state.get(STORY_KEY) if isinstance(st.session_state.get(STORY_KEY), dict) else {}
+    return sm.get("source") or "project"
+
+
+def _story_set(regions: list, edited: bool = True, source: str = None) -> None:
+    """Change this project's story map. Edits stay with the project (source "project") until you save them
+    as the track's default or a named map — nothing is written to the track's maps from here."""
+    sm = st.session_state.get(STORY_KEY) if isinstance(st.session_state.get(STORY_KEY), dict) else {}
+    same_track = sm.get("track_id") == st.session_state.get("track_id")
     st.session_state[STORY_KEY] = {
         "track_id": st.session_state.get("track_id"),
         "regions": regions,
-        "v": int(sm.get("v", 0)) + 1 if sm.get("track_id") == st.session_state.get("track_id") else 1,
+        "v": int(sm.get("v", 0)) + 1 if same_track else 1,
         "edited": edited,
+        "source": source or ("project" if edited else (sm.get("source") if same_track else None) or "project"),
+        "from": sm.get("from") if same_track and not source else (source or sm.get("source")),
     }
     st.session_state.pop("sm_play", None)
-    try:
-        STM.save_map(st.session_state.get("track_id"), regions)   # the track's saved map, for every page
-    except OSError:
-        pass
 
 
 def _story_suggest(analysis: dict, cut_times: list) -> None:
-    _story_set(STM.snap(STM.suggest(analysis, SR.all_roles()), cut_times), edited=False)
+    _story_set(STM.snap(STM.suggest(analysis, SR.all_roles()), cut_times))
+
+
+def _story_use(choice: str) -> None:
+    """🗺️ Map for this project: the track's default, a named map, or keep this project's own."""
+    tid = st.session_state.get("track_id")
+    maps = STM.track_maps(tid)
+    if choice == "default" and maps["default"]:
+        _story_set(maps["default"], edited=False, source="default")
+    elif choice.startswith("named:") and choice[6:] in maps["named"]:
+        _story_set(maps["named"][choice[6:]], edited=False, source=choice)
+
+
+def _story_save_default() -> None:
+    STM.save_map(st.session_state.get("track_id"), current_story_map(st.session_state.get("track_id")))
+    _story_set(current_story_map(st.session_state.get("track_id")), edited=False, source="default")
+    st.session_state["_story_saved_msg"] = "⭐ Saved as this track's default story map."
+
+
+def _story_save_named(name_key: str) -> None:
+    name = " ".join(str(st.session_state.get(name_key) or "").split())
+    if not name:
+        st.session_state["_story_saved_msg"] = "Give the new map a name first."
+        return
+    regions = current_story_map(st.session_state.get("track_id"))
+    STM.save_named(st.session_state.get("track_id"), name, regions)
+    _story_set(regions, edited=False, source=f"named:{name}")
+    st.session_state[name_key] = ""
+    st.session_state["_story_saved_msg"] = f"📁 Saved as “{name}” — pick it for other projects on this track."
+
+
+def _story_update_named(name: str) -> None:
+    regions = current_story_map(st.session_state.get("track_id"))
+    STM.save_named(st.session_state.get("track_id"), name, regions)
+    _story_set(regions, edited=False, source=f"named:{name}")
+    st.session_state["_story_saved_msg"] = f"📁 “{name}” updated."
 
 
 def _story_role_changed(i: int, key: str) -> None:
@@ -2391,6 +2434,45 @@ def _story_chart(track: dict, regions: list, segs: list, roles: dict, playing) -
     return fig
 
 
+def render_story_map_picker(track_id: str) -> None:
+    """🗺️ Which map this project uses, and — once you've changed it — where to keep the changes."""
+    maps = STM.track_maps(track_id)
+    src = _story_source()
+    sm = st.session_state.get(STORY_KEY) or {}
+    opts = (["default"] if maps["default"] else []) + [f"named:{n}" for n in sorted(maps["named"], key=str.lower)]
+    if src == "project" or src not in opts:
+        opts = ["project"] + opts
+    label = {"default": "⭐ Track default", "project": "✏️ This project's own (not saved to the track)"}
+    with st.container(border=True):
+        c = st.columns([3, 4])
+        c[0].selectbox("🗺️ Map for this project", opts, index=opts.index(src) if src in opts else 0,
+                       format_func=lambda o: label.get(o) or f"📁 {o[6:]}", key=f"sm_pick_{sm.get('v', 0)}",
+                       on_change=lambda k=f"sm_pick_{sm.get('v', 0)}": _story_use(st.session_state[k]),
+                       help="The track's default map is made when the track is analysed, and is what the "
+                            "recommender, the analytics and new projects use. Named maps are alternatives you've "
+                            "saved for this track. Edits here stay with this project until you save them.")
+        msg = st.session_state.pop("_story_saved_msg", None)
+        with c[1]:
+            if msg:
+                st.success(msg)
+            elif src == "project":
+                st.caption("✏️ Changed for this project — save it for the track if you want it again:")
+                bc = st.columns(2)
+                bc[0].button("⭐ Save as the track's default", use_container_width=True, on_click=_story_save_default,
+                             help="Replaces the track's default map — used by new projects, the recommender and "
+                                  "the analytics.")
+                with bc[1].popover("📁 Save as a new map", use_container_width=True):
+                    nk = f"sm_new_name_{sm.get('v', 0)}"
+                    st.text_input("Name", key=nk, placeholder="e.g. Long intro")
+                    st.button("📁 Save", key=f"{nk}_go", on_click=_story_save_named, args=(nk,), type="primary")
+                    if sm.get("from", "").startswith("named:"):
+                        st.button(f"💾 Update “{sm['from'][6:]}” instead", key=f"{nk}_upd",
+                                  on_click=_story_update_named, args=(sm["from"][6:],))
+            else:
+                st.caption("Using the track's " + ("default map." if src == "default" else f"map “{src[6:]}”.")
+                           + " Any change you make stays with this project until you save it.")
+
+
 def render_story_map_section(track: dict) -> None:
     """🎭 Story map: suggest which parts of the song suit Intro / Slow / Action /
     Outro (and your own roles), then adjust them — role per region, handles on
@@ -2422,9 +2504,11 @@ def render_story_map_section(track: dict) -> None:
         c[2].caption("Or skip this step — without a story map the planner works as before.")
         return
 
+    render_story_map_picker(track_id)
     tc = st.columns([2, 2, 2, 3])
     tc[0].button("✨ Suggest again", use_container_width=True, on_click=_story_suggest, args=(analysis, cut_times),
-                 help="Replaces the map with a fresh suggestion from the song (your edits are lost).")
+                 help="Replaces this project's map with a fresh suggestion from the song (your edits are lost). "
+                      "The track's saved maps aren't touched.")
     tc[1].button("🧹 Clear the map", use_container_width=True, on_click=lambda: _story_set(STM.blank(duration)),
                  help="One region, no role — then split and set roles yourself.")
     tc[2].button("📐 Line up with the cuts", use_container_width=True,
@@ -3577,7 +3661,8 @@ def _open_recommended_plan(plan: dict) -> None:
     _story = bool(plan.get("story")) and bool(plan.get("story_regions"))
     ss["use_story_map"] = _story
     if _story:
-        ss[STORY_KEY] = {"track_id": plan["track_id"], "regions": plan["story_regions"], "v": 1, "edited": False}
+        ss[STORY_KEY] = {"track_id": plan["track_id"], "regions": plan["story_regions"], "v": 1, "edited": False,
+                         "source": "default" if plan["story_regions"] == STM.saved_map(plan["track_id"]) else "project"}
     ss["ui_section"] = SECTION_MATCH
     _story_note = (" It uses the 🎭 story map it was scored with." if _story else
                    " The 🎭 story map is off so the plan is exactly the one recommended — turn it on under "

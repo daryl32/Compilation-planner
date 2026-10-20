@@ -752,8 +752,6 @@ def _story_strip(track_id: str, regions, duration: float) -> None:
 def _suggest_story_map(track_id: str) -> None:
     """✨ Suggest: the same suggestion as the planner's Story map step, lined up with
     the Smart method's default cuts, saved as the track's story map."""
-    import scene_roles as SR
-    import smart_cuts as SM
     import story_map as STM
     path = AUDIO_DIR / f"{track_id}.json"
     try:
@@ -761,10 +759,7 @@ def _suggest_story_map(track_id: str) -> None:
     except (OSError, ValueError) as e:
         st.session_state[f"aud_story_msg_{track_id}"] = f"Couldn't read this track: {e}"
         return
-    segs = SM.build_smart_segments(track, {"beats_per_bar": 4})
-    cuts = [sg["start"] for sg in segs] + [float(track["duration_sec"])]
-    regions = STM.snap(STM.suggest(STM.analyse(track, 4), SR.all_roles()), cuts)
-    STM.save_map(track_id, regions)
+    STM.save_map(track_id, STM.suggested_map(track))
     st.session_state[f"aud_story_msg_{track_id}"] = True
 
 

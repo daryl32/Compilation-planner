@@ -117,6 +117,20 @@ def test_matching_step_layout():
         assert any("segments**" in c.value for c in at.caption)
 
 
+import pytest
+
+
+@pytest.fixture()
+def no_story_maps():
+    """No saved story maps for the duration of a test (put back afterwards)."""
+    import story_map as STM
+    before = STM._maps_file().read_text() if STM._maps_file().exists() else None
+    STM._maps_file().unlink(missing_ok=True)
+    yield
+    if before is not None:
+        STM._maps_file().write_text(before)
+
+
 def _matching_app():
     from tests.apptest_util import page_app
     at = page_app(PLANNER)
@@ -180,7 +194,7 @@ def test_changed_videos_keep_the_old_plan_until_apply():
     assert used <= {"vid_a", "vid_b"}
 
 
-def test_matching_controls_cleanup():
+def test_matching_controls_cleanup(no_story_maps):
     """One 'Role clips' control for the two role settings; Reroll without a Seed box; Improved auto-fill
     only shown on a project saved with it off; the split-screen option only with split screen on; the
     Intro / Outro tab owns its toggle and says when the story map is in charge."""
