@@ -59,6 +59,7 @@ def _sign_in_screen(name: str) -> None:
     st.title(name)
     st.caption(f"v{APP_VERSION}")
     st.divider()
+    _idle_note()
     st.subheader("Please sign in to continue")
     st.button("🔐 Sign in with Google", on_click=st.login, type="primary")
     st.stop()
@@ -139,6 +140,113 @@ def _account_box(mb) -> None:
 
 
 _PAGE_PATH = {}   # this run's page, for the Connect link (set by page_setup)
+
+# ---------------------------------------------------------------------------
+# ⏱ Sign out after a while without use
+# ---------------------------------------------------------------------------
+# The browser keeps the time of the last tap / click / key / scroll (or a video or song
+# playing) in localStorage — shared by every tab of the app in that browser — and checks it
+# every 20 s, and as soon as a sleeping tab wakes up. Past the limit it opens the page with
+# ?signed_out=idle, which page_setup() answers with st.logout(). Installed once into the page
+# (like the dropdown script), so Streamlit's reruns don't reset it; only real use does.
+import config as _config  # noqa: E402
+
+IDLE_SIGNOUT_MIN = float(getattr(_config, "IDLE_SIGNOUT_MIN", 60) or 0)   # minutes; 0 = never
+
+_IDLE_CODE = r"""
+(function () {
+  const doc = document, win = window;
+  const LIMIT_MS = __LIMIT__ * 60000, KEY = "mp_last_active", THROTTLE_MS = Math.min(15000, LIMIT_MS / 4);
+  function store() { try { return win.localStorage; } catch (e) { return null; } }
+  function last() { const st = store(); const v = st ? parseInt(st.getItem(KEY) || "0", 10) : 0; return isNaN(v) ? 0 : v; }
+  let wrote = 0;
+  function touch() {
+    const t = Date.now(); if (t - wrote < THROTTLE_MS) return; wrote = t;
+    try { store().setItem(KEY, String(t)); } catch (e) {}
+  }
+  function playing(d) {
+    try {
+      if ([...d.querySelectorAll("video, audio")].some(m => !m.paused && !m.ended)) return true;
+      return [...d.querySelectorAll("iframe")].some(f => { try { return playing(f.contentDocument); } catch (e) { return false; } });
+    } catch (e) { return false; }
+  }
+  function check() {
+    if (playing(doc)) { wrote = 0; touch(); return false; }
+    const l = last();
+    if (l && Date.now() - l > LIMIT_MS) {
+      try { store().setItem("mp_idle_out", "1"); store().removeItem(KEY); } catch (e) {}
+      const u = new URL(win.location.href); u.search = "?signed_out=idle"; win.location.replace(u.toString());
+      return true;
+    }
+    return false;
+  }
+  // A tab reopened (or reloaded by the browser) after the limit signs out straight away;
+  // otherwise opening the app counts as using it.
+  if (check()) return;
+  touch();
+  ["pointerdown", "keydown", "wheel", "touchstart", "scroll"].forEach(ev =>
+    doc.addEventListener(ev, touch, {capture: true, passive: true}));
+  // taps inside the app's own components (cut editor, story map editor…) count too
+  new MutationObserver(() => doc.querySelectorAll("iframe").forEach(f => {
+    try { if (!f.dataset.mpIdle && f.contentDocument) { f.dataset.mpIdle = "1";
+          ["pointerdown", "keydown", "touchstart"].forEach(ev => f.contentDocument.addEventListener(ev, touch, true)); } }
+    catch (e) {}
+  })).observe(doc.body, {childList: true, subtree: true});
+  win.setInterval(check, Math.min(20000, LIMIT_MS / 3));
+  doc.addEventListener("visibilitychange", () => { if (doc.visibilityState === "visible") check(); });
+  win.addEventListener("focus", check);
+})();
+"""
+
+# Put into the PAGE itself (not this component's iframe, which Streamlit throws away on reruns).
+_IDLE_JS = """
+<script>
+(function () {
+  const doc = window.parent.document;
+  if (doc.getElementById("mp-idle-signout")) return;
+  const s = doc.createElement("script");
+  s.id = "mp-idle-signout";
+  s.textContent = __CODE__;
+  doc.head.appendChild(s);
+})();
+</script>
+"""
+
+_IDLE_NOTE_JS = """
+<div id="n" style="display:none;font-family:sans-serif;font-size:15px;color:#555;padding:4px 0">
+  ⏱ You were signed out after __LIMIT__ minutes without using the app.</div>
+<script>
+try { if (window.parent.localStorage.getItem("mp_idle_out")) {
+  document.getElementById("n").style.display = "block"; window.parent.localStorage.removeItem("mp_idle_out"); } }
+catch (e) {}
+</script>
+"""
+
+
+def _idle_signout() -> None:
+    """Install the browser-side idle timer, and sign out when it asks (?signed_out=idle)."""
+    if st.query_params.get("signed_out") == "idle":
+        st.query_params.clear()
+        st.logout()
+        st.stop()
+    if IDLE_SIGNOUT_MIN <= 0:
+        return
+    try:
+        import streamlit.components.v1 as components
+        import json as _json
+        code = _IDLE_CODE.replace("__LIMIT__", f"{IDLE_SIGNOUT_MIN:g}")
+        components.html(_IDLE_JS.replace("__CODE__", _json.dumps(code).replace("</", "<\\/")), height=0)
+    except Exception:
+        pass  # never break the page over it
+
+
+def _idle_note() -> None:
+    """On the sign-in screen: say why, when the last sign-out was the idle one."""
+    try:
+        import streamlit.components.v1 as components
+        components.html(_IDLE_NOTE_JS.replace("__LIMIT__", f"{IDLE_SIGNOUT_MIN:g}"), height=32)
+    except Exception:
+        pass
 
 
 def _save_pending(box, n: int) -> None:
@@ -377,6 +485,7 @@ def page_setup(name: str, page_path: str, *, title: str = None, anchor: str = No
         _sign_in_screen(name)
     if st.user.email not in WHITELISTED_EMAILS:
         _access_denied()
+    _idle_signout()
     _handle_drive_callback(page_path)
     st.title(title or name, anchor=anchor)
     mb = memory_check(name)

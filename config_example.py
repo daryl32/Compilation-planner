@@ -59,3 +59,10 @@ WHITELISTED_EMAILS = [
 # cleared after this many days unused by the 12-hourly sync (0 = never automatically).
 # ---------------------------------------------------------------------------
 # KEEP_DOWNLOADS_DAYS = 3
+
+# ---------------------------------------------------------------------------
+# Optional: sign out after this many minutes without using the app (no tap,
+# click, key or scroll, and nothing playing) — in every tab of that browser.
+# 0 = never. Default 60.
+# ---------------------------------------------------------------------------
+# IDLE_SIGNOUT_MIN = 60
