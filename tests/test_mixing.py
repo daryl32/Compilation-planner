@@ -498,3 +498,29 @@ def test_local_analysis_does_only_what_each_track_is_missing(mixlib, monkeypatch
     finally:
         js.write_text(before)
         (audio_dir / "brand_new.json").unlink(missing_ok=True)
+
+
+def test_mix_page_mashup_with_no_stems_anywhere(mixlib):
+    """No track has stems yet (the laptop hasn't made any): adding a part must not fail — the
+    '🎤 Vocals over…' popover is disabled, but Streamlit still runs what's inside it."""
+    import json
+    from tests.apptest_util import page_app, errors
+    saved = {}
+    for js in mixlib["audio_dir"].glob("mix_song_*.json"):
+        saved[js] = js.read_text()
+        d = json.loads(saved[js])
+        d.pop("stems", None)
+        js.write_text(json.dumps(d))
+    try:
+        at = page_app("pages/3_Media_Library.py", timeout=300)
+        at.session_state["lib_kind"] = "🎚️ Mix"
+        at.session_state["mx_mode"] = "🧩 Mashup"
+        at.session_state["mxm_add_track"] = "mix_song_c"
+        at.run()
+        at.button(key="mxm_add").click().run()
+        assert not errors(at), errors(at)
+        assert len(at.session_state["mxm_parts"]) == 1
+        assert any("No tracks with stems yet" in c.value for c in at.caption)
+    finally:
+        for js, txt in saved.items():
+            js.write_text(txt)

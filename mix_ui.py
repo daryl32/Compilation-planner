@@ -545,7 +545,8 @@ def _part_stems_row(p: dict, t: dict, tracks_all: dict, summaries: dict) -> None
                                         "to play just its instrumental or vocals.")
         singers = [tid for tid, s_ in tracks_all.items() if s_.get("stems")]
         with c[1].popover("🎤 Vocals over…", use_container_width=True, disabled=not singers):
-            _add_layer_form(p, t, singers, summaries)
+            if singers:   # a disabled popover's contents still run
+                _add_layer_form(p, t, singers, summaries)
         mine = [ly for ly in _layers() if ly["on"] == p["uid"]]
         if not singers:
             c[2].caption("No tracks with stems yet — run_audio_analysis.bat on the laptop.")
@@ -561,6 +562,8 @@ def _part_stems_row(p: dict, t: dict, tracks_all: dict, summaries: dict) -> None
 
 
 def _add_layer_form(p: dict, host: dict, singers: list, summaries: dict) -> None:
+    if not singers:
+        return
     base = summaries.get(p["track"])
     if base:
         ranked = {r["track_id"]: r for r in _partners(base, {k: summaries[k] for k in singers if k in summaries})}
