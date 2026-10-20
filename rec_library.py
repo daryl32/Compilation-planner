@@ -192,7 +192,8 @@ def plan_context(block_roles=None) -> CMATCH.PlanContext:
     used = frozenset(r for r in (block_roles or []) if r)
     return CMATCH.PlanContext(time_ranges=library_ranges, duration_of=lambda v: durations.get(v, 0.0),
                               curves_of=CStore.motion_curves, catalogue_dir=CATALOGUE_DIR,
-                              reserved_roles=used, locked_roles=used, story_in_use=bool(used))
+                              reserved_roles=used, locked_roles=used, story_in_use=bool(used),
+                              planned_sequential=True)
 
 
 def make_matcher(track: dict):

@@ -291,6 +291,7 @@ def plan_context() -> CMATCH.PlanContext:
         time_ranges=effective_time_ranges, duration_of=get_video_duration,
         curves_of=load_motion_curves_for_video, catalogue_dir=CATALOGUE_DIR,
         why_store=lambda: st.session_state.setdefault(WHY_KEY, {}), role_chips=role_chips,
+        planned_sequential=True,
     )
 
 
@@ -4238,11 +4239,14 @@ with _mt[1]:
                        "block unless no other video has footage for that spot (you'll be warned).")
     with _wt_cols[2]:
         if sequential_mode:
-            st.slider("Move through each video in order", 0.0, 5.0, step=0.1, key="weight_position",
+            st.slider("Follow the music ↔ Follow the video", 0.0, 5.0, step=0.1, key="weight_position",
                       disabled=_autofill_disabled,
-                      help="(F) Sequential mode: gives each video a beginning, middle and end — each use "
-                           "prefers its own part of the video. Also sets how far a pick may skip ahead "
-                           "within a video, never so far that it could run short before the plan ends.")
+                      help="(F) In order: Auto plans each video's clips for all its blocks together, in time "
+                           "order, so a video can never run short halfway. 0 = each clip is simply the best fit "
+                           "to its block's music (still in order). Higher = the clips are also pulled into an "
+                           "even walk through the whole video, beginning → middle → end. "
+                           "(Manual step-through and Choreography: how far a pick may skip ahead within a video, "
+                           "and the pull towards its beginning, middle and end.)")
         st.slider("Variety", 0.0, 5.0, step=0.1, key="weight_random",
                   disabled=_autofill_disabled,
                   help="(B) 0 = always the top-scoring clip. Higher = picks more often from the next "
