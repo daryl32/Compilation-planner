@@ -296,8 +296,10 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
         key = key_of(p)
         y = audio[key]
         avail = len(y) / SR
-        head = joins[k - 1]["xfade"] / 2 if k > 0 else 0.0
-        tail = joins[k]["xfade"] / 2 if k < len(joins) else 0.0
+        # the incoming audio starts `pre` early (under the end of the piece before), the outgoing
+        # carries on `post` past the line (under the start of the next)
+        head = joins[k - 1]["pre"] if k > 0 else 0.0
+        tail = joins[k]["post"] if k < len(joins) else 0.0
         a_t = max(0.0, p["start"] / p["speed"] - head)
         b_t = min(avail, p["end"] / p["speed"] + tail)
         head_eff = p["start"] / p["speed"] - a_t
@@ -310,21 +312,21 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
             seg *= np.float32(10 ** (gain_db / 20))
         if k > 0:
             jn = joins[k - 1]
-            n = min(len(seg), int(round((head_eff + jn["xfade"] / 2) * SR)))
-            seg[:n] *= _ramp(n, not jn["same_track"], True)[:, None]
+            n = min(len(seg), int(round((head_eff + jn["post"]) * SR)))
+            seg[:n] *= _ramp(n, jn.get("shape", "smooth") == "smooth", True)[:, None]
         elif p["start"] > 0.05 or recipe.get("fade_in"):
             n = min(len(seg), int(max(float(recipe.get("fade_in") or 0.0), 0.01) * SR))
             seg[:n] *= _ramp(n, False, True)[:, None]
         if k < len(joins):
             jn = joins[k]
-            n = min(len(seg), int(round((tail_eff + jn["xfade"] / 2) * SR)))
-            seg[len(seg) - n:] *= _ramp(n, not jn["same_track"], False)[:, None]
+            n = min(len(seg), int(round((tail_eff + jn["pre"]) * SR)))
+            seg[len(seg) - n:] *= _ramp(n, jn.get("shape", "smooth") == "smooth", False)[:, None]
         at = int(round((p["out_start"] - head_eff) * SR))
         at = max(0, at)
         end = min(n_out, at + len(seg))
         out[at:end] += seg[:end - at]
 
-    # 3b. 🎤 layers (e.g. one track's vocals) over the pieces, with short fades at both ends
+    # 3b. 🎤 layers (one track's vocals, instrumental or the full song) over the pieces, faded in and out
     for ly in lay.get("layers") or []:
         key = key_of(ly, "vocals")
         y = audio[key]
@@ -335,7 +337,8 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
         gain_db = gains.get(key, track_gain.get(ly["track"], 0.0)) + float(ly.get("gain_db") or 0.0)
         if abs(gain_db) > 1e-3:
             seg *= np.float32(10 ** (gain_db / 20))
-        n = min(len(seg) // 2, int(0.5 * MX.beat_len(lay["bpm"]) * SR))
+        fade_beats = float(ly.get("fade_beats") if ly.get("fade_beats") is not None else 0.5)
+        n = min(len(seg) // 2, int(max(fade_beats, 0.05) * MX.beat_len(lay["bpm"]) * SR))
         if n:
             seg[:n] *= _ramp(n, False, True)[:, None]
             seg[len(seg) - n:] *= _ramp(n, False, False)[:, None]

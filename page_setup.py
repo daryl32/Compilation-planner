@@ -505,8 +505,41 @@ def top_button(anchor: str, css: str = "") -> None:
         "text-decoration:none!important;background:rgba(127,127,127,.22);"
         "backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);"
         "border:1px solid rgba(128,128,128,.45);box-shadow:0 2px 10px rgba(0,0,0,.18);opacity:.92}"
-        ".mp-top-btn:hover{opacity:1;box-shadow:0 3px 14px rgba(0,0,0,.28)}" + css + "</style>",
+        ".mp-top-btn:hover {opacity:1;box-shadow:0 3px 14px rgba(0,0,0,.28)}" + css + "</style>",
         unsafe_allow_html=True)
+
+
+def menu_css() -> str:
+    """CSS for page menus made of horizontal radios (same keys and values as always):
+    a radio inside a container keyed "mainnav…" is the page's main menu — big, equal-width
+    tabs with the chosen one underlined; one inside "subnav…" is a sub menu — small rounded
+    chips, so the two rows never look alike."""
+    m, s_ = "[class*='st-key-mainnav']", "[class*='st-key-subnav']"
+    # (a space before every "{": Streamlit's markdown reads ":first-child{…}" as a directive and drops it)
+    return (
+        f"{m} .stElementContainer,{m} .stRadio {{width:100%!important}}"
+        f"{m} [role='radiogroup'] {{display:grid!important;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));"
+        f"gap:.5rem;width:100%}}"
+        f"{m} [role='radiogroup']>div {{margin:0!important;border-radius:.6rem;border:1px solid rgba(128,128,128,.35);"
+        f"background:rgba(128,128,128,.07)}}"
+        f"{m} [role='radiogroup']>div:hover {{border-color:rgba(255,75,75,.6)}}"
+        f"{m} [role='radiogroup']>div[data-selected='true'] {{border-color:#ff4b4b;background:rgba(255,75,75,.12);"
+        f"box-shadow:inset 0 -3px 0 #ff4b4b}}"
+        f"{m} label[data-testid='stRadioOption'] {{width:100%;justify-content:center;padding:.65rem .8rem;margin:0;"
+        f"cursor:pointer}}"
+        f"{m} label[data-testid='stRadioOption']>div>div:first-child {{display:none}}"
+        f"{m} [data-testid='stMarkdownContainer'] p {{font-weight:650;font-size:1.02rem;margin:0}}"
+        f"{m} {{margin-bottom:.4rem}}"
+        f"{s_} [role='radiogroup'] {{display:flex!important;flex-wrap:wrap;gap:.4rem}}"
+        f"{s_} [role='radiogroup']>div {{margin:0!important;border-radius:999px;border:1px solid rgba(128,128,128,.30);"
+        f"background:transparent}}"
+        f"{s_} [role='radiogroup']>div:hover {{border-color:rgba(255,75,75,.55)}}"
+        f"{s_} [role='radiogroup']>div[data-selected='true'] {{border-color:rgba(255,75,75,.7);"
+        f"background:rgba(255,75,75,.10)}}"
+        f"{s_} label[data-testid='stRadioOption'] {{padding:.22rem .8rem;margin:0;cursor:pointer}}"
+        f"{s_} label[data-testid='stRadioOption']>div>div:first-child {{display:none}}"
+        f"{s_} [data-testid='stMarkdownContainer'] p {{font-size:.88rem;margin:0}}"
+    )
 
 
 def wrap_css(prefix: str, min_px: int = 135) -> str:

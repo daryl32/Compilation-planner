@@ -313,6 +313,12 @@ def test_mix_page_mashup_build(mixlib):
     assert any("tempo" in c.value and "after part 1" in c.value for c in at.caption)
     at.button(key="mxm_fitkeys").click().run()
     assert at.session_state["mxm_shift_mix_song_a"] != 0
+    # 🔀 the join's own crossfade: a 4-bar blend with the next song coming in early
+    uid2 = at.session_state["mxm_parts"][1]["uid"]
+    at.selectbox(key=f"mxm_xfl_{uid2}").set_value("4 bars").run()
+    at.selectbox(key=f"mxm_xfw_{uid2}").set_value("before").run()
+    assert not errors(at), errors(at)
+    assert at.session_state["mxm_parts"][1]["xfade"] == {"beats": 16.0, "where": "before", "shape": "smooth"}
     at.button(key="mxm_preview").click().run()
     assert not errors(at), errors(at)
     assert at.get("audio")
@@ -502,7 +508,7 @@ def test_local_analysis_does_only_what_each_track_is_missing(mixlib, monkeypatch
 
 def test_mix_page_mashup_with_no_stems_anywhere(mixlib):
     """No track has stems yet (the laptop hasn't made any): adding a part must not fail — the
-    '🎤 Vocals over…' popover is disabled, but Streamlit still runs what's inside it."""
+    '➕ Lay over…' form must cope — and the full song can still be laid over a part."""
     import json
     from tests.apptest_util import page_app, errors
     saved = {}
@@ -520,7 +526,59 @@ def test_mix_page_mashup_with_no_stems_anywhere(mixlib):
         at.button(key="mxm_add").click().run()
         assert not errors(at), errors(at)
         assert len(at.session_state["mxm_parts"]) == 1
-        assert any("No tracks with stems yet" in c.value for c in at.caption)
+        uid = at.session_state["mxm_parts"][0]["uid"]
+        at.selectbox(key=f"mxm_ltrack_{uid}").set_value("mix_song_a").run()
+        assert [r for r in at.radio if r.key == f"mxm_lwhat_{uid}_mix_song_a"][0].options == ["Full song"]
+        assert any("only its full song can be laid over" in c.value for c in at.caption)
+        at.button(key=f"mxm_ladd_{uid}").click().run()
+        assert not errors(at), errors(at)
+        ly = at.session_state["mxm_layers"]
+        assert len(ly) == 1 and ly[0]["part"] == "full" and ly[0]["fade_beats"] == 4.0
+        assert any("🎵 mix_song_a full song" in c.value for c in at.caption)
+        at.button(key="mxm_preview").click().run()
+        assert not errors(at), errors(at)
+        assert at.get("audio")
     finally:
         for js, txt in saved.items():
             js.write_text(txt)
+
+
+def test_layout_crossfade_per_join_where_and_shape():
+    g = _grid()                                   # 120 BPM: a beat is 0.5 s, a bar 2 s
+    pieces = [{"track": "x", "start": 0.0, "end": 32.0, "uid": "p1"},
+              {"track": "y", "start": 16.0, "end": 48.0, "uid": "p2"},
+              {"track": "x", "start": 0.0, "end": 32.0, "uid": "p3",
+               "xfade": {"beats": 16.0, "where": "before", "shape": "linear"}}]
+    lay = MX.layout({"bpm": 120.0, "xfade_other": 4.0, "pieces": pieces}, {"x": g, "y": g})
+    j1, j2 = lay["joins"]
+    assert j1["pre"] == pytest.approx(1.0) and j1["post"] == pytest.approx(1.0) and j1["shape"] == "smooth"
+    assert j2["pre"] == pytest.approx(8.0) and j2["post"] == 0 and j2["shape"] == "linear"
+    # "after", and a fade can never be longer than the part it plays over
+    pieces[2]["xfade"] = {"beats": 128.0, "where": "after"}
+    j = MX.layout({"bpm": 120.0, "pieces": pieces}, {"x": g, "y": g})["joins"][1]
+    assert j["pre"] == 0 and j["post"] == pytest.approx(0.9 * 32.0)
+    pieces[2]["xfade"] = {"beats": 0.0}               # a straight cut on the bar line
+    assert MX.layout({"bpm": 120.0, "pieces": pieces}, {"x": g, "y": g})["joins"][1]["xfade"] < 0.02
+
+
+def test_render_long_blend_plays_both_songs_together(mixlib):
+    """A 4-bar 'next song comes in early' crossfade: the incoming song is already playing during
+    the 4 bars before the join, under the outgoing one; outside the blend only one song plays."""
+    import mixer
+    t = mixlib["tracks"]
+    gc, ga = MX.grid(t["mix_song_c"]), MX.grid(t["mix_song_a"])
+    rec = {"bpm": 120.0, "level_match": False, "fade_out": 0.0,
+           "pieces": [{"track": "mix_song_c", "start": 0.0, "end": MX.snap_to_bar(gc, 32.0), "uid": "p1"},
+                      {"track": "mix_song_a", "start": MX.snap_to_bar(ga, 16.0), "end": MX.snap_to_bar(ga, 40.0),
+                       "uid": "p2", "xfade": {"beats": 16.0, "where": "before", "shape": "smooth"}}]}
+    info = mixer.render(rec, {k: t[k] for k in ("mix_song_c", "mix_song_a")}, mixlib["root"] / "blend.m4a")
+    jn = info["layout"]["joins"][0]
+    assert jn["pre"] == pytest.approx(16 * MX.beat_len(120.0), abs=0.01) and jn["post"] == 0
+    y = mixer.decode(mixlib["root"] / "blend.m4a")
+    c = mixer.decode(mixer.local_path(t["mix_song_c"], "full"))
+    sr = mixer.SR
+    early = int((jn["at"] - jn["pre"] - 2.0) * sr)            # before the blend: song C alone
+    assert np.corrcoef(y[early:early + sr, 0], c[early:early + sr, 0])[0, 1] > 0.98
+    mid = int((jn["at"] - jn["pre"] / 2) * sr)                  # in the middle of it: C plus A
+    r = np.corrcoef(y[mid:mid + sr // 2, 0], c[mid:mid + sr // 2, 0])[0, 1]
+    assert 0.3 < r < 0.95

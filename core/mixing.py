@@ -16,7 +16,8 @@ all stretched to one tempo.
                                             # 🎤 played OVER the pieces (stems from analyse_audio_local.py)
         "bpm": target BPM or None (None = every piece at its own tempo),
         "shift": {tid: semitones},          # 🎹 pitch shift per track (key matching)
-        "xfade_same": beats, "xfade_other": beats,   # crossfade at joins
+        "xfade_same": beats, "xfade_other": beats,   # default crossfade at joins; a piece's own
+                                            # "xfade": {"beats", "where", "shape"} sets the join into it
         "fade_in": sec, "fade_out": sec, "level_match": True,
         "settings": {…},                    # what the Mix screen needs to reopen it
     }
@@ -39,6 +40,11 @@ JUMP_CONTEXT_BARS = 2        # bars compared on each side of a jump
 MIN_LOOP_BARS = 4
 MAX_LOOP_BARS = 64
 EDGE_BARS = 2                # never jump inside the first / last bars
+# 🔀 Where a crossfade sits around the bar line where one piece hands over to the next:
+# the share of it before the line. "before" = the next song comes in under the end of this
+# one and has taken over by the line; "after" = this one carries on under the start of the next.
+XF_WHERE = {"centre": 0.5, "before": 1.0, "after": 0.0}
+XF_SHAPES = ("smooth", "linear")   # equal power (different songs) / straight (the same audio)
 
 
 # ---------------------------------------------------------------------------
@@ -164,11 +170,21 @@ def layout(recipe: dict, grids: dict) -> dict:
     joins = []
     for a, b in zip(out[:-1], out[1:]):
         same = a["track"] == b["track"]
-        beats = float(recipe.get("xfade_same", 0.25) if same else recipe.get("xfade_other", 4))
-        xf = beats * beat_len(out_bpm)
-        # never longer than the shorter piece allows
-        xf = min(xf, 0.9 * (a["out_end"] - a["out_start"]), 0.9 * (b["out_end"] - b["out_start"]))
-        joins.append({"at": b["out_start"], "xfade": max(xf, 0.01), "same_track": same})
+        own = b.get("xfade") or {}              # 🔀 this join's own crossfade (set on the incoming piece)
+        beats = float(own["beats"]) if own.get("beats") is not None else \
+            float(recipe.get("xfade_same", 0.25) if same else recipe.get("xfade_other", 4))
+        where = own.get("where") or "centre"
+        shape = own.get("shape") or ("linear" if same else "smooth")
+        xf = max(beats, 0.0) * beat_len(out_bpm)
+        frac = XF_WHERE.get(where, 0.5)          # share of the fade before the bar line
+        pre, post = xf * frac, xf * (1 - frac)
+        # the fade before the join plays over the outgoing piece, the one after over the incoming one
+        pre = min(pre, 0.9 * (a["out_end"] - a["out_start"]))
+        post = min(post, 0.9 * (b["out_end"] - b["out_start"]))
+        if pre + post < 0.01:
+            pre = post = 0.005
+        joins.append({"at": b["out_start"], "xfade": pre + post, "pre": pre, "post": post, "where": where,
+                      "shape": shape, "beats": beats, "same_track": same})
     layers = []
     by_uid = {p.get("uid"): p for p in out if p.get("uid")}
     for ly in recipe.get("layers") or []:

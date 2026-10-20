@@ -30,7 +30,17 @@ from library_common import format_mmss
 MODES = ["📏 Extend / shorten", "🧩 Mashup", "💡 Suggestions", "📂 Saved mixes"]
 PART_LABELS = {"full": "Full song", "instrumental": "Instrumental", "vocals": "Vocals only"}
 XF_SAME = {"Very short (⅛ beat)": 0.125, "Short (¼ beat)": 0.25, "Half a beat": 0.5, "One beat": 1.0}
-XF_OTHER = {"¼ beat": 0.25, "1 beat": 1.0, "2 beats": 2.0, "1 bar": 4.0, "2 bars": 8.0}
+XF_OTHER = {"¼ beat": 0.25, "1 beat": 1.0, "2 beats": 2.0, "1 bar": 4.0, "2 bars": 8.0, "4 bars": 16.0,
+            "8 bars": 32.0, "16 bars": 64.0}
+# 🔀 A join's own crossfade (Mashup): length in beats ("Cut" = straight swap on the bar line)…
+XF_JOIN = {"Cut": 0.0, "¼ beat": 0.25, "½ beat": 0.5, "1 beat": 1.0, "2 beats": 2.0, "1 bar": 4.0,
+           "2 bars": 8.0, "4 bars": 16.0, "8 bars": 32.0, "16 bars": 64.0}
+# …where it sits around the bar line (core.mixing.XF_WHERE) and its shape.
+XF_WHERE_LABELS = {"centre": "Both sides of the bar line", "before": "Next song comes in early",
+                   "after": "This song carries on"}
+XF_SHAPE_LABELS = {"smooth": "Smooth", "linear": "Straight"}
+LAYER_FADES = {"¼ beat": 0.25, "½ beat": 0.5, "1 beat": 1.0, "1 bar": 4.0, "2 bars": 8.0, "4 bars": 16.0}
+LAYER_ICONS = {"vocals": "🎤", "instrumental": "🎹", "full": "🎵"}
 PALETTE = ["rgba(99,132,255,{a})", "rgba(255,140,60,{a})", "rgba(46,184,120,{a})", "rgba(200,90,200,{a})",
            "rgba(230,190,40,{a})", "rgba(60,190,210,{a})", "rgba(230,80,90,{a})"]
 
@@ -185,19 +195,45 @@ def _timeline(recipe: dict, tracks: dict, sims: dict, energy: list = None) -> di
         colour_of.setdefault(ly["track"], PALETTE[len(colour_of) % len(PALETTE)])
         fig.add_vrect(x0=ly["out_start"], x1=ly["out_end"], y0=0.78, y1=1.0, line_width=0,
                       fillcolor=colour_of[ly["track"]].format(a=0.55), layer="above",
-                      annotation_text=f"🎤 {ly['track'][:16]}", annotation_position="bottom left",
-                      annotation_font_size=10)
+                      annotation_text=f"{LAYER_ICONS.get(ly.get('part') or 'vocals', '🎤')} {ly['track'][:16]}",
+                      annotation_position="bottom left", annotation_font_size=10)
+    _crossfade_traces(fig, lay, colour_of, max(ys) if len(ys) else 1.0)
     for at, colour, text in _join_notes(lay, recipe, tracks, sims):
         fig.add_vline(x=at, line=dict(color=colour, width=2, dash="dot"))
     if recipe.get("trim_to") and recipe["trim_to"] < lay["duration"]:
         fig.add_vrect(x0=recipe["trim_to"], x1=lay["duration"], fillcolor="rgba(128,128,128,0.25)", line_width=0)
-    fig.update_layout(height=150, margin=dict(t=18, b=0, l=0, r=0), showlegend=False,
+    fig.update_layout(height=190, margin=dict(t=18, b=0, l=0, r=0), showlegend=False,
                       xaxis=dict(range=[0, lay["duration"]], tickformat=None, showgrid=False),
                       yaxis=dict(visible=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
     ticks = list(range(0, int(lay["duration"]) + 1, 30 if lay["duration"] < 600 else 60))
     fig.update_xaxes(tickvals=ticks, ticktext=[format_mmss(t) for t in ticks])
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     return lay
+
+
+def _crossfade_traces(fig, lay: dict, colour_of: dict, top: float) -> None:
+    """🔀 Each crossfade between different songs drawn where it happens: the stretch both play,
+    shaded, with the outgoing song's level falling and the incoming one's rising across it."""
+    pieces = lay["pieces"]
+    top = float(top) or 1.0
+    for k, jn in enumerate(lay["joins"]):
+        a, b = pieces[k], pieces[k + 1]
+        x0, x1 = jn["at"] - jn["pre"], jn["at"] + jn["post"]
+        if jn["same_track"] or x1 - x0 < 0.05:
+            continue
+        fig.add_vrect(x0=x0, x1=x1, fillcolor="rgba(128,128,128,0.16)", line=dict(color="rgba(128,128,128,0.6)",
+                      width=1, dash="dot"), layer="below")
+        xs = np.linspace(x0, x1, 24)
+        u = (xs - x0) / (x1 - x0)
+        up = np.sin(u * np.pi / 2) if jn.get("shape", "smooth") == "smooth" else u
+        down = np.sin((1 - u) * np.pi / 2) if jn.get("shape", "smooth") == "smooth" else 1 - u
+        for y, tr, name in ((down, a["track"], "fades out"), (up, b["track"], "fades in")):
+            fig.add_trace(go.Scatter(x=xs, y=y * top, mode="lines", hovertemplate=f"{tr[:24]} {name}<extra></extra>",
+                                     line=dict(color=colour_of[tr].format(a=1.0), width=2.5)))
+        bars = jn.get("beats", 0) / 4
+        fig.add_annotation(x=(x0 + x1) / 2, y=top, yanchor="bottom", showarrow=False, font=dict(size=10),
+                           text=f"🔀 {bars:g} bar{'s' if bars != 1 else ''}" if bars >= 1
+                           else f"🔀 {jn.get('beats', 0):g} beat")
 
 
 # ---------------------------------------------------------------------------
@@ -543,59 +579,113 @@ def _part_stems_row(p: dict, t: dict, tracks_all: dict, summaries: dict) -> None
                                         "(run_audio_analysis.bat on the laptop)." if has
                                    else "This track has no stems yet — run run_audio_analysis.bat on the laptop (it makes stems) "
                                         "to play just its instrumental or vocals.")
-        singers = [tid for tid, s_ in tracks_all.items() if s_.get("stems")]
-        with c[1].popover("🎤 Vocals over…", use_container_width=True, disabled=not singers):
-            if singers:   # a disabled popover's contents still run
-                _add_layer_form(p, t, singers, summaries)
+        others = sorted(tracks_all, key=str.lower)
+        with c[1].popover("➕ Lay over…", use_container_width=True, disabled=not others):
+            if others:   # a disabled popover's contents still run
+                _add_layer_form(p, t, others, tracks_all, summaries)
         mine = [ly for ly in _layers() if ly["on"] == p["uid"]]
-        if not singers:
-            c[2].caption("No tracks with stems yet — run_audio_analysis.bat on the laptop.")
         for ly in mine:
             lc = st.columns([5, 2, 1], vertical_alignment="center")
-            lc[0].caption(f"🎤 {ly['track']} vocals {format_mmss(ly['start'])}–{format_mmss(ly['end'])}"
+            icon = LAYER_ICONS.get(ly.get("part") or "vocals", "🎤")
+            what = PART_LABELS.get(ly.get("part") or "vocals", "").lower()
+            lc[0].caption(f"{icon} {ly['track']} {what} {format_mmss(ly['start'])}–{format_mmss(ly['end'])}"
                           + (f", from bar {int(ly['offset_bars']) + 1} of the part" if ly.get("offset_bars") else ""))
             gk = f"mxm_lgain_{ly['uid']}"
             st.session_state.setdefault(gk, float(ly.get("gain_db") or 0.0))
-            ly["gain_db"] = lc[1].number_input("Vocal level (dB)", -12.0, 12.0, step=1.0, key=gk,
-                                               label_visibility="collapsed", help="Level of these vocals (dB)")
+            ly["gain_db"] = lc[1].number_input("Layer level (dB)", -12.0, 12.0, step=1.0, key=gk,
+                                               label_visibility="collapsed", help="Level of this layer (dB)")
             lc[2].button("🗑", key=f"mxm_lrm_{ly['uid']}", on_click=_remove_layer, args=(ly["uid"],))
 
 
-def _add_layer_form(p: dict, host: dict, singers: list, summaries: dict) -> None:
-    if not singers:
+def _add_layer_form(p: dict, host: dict, others: list, tracks_all: dict, summaries: dict) -> None:
+    """➕ Lay another track (its full song, or with stems its vocals or instrumental) over part p."""
+    if not others:
         return
     base = summaries.get(p["track"])
+    ranked = {}
     if base:
-        ranked = {r["track_id"]: r for r in _partners(base, {k: summaries[k] for k in singers if k in summaries})}
-        singers = sorted(singers, key=lambda x: -ranked.get(x, {"score": -1})["score"])
-    else:
-        ranked = {}
+        ranked = {r["track_id"]: r for r in _partners(base, {k: summaries[k] for k in others if k in summaries})}
+        others = sorted(others, key=lambda x: -ranked.get(x, {"score": -1})["score"])
     k = f"mxm_ltrack_{p['uid']}"
-    if st.session_state.get(k) not in singers:
-        st.session_state[k] = singers[0]
-    tid = st.selectbox("Whose vocals", singers, key=k,
-                       format_func=lambda x: x + (f"  —  fits {ranked[x]['score'] * 100:.0f} %" if x in ranked else ""))
+    if st.session_state.get(k) not in others:
+        st.session_state[k] = others[0]
+    tid = st.selectbox("Track", others, key=k,
+                       format_func=lambda x: x + (f"  —  fits {ranked[x]['score'] * 100:.0f} %" if x in ranked else "")
+                       + ("  🎤" if (tracks_all.get(x) or {}).get("stems") else ""))
     tr = full_track(tid)
     if tr is None:
         return
+    import mixer
+    has = mixer.has_stems(tr)
+    whats = ["vocals", "instrumental", "full"] if has else ["full"]
+    wk = f"mxm_lwhat_{p['uid']}_{tid}"
+    if st.session_state.get(wk) not in whats:
+        st.session_state[wk] = whats[0]
+    what = st.radio("What plays", whats, key=wk, horizontal=True, format_func=PART_LABELS.get,
+                    help="Vocals over this part's music is the classic mashup (needs stems — 🎤 in the list). "
+                         "Without stems you can lay the full song over — turn one of the two down a few dB.")
+    if not has:
+        st.caption("No stems for this track yet, so only its full song can be laid over — vocals or "
+                   "instrumental need stems (run_audio_analysis.bat on the laptop).")
     g = MX.grid(tr)
     secs = g["sections"]
-    best = MX.best_section(tr, "vocals")
+    best = MX.best_section(tr, "vocals" if what == "vocals" else "energy")
     labels = [f"{i + 1}. {s_['label']}  {format_mmss(s_['start'])}–{format_mmss(s_['end'])}"
-              + ("  🎤" if s_ is best else "") for i, s_ in enumerate(secs)]
+              + ("  ⭐" if s_ is best else "") for i, s_ in enumerate(secs)]
     si = st.selectbox("Section", range(len(secs)), key=f"mxm_lsec_{p['uid']}_{tid}",
                       index=secs.index(best) if best in secs else 0, format_func=lambda i: labels[i],
-                      help="🎤 = the section with the most singing.")
-    off = st.number_input("Start how many bars into the part", 0, 64, 0, key=f"mxm_loff_{p['uid']}")
-    if st.button("➕ Add these vocals", key=f"mxm_ladd_{p['uid']}", type="primary", use_container_width=True):
-        import mixer
+                      help="⭐ = the section with the most singing (vocals) or the most energy.")
+    c = st.columns(2)
+    off = c[0].number_input("Start how many bars into the part", 0, 64, 0, key=f"mxm_loff_{p['uid']}")
+    fk = f"mxm_lfade_{p['uid']}"
+    st.session_state.setdefault(fk, "½ beat" if what == "vocals" else "1 bar")
+    fade = c[1].selectbox("Fade in / out", list(LAYER_FADES), key=fk)
+    if st.button("➕ Lay it over", key=f"mxm_ladd_{p['uid']}", type="primary", use_container_width=True):
         sec = secs[si]
-        _layers().append({"uid": f"{time.time():.6f}", "on": p["uid"], "track": tid, "part": "vocals",
+        _layers().append({"uid": f"{time.time():.6f}", "on": p["uid"], "track": tid, "part": what,
                           "start": MX.snap_to_bar(g, sec["start"]), "end": MX.snap_to_bar(g, sec["end"]),
-                          "offset_bars": int(off), "gain_db": 0.0})
-        if mixer.has_stems(host):           # their vocals over this part's music
+                          "offset_bars": int(off), "gain_db": 0.0, "fade_beats": LAYER_FADES[fade]})
+        if what == "vocals" and mixer.has_stems(host):           # their vocals over this part's music
             st.session_state["_mxm_part_pending"][p["uid"]] = "instrumental"
         st.rerun()
+
+
+def _join_row(a: dict, b: dict, i: int) -> None:
+    """🔀 The join from part i to part i + 1: its own crossfade length, where it sits around the
+    bar line and its shape (stored on the incoming part as "xfade"; "Default" = ⚙️'s setting)."""
+    uid = b["uid"]
+    own = b.get("xfade") or {}
+    same = a["track"] == b["track"]
+    lk, wk, sk = f"mxm_xfl_{uid}", f"mxm_xfw_{uid}", f"mxm_xfs_{uid}"
+    default = "Default"
+    if lk not in st.session_state:
+        st.session_state[lk] = next((n for n, v in XF_JOIN.items() if own.get("beats") is not None
+                                     and abs(v - float(own["beats"])) < 1e-6), default)
+    st.session_state.setdefault(wk, own.get("where") or "centre")
+    st.session_state.setdefault(sk, own.get("shape") or ("linear" if same else "smooth"))
+    with st.container(key=f"mxm_join_{uid}"):
+        c = st.columns([2, 2, 3, 2], vertical_alignment="center")
+        c[0].caption(f"🔀 **Join {i} → {i + 1}**")
+        length = c[1].selectbox("Crossfade", [default, *XF_JOIN], key=lk, label_visibility="collapsed",
+                                format_func=lambda x: f"Default ({st.session_state.get('mxm_xf', '1 bar')})"
+                                if x == default and not same else ("Default (¼ beat)" if x == default else x),
+                                help="How long both parts play together while one fades into the other. "
+                                     "Long ones (4–16 bars) blend the two songs over each other, DJ style.")
+        cut = length == "Cut"
+        where = c[2].selectbox("Where", list(XF_WHERE_LABELS), key=wk, format_func=XF_WHERE_LABELS.get,
+                               label_visibility="collapsed", disabled=cut,
+                               help="Both sides: half before the bar line, half after. Next song comes in early: "
+                                    "it starts under the end of this part (playing the bars just before its "
+                                    "chosen start) and has taken over by the line. This song carries on: it keeps "
+                                    "playing under the start of the next part.")
+        shape = c[3].selectbox("Shape", list(XF_SHAPE_LABELS), key=sk, format_func=XF_SHAPE_LABELS.get,
+                               label_visibility="collapsed", disabled=cut,
+                               help="Smooth (equal power) keeps the loudness even when two different songs blend; straight "
+                                    "suits the same audio (a jump within one track).")
+    if length == default and where == "centre" and shape == ("linear" if same else "smooth"):
+        b.pop("xfade", None)
+    else:
+        b["xfade"] = {"beats": None if length == default else XF_JOIN[length], "where": where, "shape": shape}
 
 
 def _mashup(summaries: dict) -> None:
@@ -631,8 +721,9 @@ def _mashup(summaries: dict) -> None:
         st.session_state.setdefault("mxm_bpm", round(float(tracks[parts[0]["track"]].get("bpm") or 120.0), 1))
         c[1].number_input("Tempo (BPM)", 40.0, 220.0, step=0.5, key="mxm_bpm", disabled=not match)
         st.session_state.setdefault("mxm_xf", "1 bar")
-        c[2].selectbox("Crossfade between tracks", list(XF_OTHER), key="mxm_xf",
-                       help="Centred on the bar line where one part hands over to the next.")
+        c[2].selectbox("Crossfade between tracks (default)", list(XF_OTHER), key="mxm_xf",
+                       help="Centred on the bar line where one part hands over to the next. Each join can have "
+                            "its own — 🔀 between the parts below.")
         c = st.columns(3)
         st.session_state.setdefault("mxm_fin", 0.0)
         c[0].slider("Fade in (s)", 0.0, 10.0, step=0.5, key="mxm_fin")
@@ -664,6 +755,8 @@ def _mashup(summaries: dict) -> None:
     for i, p in enumerate(parts):
         t, g = tracks[p["track"]], grids[p["track"]]
         speed, _ = MX.tempo_factor(g["bpm"], bpm)
+        if prev is not None:
+            _join_row(prev, p, i)
         with st.container(border=True):
             c = st.columns([5, 2, 1, 1, 1])
             c[0].markdown(f"**{i + 1}. {p['track']}** — {format_mmss(p['start'])}–{format_mmss(p['end'])} "
@@ -695,8 +788,10 @@ def _mashup(summaries: dict) -> None:
                        + f", tempo {(r['speed'] - 1) * 100:+.1f} %")
 
     recipe = {"id": st.session_state.get("mxm_id"), "kind": "mashup",
-              "pieces": [{k: p[k] for k in ("track", "start", "end", "gain_db", "part", "uid")} for p in parts],
-              "layers": [{k: ly.get(k) for k in ("track", "part", "start", "end", "gain_db", "on", "offset_bars")}
+              "pieces": [{**{k: p[k] for k in ("track", "start", "end", "gain_db", "part", "uid")},
+                          **({"xfade": p["xfade"]} if p.get("xfade") else {})} for p in parts],
+              "layers": [{k: ly.get(k) for k in ("track", "part", "start", "end", "gain_db", "on", "offset_bars",
+                                                 "fade_beats")}
                          for ly in layers if any(ly["on"] == p["uid"] for p in parts)],
               "bpm": bpm, "shift": {k: v for k, v in shift.items() if v},
               "xfade_same": 0.25, "xfade_other": XF_OTHER[st.session_state.get("mxm_xf", "1 bar")],
@@ -897,7 +992,8 @@ def _saved(summaries: dict) -> None:
 def render(summaries: dict) -> None:
     """summaries: the Media Library's load_audio_library() rows."""
     st.session_state.setdefault("mx_mode", MODES[0])
-    mode = st.radio("Mix", MODES, horizontal=True, key="mx_mode", label_visibility="collapsed")
+    with st.container(key="subnav_mix"):   # a sub menu — chips (page_setup.menu_css)
+        mode = st.radio("Mix", MODES, horizontal=True, key="mx_mode", label_visibility="collapsed")
     if mode == MODES[0]:
         _extend(summaries)
     elif mode == MODES[1]:

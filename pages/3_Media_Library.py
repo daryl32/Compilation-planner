@@ -34,15 +34,16 @@ from library_common import (
     render_range_picker, show_render_player, file_download_button,
 )
 
-from page_setup import page_setup, drive_token, top_button, wrap_css
+from page_setup import page_setup, drive_token, top_button, wrap_css, menu_css
 import catalogue_store as CS
 
 PAGE_SIZE = 20
 
 page_setup("Media Library", "pages/3_Media_Library.py", title="📁 Media Library", anchor="library-top")
-top_button("library-top", wrap_css("ml_wrap", 120))   # rows wrap on narrow screens (iPad portrait)
-library_kind = st.radio("Library", ["🎬 Videos", "🎵 Audio", "🎚️ Mix", "🎞️ Renders", "📈 Analytics"], horizontal=True,
-                        key="lib_kind", label_visibility="collapsed")
+top_button("library-top", wrap_css("ml_wrap", 120) + menu_css())   # rows wrap on narrow screens (iPad portrait)
+with st.container(key="mainnav_lib"):   # the page's main menu — styled as tabs (menu_css)
+    library_kind = st.radio("Library", ["🎬 Videos", "🎵 Audio", "🎚️ Mix", "🎞️ Renders", "📈 Analytics"],
+                            horizontal=True, key="lib_kind", label_visibility="collapsed")
 
 
 # ---------------------------------------------------------------------------
@@ -2093,8 +2094,9 @@ def render_library_analytics():
 
 
 def render_analytics_tab():
-    which = st.radio("Analytics", ["📚 Library", "⭐ Render ratings"], horizontal=True, key="ana_kind",
-                     label_visibility="collapsed")
+    with st.container(key="subnav_ana"):   # a sub menu — chips (menu_css)
+        which = st.radio("Analytics", ["📚 Library", "⭐ Render ratings"], horizontal=True, key="ana_kind",
+                         label_visibility="collapsed")
     if which == "📚 Library":
         render_library_analytics()
     else:
