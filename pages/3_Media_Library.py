@@ -5,6 +5,8 @@ Media Library — two libraries, picked at the top of the page:
   Audio:  search, filter and sort the music tracks, see their energy shape
           and play them; analyse new tracks (and add the extra cut-finding
           analysis to existing ones) on the server.
+  Mix:    🎚️ make new tracks from existing ones — extend / shorten a track,
+          mashups of several (mix_ui.py, mixer.py, mixes.py).
   Analytics: 📚 Library — progress (split pass, review, roles, actors), actors,
           role footage vs what your tracks need, clip lengths vs blocks
           (library_analytics.py); ⭐ Render ratings — what your rated renders say
@@ -37,7 +39,7 @@ import catalogue_store as CS
 PAGE_SIZE = 20
 
 page_setup("Media Library", "pages/3_Media_Library.py", title="📁 Media Library")
-library_kind = st.radio("Library", ["🎬 Videos", "🎵 Audio", "🎞️ Renders", "📈 Analytics"], horizontal=True,
+library_kind = st.radio("Library", ["🎬 Videos", "🎵 Audio", "🎚️ Mix", "🎞️ Renders", "📈 Analytics"], horizontal=True,
                         key="lib_kind", label_visibility="collapsed")
 
 
@@ -385,6 +387,8 @@ def load_audio_library(signature: tuple) -> dict:
             "sections": [{"start": x["start"], "end": x["end"], "label": x["label"]}
                          for x in (t.get("analysis") or {}).get("sections") or []],
             "drops": list((t.get("analysis") or {}).get("drops") or []),
+            "key": t.get("key"),
+            "mix": t.get("mix"),
         }
     return tracks
 
@@ -467,7 +471,7 @@ def _analysis_progress(aa) -> None:
     icons = {"queued": "⏳", "running": "⚙️", "done": "✅", "error": "❌"}
     order = {"running": 0, "queued": 1, "error": 2, "done": 3}
     for tid, info in sorted(status.items(), key=lambda kv: (order.get(kv[1].get("state"), 9), kv[0].lower())):
-        kind = "new track" if info.get("kind") == "new" else "analysis"
+        kind = {"new": "new track", "key": "key"}.get(info.get("kind"), "analysis")
         st.caption(f"{icons.get(info.get('state'), '•')} **{tid}** — {kind}: {info.get('msg', '')}")
     if not active:
         if st.button("Clear finished", key="aa_clear"):
@@ -485,8 +489,12 @@ def render_analysis_panel(tracks: dict) -> None:
     cut-finding analysis (bars, drums, sections, build-ups, vocals) for
     tracks that only have the original Colab analysis."""
     missing_extra = sorted(tid for tid, t in tracks.items() if not t["extra"])
-    with st.expander(f"🔬 Audio analysis — {len(missing_extra)} track(s) without the extra analysis",
-                     expanded=bool(missing_extra) or bool(st.session_state.get("_aa_was_active"))):
+    missing_key = [tid for tid, t in tracks.items() if not t.get("key")]
+    label = f"🔬 Audio analysis — {len(missing_extra)} track(s) without the extra analysis"
+    if missing_key:
+        label += f", {len(missing_key)} without a key"
+    with st.expander(label, expanded=bool(missing_extra) or bool(missing_key)
+                     or bool(st.session_state.get("_aa_was_active"))):
         aa, err = _audio_analysis_module()
         if aa is None:
             st.error(f"Audio analysis isn't available on this server: {err}. "
@@ -543,9 +551,28 @@ def render_analysis_panel(tracks: dict) -> None:
                         st.rerun()
 
         _render_upgrade(aa, tracks)
+        _render_keys(aa, tracks)
 
         if aa.read_status() or st.session_state.get("_aa_was_active"):
             _analysis_progress(aa)   # refreshes itself every few seconds
+
+
+def _render_keys(aa, tracks: dict) -> None:
+    """🎹 Key detection for tracks analysed before it existed (new tracks get it with
+    their analysis). Used by 🎚️ Mix to match keys in mashups."""
+    no_key = sorted(tid for tid, t in tracks.items() if not t.get("key"))
+    if not no_key:
+        return
+    st.divider()
+    st.markdown(f"**🎹 Keys** — {len(no_key)} track(s) without a key yet")
+    if st.button(f"🎹 Find the key of {len(no_key)} track(s) (~{max(1, round(len(no_key) * 5 / 60))} min)",
+                 key="aa_keys", help="A few seconds a track on the server (the audio is fetched from Google Drive "
+                                      "if needed). Nothing else about the tracks changes."):
+        n = aa.enqueue([{"track_id": tid, "kind": "key"} for tid in no_key])
+        aa.resume()
+        st.session_state["_aa_was_active"] = True
+        st.toast(f"Queued {n} track(s).")
+        st.rerun()
 
 
 def _render_upgrade(aa, tracks: dict) -> None:
@@ -622,6 +649,7 @@ def render_audio():
         "Hits per minute": lambda t: t["hit_rate"],
         "Date added": lambda t: t["added"],
         "Times rendered": lambda t: track_use.get(t["track_id"], 0),
+        "Key (Camelot)": lambda t: _camelot_sort(t.get("key")),
     }
     sort_by = st.sidebar.selectbox(
         "Sort by", list(sorts), key="aud_sort",
@@ -677,10 +705,15 @@ def render_audio():
                 info.append(f"energy variation {t['variance']:.2f}")
                 if t["hit_rate"]:
                     info.append(f"{t['hit_rate']:.1f} hits/min")
+                if t.get("key"):
+                    info.append(f"🎹 {t['key']['name']} ({t['key']['camelot']})")
                 info.append(f"🔬 {t['extra_info']}" if t["extra"] else "basic analysis only")
                 if track_use.get(tid):
                     info.append(f"🎞️ in {track_use[tid]} render(s)")
                 st.caption("  ·  ".join(info))
+                if t.get("mix"):
+                    _src = " + ".join(t["mix"].get("made_from") or [])
+                    st.caption(f"🎚️ {'Extended' if t['mix'].get('kind') == 'extend' else 'Mashup'} — made from {_src}")
                 _story_strip(tid, _maps.get(tid), t["duration"])
             with cols[1]:
                 if t["energy"] and t["extra"]:
@@ -726,6 +759,13 @@ def render_audio():
                 _render_analysis_detail(tid)
             if st.session_state["aud_open_player"] == tid:
                 _render_audio_player(tid, t["source_path"])
+
+
+def _camelot_sort(key) -> tuple:
+    """1A, 1B, 2A … 12B; tracks without a key last."""
+    if not key or not key.get("camelot"):
+        return (99, "Z")
+    return (int(key["camelot"][:-1]), key["camelot"][-1])
 
 
 def _story_strip(track_id: str, regions, duration: float) -> None:
@@ -2042,6 +2082,9 @@ def render_rating_analytics():
 
 if library_kind == "🎵 Audio":
     render_audio()
+elif library_kind == "🎚️ Mix":
+    import mix_ui
+    mix_ui.render(load_audio_library(_audio_signature()))
 elif library_kind == "🎞️ Renders":
     render_renders()
 elif library_kind == "📈 Analytics":
