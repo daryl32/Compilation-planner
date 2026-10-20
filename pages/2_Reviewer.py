@@ -33,7 +33,7 @@ import scene_edits as SE
 import scene_roles as SR
 
 # Sign-in, whitelist, Drive connect, title and the shared sidebar — see page_setup.py
-from page_setup import page_setup, push_file_with_oauth, drive_token, top_button
+from page_setup import page_setup, push_file_with_oauth, drive_token, top_button, wrap_css
 
 OUTPUT_DIR = CATALOGUE_DIR
 
@@ -48,16 +48,13 @@ def load_labels() -> list:
 CANDIDATE_LABELS = load_labels()
 
 page_setup("Reviewer", "pages/2_Reviewer.py", anchor="reviewer-top")
-top_button("reviewer-top")
 # Rows of controls wrap onto a second line when the page is narrow (iPad portrait with the
 # sidebar open) instead of squashing every label to "…".
-st.markdown("<style>"
-            "[class*='st-key-rev_wrap'] [data-testid='stHorizontalBlock']{flex-wrap:wrap;row-gap:.5rem}"
-            "[class*='st-key-rev_wrap'] [data-testid='stColumn']{min-width:min(135px,100%)}"
-            "[class*='st-key-rev_wrap_card'] [data-testid='stColumn']{min-width:min(200px,100%)}"
-            "[class*='st-key-rev_wrap_card'] [class*='st-key-rev_wrap_act'] [data-testid='stColumn']"
-            "{min-width:min(105px,100%)}"
-            "</style>", unsafe_allow_html=True)
+top_button("reviewer-top",
+           wrap_css("rev_wrap", 135)
+           + "[class*='st-key-rev_wrap_card'] [data-testid='stColumn']{min-width:min(200px,100%)}"
+           "[class*='st-key-rev_wrap_card'] [class*='st-key-rev_wrap_act'] [data-testid='stColumn']"
+           "{min-width:min(105px,100%)}")
 
 # ---------------------------------------------------------------------------
 # Sidebar (this page's controls — the shared ones are drawn by page_setup)
