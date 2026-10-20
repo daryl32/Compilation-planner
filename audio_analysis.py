@@ -137,7 +137,10 @@ def chroma_from_stft(mag: np.ndarray) -> np.ndarray:
 def key_from_spectrum(mag: np.ndarray, rms: np.ndarray) -> dict | None:
     """🎹 The track's key (core/keys.py): average chroma of the louder frames
     (quiet intros/outros and silence say little about the key)."""
-    from core.keys import estimate_key
+    try:
+        from core.keys import estimate_key
+    except ImportError:          # a copy without the core/ folder (e.g. an older laptop folder): no key
+        return None
     ch = chroma_from_stft(mag)
     n = min(len(ch), len(rms))
     if n < 10:
