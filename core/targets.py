@@ -55,7 +55,8 @@ def _count(track, settings, bpb) -> int:
     return len(build_track_segments(
         track, float(settings["change_window_secs"]), float(settings["change_threshold"]),
         float(settings["min_segment_sec"]), bool(settings["react_to_hits"]), float(settings["hit_threshold"]),
-        float(settings["snap_secs"]), float(settings["max_segment_sec"]), bpb))
+        float(settings["snap_secs"]), float(settings["max_segment_sec"]), bpb,
+        on_beat=bool(settings.get("on_beat", True))))
 
 
 def target_count(track: dict, segments: int = None, avg_sec: float = None) -> int:
@@ -72,8 +73,8 @@ def adaptive_for_target(track: dict, *, segments: int = None, avg_sec: float = N
     """Adaptive dial values that cut `track` into about `segments` segments
     (or segments about `avg_sec` long on average).
 
-    base: the current Adaptive settings (change_window_secs, snap_secs and
-    react_to_hits are kept as they are; the rest are set).
+    base: the current Adaptive settings (change_window_secs, snap_secs, react_to_hits and
+    on_beat are kept as they are; the rest are set).
 
     Returns {"settings": {...}, "target": n, "segments": got, "avg_sec": …,
     "exact": bool (within 5%), "notes": [plain-language lines]}."""
@@ -81,6 +82,7 @@ def adaptive_for_target(track: dict, *, segments: int = None, avg_sec: float = N
     want = target_count(track, segments, avg_sec)
     want_len = duration / want
     keep = {k: base[k] for k in ("change_window_secs", "snap_secs", "react_to_hits")}
+    keep["on_beat"] = bool(base.get("on_beat", True))
     hires = bool(track.get("hires"))
     grid = _threshold_grid() if hires else [(base.get("change_threshold", 0.12), base.get("hit_threshold", 0.9))]
 

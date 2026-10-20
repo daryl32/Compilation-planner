@@ -1579,7 +1579,7 @@ AUDIO_SETTINGS_KEYS = [
     "react_to_hits", "hit_threshold", "snap_secs",
     "fast_energy_thresh", "fast_max_bars", "fast_cooldown_bars",
     "phrase_lock_bars", "cinematic_bars", "dynamic_priority_override", "override_delta_thresh",
-    "override_clear_secs",
+    "override_clear_secs", "on_beat",
     *CS.DEFAULTS.keys(),
     *SM.DEFAULTS.keys(),
 ]
@@ -1717,7 +1717,7 @@ def _pace_row(_pc, _styles, _style_now) -> None:
 
 AIM_MODES = {"avg": "Average clip length", "count": "Number of segments"}
 ADAPTIVE_DIAL_KEYS = ["change_window_secs", "change_threshold", "min_segment_sec", "max_segment_sec",
-                      "react_to_hits", "hit_threshold", "snap_secs"]
+                      "react_to_hits", "hit_threshold", "snap_secs", "on_beat"]
 
 
 def _aim_adaptive() -> None:
@@ -2271,6 +2271,11 @@ def render_audio_settings_section(track: dict) -> None:
                 st.caption(line)
 
     _custom = dict(on_change=_mark_audio_custom)
+    if segmentation_method in (SEG_SCORED, SEG_ADAPTIVE, SEG_RHYTHM):
+        st.toggle("🥁 Land every cut on the beat", value=bool(_v("on_beat")), key="on_beat", **_custom,
+                  help="Moves each cut onto the nearest beat — onto a bar line when one is within a beat, for "
+                       "changes in the music (energy changes, sections, drops, bar styles). Off = cuts can fall "
+                       "between beats, exactly on a hit or a loudness jump.")
     if segmentation_method == SEG_SMART:
         _render_smart_cut_settings(track, _v)
     elif segmentation_method == SEG_SCORED:
@@ -2283,7 +2288,7 @@ def render_audio_settings_section(track: dict) -> None:
                       step=0.01, key="change_threshold", **_custom,
                       help="How big a jump in loudness counts as a change worth cutting on. Lower = more cuts.")
             react = st.toggle("Cut on big hits", value=bool(_v("react_to_hits")), key="react_to_hits", **_custom,
-                              help="Also cut exactly on the strongest hits, wherever they fall.")
+                              help="Also cut on the strongest hits — exactly on the hit, or on its beat with 🥁 on.")
             st.slider("Big-hit threshold", 0.5, 1.0, value=float(_v("hit_threshold")), step=0.01,
                       key="hit_threshold", disabled=not react, **_custom,
                       help="How strong a hit must be (0–1) to become a cut. Lower = more cuts.")
@@ -2299,7 +2304,8 @@ def render_audio_settings_section(track: dict) -> None:
                          key="change_window_secs", **_custom,
                          help="Compares the loudness this long after each moment with this long before it.")
             ac[1].slider("Snap radius (s)", 0.0, 1.0, value=float(_v("snap_secs")), step=0.05, key="snap_secs",
-                         **_custom, help="Energy-change cuts move onto the strongest hit within this distance.")
+                         **_custom, help="Energy-change cuts move onto the strongest hit within this distance "
+                                        "(then onto the beat, with 🥁 on).")
     else:
         col1, col2 = st.columns(2)
         with col1:
@@ -3043,6 +3049,7 @@ DIAL_DEFAULTS = {
     "dynamic_priority_override": False,
     "override_delta_thresh": 0.15,
     "override_clear_secs": 1.0,
+    "on_beat": True,              # 🥁 Adaptive / Rhythm Engine / Scored: every cut on the beat
     # Segmentation — Scored cuts
     **CS.DEFAULTS,
     # Segmentation — Smart

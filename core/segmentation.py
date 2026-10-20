@@ -33,6 +33,7 @@ SEG_DEFAULTS = {
     "dynamic_priority_override": False,
     "override_delta_thresh": 0.15,
     "override_clear_secs": 1.0,
+    "on_beat": True,
     **CS.DEFAULTS,
     **SM.DEFAULTS,
 }
@@ -53,11 +54,11 @@ SEG_SMART = "Smart (self-tuning)"
 # Which settings each segmentation method actually uses (beats_per_bar: all).
 SEG_METHOD_KEYS = {
     SEG_ADAPTIVE: ["change_window_secs", "change_threshold", "min_segment_sec", "max_segment_sec",
-                   "react_to_hits", "hit_threshold", "snap_secs"],
+                   "react_to_hits", "hit_threshold", "snap_secs", "on_beat"],
     SEG_RHYTHM: ["fast_energy_thresh", "fast_max_bars", "fast_cooldown_bars", "phrase_lock_bars",
                  "cinematic_bars", "dynamic_priority_override", "override_delta_thresh",
-                 "override_clear_secs"],
-    SEG_SCORED: list(CS.DEFAULTS.keys()),
+                 "override_clear_secs", "on_beat"],
+    SEG_SCORED: list(CS.DEFAULTS.keys()) + ["on_beat"],
     SEG_SMART: list(SM.DEFAULTS.keys()),
 }
 
@@ -74,11 +75,70 @@ def build_segments(track: dict, cfg: dict) -> list:
             track, bpb, float(cfg["fast_energy_thresh"]), int(cfg["fast_max_bars"]),
             int(cfg["fast_cooldown_bars"]), int(cfg["phrase_lock_bars"]), int(cfg["cinematic_bars"]),
             bool(cfg["dynamic_priority_override"]), float(cfg["override_delta_thresh"]),
-            float(cfg["override_clear_secs"]))
+            float(cfg["override_clear_secs"]), on_beat=bool(cfg.get("on_beat", True)))
     return build_track_segments(
         track, float(cfg["change_window_secs"]), float(cfg["change_threshold"]),
         float(cfg["min_segment_sec"]), bool(cfg["react_to_hits"]), float(cfg["hit_threshold"]),
-        float(cfg["snap_secs"]), float(cfg["max_segment_sec"]), bpb)
+        float(cfg["snap_secs"]), float(cfg["max_segment_sec"]), bpb, on_beat=bool(cfg.get("on_beat", True)))
+
+
+# ---------------------------------------------------------------------------
+# 🥁 Land every cut on the beat (Adaptive, Rhythm Engine; Scored picks beats itself)
+# ---------------------------------------------------------------------------
+
+# Cuts that mark a change in the music (rather than one hit) go to a bar line when one is near.
+STRUCTURAL_CUTS = {"change", "fill", "cinematic", "fast"}
+# Which cut wins when two land on the same beat.
+_CUT_RANK = {"change": 3, "cinematic": 3, "fast": 3, "override": 2, "hit": 2, "fill": 1}
+
+
+def land_on_beats(track: dict, segments: list, beats_per_bar: int = 4, min_gap: float = 0.0) -> list:
+    """The same segments with every cut moved onto the track's beat grid (cut_scoring.beat_grid,
+    the corrected one Smart and Scored use): a structural cut (energy change, fill, bar style) onto
+    a bar line when one is within a beat, otherwise the nearest beat; a hit or jump cut onto the
+    nearest beat. Two cuts that land on the same beat — or closer than min_gap — keep the more
+    important one. Segments keep their kind; energy and strength are measured again."""
+    hires = track.get("hires")
+    if len(segments) < 2 or not hires:
+        return segments
+    beats = np.asarray(CS.beat_grid(track)[0], dtype=float)
+    if len(beats) < 4:
+        return segments
+    beat = float(np.median(np.diff(beats)))
+    bars = np.asarray(CS.bar_lines(track, beats_per_bar), dtype=float)
+    duration = float(track["duration_sec"])
+    gap = max(0.9 * beat, float(min_gap))
+    moved = []
+    for sg in segments[1:]:
+        t = float(sg["start"])
+        b = float(beats[int(np.argmin(np.abs(beats - t)))])
+        if sg.get("cut") in STRUCTURAL_CUTS and len(bars):
+            nb = float(bars[int(np.argmin(np.abs(bars - t)))])
+            if abs(nb - t) <= 1.01 * beat:
+                b = nb
+        moved.append((b, sg))
+    kept = []
+    for b, sg in sorted(moved, key=lambda m: (-_CUT_RANK.get(m[1].get("cut"), 1),
+                                              -float(m[1].get("cut_strength") or 0.0))):
+        if b < gap or duration - b < 0.5 * gap:
+            continue
+        if all(abs(b - k) >= gap for k, _ in kept):
+            kept.append((b, sg))
+    kept.sort(key=lambda m: m[0])
+
+    rate = float(hires["rate"])
+    rms = np.asarray(hires["rms"], dtype=float)
+    onset = np.asarray(hires["onset"], dtype=float)
+    starts = [(0.0, segments[0])] + kept
+    out = []
+    for (s0, sg), nxt in zip(starts, starts[1:] + [(duration, None)]):
+        e0 = nxt[0]
+        a, z = int(round(s0 * rate)), int(round(e0 * rate))
+        out.append({**sg, "start": round(s0, 3), "end": round(min(e0, duration), 3),
+                    "energy": round(float(rms[a:z].mean()), 3) if z > a and len(rms) else sg.get("energy", 0.0),
+                    "cut_strength": (round(float(onset[a]), 3) if 0 <= a < len(onset) and s0 > 0
+                                     else sg.get("cut_strength", 0.0))})
+    return out
 
 
 def _moving_average(values, half_window: int):
@@ -254,6 +314,7 @@ def build_rhythm_engine_segments(
     dynamic_priority_override: bool = False,
     override_delta_thresh: float = 0.15,
     override_clear_secs: float = 1.0,
+    on_beat: bool = False,
 ) -> list:
     """Converts the per-bar cutting states into actual segments, in the same
     {"start","end","energy","cut","cut_strength"} schema build_track_segments
@@ -325,6 +386,8 @@ def build_rhythm_engine_segments(
             "cut": kind,
             "cut_strength": round(strength, 3),
         })
+    if on_beat:   # jump cuts land mid-bar; put them on the nearest beat
+        segments = land_on_beats(track, segments, beats_per_bar)
     return segments
 
 
@@ -338,6 +401,7 @@ def build_track_segments(
     snap_secs: float,
     max_block_secs: float = 0.0,
     beats_per_bar: int = 4,
+    on_beat: bool = False,
 ) -> list[dict]:
     """Tight segmentation on the 30 Hz signals from audio_pipeline.py.
 
@@ -462,6 +526,8 @@ def build_track_segments(
             "cut": kinds[k],
             "cut_strength": round(float(onset[s]), 3),
         })
+    if on_beat:   # 🥁 every cut on the beat (changes and fills on a bar line when one is near)
+        segments = land_on_beats(track, segments, beats_per_bar, min_gap=0.5 * min_block_secs)
     return segments
 
 

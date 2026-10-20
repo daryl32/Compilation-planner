@@ -21,7 +21,8 @@ def test_hits_target_and_reports_truthfully(tid, avg):
     assert abs(r["segments"] - r["target"]) <= max(1, 0.05 * r["target"])
     # the dials it sets really give what it reports
     got = build_track_segments(tr, s["change_window_secs"], s["change_threshold"], s["min_segment_sec"],
-                               s["react_to_hits"], s["hit_threshold"], s["snap_secs"], s["max_segment_sec"], 4)
+                               s["react_to_hits"], s["hit_threshold"], s["snap_secs"], s["max_segment_sec"], 4,
+                               on_beat=s["on_beat"])
     assert len(got) == r["segments"]
     # and fit the sliders
     assert CHANGE_MIN <= s["change_threshold"] <= CHANGE_MAX and HIT_MIN <= s["hit_threshold"] <= HIT_MAX
