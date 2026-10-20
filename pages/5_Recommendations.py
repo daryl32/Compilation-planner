@@ -451,13 +451,23 @@ def feed_gaps(results: dict) -> None:
                    "coming back. Mark more in the Reviewer (🎭 Quick role marking), or add videos that have them.")
     else:
         st.caption("None of the searched tracks has story parts.")
-    st.markdown("**🕳️ Hard-to-match blocks**")
-    if g["blocks"]:
+    st.markdown("**🕳️ Hardest blocks to match**",
+                help="For every block of every searched track: how well the 5th-best video in your library fits "
+                     "it. High = plenty of videos suit it; low = only one or two do, so the same clips keep coming "
+                     "back there. Grouped by how intense and how long the blocks are.")
+    if g["blocks"] and g.get("measure") == "depth":
+        st.caption(f"Library average: the 5th-best video fits a block **{g['average']:.0f}%**.")
         for k in g["blocks"]:
-            st.markdown(f"- **{k['label']}** — best fit anywhere in the library averages **{k['fit']:.0f}%** "
-                        f"({k['blocks']} blocks in {k['tracks']} tracks)")
+            st.markdown(f"- {'🕳️ ' if k['gap'] else ''}**{k['label']}** — the 5th-best video fits **{k['fit']:.0f}%** "
+                        f"({k['vs_avg']:+.0f} vs the average) · {k['blocks']} blocks in {k['tracks']} tracks")
+        if not any(k["gap"] for k in g["blocks"]):
+            st.caption("None stands out — every kind of block has several videos that suit it.")
+    elif g["blocks"]:
+        st.caption("Shown from older searches — tonight's run adds the full picture.")
+        for k in g["blocks"]:
+            st.markdown(f"- **{k['label']}** — best fit **{k['fit']:.0f}%** ({k['blocks']} blocks in {k['tracks']} tracks)")
     else:
-        st.caption(f"Every kind of block has footage that fits it at least {100 * FEEDS.WEAK_FIT:.0f}% on average.")
+        st.caption("Not enough searched blocks yet.")
 
 
 # ---------------------------------------------------------------------------

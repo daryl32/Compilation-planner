@@ -303,8 +303,13 @@ def totals(regions: list, segments: list) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Saved story maps — one per track, in CATALOGUE_DIR/story_maps.json (synced to
-# Drive with the catalogues), so the Media Library and every project see them.
+# Saved story maps — per track in CATALOGUE_DIR/story_maps.json (synced to Drive
+# with the catalogues), so the Media Library, every project, the recommender and
+# the analytics see them:
+#   {track_id: {"default": regions, "named": {name: regions}}}
+# The default is made when the track is analysed (ensure_default) and is what
+# everything uses unless a project picks another; named maps are alternatives
+# kept for later. Older files ({track_id: regions}) read as the default.
 # A project keeps its own copy too (see the planner).
 # ---------------------------------------------------------------------------
 
@@ -313,34 +318,104 @@ def _maps_file():
     return CATALOGUE_DIR / "story_maps.json"
 
 
-def saved_maps() -> dict:
-    """{track_id: regions} for every track with a saved story map."""
+def _read_all() -> dict:
+    """{track_id: {"default": regions or None, "named": {name: regions}}} — older shapes upgraded."""
     try:
         data = json.loads(_maps_file().read_text())
     except (FileNotFoundError, ValueError, OSError):
         return {}
-    return {k: v for k, v in data.items() if isinstance(v, list) and v} if isinstance(data, dict) else {}
+    out = {}
+    for tid, v in (data.items() if isinstance(data, dict) else []):
+        if isinstance(v, list):
+            out[tid] = {"default": v or None, "named": {}}
+        elif isinstance(v, dict):
+            named = {str(n): r for n, r in (v.get("named") or {}).items() if isinstance(r, list) and r}
+            default = v.get("default") if isinstance(v.get("default"), list) and v.get("default") else None
+            out[tid] = {"default": default, "named": named}
+    return out
 
 
-def saved_map(track_id: str):
-    return saved_maps().get(track_id)
-
-
-def save_map(track_id: str, regions) -> None:
-    """Save (or with regions None / empty, remove) a track's story map."""
+def _write_all(maps: dict) -> None:
     from library_common import mark_pending
-    maps = saved_maps()
-    if regions:
-        if maps.get(track_id) == regions:
-            return
-        maps[track_id] = regions
-    elif track_id in maps:
-        maps.pop(track_id)
-    else:
-        return
+    clean = {tid: {"default": m.get("default"), "named": m.get("named") or {}}
+             for tid, m in maps.items() if m.get("default") or m.get("named")}
     path = _maps_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(maps, indent=1))
+    tmp.write_text(json.dumps(clean, indent=1))
     os.replace(tmp, path)
     mark_pending(path.stem)
+
+
+def saved_maps() -> dict:
+    """{track_id: default regions} for every track with a default story map."""
+    return {tid: m["default"] for tid, m in _read_all().items() if m.get("default")}
+
+
+def saved_map(track_id: str):
+    """The track's default story map, or None."""
+    return (_read_all().get(track_id) or {}).get("default")
+
+
+def track_maps(track_id: str) -> dict:
+    """{"default": regions or None, "named": {name: regions}} for one track."""
+    m = _read_all().get(track_id) or {}
+    return {"default": m.get("default"), "named": dict(m.get("named") or {})}
+
+
+def save_map(track_id: str, regions) -> None:
+    """Save (or with regions None / empty, remove) a track's DEFAULT story map. Named maps are kept."""
+    maps = _read_all()
+    m = maps.setdefault(track_id, {"default": None, "named": {}})
+    if (m.get("default") or None) == (regions or None):
+        return
+    m["default"] = regions or None
+    _write_all(maps)
+
+
+def save_named(track_id: str, name: str, regions) -> None:
+    """Save a named story map for the track (replacing one of the same name)."""
+    name = " ".join(str(name).split())
+    if not name or not regions:
+        raise ValueError("A named map needs a name and at least one part.")
+    maps = _read_all()
+    maps.setdefault(track_id, {"default": None, "named": {}})["named"][name] = regions
+    _write_all(maps)
+
+
+def delete_named(track_id: str, name: str) -> None:
+    maps = _read_all()
+    if name in ((maps.get(track_id) or {}).get("named") or {}):
+        maps[track_id]["named"].pop(name)
+        _write_all(maps)
+
+
+def suggested_map(track: dict, beats_per_bar: int = 4) -> list:
+    """The suggestion for a track, lined up with the 🧠 Smart method's default cuts (as the Media Library's
+    ✨ Suggest and the planner's do). Needs SM's analysis; raises on a track it can't read."""
+    from scene_roles import all_roles
+    segs = SM.build_smart_segments(track, {"beats_per_bar": beats_per_bar})
+    cuts = [sg["start"] for sg in segs] + [float(track["duration_sec"])]
+    return snap(suggest(analyse(track, beats_per_bar), all_roles()), cuts)
+
+
+def ensure_default(track_id: str, track: dict = None) -> bool:
+    """Give the track a default story map from the suggestion if it hasn't one (when it's analysed, and
+    once for tracks analysed before this). Returns True if one was made. Leaves a track the suggestion
+    can't read — or one with nothing worth a role — without."""
+    if saved_map(track_id):
+        return False
+    if track is None:
+        from config import AUDIO_DIR
+        try:
+            track = json.loads((AUDIO_DIR / f"{track_id}.json").read_text())
+        except (OSError, ValueError):
+            return False
+    try:
+        regions = suggested_map(track)
+    except Exception:
+        return False
+    if not any(r.get("role") for r in regions):
+        return False
+    save_map(track_id, regions)
+    return True

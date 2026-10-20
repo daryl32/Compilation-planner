@@ -596,8 +596,9 @@ def _render_upgrade(aa, tracks: dict) -> None:
 
 
 def render_audio():
-    if st.session_state.pop("_switch_to_planner", False):
-        st.switch_page("pages/1_Compilation_Planner.py")
+    if st.session_state.get(SM_EDIT):
+        render_story_editor()
+        return
     tracks = load_audio_library(_audio_signature())
     _, track_use = render_usage()
     render_analysis_panel(tracks)
@@ -705,19 +706,19 @@ def render_audio():
                     st.rerun()
 
             sc = st.columns([1, 1, 3])
-            if tid in _maps:
-                sc[0].button("🎭 Edit story map", key=f"aud_story_edit_{tid}", on_click=_open_story_in_planner,
-                             args=(tid,), use_container_width=True,
-                             help="Opens this track's 🎭 Story map step in the Compilation Planner.")
-            else:
-                sc[0].button("✨ Suggest story map", key=f"aud_story_new_{tid}", on_click=_suggest_story_map,
+            sc[0].button("🎭 Edit story map" if tid in _maps else "🎭 Make a story map", key=f"aud_story_edit_{tid}",
+                         on_click=_open_story_editor, args=(tid,), use_container_width=True,
+                         help="Edit this track's story maps here — the default (used by new projects, the "
+                              "recommender and the analytics) and any named ones.")
+            if tid not in _maps:
+                sc[1].button("✨ Suggest one", key=f"aud_story_new_{tid}", on_click=_suggest_story_map,
                              args=(tid,), use_container_width=True, disabled=not t["extra"],
-                             help="Marks out which parts of the song suit 🎬 Intro, 🌙 Slow, 💥 Action and "
-                                  "🏁 Outro from its analysis — then 🎭 Edit to adjust it in the planner."
+                             help="Saves the suggestion straight away as the track's default map: which parts of "
+                                  "the song suit 🎬 Intro, 🌙 Slow, 💥 Action and 🏁 Outro."
                              if t["extra"] else "Needs the extra analysis (panel above) first.")
             _sm_msg = st.session_state.pop(f"aud_story_msg_{tid}", None)
             if _sm_msg is True:
-                sc[2].success("✨ Story map suggested — 🎭 Edit to check and adjust it.")
+                sc[2].success("✨ Story map suggested — 🎭 Edit story map to check and adjust it.")
             elif _sm_msg:
                 sc[2].error(_sm_msg)
 
@@ -752,8 +753,6 @@ def _story_strip(track_id: str, regions, duration: float) -> None:
 def _suggest_story_map(track_id: str) -> None:
     """✨ Suggest: the same suggestion as the planner's Story map step, lined up with
     the Smart method's default cuts, saved as the track's story map."""
-    import scene_roles as SR
-    import smart_cuts as SM
     import story_map as STM
     path = AUDIO_DIR / f"{track_id}.json"
     try:
@@ -761,17 +760,188 @@ def _suggest_story_map(track_id: str) -> None:
     except (OSError, ValueError) as e:
         st.session_state[f"aud_story_msg_{track_id}"] = f"Couldn't read this track: {e}"
         return
-    segs = SM.build_smart_segments(track, {"beats_per_bar": 4})
-    cuts = [sg["start"] for sg in segs] + [float(track["duration_sec"])]
-    regions = STM.snap(STM.suggest(STM.analyse(track, 4), SR.all_roles()), cuts)
-    STM.save_map(track_id, regions)
+    STM.save_map(track_id, STM.suggested_map(track))
     st.session_state[f"aud_story_msg_{track_id}"] = True
 
 
-def _open_story_in_planner(track_id: str) -> None:
-    """Hand-off to the planner: open this track on the 🎭 Story map step."""
-    st.session_state["_open_story_for"] = track_id
-    st.session_state["_switch_to_planner"] = True
+# ---------------------------------------------------------------------------
+# 🎭 Story map editor (full page) — the track's saved maps, edited here
+# ---------------------------------------------------------------------------
+SM_EDIT = "aud_sm_edit"   # {"track_id", "target": "default" | "named:<name>", "regions", "v", "dirty"}
+
+
+def _sm_state() -> dict:
+    return st.session_state.get(SM_EDIT) or {}
+
+
+def _sm_load(track_id: str, target: str) -> None:
+    import story_map as STM
+    maps = STM.track_maps(track_id)
+    regions = maps["default"] if target == "default" else maps["named"].get(target[6:])
+    old = _sm_state()
+    st.session_state[SM_EDIT] = {"track_id": track_id, "target": target, "regions": regions or None,
+                                 "v": int(old.get("v", 0)) + 1, "dirty": False}
+    for k in ("aud_sm_play", "aud_sm_focus"):
+        st.session_state.pop(k, None)
+
+
+def _open_story_editor(track_id: str) -> None:
+    _sm_load(track_id, "default")
+
+
+def _close_story_editor() -> None:
+    for k in (SM_EDIT, "aud_sm_play", "aud_sm_focus", "aud_sm_msg"):
+        st.session_state.pop(k, None)
+
+
+def _sm_set(regions: list) -> None:
+    sm = _sm_state()
+    st.session_state[SM_EDIT] = {**sm, "regions": regions, "v": int(sm.get("v", 0)) + 1, "dirty": True}
+    st.session_state.pop("aud_sm_play", None)
+
+
+def _sm_target_name(target: str) -> str:
+    return "the track's default map" if target == "default" else f"“{target[6:]}”"
+
+
+def _sm_save() -> None:
+    import story_map as STM
+    sm = _sm_state()
+    if sm["target"] == "default":
+        STM.save_map(sm["track_id"], sm["regions"])
+    else:
+        STM.save_named(sm["track_id"], sm["target"][6:], sm["regions"])
+    st.session_state[SM_EDIT] = {**sm, "dirty": False}
+    st.session_state["aud_sm_msg"] = f"💾 Saved {_sm_target_name(sm['target'])}."
+
+
+def _sm_save_as(name_key: str) -> None:
+    import story_map as STM
+    name = " ".join(str(st.session_state.get(name_key) or "").split())
+    if not name:
+        st.session_state["aud_sm_msg"] = "Give the new map a name first."
+        return
+    sm = _sm_state()
+    STM.save_named(sm["track_id"], name, sm["regions"])
+    st.session_state[SM_EDIT] = {**sm, "target": f"named:{name}", "dirty": False, "v": int(sm.get("v", 0)) + 1}
+    st.session_state[name_key] = ""
+    st.session_state["aud_sm_msg"] = f"📁 Saved as “{name}” — projects on this track can pick it."
+
+
+def _sm_make_default() -> None:
+    import story_map as STM
+    sm = _sm_state()
+    STM.save_map(sm["track_id"], sm["regions"])
+    st.session_state["aud_sm_msg"] = f"⭐ {_sm_target_name(sm['target'])} is now the track's default map too."
+
+
+def _sm_delete() -> None:
+    import story_map as STM
+    sm = _sm_state()
+    STM.delete_named(sm["track_id"], sm["target"][6:])
+    st.session_state["aud_sm_msg"] = f"🗑️ Deleted {_sm_target_name(sm['target'])}."
+    _sm_load(sm["track_id"], "default")
+
+
+@st.cache_data(max_entries=4, show_spinner="Reading the song's structure…")
+def _sm_track_bits(track_id: str, mtime: float):
+    """(track, 🧠 Smart default cuts, the suggestion's analysis) — the same cuts the ✨ suggestion lines up with."""
+    import smart_cuts as SMC
+    import story_map as STM
+    track = _load_track(track_id, mtime)
+    try:
+        analysis = STM.analyse(track, 4)
+    except Exception:          # a track the suggestion can't read — you can still mark it out by hand
+        analysis = None
+    return track, SMC.build_smart_segments(track, {"beats_per_bar": 4}), analysis
+
+
+def _sm_play(track: dict, r: dict, lead: bool, key: str) -> None:
+    """▶ on a part: cut that stretch of the song and play it (download the track first if it isn't here)."""
+    from render_preview import colab_to_local
+    import preview_snippets
+    path = Path(colab_to_local(track.get("source_path", "")))
+    if not path.exists():
+        _render_audio_player(st.session_state[SM_EDIT]["track_id"], track.get("source_path", ""))
+        return
+    with st.spinner("Cutting the music…"):
+        clip, err = preview_snippets.make_audio_snippet(PREVIEW_DIR / "snippets", path, r["start"],
+                                                        r["end"] - r["start"], lead_in=2.0 if lead else 0.0)
+    if err:
+        st.error(f"Couldn't cut the music: {err}")
+    else:
+        st.audio(str(clip), autoplay=True)
+
+
+def render_story_editor() -> None:
+    """The full-page editor: replaces the track list until ← Back to tracks."""
+    import story_map as STM
+    import story_map_editor as SME
+    sm = _sm_state()
+    tid = sm["track_id"]
+    try:
+        track, segs, analysis = _sm_track_bits(tid, (AUDIO_DIR / f"{tid}.json").stat().st_mtime)
+    except (OSError, ValueError) as e:
+        st.error(f"Couldn't read {tid}: {e}")
+        st.button("← Back to tracks", on_click=_close_story_editor, key="aud_sm_back_err")
+        return
+    dirty = sm.get("dirty")
+    top = st.columns([1.8, 5])
+    top[0].button("← Back to tracks" if not dirty else "← Back without saving", key="aud_sm_back",
+                  use_container_width=True, on_click=_close_story_editor,
+                  help="Unsaved changes are dropped." if dirty else None)
+    top[1].subheader(f"🎭 Story map — {tid}")
+
+    maps = STM.track_maps(tid)
+    opts = ["default"] + [f"named:{n}" for n in sorted(maps["named"], key=str.lower)]
+    if sm["target"] not in opts:
+        opts.append(sm["target"])
+    with st.container(border=True):
+        c = st.columns([3, 4])
+        pk = f"aud_sm_pick_{sm.get('v', 0)}"
+        c[0].selectbox("🗺️ Editing", opts, index=opts.index(sm["target"]), key=pk, disabled=dirty,
+                       format_func=lambda o: ("⭐ Track default" + ("" if maps["default"] else " (none yet)"))
+                       if o == "default" else f"📁 {o[6:]}",
+                       on_change=lambda: _sm_load(tid, st.session_state[pk]),
+                       help="Save or undo your changes before switching maps." if dirty else
+                            "The default is what new projects, the recommender and the analytics use. Named maps "
+                            "are alternatives a project can pick.")
+        with c[1]:
+            msg = st.session_state.pop("aud_sm_msg", None)
+            if msg:
+                (st.warning if msg.startswith("Give") else st.success)(msg)
+            if dirty:
+                st.caption(f"✏️ Unsaved changes to {_sm_target_name(sm['target'])}")
+                bc = st.columns(3)
+                bc[0].button("💾 Save", key="aud_sm_save", type="primary", use_container_width=True,
+                             on_click=_sm_save)
+                with bc[1].popover("📁 Save as…", use_container_width=True):
+                    nk = f"aud_sm_new_{sm.get('v', 0)}"
+                    st.text_input("Name", key=nk, placeholder="e.g. Long intro")
+                    st.button("📁 Save", key=f"{nk}_go", type="primary", on_click=_sm_save_as, args=(nk,))
+                bc[2].button("↩️ Undo", key="aud_sm_undo", use_container_width=True,
+                             on_click=_sm_load, args=(tid, sm["target"]))
+            elif sm["target"] != "default" and sm.get("regions"):
+                bc = st.columns(2)
+                bc[0].button("⭐ Make this the default", key="aud_sm_mkdef", use_container_width=True,
+                             on_click=_sm_make_default,
+                             help="Copies this map over the track's default map.")
+                bc[1].button("🗑️ Delete this map", key="aud_sm_del", use_container_width=True,
+                             on_click=_sm_delete)
+            elif sm.get("regions"):
+                st.caption("Changes are only kept when you 💾 Save.")
+
+    duration = float(track["duration_sec"])
+    if not sm.get("regions"):
+        SME.render_empty(duration, analysis, [sg["start"] for sg in segs] + [duration], set_regions=_sm_set,
+                         ns="aud_sm", note="Lined up with the 🧠 Smart method's normal cuts.")
+        return
+    st.caption("Block lines are the 🧠 Smart method's normal cuts. A project with other audio settings keeps "
+               "the parts where they are in seconds (📐 in the planner lines them up with its own cuts).")
+    SME.render_editor(track, segs, ns="aud_sm", get_regions=lambda: _sm_state().get("regions"),
+                      set_regions=_sm_set, version=int(sm.get("v", 0)), analysis=analysis,
+                      play=lambda r, lead, key: _sm_play(track, r, lead, key))
+
 
 
 @st.cache_data(max_entries=3, show_spinner=False)

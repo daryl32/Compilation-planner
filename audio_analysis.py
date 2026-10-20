@@ -893,6 +893,13 @@ def run_worker() -> None:
                 with heavy_slot("audio analysis", on_wait=lambda _h: say("waiting for a recommendation search "
                                                                          "to finish its track")):
                     _process(job, say)
+                # 🎭 A new (or newly analysed) track gets its default story map from the suggestion.
+                try:
+                    import story_map as STM
+                    if STM.ensure_default(tid):
+                        say("default story map made")
+                except Exception:
+                    traceback.print_exc()
                 state, msg = "done", "finished"
             except _Stopped:
                 st = _read_json(p["status"], {})

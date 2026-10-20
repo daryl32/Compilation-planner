@@ -97,6 +97,8 @@ def test_edits_reach_matching_export_and_project_file():
     for v in VIDEOS:
         state[f"select_video_{v}"] = True
     _run(at, **state)
+    from tests.apptest_util import press_match
+    press_match(at)
     [b for b in at.button if b.label == "💾 Save plan"][0].click().run()
     plan = json.loads((DATA / "compilation_plans" / "song_full_plan.json").read_text())
     assert [b["track_time"][0] for b in plan["timeline"]] == [0.0, 10.0, 20.0, 30.0, 40.0]
