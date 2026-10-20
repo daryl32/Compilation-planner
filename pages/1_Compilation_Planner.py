@@ -2466,9 +2466,10 @@ def render_story_map_picker(track_id: str) -> None:
                     nk = f"sm_new_name_{sm.get('v', 0)}"
                     st.text_input("Name", key=nk, placeholder="e.g. Long intro")
                     st.button("📁 Save", key=f"{nk}_go", on_click=_story_save_named, args=(nk,), type="primary")
-                    if sm.get("from", "").startswith("named:"):
-                        st.button(f"💾 Update “{sm['from'][6:]}” instead", key=f"{nk}_upd",
-                                  on_click=_story_update_named, args=(sm["from"][6:],))
+                    came_from = sm.get("from") or ""          # None for maps from a suggestion / older projects
+                    if came_from.startswith("named:"):
+                        st.button(f"💾 Update “{came_from[6:]}” instead", key=f"{nk}_upd",
+                                  on_click=_story_update_named, args=(came_from[6:],))
             else:
                 st.caption("Using the track's " + ("default map." if src == "default" else f"map “{src[6:]}”.")
                            + " Any change you make stays with this project until you save it.")

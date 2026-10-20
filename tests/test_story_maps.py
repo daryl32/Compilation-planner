@@ -87,3 +87,20 @@ def test_planner_edits_stay_in_the_project_until_saved(clean_maps):
     assert not errors(at), errors(at)
     assert STM.saved_map("song_full") == at.session_state["story_map"]["regions"]
     assert at.session_state["story_map"]["source"] == "default"
+
+
+def test_edit_a_map_that_came_from_nowhere(clean_maps):
+    """A map with no saved origin ("from": None — a fresh suggestion, or a project from before named maps)
+    can be edited without an error (20 Oct: AttributeError 'NoneType' … 'startswith')."""
+    from tests.apptest_util import errors
+    from tests.apptest_util import page_app
+    at = page_app(PLANNER)
+    at.session_state["track_id"] = "song_full"
+    at.session_state["ui_section"] = "🎭 1. Story map"
+    at.session_state["story_map"] = {"track_id": "song_full", "regions": R1, "v": 1, "edited": True,
+                                     "source": "project", "from": None}
+    at.run()
+    assert not errors(at), errors(at)
+    [b for b in at.button if b.label == "🧹 Clear the map"][0].click().run()
+    assert not errors(at), errors(at)
+    assert any(b.label == "📁 Save" for b in at.button)
