@@ -147,7 +147,7 @@ def _metrics(sc: dict, keys: list, about: str = "", about_help: str = "") -> Non
 
 
 def _videos_row(videos: list, small: bool = False) -> None:
-    cols = st.columns(max(len(videos), 6 if small else 5))
+    cols = st.columns(max(len(videos), 6) if small else (min(len(videos), 8) or 1))
     for c, vid in zip(cols * 2, videos):
         with c:
             t = _thumb(vid)
