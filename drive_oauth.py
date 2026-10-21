@@ -42,6 +42,11 @@ TOKEN_URL  = "https://oauth2.googleapis.com/token"
 SESSION_KEY = "_drive_oauth_token"
 
 
+# Google Drive sometimes answers a request with a passing "500 Unknown Error" (or 429 / 503).
+# Reads and in-place updates are tried again up to this many times, waiting a little longer
+# each time (googleapiclient's own back-off); creating a file isn't, so it can't be made twice.
+DRIVE_RETRIES = 4
+
 def get_auth_url(state: str = "") -> str:
     """Generate the Google OAuth authorisation URL."""
     params = {
@@ -122,7 +127,7 @@ def _find_or_create_folder(service, name: str, parent_id: str = None) -> str:
     q = f"name='{q_escape(name)}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
     if parent_id:
         q += f" and '{parent_id}' in parents"
-    resp = service.files().list(q=q, fields="files(id)").execute()
+    resp = service.files().list(q=q, fields="files(id)").execute(num_retries=DRIVE_RETRIES)
     files = resp.get("files", [])
     if files:
         return files[0]["id"]
@@ -174,14 +179,14 @@ def _upload_via_lookup(service, sa, local_path: Path, parts: list, mime_type: st
     resp = sa.files().list(
         q=f"name='{q_escape(local_path.name)}' and '{parent_id}' in parents and trashed=false",
         fields="files(id, modifiedTime)", orderBy="modifiedTime desc",
-    ).execute()
+    ).execute(num_retries=DRIVE_RETRIES)
     existing = resp.get("files", [])
     if existing:
         file_id = existing[0]["id"]
         for client in (service, sa):
             try:
                 media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
-                return client.files().update(fileId=file_id, media_body=media, fields="id, size").execute()
+                return client.files().update(fileId=file_id, media_body=media, fields="id, size").execute(num_retries=DRIVE_RETRIES)
             except Exception as e:
                 if not any(x in str(e) for x in ("404", "403", "notFound", "insufficient")):
                     raise
@@ -219,11 +224,11 @@ def upload_file_with_oauth(token_dict: dict, local_path: Path, drive_path: str) 
                 parent_id = _find_or_create_folder(service, part, parent_id)
             from drive_sync import q_escape
             q = f"name='{q_escape(local_path.name)}' and '{parent_id}' in parents and trashed=false"
-            existing = service.files().list(q=q, fields="files(id)").execute().get("files", [])
+            existing = service.files().list(q=q, fields="files(id)").execute(num_retries=DRIVE_RETRIES).get("files", [])
             media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
             if existing:
                 f = service.files().update(fileId=existing[0]["id"], media_body=media,
-                                           fields="id, size").execute()
+                                           fields="id, size").execute(num_retries=DRIVE_RETRIES)
             else:
                 f = service.files().create(body={"name": local_path.name, "parents": [parent_id]},
                                            media_body=media, fields="id, size").execute()
@@ -258,7 +263,7 @@ def trash_file_with_oauth(token_dict: dict, file_id: str) -> str | None:
     if token_expired(token_dict):
         return EXPIRED_MESSAGE
     try:
-        _get_service(token_dict).files().update(fileId=file_id, body={"trashed": True}).execute()
+        _get_service(token_dict).files().update(fileId=file_id, body={"trashed": True}).execute(num_retries=DRIVE_RETRIES)
         return None
     except Exception as e:
         if "404" in str(e) or "notFound" in str(e):
@@ -316,7 +321,7 @@ def _names_in(client, folder_id: str) -> dict:
         resp = client.files().list(
             q=f"'{folder_id}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'",
             fields="nextPageToken, files(id, name, modifiedTime)", orderBy="modifiedTime desc",
-            pageSize=1000, pageToken=page_token).execute()
+            pageSize=1000, pageToken=page_token).execute(num_retries=DRIVE_RETRIES)
         for f in resp.get("files", []):
             out.setdefault(f["name"], f["id"])
         page_token = resp.get("nextPageToken")
@@ -395,7 +400,7 @@ def upload_many(token_dict: dict, items: list, progress=None, workers: int = 6) 
                     continue
                 try:
                     media = MediaFileUpload(str(path), mimetype=mime, resumable=resumable)
-                    return client.files().update(fileId=file_id, media_body=media, fields="id").execute()
+                    return client.files().update(fileId=file_id, media_body=media, fields="id").execute(num_retries=DRIVE_RETRIES)
                 except Exception as e:
                     last = e
                     if not any(x in str(e) for x in ("404", "403", "notFound", "insufficient")):

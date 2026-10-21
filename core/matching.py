@@ -13,6 +13,7 @@ No Streamlit in here.
 
 from __future__ import annotations
 
+import hashlib
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +48,8 @@ class PlanContext:
     role_chips: Callable = lambda _c: ""         # how a clip's roles are written in labels
     planned_sequential: bool = False             # in-order Auto: plan each video's path in one go (core/sequential.py)
     plan_within_scenes: bool = False             # …with every clip inside one scene (📍 planned path, step modes)
+    shape_memo: dict | None = None               # ⚡ a dict to reuse shape-window scores across matcher runs on the
+                                                 # same library (recommendation searches); None = off
 
 
 def _skip_budget(c: PlanContext, available_windows, remaining_blocks, weight_position, n_videos=1) -> int:
@@ -169,6 +172,12 @@ def find_shape_candidates(
 
     search_spans = get_candidate_spans(queues, sequential, global_excluded, min_duration=block_duration)
     audio_ready = prepare_audio(audio_curve)    # the block's music curve, resampled once for every span
+    # ⚡ The same block searched again over the same footage gives the same best window — a
+    # recommendation search runs the matcher ~25 times on overlapping videos, so it passes a
+    # memo (PlanContext.shape_memo). Keyed on the block's exact music curve, the scene and the
+    # frame range searched; only when no position bias is in play.
+    audio_key = (hashlib.sha1(np.ascontiguousarray(audio_curve, dtype=float).tobytes()).hexdigest()
+                 if pctx.shape_memo is not None else None)
     span_limit = {}   # (video, scene) -> seconds of this span the search may reach (restrict_to_front)
     if restrict_to_front and sequential:
         # The skip budget counts windows across the WHOLE video (not just its front
@@ -249,9 +258,16 @@ def find_shape_candidates(
         # Vectorized: scores every frame position in the search range at once (see
         # find_best_shape_window), not just every SHAPE_SEARCH_STEP_SEC —
         # faster AND exhaustive rather than a speed/precision compromise.
-        best_score, best_offset = find_best_shape_window(
-            values[span_start_frame:search_end_frame], window_frames, audio_ready, bias=bias
-        )
+        memo = pctx.shape_memo if bias is None else None
+        mkey = (span["video_id"], span["scene_id"], fps, len(values), span_start_frame, search_end_frame,
+                window_frames, audio_key) if memo is not None else None
+        hit = memo.get(mkey) if memo is not None else None
+        if hit is None:
+            hit = find_best_shape_window(values[span_start_frame:search_end_frame], window_frames, audio_ready,
+                                         bias=bias)
+            if memo is not None:
+                memo[mkey] = hit
+        best_score, best_offset = hit
         best_start_frame = span_start_frame + best_offset
         # Frame rounding can put the window a fraction outside the span; keep it inside.
         win_start = min(max(best_start_frame / fps, span["offset_sec"]),

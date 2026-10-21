@@ -441,9 +441,9 @@ MODE_HELP = {m[0]: m[2] for m in MODES}
 # from the other styles (normal pace); 🎲 Wildcard rolls any style and pace.
 TOP_STYLE = ("smart", 0)
 VARIANTS = [TOP_STYLE, ("cinematic", 0), ("beat", 0), ("energy", 0), ("drop", 0), ("vocal", 0), ("hyper", 0)]
-CHECKS = {"shape": 4, "story": 4, "overall": 5}
+CHECKS = {"shape": 3, "story": 2, "overall": 3}   # ⚡ trimmed 21 Oct 2026 from 4/4/5 (shape kept at 3: at 2 it lost ~1.4 pts)
 DEPTH_RANK = 5                                    # 🕳️ Gaps: a block's depth = the 5th-best video's fit   # leading candidates run through the real matcher
-SWAP_BUDGET = 10                                  # Best overall: one-video swaps tried on the best plan
+SWAP_BUDGET = 4                                   # Best overall: one-video swaps tried on the best plan (was 10)
 VERSES_SEEDS = 3                                  # Verses: top picks tried
 VERSES_POOL = 5                                   # Verses: similar videos (different actors) per top pick
 
