@@ -289,7 +289,6 @@ def test_mix_page_extend_auto_preview(mixlib):
     at.button(key="mxe_preview").click().run()
     assert not errors(at), errors(at)
     assert at.get("audio"), "no preview player"
-    assert any(b.label.startswith(("🟢", "🟠", "🔴", "⚪")) for b in at.button)     # listen-to-join buttons
     # by sections: play the 2nd section twice
     at.radio(key="mxe_method").set_value("✋ By sections").run()
     at.number_input(key="mxe_cnt_mix_song_c_1").set_value(2).run()
@@ -582,3 +581,86 @@ def test_render_long_blend_plays_both_songs_together(mixlib):
     mid = int((jn["at"] - jn["pre"] / 2) * sr)                  # in the middle of it: C plus A
     r = np.corrcoef(y[mid:mid + sr // 2, 0], c[mid:mid + sr // 2, 0])[0, 1]
     assert 0.3 < r < 0.95
+
+
+# ---------------------------------------------------------------------------
+# 🖐 Crossfades dragged on the timeline, 🎛️ bass swap
+# ---------------------------------------------------------------------------
+
+def test_layout_dragged_split_and_bass_swap_point():
+    g = _grid()                                   # 120 BPM: a beat is 0.5 s, a bar 2 s
+    pieces = [{"track": "x", "start": 0.0, "end": 32.0, "uid": "p1"},
+              {"track": "y", "start": 16.0, "end": 48.0, "uid": "p2",
+               "xfade": {"beats": 8.0, "where": 0.75, "bass_swap": True}}]
+    jn = MX.layout({"bpm": 120.0, "pieces": pieces}, {"x": g, "y": g})["joins"][0]
+    assert jn["pre"] == pytest.approx(3.0) and jn["post"] == pytest.approx(1.0)     # 6 beats before, 2 after
+    assert jn["bass_swap"] and jn["swap_at"] == pytest.approx(jn["at"] - 1.0)        # the beat in the middle
+    assert MX.where_from_frac(0.5) == "centre" and MX.where_from_frac(1.0) == "before"
+    assert MX.where_from_frac(0.75) == 0.75 and MX.where_frac(0.75) == 0.75 and MX.where_frac("after") == 0.0
+    # centred on the bar line: the swap is on the line; too short a fade: no swap
+    pieces[1]["xfade"] = {"beats": 8.0, "bass_swap": True}
+    jn = MX.layout({"bpm": 120.0, "pieces": pieces}, {"x": g, "y": g})["joins"][0]
+    assert jn["swap_at"] == pytest.approx(jn["at"])
+    pieces[1]["xfade"] = {"beats": 0.5, "bass_swap": True}
+    assert not MX.layout({"bpm": 120.0, "pieces": pieces}, {"x": g, "y": g})["joins"][0]["bass_swap"]
+
+
+def test_bass_swap_fade_keeps_one_low_end_and_the_highs_crossfading():
+    """_fade_region: with bass swap the low band is full then gone (outgoing) / gone then full
+    (incoming) around the swap point, the highs follow the ramp, and nothing else changes."""
+    import mixer
+    sr = mixer.SR
+    n = 4 * sr
+    t = np.arange(n) / sr
+    lowtone = (0.5 * np.sin(2 * np.pi * 55 * t)).astype(np.float32)
+    hightone = (0.5 * np.sin(2 * np.pi * 2000 * t)).astype(np.float32)
+    jn = {"bass_swap": True, "swap_at": 2.0}
+    ramp = mixer._ramp(n, True, False)
+
+    def level(y, a, b, hz):
+        seg = y[int(a * sr):int(b * sr), 0]
+        ref = np.sin(2 * np.pi * hz * t[int(a * sr):int(b * sr)])
+        return abs(float(np.dot(seg, ref)) * 2 / len(seg))
+
+    out = np.stack([lowtone + hightone] * 2, axis=1)
+    mixer._fade_region(out, ramp, jn, 0.0, 120.0, outgoing=True)
+    assert level(out, 1.0, 1.8, 55) > 0.45                      # bass full until the swap…
+    assert level(out, 2.3, 3.5, 55) < 0.03                      # …then gone
+    assert 0.2 < level(out, 1.4, 1.6, 2000) < 0.45              # the highs are fading as usual
+    inc = np.stack([lowtone + hightone] * 2, axis=1)
+    mixer._fade_region(inc, mixer._ramp(n, True, True), jn, 0.0, 120.0, outgoing=False)
+    assert level(inc, 0.5, 1.7, 55) < 0.03 and level(inc, 2.3, 3.5, 55) > 0.45
+    plain = np.stack([lowtone + hightone] * 2, axis=1)
+    mixer._fade_region(plain, ramp, {"bass_swap": False}, 0.0, 120.0, outgoing=True)
+    assert np.allclose(plain[:, 0], (lowtone + hightone) * ramp, atol=1e-6)
+
+
+def test_render_with_bass_swap(mixlib):
+    import mixer
+    t = mixlib["tracks"]
+    gc, ga = MX.grid(t["mix_song_c"]), MX.grid(t["mix_song_a"])
+    rec = {"bpm": 120.0, "level_match": False, "fade_out": 0.0,
+           "pieces": [{"track": "mix_song_c", "start": 0.0, "end": MX.snap_to_bar(gc, 32.0), "uid": "p1"},
+                      {"track": "mix_song_a", "start": MX.snap_to_bar(ga, 16.0), "end": MX.snap_to_bar(ga, 40.0),
+                       "uid": "p2", "xfade": {"beats": 8.0, "bass_swap": True}}]}
+    info = mixer.render(rec, {k: t[k] for k in ("mix_song_c", "mix_song_a")}, mixlib["root"] / "bass.m4a")
+    jn = info["layout"]["joins"][0]
+    assert jn["bass_swap"] and jn["swap_at"] == pytest.approx(jn["at"], abs=0.01)
+    assert info["duration"] > 0
+
+
+def test_timeline_drag_sets_the_join(monkeypatch):
+    import mix_ui
+    state = {}
+    monkeypatch.setattr(mix_ui.st, "session_state", state)
+    parts = [{"uid": "a", "track": "x"}, {"uid": "b", "track": "y", "xfade": {"shape": "linear", "bass_swap": True}}]
+    state["mxm_tl"] = {"uid": "b", "pre_beats": 6, "post_beats": 2, "nonce": 1}
+    mix_ui._apply_timeline_drag(parts)
+    assert parts[1]["xfade"] == {"shape": "linear", "bass_swap": True, "beats": 8.0, "where": 0.75}
+    assert state["mxm_xfl_b"] == "2 bars" and state["mxm_xfw_b"] == 0.75
+    parts[1]["xfade"]["beats"] = 1.0                     # the same nonce again: nothing changes
+    mix_ui._apply_timeline_drag(parts)
+    assert parts[1]["xfade"]["beats"] == 1.0
+    state["mxm_tl"] = {"uid": "b", "pre_beats": 0, "post_beats": 5, "nonce": 2}
+    mix_ui._apply_timeline_drag(parts)
+    assert parts[1]["xfade"]["where"] == "after" and state["mxm_xfl_b"] == "🖐 5 beats"

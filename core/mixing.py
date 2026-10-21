@@ -17,7 +17,9 @@ all stretched to one tempo.
         "bpm": target BPM or None (None = every piece at its own tempo),
         "shift": {tid: semitones},          # 🎹 pitch shift per track (key matching)
         "xfade_same": beats, "xfade_other": beats,   # default crossfade at joins; a piece's own
-                                            # "xfade": {"beats", "where", "shape"} sets the join into it
+                                            # "xfade": {"beats", "where", "shape", "bass_swap"} sets the
+                                            # join into it ("where": a XF_WHERE name, or the share of
+                                            # the fade before the bar line, 0–1, as dragged on the graph)
         "fade_in": sec, "fade_out": sec, "level_match": True,
         "settings": {…},                    # what the Mix screen needs to reopen it
     }
@@ -45,6 +47,27 @@ EDGE_BARS = 2                # never jump inside the first / last bars
 # one and has taken over by the line; "after" = this one carries on under the start of the next.
 XF_WHERE = {"centre": 0.5, "before": 1.0, "after": 0.0}
 XF_SHAPES = ("smooth", "linear")   # equal power (different songs) / straight (the same audio)
+# 🎛️ Bass swap: during a crossfade only one song's low end plays — the outgoing one's until the
+# swap point (the beat nearest the middle of the fade), then the incoming one's — so two bass
+# lines never pile up into mud. Everything above BASS_HZ fades as usual.
+BASS_HZ = 180.0
+BASS_SWAP_BEATS = 0.25      # how quickly the low end changes hands at the swap point
+
+
+def where_frac(where) -> float:
+    """The share of a crossfade before the bar line: a XF_WHERE name or a number 0–1."""
+    if isinstance(where, (int, float)) and not isinstance(where, bool):
+        return float(min(max(where, 0.0), 1.0))
+    return XF_WHERE.get(where, 0.5)
+
+
+def where_from_frac(frac: float):
+    """A dragged split back to a XF_WHERE name when it is one, else the number (3 places)."""
+    frac = round(float(min(max(frac, 0.0), 1.0)), 3)
+    for name, f in XF_WHERE.items():
+        if abs(f - frac) < 1e-3:
+            return name
+    return frac
 
 
 # ---------------------------------------------------------------------------
@@ -173,10 +196,10 @@ def layout(recipe: dict, grids: dict) -> dict:
         own = b.get("xfade") or {}              # 🔀 this join's own crossfade (set on the incoming piece)
         beats = float(own["beats"]) if own.get("beats") is not None else \
             float(recipe.get("xfade_same", 0.25) if same else recipe.get("xfade_other", 4))
-        where = own.get("where") or "centre"
+        where = own.get("where") if own.get("where") is not None else "centre"
         shape = own.get("shape") or ("linear" if same else "smooth")
         xf = max(beats, 0.0) * beat_len(out_bpm)
-        frac = XF_WHERE.get(where, 0.5)          # share of the fade before the bar line
+        frac = where_frac(where)                  # share of the fade before the bar line
         pre, post = xf * frac, xf * (1 - frac)
         # the fade before the join plays over the outgoing piece, the one after over the incoming one
         pre = min(pre, 0.9 * (a["out_end"] - a["out_start"]))
@@ -184,7 +207,8 @@ def layout(recipe: dict, grids: dict) -> dict:
         if pre + post < 0.01:
             pre = post = 0.005
         joins.append({"at": b["out_start"], "xfade": pre + post, "pre": pre, "post": post, "where": where,
-                      "shape": shape, "beats": beats, "same_track": same})
+                      "shape": shape, "beats": beats, "same_track": same,
+                      "bass_swap": bool(own.get("bass_swap")) and pre + post >= beat_len(out_bpm) - 1e-6})
     layers = []
     by_uid = {p.get("uid"): p for p in out if p.get("uid")}
     for ly in recipe.get("layers") or []:
@@ -203,9 +227,21 @@ def layout(recipe: dict, grids: dict) -> dict:
         length = min((end - start) / speed, t - at)
         layers.append({**ly, "start": start, "end": start + length * speed, "speed": speed, "src_bpm": g["bpm"],
                        "eff_bpm": eff, "out_start": at, "out_end": at + length})
+    beats_all = _dedupe(beats_out, 0.3 * beat_len(out_bpm))
+    for jn in joins:
+        if jn["bass_swap"]:
+            jn["swap_at"] = swap_point(jn, beats_all)
     return {"pieces": out, "duration": t, "bpm": out_bpm, "joins": joins, "layers": layers,
-            "beats": _dedupe(beats_out, 0.3 * beat_len(out_bpm)),
-            "bars": _dedupe(bars_out, 1.5 * beat_len(out_bpm))}
+            "beats": beats_all, "bars": _dedupe(bars_out, 1.5 * beat_len(out_bpm))}
+
+
+def swap_point(jn: dict, beats: list) -> float:
+    """🎛️ Where the low end changes hands: the beat nearest the middle of the crossfade (the bar
+    line itself for a fade centred on it), else the middle."""
+    lo, hi = jn["at"] - jn["pre"], jn["at"] + jn["post"]
+    mid = (lo + hi) / 2
+    inside = [b for b in beats if lo + 1e-3 < b < hi - 1e-3]
+    return float(min(inside, key=lambda b: abs(b - mid))) if inside else float(mid)
 
 
 def _dedupe(times: list, min_gap: float) -> list:

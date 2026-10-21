@@ -19,7 +19,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-import plotly.graph_objects as go
 import streamlit as st
 
 from config import AUDIO_DIR
@@ -168,72 +167,94 @@ def _join_notes(lay: dict, recipe: dict, tracks: dict, sims: dict) -> list:
     return notes
 
 
-def _timeline(recipe: dict, tracks: dict, sims: dict, energy: list = None) -> dict | None:
+def _timeline(recipe: dict, tracks: dict, sims: dict, energy: list = None, audio_url: str = "",
+              ns: str = "mx", editable: bool = False) -> dict | None:
+    """The 🎚️ Mix timeline (mix_timeline.py): waveform, parts, crossfades (◆ edges draggable when
+    `editable`), bass-swap points, layers, and the preview player. Returns the layout."""
+    from mix_timeline import mix_timeline
     grids = {tid: MX.grid(t) for tid, t in tracks.items()}
     lay = MX.layout(recipe, grids)
     if not lay["pieces"]:
         return None
-    total = min(lay["duration"], float(recipe.get("trim_to") or lay["duration"]))
     colour_of = {}
     for p in lay["pieces"]:
         colour_of.setdefault(p["track"], PALETTE[len(colour_of) % len(PALETTE)])
-    fig = go.Figure()
-    ys = energy if energy else _predicted_energy(lay, tracks)
-    n = max(1, len(ys))
-    span = total if energy else lay["duration"]
-    fig.add_trace(go.Scatter(x=[span * i / n for i in range(n)], y=ys, mode="lines", hoverinfo="skip",
-                             line=dict(color="rgba(70,70,70,0.75)", width=1)))
-    seen = {}
-    for p in lay["pieces"]:
-        k = seen[p["track"]] = seen.get(p["track"], 0) + 1
-        fig.add_vrect(x0=p["out_start"], x1=min(p["out_end"], total),
-                      fillcolor=colour_of[p["track"]].format(a=0.30 if k % 2 else 0.18), line_width=0, layer="below",
-                      annotation_text=(f"{p['track'][:18]} " if len(colour_of) > 1 else "")
-                      + f"{format_mmss(p['start'])}–{format_mmss(p['end'])}",
-                      annotation_position="top left", annotation_font_size=10)
     for ly in lay.get("layers") or []:
         colour_of.setdefault(ly["track"], PALETTE[len(colour_of) % len(PALETTE)])
-        fig.add_vrect(x0=ly["out_start"], x1=ly["out_end"], y0=0.78, y1=1.0, line_width=0,
-                      fillcolor=colour_of[ly["track"]].format(a=0.55), layer="above",
-                      annotation_text=f"{LAYER_ICONS.get(ly.get('part') or 'vocals', '🎤')} {ly['track'][:16]}",
-                      annotation_position="bottom left", annotation_font_size=10)
-    _crossfade_traces(fig, lay, colour_of, max(ys) if len(ys) else 1.0)
-    for at, colour, text in _join_notes(lay, recipe, tracks, sims):
-        fig.add_vline(x=at, line=dict(color=colour, width=2, dash="dot"))
-    if recipe.get("trim_to") and recipe["trim_to"] < lay["duration"]:
-        fig.add_vrect(x0=recipe["trim_to"], x1=lay["duration"], fillcolor="rgba(128,128,128,0.25)", line_width=0)
-    fig.update_layout(height=190, margin=dict(t=18, b=0, l=0, r=0), showlegend=False,
-                      xaxis=dict(range=[0, lay["duration"]], tickformat=None, showgrid=False),
-                      yaxis=dict(visible=False), plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
-    ticks = list(range(0, int(lay["duration"]) + 1, 30 if lay["duration"] < 600 else 60))
-    fig.update_xaxes(tickvals=ticks, ticktext=[format_mmss(t) for t in ticks])
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    total = min(lay["duration"], float(recipe.get("trim_to") or lay["duration"]))
+    if energy:
+        env, rate = list(energy), len(energy) / max(total, 1e-6)       # the previewed mix itself (30 Hz)
+    else:
+        env, rate = _predicted_energy(lay, tracks), 10.0
+    top = max(env) if env else 1.0
+    env = [v / top for v in env] if top else env
+    many = len({p["track"] for p in lay["pieces"]}) > 1
+    pieces = [{"x0": p["out_start"], "x1": p["out_end"], "colour": colour_of[p["track"]],
+               "label": (f"{p['track'][:22]} " if many else "") + f"{format_mmss(p['start'])}–{format_mmss(p['end'])}"
+               + ("" if (p.get("part") or "full") == "full" else f" · {PART_LABELS[p['part']].lower()}")}
+              for p in lay["pieces"]]
+    layers = [{"x0": ly["out_start"], "x1": ly["out_end"], "colour": colour_of[ly["track"]],
+               "label": f"{LAYER_ICONS.get(ly.get('part') or 'vocals', '🎤')} {ly['track'][:16]}"}
+              for ly in lay.get("layers") or []]
+    notes = _join_notes(lay, recipe, tracks, sims)
+    joins = []
+    for k, jn in enumerate(lay["joins"]):
+        a, b = lay["pieces"][k], lay["pieces"][k + 1]
+        _, colour, text = notes[k]
+        joins.append({"uid": b.get("uid"), "at": jn["at"], "pre": jn["pre"], "post": jn["post"],
+                      "shape": jn.get("shape", "smooth"), "bass_swap": bool(jn.get("bass_swap")),
+                      "swap_at": jn.get("swap_at"), "note": text,
+                      "note_colour": {"green": "#2e9e5b", "orange": "#e8890c", "red": "#d93a3a"}.get(colour, "#8a8f98"),
+                      "editable": bool(editable and b.get("uid")),
+                      "min_t": jn["at"] - 0.9 * (a["out_end"] - a["out_start"]),
+                      "max_t": jn["at"] + 0.9 * (b["out_end"] - b["out_start"])})
+    mix_timeline(duration=lay["duration"], beat_len=MX.beat_len(lay["bpm"]), pieces=pieces, layers=layers,
+                 joins=joins, env=env, env_rate=rate, beats=lay["beats"], bars=lay["bars"],
+                 trim_to=recipe.get("trim_to") if recipe.get("trim_to") and recipe["trim_to"] < lay["duration"]
+                 else None, audio_url=audio_url, key=f"{ns}_tl")
     return lay
 
 
-def _crossfade_traces(fig, lay: dict, colour_of: dict, top: float) -> None:
-    """🔀 Each crossfade between different songs drawn where it happens: the stretch both play,
-    shaded, with the outgoing song's level falling and the incoming one's rising across it."""
-    pieces = lay["pieces"]
-    top = float(top) or 1.0
-    for k, jn in enumerate(lay["joins"]):
-        a, b = pieces[k], pieces[k + 1]
-        x0, x1 = jn["at"] - jn["pre"], jn["at"] + jn["post"]
-        if jn["same_track"] or x1 - x0 < 0.05:
-            continue
-        fig.add_vrect(x0=x0, x1=x1, fillcolor="rgba(128,128,128,0.16)", line=dict(color="rgba(128,128,128,0.6)",
-                      width=1, dash="dot"), layer="below")
-        xs = np.linspace(x0, x1, 24)
-        u = (xs - x0) / (x1 - x0)
-        up = np.sin(u * np.pi / 2) if jn.get("shape", "smooth") == "smooth" else u
-        down = np.sin((1 - u) * np.pi / 2) if jn.get("shape", "smooth") == "smooth" else 1 - u
-        for y, tr, name in ((down, a["track"], "fades out"), (up, b["track"], "fades in")):
-            fig.add_trace(go.Scatter(x=xs, y=y * top, mode="lines", hovertemplate=f"{tr[:24]} {name}<extra></extra>",
-                                     line=dict(color=colour_of[tr].format(a=1.0), width=2.5)))
-        bars = jn.get("beats", 0) / 4
-        fig.add_annotation(x=(x0 + x1) / 2, y=top, yanchor="bottom", showarrow=False, font=dict(size=10),
-                           text=f"🔀 {bars:g} bar{'s' if bars != 1 else ''}" if bars >= 1
-                           else f"🔀 {jn.get('beats', 0):g} beat")
+def _apply_timeline_drag(parts: list, ns: str = "mxm") -> None:
+    """A crossfade dragged on the timeline → that join's own crossfade (its length and how much
+    of it sits before the bar line), and the join row's boxes to match."""
+    v = st.session_state.get(f"{ns}_tl")
+    if not isinstance(v, dict) or not v.get("nonce") or v.get("nonce") == st.session_state.get(f"_{ns}_tl_nonce"):
+        return
+    st.session_state[f"_{ns}_tl_nonce"] = v["nonce"]
+    b = next((p for p in parts if p.get("uid") == v.get("uid")), None)
+    if b is None:
+        return
+    pre, post = max(0.0, float(v.get("pre_beats") or 0)), max(0.0, float(v.get("post_beats") or 0))
+    beats = round(pre + post, 3)
+    own = dict(b.get("xfade") or {})
+    own["beats"] = beats
+    own["where"] = MX.where_from_frac(pre / beats) if beats > 0 else "centre"
+    b["xfade"] = own
+    uid = b["uid"]
+    st.session_state[f"mxm_xfl_{uid}"] = _len_label(beats)
+    st.session_state[f"mxm_xfw_{uid}"] = own["where"]
+
+
+def _len_label(beats: float) -> str:
+    return next((n for n, x in XF_JOIN.items() if abs(x - beats) < 1e-6), f"🖐 {_beats_text(beats)}")
+
+
+def _beats_text(b: float) -> str:
+    if b >= 4 and abs(b / 4 - round(b / 4)) < 1e-6:
+        n = round(b / 4)
+        return f"{n} bar{'s' if n != 1 else ''}"
+    return f"{b:g} beat{'s' if b != 1 else ''}"
+
+
+def _where_label(w) -> str:
+    if w in XF_WHERE_LABELS:
+        return XF_WHERE_LABELS[w]
+    try:
+        f = float(w)
+    except (TypeError, ValueError):
+        return str(w)
+    return f"🖐 {round(f * 100)} % before the line, {round((1 - f) * 100)} % after"
 
 
 # ---------------------------------------------------------------------------
@@ -243,9 +264,14 @@ def _crossfade_traces(fig, lay: dict, colour_of: dict, top: float) -> None:
 def _preview_and_save(recipe: dict, tracks: dict, sims: dict, default_name: str, ns: str) -> None:
     import mixer
     import mixes as MS
-    lay = _timeline(recipe, tracks, sims, energy=(st.session_state.get(f"{ns}_pv") or {}).get("energy")
-                    if (st.session_state.get(f"{ns}_pv") or {}).get("path") == str(mixer.preview_path(recipe))
-                    else None)
+    from cut_editor import media_url
+    pv_path = mixer.preview_path(recipe)
+    pv = st.session_state.get(f"{ns}_pv") or {}
+    fresh = pv.get("path") == str(pv_path) and pv_path.exists()
+    url = media_url(pv_path, "audio/mpeg" if pv_path.suffix == ".mp3" else "audio/mp4", f"{ns}_mix_audio") \
+        if fresh else ""
+    lay = _timeline(recipe, tracks, sims, energy=pv.get("energy") if fresh else None, audio_url=url, ns=ns,
+                    editable=ns == "mxm")
     if lay is None:
         st.info("Nothing to play yet.")
         return
@@ -260,10 +286,8 @@ def _preview_and_save(recipe: dict, tracks: dict, sims: dict, default_name: str,
 
     if not _audio_ready(mixer.parts_needed(recipe), ns):
         return
-    pv_path = mixer.preview_path(recipe)
-    pv = st.session_state.get(f"{ns}_pv") or {}
     c = st.columns([1, 3])
-    if c[0].button("▶️ Preview", key=f"{ns}_preview", type="primary", use_container_width=True,
+    if c[0].button("▶️ Preview", key=f"{ns}_preview", type="primary", width="stretch",
                    help="Renders the mix to a quick temporary file to listen to (nothing is saved)."):
         if not pv_path.exists() or pv.get("path") != str(pv_path):
             with st.spinner("Mixing…"):
@@ -276,19 +300,12 @@ def _preview_and_save(recipe: dict, tracks: dict, sims: dict, default_name: str,
                                             "warnings": info["warnings"]}
         st.session_state[f"{ns}_start"] = 0
         st.rerun()
-    if pv.get("path") == str(pv_path) and pv_path.exists():
-        st.audio(str(pv_path), start_time=int(st.session_state.get(f"{ns}_start", 0)))
+    if fresh:
+        c[1].caption("▶ Play it on the timeline above — ◀ Join ▶ steps through the joins.")
         for w in pv.get("warnings") or []:
             st.caption(f"⚠️ {w}")
-        if notes:
-            st.caption("🎧 Listen to a join (starts 6 s before it):")
-            cols = st.columns(min(6, len(notes)))
-            for i, (at, colour, text) in enumerate(notes):
-                dot = {"green": "🟢", "orange": "🟠", "red": "🔴"}.get(colour, "⚪")
-                if cols[i % len(cols)].button(f"{dot} {format_mmss(at)}", key=f"{ns}_j{i}", help=text,
-                                              use_container_width=True):
-                    st.session_state[f"{ns}_start"] = max(0, int(at - 6))
-                    st.rerun()
+        with st.expander("🔈 Plain player"):
+            st.audio(str(pv_path))
     elif pv.get("path"):
         c[1].caption("The mix has changed since the last preview — ▶️ Preview again to hear it.")
 
@@ -305,7 +322,7 @@ def _preview_and_save(recipe: dict, tracks: dict, sims: dict, default_name: str,
     replacing = editing and (editing.get("output") or {}).get("track_id") == clean
     c = st.columns(2)
     label = f"💾 Save over {clean}" if replacing else "💾 Save as a new track"
-    if c[0].button(label, key=f"{ns}_save", type="primary", disabled=not clean or taken, use_container_width=True,
+    if c[0].button(label, key=f"{ns}_save", type="primary", disabled=not clean or taken, width="stretch",
                    help="Mixes it properly (AAC), adds it to the Audio-Library (and Google Drive when connected) "
                         "and analyses it like any other track — ready for the planner in a minute or two."
                         + (" Replaces the track this mix made before (plans using it will pick up the new "
@@ -324,7 +341,7 @@ def _preview_and_save(recipe: dict, tracks: dict, sims: dict, default_name: str,
         for m in msgs:
             st.caption(f"ℹ️ {m}")
         st.session_state[f"{ns}_id"] = rec["id"]
-    if c[1].button("📝 Save the recipe only", key=f"{ns}_recipe", disabled=not clean, use_container_width=True,
+    if c[1].button("📝 Save the recipe only", key=f"{ns}_recipe", disabled=not clean, width="stretch",
                    help="Keeps the mix in 📂 Saved mixes to finish later — no track is made."):
         rec = MS.save({**recipe, "name": clean})
         st.session_state[f"{ns}_id"] = rec["id"]
@@ -407,7 +424,7 @@ def _extend_auto(tid: str, track: dict, g: dict, sims: dict) -> tuple:
         c[1].toggle("Exact length", key="mxe_exact",
                     help="Fade out on exactly the target. Off: jumps only, so it ends on the song's own "
                          "ending, within about a bar of the target.")
-        c[2].form_submit_button("🔍 Find the jumps", type="primary", use_container_width=True)
+        c[2].form_submit_button("🔍 Find the jumps", type="primary", width="stretch")
     target = float(st.session_state["mxe_target"])
     exact = bool(st.session_state.get("mxe_exact"))
     st.caption(f"Target {format_mmss(target)} — {'+' if target >= dur else '−'}"
@@ -580,7 +597,7 @@ def _part_stems_row(p: dict, t: dict, tracks_all: dict, summaries: dict) -> None
                                    else "This track has no stems yet — run run_audio_analysis.bat on the laptop (it makes stems) "
                                         "to play just its instrumental or vocals.")
         others = sorted(tracks_all, key=str.lower)
-        with c[1].popover("➕ Lay over…", use_container_width=True, disabled=not others):
+        with c[1].popover("➕ Lay over…", width="stretch", disabled=not others):
             if others:   # a disabled popover's contents still run
                 _add_layer_form(p, t, others, tracks_all, summaries)
         mine = [ly for ly in _layers() if ly["on"] == p["uid"]]
@@ -640,7 +657,7 @@ def _add_layer_form(p: dict, host: dict, others: list, tracks_all: dict, summari
     fk = f"mxm_lfade_{p['uid']}"
     st.session_state.setdefault(fk, "½ beat" if what == "vocals" else "1 bar")
     fade = c[1].selectbox("Fade in / out", list(LAYER_FADES), key=fk)
-    if st.button("➕ Lay it over", key=f"mxm_ladd_{p['uid']}", type="primary", use_container_width=True):
+    if st.button("➕ Lay it over", key=f"mxm_ladd_{p['uid']}", type="primary", width="stretch"):
         sec = secs[si]
         _layers().append({"uid": f"{time.time():.6f}", "on": p["uid"], "track": tid, "part": what,
                           "start": MX.snap_to_bar(g, sec["start"]), "end": MX.snap_to_bar(g, sec["end"]),
@@ -652,40 +669,58 @@ def _add_layer_form(p: dict, host: dict, others: list, tracks_all: dict, summari
 
 def _join_row(a: dict, b: dict, i: int) -> None:
     """🔀 The join from part i to part i + 1: its own crossfade length, where it sits around the
-    bar line and its shape (stored on the incoming part as "xfade"; "Default" = ⚙️'s setting)."""
+    bar line, its shape and 🎛️ bass swap (stored on the incoming part as "xfade"; "Default" = ⚙️'s
+    setting). Lengths and splits dragged on the timeline show as 🖐 choices."""
     uid = b["uid"]
     own = b.get("xfade") or {}
     same = a["track"] == b["track"]
-    lk, wk, sk = f"mxm_xfl_{uid}", f"mxm_xfw_{uid}", f"mxm_xfs_{uid}"
+    lk, wk, sk, bk = f"mxm_xfl_{uid}", f"mxm_xfw_{uid}", f"mxm_xfs_{uid}", f"mxm_xfb_{uid}"
     default = "Default"
     if lk not in st.session_state:
-        st.session_state[lk] = next((n for n, v in XF_JOIN.items() if own.get("beats") is not None
-                                     and abs(v - float(own["beats"])) < 1e-6), default)
-    st.session_state.setdefault(wk, own.get("where") or "centre")
+        st.session_state[lk] = _len_label(float(own["beats"])) if own.get("beats") is not None else default
+    st.session_state.setdefault(wk, own.get("where") if own.get("where") is not None else "centre")
     st.session_state.setdefault(sk, own.get("shape") or ("linear" if same else "smooth"))
+    st.session_state.setdefault(bk, bool(own.get("bass_swap")))
+    len_opts = [default, *XF_JOIN]
+    if st.session_state[lk] not in len_opts:
+        len_opts.append(st.session_state[lk])
+    where_opts = list(XF_WHERE_LABELS)
+    if st.session_state[wk] not in where_opts:
+        where_opts.append(st.session_state[wk])
     with st.container(key=f"mxm_join_{uid}"):
-        c = st.columns([2, 2, 3, 2], vertical_alignment="center")
+        c = st.columns([2, 2, 3, 2, 2], vertical_alignment="center")
         c[0].caption(f"🔀 **Join {i} → {i + 1}**")
-        length = c[1].selectbox("Crossfade", [default, *XF_JOIN], key=lk, label_visibility="collapsed",
+        length = c[1].selectbox("Crossfade", len_opts, key=lk, label_visibility="collapsed",
                                 format_func=lambda x: f"Default ({st.session_state.get('mxm_xf', '1 bar')})"
                                 if x == default and not same else ("Default (¼ beat)" if x == default else x),
                                 help="How long both parts play together while one fades into the other. "
-                                     "Long ones (4–16 bars) blend the two songs over each other, DJ style.")
+                                     "Long ones (4–16 bars) blend the two songs over each other, DJ style. "
+                                     "Or drag the crossfade's ◆ edges on the timeline below.")
         cut = length == "Cut"
-        where = c[2].selectbox("Where", list(XF_WHERE_LABELS), key=wk, format_func=XF_WHERE_LABELS.get,
+        where = c[2].selectbox("Where", where_opts, key=wk, format_func=_where_label,
                                label_visibility="collapsed", disabled=cut,
                                help="Both sides: half before the bar line, half after. Next song comes in early: "
                                     "it starts under the end of this part (playing the bars just before its "
                                     "chosen start) and has taken over by the line. This song carries on: it keeps "
-                                    "playing under the start of the next part.")
+                                    "playing under the start of the next part. 🖐 = as dragged on the timeline.")
         shape = c[3].selectbox("Shape", list(XF_SHAPE_LABELS), key=sk, format_func=XF_SHAPE_LABELS.get,
                                label_visibility="collapsed", disabled=cut,
                                help="Smooth (equal power) keeps the loudness even when two different songs blend; straight "
                                     "suits the same audio (a jump within one track).")
-    if length == default and where == "centre" and shape == ("linear" if same else "smooth"):
+        bass = c[4].toggle("🎛️ Bass swap", key=bk, disabled=cut,
+                           help="Only one song's bass plays during the crossfade: the outgoing song keeps its low end "
+                                "until the middle of the fade, then hands it to the incoming one on the beat — the "
+                                "DJ trick that stops a long blend getting muddy. Needs a crossfade of a beat or more.")
+    if length == default:
+        beats = None
+    elif length in XF_JOIN:
+        beats = XF_JOIN[length]
+    else:
+        beats = float(own.get("beats") or 0.0)            # 🖐 dragged on the timeline
+    if beats is None and where == "centre" and shape == ("linear" if same else "smooth") and not bass:
         b.pop("xfade", None)
     else:
-        b["xfade"] = {"beats": None if length == default else XF_JOIN[length], "where": where, "shape": shape}
+        b["xfade"] = {"beats": beats, "where": where, "shape": shape, **({"bass_swap": True} if bass else {})}
 
 
 def _mashup(summaries: dict) -> None:
@@ -750,6 +785,7 @@ def _mashup(summaries: dict) -> None:
     shift = {tid: int(st.session_state.get(f"mxm_shift_{tid}", 0)) for tid in used}
     grids = {tid: MX.grid(t) for tid, t in tracks.items()}
 
+    _apply_timeline_drag(parts)
     st.markdown("**Parts**")
     prev = None
     for i, p in enumerate(parts):
@@ -888,7 +924,7 @@ def _suggestion_row(r: dict, i: int, vocal_swap: bool) -> None:
         bits = [r["key_label"] + (f" (shift {r['shift']:+d} st)" if r["shift"] else ""),
                 f"tempo {(r['speed'] - 1) * 100:+.1f} %"]
         c[0].caption(" · ".join(bits))
-        c[1].button("🧩 Start it", key=f"mx_sug_go_{'v' if vocal_swap else 'p'}_{i}", use_container_width=True,
+        c[1].button("🧩 Start it", key=f"mx_sug_go_{'v' if vocal_swap else 'p'}_{i}", width="stretch",
                     on_click=_start_suggestion, args=(r["a"], r["b"], vocal_swap))
 
 

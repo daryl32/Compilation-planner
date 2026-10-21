@@ -126,8 +126,8 @@ def export_training_data():
 
 with _labels_box:
     st.divider()
-    st.link_button("▶️ Open Google Colab", "https://colab.research.google.com", use_container_width=True)
-    if st.button("Export corrections as training data", use_container_width=True):
+    st.link_button("▶️ Open Google Colab", "https://colab.research.google.com", width="stretch")
+    if st.button("Export corrections as training data", width="stretch"):
         count, out_path = export_training_data()
         if count == 0:
             st.warning("No reviewed scenes yet — correct some scenes first.")
@@ -220,7 +220,7 @@ with st.container(border=True, key="rev_wrap_find"):
     # Actors / video tags / roles: less used, so in a popover (its label counts the ones in use).
     _n_more = sum(bool(st.session_state.get(k)) for k in
                   ("rev_find_actors", "rev_find_vtags", "rev_find_roles", "rev_find_no_roles"))
-    with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", use_container_width=True):
+    with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", width="stretch"):
         find_actors = st.multiselect("With actors", all_actors(), key="rev_find_actors", placeholder="anyone")
         find_vtags = st.multiselect("With video tags", all_video_tags(), key="rev_find_vtags", placeholder="any")
         find_roles = st.multiselect("With scenes marked", list(_roles), key="rev_find_roles", placeholder="any",
@@ -374,7 +374,7 @@ with st.container(border=True):
         _bits.append("library range off — every scene shown")
     _bits.append(f"⭐ thumbnail: scene {master_sid}" if _mp else "⭐ thumbnail: automatic")
     hc[1].markdown("  ·  ".join(_bits))
-    with hc[2].popover("⋯", use_container_width=True):
+    with hc[2].popover("⋯", width="stretch"):
         st.caption(f"Source: {data.get('source_path', '')}")
         st.caption("⭐ The video thumbnail is used for this video in the Media Library and the planner's "
                    "video list — pick it with ⭐ on any scene below.")
@@ -413,7 +413,7 @@ with st.expander(f"🎬 Video details — {len(_vd['actors'])} actor(s), {len(_v
         ac = st.columns([3, 1])
         ac[0].text_input("New actor", key=_kn, placeholder="type a name", label_visibility="collapsed")
         ac[1].button("➕ Add", key=f"vd_add_{selected}", on_click=_vd_add_actor, args=(_ka, _kn),
-                     use_container_width=True)
+                     width="stretch")
     with vc[1]:
         _tag_opts = sorted(set(CANDIDATE_LABELS) | set(all_video_tags()) | set(_vd["tags"])
                            | set(st.session_state.get(_kt) or []), key=str.lower)
@@ -431,7 +431,7 @@ with st.expander(f"🎬 Video details — {len(_vd['actors'])} actor(s), {len(_v
     _changed = (_now_a != _vd["actors"]) or (_now_t != _vd["tags"])
     sc = st.columns([1, 3])
     if sc[0].button("💾 Save video details", key=f"vd_save_{selected}", type="primary" if _changed else "secondary",
-                    disabled=not _changed, use_container_width=True):
+                    disabled=not _changed, width="stretch"):
         set_video_details(video_id, actors=_now_a, tags=_now_t)
         for k in (_ka, _kt):
             st.session_state.pop(k, None)
@@ -678,7 +678,7 @@ def split_dialog(sid, auto: bool = False):
                   f"(target {auto_target_sec:g}s, set in the sidebar)." if auto_cuts
                   else f"⚡ Auto: already close to the {auto_target_sec:g}s target — no cuts needed.")
     ac[1].button("⚡ Use auto cuts", key=f"{pos_key}_auto", on_click=_set_state, args=(cuts_key, auto_cuts),
-                 disabled=not auto_cuts, use_container_width=True)
+                 disabled=not auto_cuts, width="stretch")
 
     suggested = [t for t in SE.cut_suggestions_from_sprite(data, sprite_path, scene) if lo <= t <= hi]
     if suggested:
@@ -699,9 +699,9 @@ def split_dialog(sid, auto: bool = False):
 
     bc = st.columns(2)
     bc[0].button("➕ Add cut here", key=f"{pos_key}_add", on_click=_add_cut, args=(cuts_key, pos_key),
-                 use_container_width=True)
+                 width="stretch")
     bc[1].button("Clear cuts", key=f"{pos_key}_clear", on_click=_set_state, args=(cuts_key, []),
-                 disabled=not cuts, use_container_width=True)
+                 disabled=not cuts, width="stretch")
 
     if cuts:
         bounds = [start] + cuts + [end]
@@ -718,7 +718,7 @@ def split_dialog(sid, auto: bool = False):
                    "Undo is available afterwards. Compilation Planner projects that already picked clips "
                    "from this scene may need those picks redone.")
     if st.button(f"✂️ Split into {len(cuts) + 1} parts" if cuts else "✂️ Split",
-                 type="primary", disabled=not cuts, use_container_width=True, key=f"{pos_key}_go"):
+                 type="primary", disabled=not cuts, width="stretch", key=f"{pos_key}_go"):
         st.session_state.pop(pos_key, None)
         st.session_state.pop(cuts_key, None)
         back_to(sid)
@@ -743,7 +743,7 @@ def bulk_auto_split_dialog(candidate_ids: list):
         st.markdown(f"- Scene {sid} · {fmt_dur(dur)} → {len(cuts) + 1} parts of ~{fmt_dur(dur / (len(cuts) + 1))}")
     st.caption("Each split can be undone on its own afterwards. New parts get thumbnails and motion "
                "scores — this takes a few seconds per scene.")
-    if st.button(f"⚡ Split {len(plans)} scene(s)", type="primary", use_container_width=True):
+    if st.button(f"⚡ Split {len(plans)} scene(s)", type="primary", width="stretch"):
         unsaved = apply_pending()
         bar = st.progress(0.0, text="Splitting…")
         new_thumbs, done = [], 0
@@ -824,12 +824,12 @@ if _todo:
                         help=f"Split suggestions: clips over {suggest_long_sec:g}s; combine: runs of clips each under "
                              f"{suggest_short_sec:g}s; ⚡ auto split targets {auto_target_sec:g}s parts — set them in "
                              "the sidebar (✂️ Split & combine).")
-        if _no_thumb and tc_[1].button(f"🔄 Remake {len(_no_thumb)}", use_container_width=True,
+        if _no_thumb and tc_[1].button(f"🔄 Remake {len(_no_thumb)}", width="stretch",
                                        key=f"remake_all_thumbs_{selected}",
                                        help="Takes a new picture for each from the preview copy / video (or the "
                                             "timeline thumbnails) and queues them for Google Drive."):
             _remake_missing_thumbs()
-        if auto_ids and tc_[2].button(f"⚡ Auto split {len(auto_ids)}…", use_container_width=True,
+        if auto_ids and tc_[2].button(f"⚡ Auto split {len(auto_ids)}…", width="stretch",
                                       key=f"bulk_auto_{selected}"):
             bulk_auto_split_dialog(auto_ids)
 
@@ -971,16 +971,16 @@ def role_manager() -> None:
     bc = st.columns(2)
     try:
         if pick == choices[0]:
-            if bc[0].button("➕ Add role", type="primary", use_container_width=True, key=f"{p}_add"):
+            if bc[0].button("➕ Add role", type="primary", width="stretch", key=f"{p}_add"):
                 rid = SR.add_role(name, emoji, colour, fit, help_text)
                 st.session_state["rev_saved_msg"] = f"Added {SR.label(rid)}."
                 st.rerun()
         else:
-            if bc[0].button("💾 Save role", type="primary", use_container_width=True, key=f"{p}_save"):
+            if bc[0].button("💾 Save role", type="primary", width="stretch", key=f"{p}_save"):
                 SR.update_role(pick, name=name, emoji=emoji, colour=colour, help=help_text, fit=fit)
                 st.session_state["rev_saved_msg"] = f"Saved {SR.label(pick)}."
                 st.rerun()
-            if bc[1].button("🗑️ Delete role", use_container_width=True, key=f"{p}_del",
+            if bc[1].button("🗑️ Delete role", width="stretch", key=f"{p}_del",
                             help="Removes it from the list. Scenes keep the mark (shown as 'deleted') until "
                                  "they're next saved, so adding a role with the same name brings them back."):
                 SR.delete_role(pick)
@@ -997,19 +997,19 @@ quick_mode = rc_[2].toggle("🎭 Quick role marking", key="rev_quick_roles",
                            help="A grid of the shown scenes' pictures: pick a role, then click scenes to "
                                 "add or remove it — no cards to open. 💾 Save when done. Uses the filters "
                                 "above (e.g. Role → No role to see just the unmarked ones).")
-with rc_[0].popover(f"🎭 Mark all {len(_shown_ids)}…", use_container_width=True,
+with rc_[0].popover(f"🎭 Mark all {len(_shown_ids)}…", width="stretch",
                     disabled=not _shown_ids):
     _brole = st.selectbox("Role", list(_roles), format_func=lambda r: SR.label(r, _roles), key="rev_bulk_role")
     _bc = st.columns(2)
-    _bc[0].button("➕ Add to all", use_container_width=True, on_click=_bulk_role, args=(None, True, _shown_ids))
-    _bc[1].button("➖ Remove from all", use_container_width=True, on_click=_bulk_role,
+    _bc[0].button("➕ Add to all", width="stretch", on_click=_bulk_role, args=(None, True, _shown_ids))
+    _bc[1].button("➖ Remove from all", width="stretch", on_click=_bulk_role,
                   args=(None, False, _shown_ids))
     _n_hints = sum(1 for i in _shown_ids if SR.motion_hint(motion_rank(scene_by_id[i])) in _roles)
-    st.button(f"💡 Accept the {_n_hints} motion hint(s)", use_container_width=True, disabled=not _n_hints,
+    st.button(f"💡 Accept the {_n_hints} motion hint(s)", width="stretch", disabled=not _n_hints,
               on_click=_bulk_hints, args=(_shown_ids,),
               help="Calmest fifth of this video's scenes → 🌙 Slow, busiest fifth → 💥 Action. Check them over.")
     st.caption("Unsaved until you 💾 save, like ticking each card.")
-with rc_[1].popover("Roles…", use_container_width=True):
+with rc_[1].popover("Roles…", width="stretch"):
     role_manager()
 
 
@@ -1022,7 +1022,7 @@ def save_row(where: str) -> bool:
     c[1].checkbox("Mark all shown as reviewed", key=f"rev_mark_all_{where}",
                   help="Off: only scenes you changed are marked ✓ Reviewed. "
                        "On: every scene shown is marked reviewed (you've checked them all).")
-    return c[2].button("💾 Save changes", type="primary", use_container_width=True, key=f"rev_save_{where}",
+    return c[2].button("💾 Save changes", type="primary", width="stretch", key=f"rev_save_{where}",
                        help="Saves the tag, exclude and role edits on this video. They're kept until you save — "
                             "changing the video or a filter discards them. Split, combine and ⭐ save straight away.")
 
@@ -1116,23 +1116,23 @@ def scene_card(sid, trimmed_to) -> None:
                                                                vertical_alignment="center")
         _row[0].checkbox("🚫 Exclude", value=scene.get("excluded", False), key=wkey("excluded", sid))
         bc = dict(zip(actions, _row[1:]))
-        if bc["split"].button("✂️ Split…", key=f"split_{selected}_{sid}", use_container_width=True):
+        if bc["split"].button("✂️ Split…", key=f"split_{selected}_{sid}", width="stretch"):
             back_to(sid)
             st.session_state["rev_open_dialog"] = (selected, sid, False)
             st.rerun()
-        if "auto" in bc and bc["auto"].button("⚡ Auto split", key=f"auto_{selected}_{sid}", use_container_width=True,
+        if "auto" in bc and bc["auto"].button("⚡ Auto split", key=f"auto_{selected}_{sid}", width="stretch",
                                               help=f"Splits it straight away into parts of about {auto_target_sec:g}s "
                                                    "(↩️ Undo split puts it back). ✂️ Split… lets you place cuts by hand."):
             back_to(sid)
             do_split(sid, SE.auto_split_points(scene_by_id[sid], auto_target_sec))
         if "merge" in bc and bc["merge"].button("🔗 Combine", key=f"merge_next_{selected}_{sid}",
-                                                use_container_width=True,
+                                                width="stretch",
                                                 help=f"Join this scene and the next one (scene {nxt}) into one."):
             back_to(sid)
             do_merge([sid, nxt])
         if "undo" in bc:
             label = "↩️ Undo combine" if edit.get("kind") == "merge" else "↩️ Undo split"
-            if bc["undo"].button(label, key=f"undo_{selected}_{sid}", use_container_width=True):
+            if bc["undo"].button(label, key=f"undo_{selected}_{sid}", width="stretch"):
                 back_to(sid)
                 do_undo(sid)
 
@@ -1194,7 +1194,7 @@ def quick_role_grid(ids: list) -> None:
                         format_func=lambda r: SR.label(r, _roles))
     changed = _qr_changed()
     if top[1].button(f"💾 Save {len(changed)} change(s)", type="primary", disabled=not changed,
-                     use_container_width=True, key="rev_qr_save"):
+                     width="stretch", key="rev_qr_save"):
         for sid in changed:
             sc = scene_by_id[sid]
             SR.set_scene_roles(sc, _qr_roles(sid))
@@ -1203,7 +1203,7 @@ def quick_role_grid(ids: list) -> None:
             sc["reviewed"] = True
         st.session_state.pop(_qr_key(), None)
         write_catalogue(f"Saved roles for {len(changed)} scene(s).")
-    if top[2].button("↩️ Undo unsaved", disabled=not changed, use_container_width=True, key="rev_qr_discard"):
+    if top[2].button("↩️ Undo unsaved", disabled=not changed, width="stretch", key="rev_qr_discard"):
         st.session_state.pop(_qr_key(), None)
         st.rerun(scope="fragment")
     n_pages = (len(ids) - 1) // QUICK_PAGE + 1
@@ -1214,11 +1214,11 @@ def quick_role_grid(ids: list) -> None:
                                   label_visibility="collapsed")
     page_ids = ids[(page - 1) * QUICK_PAGE: page * QUICK_PAGE]
     bc[0].button(f"➕ {SR.label(role, _roles) if role else 'role'} on all {len(page_ids)}",
-                 disabled=not role, on_click=_qr_all, args=(page_ids, True), use_container_width=True,
+                 disabled=not role, on_click=_qr_all, args=(page_ids, True), width="stretch",
                  key="rev_qr_all_add")
     bc[1].button("➖ Off all of these", disabled=not role, on_click=_qr_all, args=(page_ids, False),
-                 use_container_width=True, key="rev_qr_all_off")
-    bc[2].button("💡 Accept motion hints", on_click=_qr_hints, args=(page_ids,), use_container_width=True,
+                 width="stretch", key="rev_qr_all_off")
+    bc[2].button("💡 Accept motion hints", on_click=_qr_hints, args=(page_ids,), width="stretch",
                   key="rev_qr_hints",
                   help="Calmest fifth of this video's scenes → 🌙 Slow, busiest fifth → 💥 Action.")
     if not role:
@@ -1256,15 +1256,15 @@ def quick_role_grid(ids: list) -> None:
                     st.caption(f":gray[*💡 suggests {SR.label(hint, _roles)}*]")
                 st.button(("✓ " if on else "＋ ") + (_roles[role]["emoji"] if role else ""),
                           key=f"rev_qr_t_{selected}_{sid}", type="primary" if on else "secondary",
-                          use_container_width=True, disabled=not role, on_click=_qr_toggle, args=(sid,))
+                          width="stretch", disabled=not role, on_click=_qr_toggle, args=(sid,))
                 # ✂️ / ⚡ without leaving quick marking (unsaved role clicks stay pending; the parts
                 # keep this scene's saved roles and each gets its own motion score).
                 ec = st.columns(2)
-                if ec[0].button("✂️", key=f"rev_qr_split_{selected}_{sid}", use_container_width=True,
+                if ec[0].button("✂️", key=f"rev_qr_split_{selected}_{sid}", width="stretch",
                                 help="Split… — place the cuts by hand."):
                     st.session_state["rev_open_dialog"] = (selected, sid, False)
                     st.rerun(scope="app")
-                if ec[1].button("⚡", key=f"rev_qr_auto_{selected}_{sid}", use_container_width=True,
+                if ec[1].button("⚡", key=f"rev_qr_auto_{selected}_{sid}", width="stretch",
                                 disabled=sid not in auto_ids,
                                 help=(f"Auto split into parts of about {auto_target_sec:g}s (↩️ undo on its card "
                                       "outside quick marking)." if sid in auto_ids else
@@ -1321,8 +1321,8 @@ if _want and _want[0] == selected and shown:
         _after = [sc["scene_id"] for sc, _ in shown if SE.scene_start_sec(sc) >= _want[2] - 0.05]
         _scroll = _after[0] if _after else _shown_ids[-1]
 if _scroll is not None:
-    import streamlit.components.v1 as _components
-    _components.html(
+    import embed as _embed
+    _embed.html(
         "<script>(function () {"
         f"  var id = 'rev-scene-{_scroll}', tries = 0;"
         "  function go() {"

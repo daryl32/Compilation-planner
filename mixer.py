@@ -241,6 +241,32 @@ def _ramp(n: int, equal_power: bool, rising: bool) -> np.ndarray:
     return np.sin(x * np.pi / 2).astype(np.float32) if equal_power else x
 
 
+@functools.lru_cache(maxsize=4)
+def _bass_sos(hz: float):
+    from scipy.signal import butter
+    return butter(4, hz, btype="lowpass", fs=SR, output="sos")
+
+
+def _fade_region(region: np.ndarray, ramp: np.ndarray, jn: dict | None, region_start: float, bpm: float,
+                 outgoing: bool) -> None:
+    """Fade one side of a join in place. With 🎛️ bass swap, only the part above MX.BASS_HZ
+    follows the crossfade ramp; the low end stays full (outgoing) or silent (incoming) until the
+    swap point, then changes hands over MX.BASS_SWAP_BEATS. The two bands are split with a
+    zero-phase filter, so low + high is exactly the original audio."""
+    if not (jn and jn.get("bass_swap") and jn.get("swap_at") is not None) or len(region) < 64:
+        region *= ramp[:, None]
+        return
+    from scipy.signal import sosfiltfilt
+    low = sosfiltfilt(_bass_sos(MX.BASS_HZ), region, axis=0).astype(np.float32)
+    high = region - low
+    n = len(region)
+    w = max(int(MX.BASS_SWAP_BEATS * MX.beat_len(bpm) * SR), int(0.02 * SR))
+    centre = (float(jn["swap_at"]) - region_start) * SR
+    x = np.clip((np.arange(n, dtype=np.float32) - (centre - w / 2)) / w, 0.0, 1.0)
+    step = 1.0 - x if outgoing else x                        # 1 → 0 for the outgoing song's bass
+    region[:] = high * ramp[:, None] + low * step[:, None]
+
+
 def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: str = "256k") -> dict:
     """Render recipe to out_path. tracks: {track_id: catalogue track} for every
     track the recipe uses (their audio files must be local — ensure_local).
@@ -313,14 +339,16 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
         if k > 0:
             jn = joins[k - 1]
             n = min(len(seg), int(round((head_eff + jn["post"]) * SR)))
-            seg[:n] *= _ramp(n, jn.get("shape", "smooth") == "smooth", True)[:, None]
+            _fade_region(seg[:n], _ramp(n, jn.get("shape", "smooth") == "smooth", True), jn,
+                         jn["at"] - head_eff, lay["bpm"], outgoing=False)
         elif p["start"] > 0.05 or recipe.get("fade_in"):
             n = min(len(seg), int(max(float(recipe.get("fade_in") or 0.0), 0.01) * SR))
             seg[:n] *= _ramp(n, False, True)[:, None]
         if k < len(joins):
             jn = joins[k]
             n = min(len(seg), int(round((tail_eff + jn["pre"]) * SR)))
-            seg[len(seg) - n:] *= _ramp(n, jn.get("shape", "smooth") == "smooth", False)[:, None]
+            _fade_region(seg[len(seg) - n:], _ramp(n, jn.get("shape", "smooth") == "smooth", False), jn,
+                         jn["at"] + tail_eff - n / SR, lay["bpm"], outgoing=True)
         at = int(round((p["out_start"] - head_eff) * SR))
         at = max(0, at)
         end = min(n_out, at + len(seg))

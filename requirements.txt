@@ -8,7 +8,9 @@
 #   pip install torch --index-url https://download.pytorch.org/whl/cu121
 
 # --- Streamlit app ---
-streamlit>=1.37.0        # 1.37+ required for st.fragment (used for performance)
+streamlit[auth]==1.66.0  # pinned: the version CI tests with — upgrade on purpose (change here, run the
+                         # tests, then on the server: venv/bin/pip install -r requirements.txt + restart).
+                         # [auth] = native Google login (st.login / st.logout / st.user)
 plotly>=5.18.0
 Pillow>=10.0.0
 
@@ -30,9 +32,6 @@ google-api-python-client>=2.100.0
 google-auth>=2.23.0
 google-auth-oauthlib>=1.1.0
 
-# --- Streamlit auth (native Google login) ---
-# Install with: pip install "streamlit[auth]"
-# The [auth] extra is required for st.login() / st.logout() / st.user
 
 # --- 🎚️ Mix (mixer.py) ---
 # Uses ffmpeg's rubberband filter for tempo / key changes (Ubuntu's ffmpeg has it;

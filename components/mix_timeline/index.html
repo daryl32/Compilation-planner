@@ -1,0 +1,344 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#ffffff; --fg:#262730; --muted:#8a8f98; --line:#d9dce1; --accent:#ff4b4b;
+          --panel:#f3f4f7; --wave:rgba(40,44,52,0.55); --xf:rgba(128,128,128,0.18); --bass:#e8890c; }
+  html, body { margin:0; padding:0; background:transparent; color:var(--fg);
+               font-family: "Source Sans Pro", -apple-system, system-ui, sans-serif; font-size:15px;
+               -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color: transparent; }
+  .bar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:4px 0; }
+  button { min-height:44px; min-width:44px; padding:0 12px; border-radius:8px; border:1px solid var(--line);
+           background:var(--panel); color:var(--fg); font-size:15px; cursor:pointer; touch-action:manipulation; }
+  button:active { transform: scale(0.97); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  button.on { outline:2px solid var(--accent); }
+  button:disabled { opacity:.4; cursor:default; }
+  .time { font-variant-numeric: tabular-nums; min-width:118px; text-align:center; font-weight:600; }
+  .grow { flex:1; }
+  canvas { display:block; width:100%; touch-action:none; border-radius:8px; }
+  #main { height:210px; background:var(--panel); }
+  #over { height:30px; margin-top:6px; background:var(--panel); }
+  .hint { color:var(--muted); font-size:13px; margin-top:4px; min-height:18px; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <button id="play" class="primary" title="Play / pause (space)">▶</button>
+  <button id="back" title="Back 5 seconds">⏪</button>
+  <button id="fwd" title="Forward 5 seconds">⏩</button>
+  <span class="time" id="time">0:00.0</span>
+  <span class="grow"></span>
+  <button id="prevj" title="Go to the previous join">◀ Join</button>
+  <button id="nextj" title="Go to the next join">Join ▶</button>
+  <button id="zout" title="Zoom out ( [ )">−</button>
+  <button id="zin" title="Zoom in ( ] )">+</button>
+  <button id="all" title="Show the whole mix">⤢ All</button>
+</div>
+<canvas id="main"></canvas>
+<canvas id="over"></canvas>
+<div class="hint" id="hint"></div>
+
+<script>
+// Streamlit component protocol (no build step)
+function post(type, extra) {
+  window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra || {}), "*");
+}
+function setHeight() { post("streamlit:setFrameHeight", {height: document.body.scrollHeight + 4}); }
+function sendValue(v) { post("streamlit:setComponentValue", {value: v, dataType: "json"}); }
+
+let A = null;
+let view = {start: 0, span: 60};
+let audio = new Audio(); audio.preload = "auto";
+let playing = false;
+let drag = null;              // {join index, side "pre"|"post", t}
+const $ = id => document.getElementById(id);
+const main = $("main"), over = $("over");
+const DEFAULT_HINT = "Drag a crossfade's ◆ edges to make it longer or shorter, on either side of the join · " +
+                     "tap the chart to move the playhead · drag elsewhere to scroll";
+
+function fmt(t) { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = t - m * 60;
+                  return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1); }
+function dur() { return A ? A.duration : 1; }
+function now() { return audio && !isNaN(audio.currentTime) ? audio.currentTime : 0; }
+function hint(s) { $("hint").textContent = s; }
+function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+function nearest(arr, t) {
+  let lo = 0, hi = arr.length - 1; if (hi < 0) return null;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < t) lo = m + 1; else hi = m; }
+  if (lo > 0 && Math.abs(arr[lo - 1] - t) <= Math.abs(arr[lo] - t)) lo--;
+  return arr[lo];
+}
+function beatsText(b) {
+  b = Math.round(b * 100) / 100;
+  if (b <= 0) return "0";
+  if (b >= 4 && Math.abs(b / 4 - Math.round(b / 4)) < 1e-6) { const n = b / 4; return n + " bar" + (n === 1 ? "" : "s"); }
+  return b + " beat" + (b === 1 ? "" : "s");
+}
+function fit(c) {
+  const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  if (c.width !== Math.round(r.width * d) || c.height !== Math.round(r.height * d)) {
+    c.width = Math.round(r.width * d); c.height = Math.round(r.height * d);
+  }
+  const g = c.getContext("2d"); g.setTransform(d, 0, 0, d, 0, 0); return [g, r.width, r.height];
+}
+function colour(c, a) { return c.replace("{a}", a); }
+
+// the edges of join k (with a drag in progress applied)
+function edges(k) {
+  const j = A.joins[k];
+  let pre = j.pre, post = j.post;
+  if (drag && drag.k === k) { if (drag.side === "pre") pre = Math.max(0, j.at - drag.t); else post = Math.max(0, drag.t - j.at); }
+  return [j.at - pre, j.at + post, pre, post];
+}
+
+function drawWave(g, w, h, t0, t1, mid, amp, alpha) {
+  const env = A.env, rate = A.env_rate; if (!env.length) return;
+  g.fillStyle = css("--wave"); g.globalAlpha = alpha;
+  g.beginPath(); g.moveTo(0, mid);
+  const vals = [];
+  for (let px = 0; px <= w; px++) {
+    const ta = t0 + (t1 - t0) * px / w, tb = t0 + (t1 - t0) * (px + 1) / w;
+    let v = 0; for (let i = Math.floor(ta * rate); i <= Math.floor(tb * rate); i++) v = Math.max(v, env[i] || 0);
+    vals.push(v); g.lineTo(px, mid - v * amp);
+  }
+  for (let px = w; px >= 0; px--) g.lineTo(px, mid + vals[px] * amp);
+  g.closePath(); g.fill(); g.globalAlpha = 1;
+}
+
+function draw() {
+  if (!A) return;
+  view.span = Math.min(Math.max(view.span, 2), Math.max(dur(), 2));
+  view.start = Math.min(Math.max(view.start, 0), Math.max(0, dur() - view.span));
+  const [g, w, h] = fit(main);
+  g.clearRect(0, 0, w, h);
+  const t0 = view.start, t1 = view.start + view.span, X = t => (t - t0) / (t1 - t0) * w;
+  const top = 18, laneH = 16, bottom = h - 14, mid = (top + laneH + bottom) / 2 + 4, amp = (bottom - top - laneH) / 2 - 2;
+  // the parts, each in its song's colour
+  A.pieces.forEach((p, i) => {
+    if (p.x1 < t0 || p.x0 > t1) return;
+    g.fillStyle = colour(p.colour, i % 2 ? 0.20 : 0.30);
+    g.fillRect(X(p.x0), top, X(p.x1) - X(p.x0), bottom - top);
+  });
+  // bars (faint)
+  if (view.span < 120) { g.strokeStyle = css("--line"); g.lineWidth = 1;
+    A.bars.forEach(b => { if (b >= t0 && b <= t1) { g.beginPath(); g.moveTo(X(b), top); g.lineTo(X(b), bottom); g.stroke(); } }); }
+  drawWave(g, w, h, t0, t1, mid, amp, 1);
+  // part labels
+  g.font = "11px sans-serif"; g.fillStyle = css("--fg");
+  A.pieces.forEach(p => {
+    if (p.x1 < t0 || p.x0 > t1) return;
+    const x = Math.max(X(p.x0), 0) + 3, room = X(p.x1) - x - 4;
+    if (room > 30) { let s = p.label; while (s.length > 3 && g.measureText(s).width > room) s = s.slice(0, -2);
+                     g.fillText(s === p.label ? s : s + "…", x, top + 12 + laneH); }
+  });
+  // 🎤 layers along the top lane
+  A.layers.forEach(l => {
+    if (l.x1 < t0 || l.x0 > t1) return;
+    g.fillStyle = colour(l.colour, 0.75);
+    g.fillRect(X(l.x0), top, X(l.x1) - X(l.x0), laneH - 2);
+    g.fillStyle = "#fff"; g.font = "10px sans-serif";
+    if (X(l.x1) - X(l.x0) > 40) g.fillText(l.label, X(l.x0) + 3, top + 11);
+  });
+  // 🔀 crossfades: shaded, the outgoing song falling and the incoming one rising, ◆ handles to drag
+  A.joins.forEach((j, k) => {
+    const [x0t, x1t, pre, post] = edges(k);
+    if (x1t < t0 - 1 || x0t > t1 + 1) return;
+    const a = A.pieces[k], b = A.pieces[k + 1], x0 = X(x0t), x1 = X(x1t);
+    if (x1 - x0 > 1.5) {
+      g.fillStyle = css("--xf"); g.fillRect(x0, top, x1 - x0, bottom - top);
+      const smooth = j.shape === "smooth";
+      [[a.colour, false], [b.colour, true]].forEach(([c, up]) => {
+        g.strokeStyle = colour(c, 1); g.lineWidth = 2.5; g.beginPath();
+        for (let i = 0; i <= 24; i++) {
+          const u = i / 24, v = up ? (smooth ? Math.sin(u * Math.PI / 2) : u) : (smooth ? Math.sin((1 - u) * Math.PI / 2) : 1 - u);
+          const x = x0 + (x1 - x0) * u, y = bottom - 4 - v * (bottom - top - laneH - 10);
+          i ? g.lineTo(x, y) : g.moveTo(x, y);
+        }
+        g.stroke();
+      });
+    }
+    // the join's bar line, coloured by how well it should sound
+    g.setLineDash([3, 4]); g.strokeStyle = j.note_colour || css("--muted"); g.lineWidth = 2;
+    g.beginPath(); g.moveTo(X(j.at), top); g.lineTo(X(j.at), bottom); g.stroke(); g.setLineDash([]);
+    // 🎛️ bass swap point
+    if (j.bass_swap && j.swap_at != null && !(drag && drag.k === k)) {
+      const xs = X(j.swap_at); g.strokeStyle = css("--bass"); g.lineWidth = 3;
+      g.beginPath(); g.moveTo(xs, bottom - 18); g.lineTo(xs, bottom); g.stroke();
+      g.fillStyle = css("--bass"); g.font = "bold 10px sans-serif"; g.fillText("bass", xs + 3, bottom - 8);
+    }
+    // label + handles
+    if (x1 - x0 > 1.5 || j.editable) {
+      g.fillStyle = css("--fg"); g.font = "bold 11px sans-serif";
+      const lab = "🔀 " + beatsText((pre + post) / A.beat_len);
+      g.fillText(lab, Math.max(2, (x0 + x1) / 2 - g.measureText(lab).width / 2), 13);
+    }
+    if (j.editable) {
+      [x0, x1].forEach((x, side) => {
+        const active = drag && drag.k === k && drag.side === (side ? "post" : "pre");
+        g.fillStyle = active ? css("--accent") : css("--fg");
+        g.beginPath(); const yy = mid, s = active ? 11 : 9;
+        g.moveTo(x, yy - s); g.lineTo(x + s, yy); g.lineTo(x, yy + s); g.lineTo(x - s, yy); g.closePath(); g.fill();
+        g.strokeStyle = g.fillStyle; g.lineWidth = 1.5; g.beginPath(); g.moveTo(x, top); g.lineTo(x, bottom); g.stroke();
+      });
+    }
+  });
+  // trimmed off the end
+  if (A.trim_to != null && A.trim_to < dur()) { g.fillStyle = "rgba(128,128,128,0.35)"; g.fillRect(X(A.trim_to), top, w, bottom - top); }
+  // playhead
+  const p = now();
+  if (A.audio_url && p >= t0 && p <= t1) { g.strokeStyle = css("--fg"); g.lineWidth = 2; g.beginPath(); g.moveTo(X(p), top); g.lineTo(X(p), bottom); g.stroke(); }
+  // ruler
+  g.fillStyle = css("--muted"); g.font = "11px sans-serif";
+  const every = view.span > 400 ? 60 : view.span > 150 ? 30 : view.span > 50 ? 10 : view.span > 16 ? 5 : 1;
+  for (let s = Math.ceil(t0 / every) * every; s <= t1; s += every) g.fillText(fmt(s).replace(/\.0$/, ""), X(s) + 3, h - 2);
+
+  // overview
+  const [o, ow, oh] = fit(over);
+  o.clearRect(0, 0, ow, oh);
+  const OX = t => t / dur() * ow;
+  A.pieces.forEach((pc, i) => { o.fillStyle = colour(pc.colour, i % 2 ? 0.25 : 0.4); o.fillRect(OX(pc.x0), 0, OX(pc.x1) - OX(pc.x0), oh); });
+  drawWave(o, ow, oh, 0, dur(), oh / 2, oh / 2 - 2, 0.8);
+  o.strokeStyle = css("--fg"); o.lineWidth = 1.5; o.strokeRect(OX(t0), 1, Math.max(3, OX(t1) - OX(t0)), oh - 2);
+  if (A.audio_url) { o.fillStyle = css("--accent"); o.fillRect(OX(p) - 1, 0, 2, oh); }
+  $("time").textContent = fmt(p) + " / " + fmt(dur());
+}
+
+// playback
+function loop() {
+  if (playing) { const t = now(); if (t > view.start + view.span * 0.9 || t < view.start) view.start = t - view.span * 0.1; }
+  draw(); requestAnimationFrame(loop);
+}
+function togglePlay() {
+  if (!A || !A.audio_url) { hint("▶️ Preview the mix first (below) to listen here."); return; }
+  if (audio.paused) audio.play().catch(e => hint("Couldn't play: " + e.message)); else audio.pause();
+}
+audio.addEventListener("play", () => { playing = true; $("play").textContent = "⏸"; });
+audio.addEventListener("pause", () => { playing = false; $("play").textContent = "▶"; });
+audio.addEventListener("ended", () => { playing = false; $("play").textContent = "▶"; });
+function seek(t) { t = Math.min(Math.max(t, 0), dur()); try { audio.currentTime = t; } catch (e) {} draw(); }
+function goJoin(dir) {
+  if (!A.joins.length) return;
+  const c = view.start + view.span / 2;
+  let list = A.joins.map(j => j.at);
+  let t = dir > 0 ? list.find(x => x > c + 0.5) : list.slice().reverse().find(x => x < c - 0.5);
+  if (t == null) t = dir > 0 ? list[0] : list[list.length - 1];
+  const k = list.indexOf(t), j = A.joins[k];
+  view.span = Math.min(dur(), Math.max(16, (j.pre + j.post) * 2.2 + 8));
+  view.start = t - view.span / 2;
+  seek(Math.max(0, t - Math.max(6, j.pre + 2)));
+  hint((j.note || "Join " + (k + 1)) + (j.editable ? " — drag the ◆ edges to change the crossfade." : ""));
+}
+
+// pointer: drag a ◆ = change a crossfade, drag elsewhere = scroll, tap = playhead
+let ptr = null;
+function tAt(e) { const r = main.getBoundingClientRect(); return view.start + (e.clientX - r.left) / r.width * view.span; }
+function handleNear(e) {
+  const r = main.getBoundingClientRect(), x = e.clientX - r.left, tol = e.pointerType === "touch" ? 24 : 12;
+  let best = null, bd = 1e9;
+  A.joins.forEach((j, k) => {
+    if (!j.editable) return;
+    [["pre", j.at - j.pre], ["post", j.at + j.post]].forEach(([side, t]) => {
+      const d = Math.abs((t - view.start) / view.span * r.width - x);
+      // a zero-length side sits on the bar line: pick the side the finger moves towards later
+      if (d < bd || (d === bd && best && best.k === k)) { bd = d; best = {k: k, side: side}; }
+    });
+  });
+  return bd <= tol ? best : null;
+}
+function snapT(t) { return A.beats.length ? nearest(A.beats, t) : t; }
+main.addEventListener("pointerdown", e => {
+  if (!A) return;
+  main.setPointerCapture(e.pointerId);
+  const hnd = handleNear(e);
+  ptr = {id: e.pointerId, x0: e.clientX, start0: view.start, hnd: hnd, moved: false};
+});
+main.addEventListener("pointermove", e => {
+  if (!ptr || e.pointerId !== ptr.id) return;
+  const dx = e.clientX - ptr.x0;
+  if (Math.abs(dx) > 5) ptr.moved = true;
+  if (!ptr.moved) return;
+  if (ptr.hnd) {
+    const j = A.joins[ptr.hnd.k];
+    let side = ptr.hnd.side, t = tAt(e);
+    if (j.pre < 1e-3 && j.post < 1e-3) side = t < j.at ? "pre" : "post";   // a straight cut: either way
+    ptr.hnd.side = side;
+    const lim = side === "pre" ? [j.min_t, j.at] : [j.at, j.max_t];
+    t = Math.min(Math.max(snapT(t), lim[0]), lim[1]);
+    drag = {k: ptr.hnd.k, side: side, t: t};
+    const [, , pre, post] = edges(ptr.hnd.k);
+    hint("🔀 " + beatsText(pre / A.beat_len) + " before the join · " + beatsText(post / A.beat_len) + " after");
+    draw();
+  } else { const r = main.getBoundingClientRect(); view.start = ptr.start0 - dx / r.width * view.span; draw(); }
+});
+main.addEventListener("pointerup", e => {
+  if (!ptr || e.pointerId !== ptr.id) return;
+  const p = ptr; ptr = null;
+  if (p.hnd && drag) {
+    const k = drag.k, j = A.joins[k], [, , pre, post] = edges(k);
+    drag = null;
+    const preB = Math.round(pre / A.beat_len * 4) / 4, postB = Math.round(post / A.beat_len * 4) / 4;
+    j.pre = preB * A.beat_len; j.post = postB * A.beat_len;        // show it until Python redraws
+    sendValue({uid: j.uid, pre_beats: preB, post_beats: postB, nonce: Date.now()});
+    hint("🔀 Join " + (k + 1) + ": " + beatsText(preB) + " before · " + beatsText(postB) + " after — ▶️ Preview again to hear it.");
+    draw(); return;
+  }
+  drag = null;
+  if (p.moved) return;
+  const t = tAt(e);
+  const near = A.joins.findIndex(j => t >= j.at - j.pre - 0.3 && t <= j.at + j.post + 0.3);
+  if (near >= 0) hint(A.joins[near].note || "");
+  seek(t);
+});
+main.addEventListener("pointercancel", () => { ptr = null; drag = null; draw(); });
+over.addEventListener("pointerdown", e => {
+  const r = over.getBoundingClientRect(), t = (e.clientX - r.left) / r.width * dur();
+  view.start = t - view.span / 2; seek(t);
+});
+
+$("play").onclick = togglePlay;
+$("back").onclick = () => seek(now() - 5);
+$("fwd").onclick = () => seek(now() + 5);
+$("zin").onclick = () => { const c = view.start + view.span / 2; view.span /= 1.6; view.start = c - view.span / 2; draw(); };
+$("zout").onclick = () => { const c = view.start + view.span / 2; view.span *= 1.6; view.start = c - view.span / 2; draw(); };
+$("all").onclick = () => { view.start = 0; view.span = dur(); draw(); };
+$("prevj").onclick = () => goJoin(-1);
+$("nextj").onclick = () => goJoin(1);
+document.addEventListener("keydown", e => {
+  if (e.code === "Space") { e.preventDefault(); togglePlay(); }
+  else if (e.key === "[") $("zout").click(); else if (e.key === "]") $("zin").click();
+});
+
+function applyTheme(th) {
+  if (!th) return;
+  const r = document.documentElement.style;
+  if (th.base === "dark") { r.setProperty("--panel", "#1f2129"); r.setProperty("--line", "#3a3d47");
+                            r.setProperty("--muted", "#9aa0aa"); r.setProperty("--wave", "rgba(230,232,238,0.55)"); }
+  if (th.textColor) r.setProperty("--fg", th.textColor);
+  if (th.primaryColor) r.setProperty("--accent", th.primaryColor);
+}
+window.addEventListener("message", ev => {
+  const d = ev.data;
+  if (!d || d.type !== "streamlit:render") return;
+  applyTheme(d.theme);
+  const first = !A, args = d.args;
+  if (!A || A.audio_url !== args.audio_url) {
+    const t = now(); audio.src = args.audio_url || "";
+    if (args.audio_url && !first) { try { audio.currentTime = t; } catch (e) {} }
+  }
+  const lengthChanged = A && Math.abs(A.duration - args.duration) > 0.5;
+  A = args;
+  $("play").disabled = !A.audio_url;
+  $("prevj").disabled = $("nextj").disabled = !A.joins.length;
+  if (first || lengthChanged) { view.start = 0; view.span = dur(); }
+  if (first) hint(A.joins.some(j => j.editable) ? DEFAULT_HINT : "Tap the chart to move the playhead · drag to scroll");
+  draw(); setHeight();
+});
+window.addEventListener("resize", () => { draw(); setHeight(); });
+post("streamlit:componentReady", {apiVersion: 1});
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

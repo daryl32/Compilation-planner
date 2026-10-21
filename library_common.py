@@ -854,8 +854,8 @@ def show_render_player(meta: dict, height: int = 360) -> None:
                 st.error(err)
             else:
                 st.rerun()
-        import streamlit.components.v1 as components
-        components.iframe(url, height=height)
+        import embed
+        embed.url(url, height=height)
         st.caption("☁️ Playing from Google Drive. A video uploaded in the last minute or two may still be "
                    "processing — if so, wait a moment and reopen it.")
     else:
