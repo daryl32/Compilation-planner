@@ -472,7 +472,7 @@ def render_choreography_block(
         _pl_cols = st.columns([2, 3])
         with _pl_cols[0]:
             if st.button(f"📍 Use the planned picks ({len(_pclips)})", key=f"chor_use_plan_{seg_idx}",
-                         use_container_width=True,
+                         width="stretch",
                          help="Tick the planned path's videos (each on its planned clip) and untick the rest. "
                               "Each video's clips are planned for all its remaining blocks together, in order, "
                               "so none runs short later — picking something else plans the rest again."):
@@ -579,11 +579,11 @@ def render_choreography_block(
                          ("⏩", +CHOR_SKIP, _at_end, f"Forward {CHOR_SKIP} trimmed clips")]):
                     with _col:
                         if st.button(_lbl, key=f"chor_step{_step:+d}_{seg_idx}_{video_id}",
-                                     use_container_width=True, disabled=_off, help=_tip):
+                                     width="stretch", disabled=_off, help=_tip):
                             _chor_step(overrides, video_id, clips, sel_idx, _step)
                             rerun_fragment()
                 with nav[2]:
-                    if st.button("↺", key=f"chor_auto_{seg_idx}_{video_id}", use_container_width=True,
+                    if st.button("↺", key=f"chor_auto_{seg_idx}_{video_id}", width="stretch",
                                  disabled=current_key is None, help="Back to the automatic pick"):
                         overrides.pop(video_id, None)
                         rerun_fragment()
@@ -609,7 +609,7 @@ def render_choreography_block(
 
                 _is_open = st.session_state.get("chor_preview") == (seg_idx, video_id)
                 if st.button("⏹ Close preview" if _is_open else "🎵 Preview with music",
-                             key=f"chor_prevw_{seg_idx}_{video_id}", use_container_width=True,
+                             key=f"chor_prevw_{seg_idx}_{video_id}", width="stretch",
                              disabled=display_clip is None):
                     st.session_state["chor_preview"] = None if _is_open else (seg_idx, video_id)
                     rerun_fragment()
@@ -725,7 +725,7 @@ def _render_chor_preview_panel(seg_idx: int, seg: dict, video_id: str, shown: tu
                                                        ("Next ▶", +1, _at_end),
                                                        (f"{CHOR_SKIP} ⏩", +CHOR_SKIP, _at_end)]):
             with _col:
-                if st.button(_lbl, key=f"chor_p{_step:+d}_{seg_idx}_{video_id}", use_container_width=True,
+                if st.button(_lbl, key=f"chor_p{_step:+d}_{seg_idx}_{video_id}", width="stretch",
                              disabled=_off):
                     _chor_step(overrides, video_id, clips, idx, _step)
                     rerun_fragment()
@@ -736,9 +736,9 @@ def _render_chor_preview_panel(seg_idx: int, seg: dict, video_id: str, shown: tu
                 st.session_state[pick_key] = True
                 st.session_state["chor_preview"] = None
             st.button("✔ Use this clip", key=f"chor_puse_{seg_idx}_{video_id}", type="primary",
-                      use_container_width=True, on_click=_use_and_close, disabled=clip is None)
+                      width="stretch", on_click=_use_and_close, disabled=clip is None)
         with cols[5]:
-            if st.button("Close", key=f"chor_pclose_{seg_idx}_{video_id}", use_container_width=True):
+            if st.button("Close", key=f"chor_pclose_{seg_idx}_{video_id}", width="stretch"):
                 st.session_state["chor_preview"] = None
                 rerun_fragment()
 
@@ -927,7 +927,7 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                         st.session_state["adv_viewing"] = None
                         rerun_full()
                 if similar_ctx and st.button("✨ More like this", key=f"adv_more_{current_block}_{cand_key(c)}",
-                                             use_container_width=True,
+                                             width="stretch",
                                              help="Find clips like this one in your selected videos' still-available "
                                                   "footage — they're added to the grid marked ✨."):
                     found = similar_ctx["find"](c)
@@ -970,7 +970,7 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                                   line=dict(color="rgba(230,120,20,0.9)", width=2)))
         vfig.update_layout(height=250, margin=dict(t=30, b=20), title=f"Shape score: {vc['score']:.2f}",
                            legend=dict(orientation="h", y=-0.3))
-        st.plotly_chart(vfig, use_container_width=True)
+        st.plotly_chart(vfig, width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -1710,7 +1710,7 @@ def _pace_row(_pc, _styles, _style_now) -> None:
                                AUDIO_STYLE_CUSTOM: "✏️ Custom — your own settings"}.get(x, x),
         help="Sets every dial below for THIS track — its tempo, loudness and hits — and keeps them "
              "tuned if you change the track or method. Moving any dial switches to Custom.")
-    _pc[1].button("🎯 Re-tune for this track", on_click=_run_auto_tune, use_container_width=True,
+    _pc[1].button("🎯 Re-tune for this track", on_click=_run_auto_tune, width="stretch",
                   help="Re-runs auto-detect for the current method at the chosen pace (Balanced if Custom). "
                        "Same as the sidebar's Auto-detect.")
 
@@ -1758,7 +1758,7 @@ def _render_aim_adaptive(track: dict, current_segments: int) -> None:
         else:
             c[1].number_input("Segments", 1, 1000, step=1, key="aim_segments",
                               help=f"This track is {dur:.0f}s long.")
-        c[2].button("Set the dials", on_click=_aim_adaptive, type="primary", use_container_width=True,
+        c[2].button("Set the dials", on_click=_aim_adaptive, type="primary", width="stretch",
                     help="Finds energy-change and big-hit thresholds plus shortest / longest segment that "
                          "give that many cuts on this track.")
         rep = st.session_state.get("aim_report")
@@ -1904,13 +1904,13 @@ def _render_cut_editor(track: dict) -> None:
                        f"your edited cuts ({len(e['cuts']) + 1} segments) — the new settings would give "
                        f"{len(base_cuts) + 1}, with {len(d['added'])} of your cuts not among them.")
             bc = st.columns(3 if n_locked else 2)
-            bc[0].button("✋ Keep my edited cuts", on_click=_keep_cut_edits, args=(sig,), use_container_width=True)
+            bc[0].button("✋ Keep my edited cuts", on_click=_keep_cut_edits, args=(sig,), width="stretch")
             if n_locked:
                 bc[1].button(f"♻️ New settings + my {n_locked} 🔒 cut(s)", on_click=_keep_new_with_locks,
-                             args=(sig, base_cuts, duration), use_container_width=True, type="primary",
+                             args=(sig, base_cuts, duration), width="stretch", type="primary",
                              help="The new settings' cuts, with your locked cuts kept exactly where they are.")
             bc[-1].button("♻️ Use the new settings (drop my edits)", on_click=_drop_cut_edits,
-                          use_container_width=True)
+                          width="stretch")
 
     audio_url = ""
     audio_path, missing = _local_media(track.get("source_path", ""))
@@ -1925,7 +1925,7 @@ def _render_cut_editor(track: dict) -> None:
         _dc[0].caption(f"▶ Playback needs {Path(colab_to_local(missing)).name} on the server — you can still "
                        f"edit the cuts without it.")
         if _DRIVE_SYNC_AVAILABLE and "MyDrive/" in missing and _dc[1].button(
-                "⬇️ Download the track from Google Drive", key="ced_dl", use_container_width=True):
+                "⬇️ Download the track from Google Drive", key="ced_dl", width="stretch"):
             bar = st.progress(0.0, text="Downloading…")
             dl_err = download_source_video(missing.split("MyDrive/", 1)[1], Path(colab_to_local(missing)),
                                            progress_callback=lambda pr: bar.progress(min(pr, 1.0)))
@@ -1974,7 +1974,7 @@ def _render_cut_editor(track: dict) -> None:
                       + ". Saved with this project.",
                       help="🟠 your cuts · 🔵 the method's · 🟩 locked · dashed = removed · 👻 dotted = ideas · "
                            "purple ticks along the top = the kept set A.")
-        ec[1].button("↺ Undo all edits", on_click=_drop_cut_edits, use_container_width=True,
+        ec[1].button("↺ Undo all edits", on_click=_drop_cut_edits, width="stretch",
                      help="Drops your hand edits for this track (Undo in the editor can't bring them back).")
     else:
         st.caption("▶ Play and listen — tap ✂️ *Cut here* on the beat, drag a cut to move it, or select one and "
@@ -1990,12 +1990,12 @@ def _render_cut_editor(track: dict) -> None:
                       "🥁 On the beat) would cut — tap one in the editor to make it a cut.")
     if ab:
         xc[1].button("⇄ Swap with A", key="ced_ab_swap", on_click=_ab_swap, args=(tid, sig, base_cuts),
-                     use_container_width=True,
+                     width="stretch",
                      help="Puts the kept set (A) back in the editor and keeps what's there now as A — listen to "
                           "one, swap, listen to the other.")
     else:
         xc[1].button("📌 Keep as A", key="ced_ab_keep", on_click=_ab_keep, args=(tid, cuts_now),
-                     use_container_width=True,
+                     width="stretch",
                      help="Keep these cuts as set A, then try something else and compare (A shows as purple ticks "
                           "along the top of the editor).")
     if ab:
@@ -2005,7 +2005,7 @@ def _render_cut_editor(track: dict) -> None:
                        f"avg {sb['average']:.1f}s · {diff_n} cut(s) differ",
                        help=f"Shortest / longest — A: {sa['shortest']:.1f}s / {sa['longest']:.1f}s · now: "
                             f"{sb['shortest']:.1f}s / {sb['longest']:.1f}s.")
-        xc[1].button("✕ Forget A", key="ced_ab_forget", use_container_width=True,
+        xc[1].button("✕ Forget A", key="ced_ab_forget", width="stretch",
                      on_click=lambda: st.session_state.pop("cut_ab", None))
     with st.expander("🎨 Re-cut a part in another style", expanded=bool(st.session_state.pop("ced_region_open", False))):
         lines = _region_lines(track, bpb)
@@ -2021,7 +2021,7 @@ def _render_cut_editor(track: dict) -> None:
         st.session_state.setdefault("ced_rpace", 0)
         rc[0].selectbox("Style", list(CSTY.STYLES), key="ced_rstyle", format_func=lambda k: CSTY.STYLES[k]["label"])
         rc[1].selectbox("Pace", list(CSTY.PACE_LABELS), key="ced_rpace", format_func=lambda k: CSTY.PACE_LABELS[k])
-        rc[2].button("🎨 Re-cut this part", key="ced_recut", type="primary", use_container_width=True,
+        rc[2].button("🎨 Re-cut this part", key="ced_recut", type="primary", width="stretch",
                      on_click=_recut_region, args=(track, tid, sig, base_cuts, bpb, part),
                      help="Replaces the cuts inside the part with the style's — 🔒 locked cuts stay, and the "
                           "rest of the track is untouched. ↶ Undo in the editor takes it back.")
@@ -2087,7 +2087,7 @@ def _render_smart_cut_settings(track: dict, _v) -> None:
                  "Intensity": s["intensity"], "A cut every": s["every"], "Why": s["reason"]}
                 for s in rep.get("sections", [])]
         if rows:
-            st.dataframe(rows, hide_index=True, use_container_width=True,
+            st.dataframe(rows, hide_index=True, width="stretch",
                          column_config={"Intensity": st.column_config.ProgressColumn(
                              "Intensity", min_value=0.0, max_value=1.0, format="%.2f")})
 
@@ -2207,7 +2207,7 @@ def block_chart(track: dict, segments: list, marks: dict = None, height: int = 2
                                            "<extra></extra>"))
     fig.update_layout(height=height, margin=dict(t=24, b=10, l=10, r=10), showlegend=False,
                       yaxis=dict(showticklabels=False, title=None), xaxis_title=None)
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 
 @fragment
@@ -2256,7 +2256,7 @@ def render_audio_settings_section(track: dict) -> None:
     if segmentation_method == SEG_SMART:
         # Smart sets its own pace from the track; the Pace slider below dials it in.
         _pc[0].caption("🧠 Smart sets its pace from the track itself — dial it in with **Pace** below.")
-        _pc[1].button("↺ Back to auto", on_click=_smart_reset, use_container_width=True,
+        _pc[1].button("↺ Back to auto", on_click=_smart_reset, width="stretch",
                       help="Pace back to auto, contrast back to the song's own, all switches on.")
     else:
         _pace_row(_pc, _styles, _style_now)
@@ -2400,7 +2400,7 @@ def render_audio_settings_section(track: dict) -> None:
                     range=[0, _max_c + 0.5], dtick=1, showgrid=False),
         legend=dict(orientation="h", y=-0.28),
     )
-    st.plotly_chart(afig, use_container_width=True)
+    st.plotly_chart(afig, width="stretch")
     st.caption(_audio_status(track, _segs)[0])
 
     # Save the shadow copy every call — this is what actually survives the round trip to
@@ -2458,7 +2458,7 @@ def render_audio_simple(track: dict) -> None:
     add_cut_markers(fig, segs)
     fig.update_layout(height=260, margin=dict(t=10, b=10, l=10, r=10), showlegend=False,
                       xaxis_title=None, yaxis=dict(showticklabels=False, title=None))
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
     line, notes = _audio_status(track, segs)
     st.caption(line + (f"  ·  also in use: {', '.join(notes)} (🛠️ Advanced to change)" if notes else ""))
     regions = current_story_map(st.session_state.get("track_id"))
@@ -2599,10 +2599,10 @@ def render_story_map_picker(track_id: str) -> None:
             elif src == "project":
                 st.caption("✏️ Changed for this project — save it for the track if you want it again:")
                 bc = st.columns(2)
-                bc[0].button("⭐ Save as the track's default", use_container_width=True, on_click=_story_save_default,
+                bc[0].button("⭐ Save as the track's default", width="stretch", on_click=_story_save_default,
                              help="Replaces the track's default map — used by new projects, the recommender and "
                                   "the analytics.")
-                with bc[1].popover("📁 Save as a new map", use_container_width=True):
+                with bc[1].popover("📁 Save as a new map", width="stretch"):
                     nk = f"sm_new_name_{sm.get('v', 0)}"
                     st.text_input("Name", key=nk, placeholder="e.g. Long intro")
                     st.button("📁 Save", key=f"{nk}_go", on_click=_story_save_named, args=(nk,), type="primary")
@@ -2728,10 +2728,10 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
         _bc = top_cols[1:]
         for c in _bc:
             c.write("")
-    _bc[0].button("✅ Select all recommended", on_click=_select_all_recommended, use_container_width=True,
+    _bc[0].button("✅ Select all recommended", on_click=_select_all_recommended, width="stretch",
                   help=f"Tick the top {RECOMMENDED_COUNT} best-matching videos listed below.")
-    _bc[1].button("Clear selection", on_click=_clear_video_selection, use_container_width=True)
-    _bc[2].button("🎲 Randomize", on_click=_randomize_top_videos, use_container_width=True,
+    _bc[1].button("Clear selection", on_click=_clear_video_selection, width="stretch")
+    _bc[2].button("🎲 Randomize", on_click=_randomize_top_videos, width="stretch",
                   help=f"Replace the top list with {RECOMMENDED_COUNT} videos picked purely at random from the "
                        f"whole library (ignores the ranking weights). Press again for a different set.")
 
@@ -2779,7 +2779,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
     if _seed is not None:
         _hc = st.columns([6, 2])
         _hc[0].subheader(f"🎲 Random pick — {len(info['top_matches'])} videos")
-        _hc[1].button("↩️ Back to best matches", on_click=_back_to_best_matches, use_container_width=True)
+        _hc[1].button("↩️ Back to best matches", on_click=_back_to_best_matches, width="stretch")
         st.caption(f"Picked at random from all {len(video_matches)} videos with usable scenes (seed {_seed}) — "
                    f"the ranking weights aren't used. Match scores are still shown for reference." +
                    (f"  |  filtered to tags: {', '.join(tag_filter)}" if tag_filter else ""))
@@ -2886,7 +2886,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                         _is_sel = _vid in _selected_now or st.session_state.get(f"select_video_{_vid}", False)
                         st.button("✓ Selected" if _is_sel else "➕ Add", key=f"sim_add_{video_id}_{_vid}",
                                   disabled=_is_sel, on_click=_add_video_to_selection, args=(_vid,),
-                                  use_container_width=True)
+                                  width="stretch")
 
         if not simple and st.session_state["show_range_picker"].get(video_id):
             with st.container(border=True):
@@ -2930,7 +2930,7 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                        + ", ".join(_new_ids[:6]) + ("…" if len(_new_ids) > 6 else "")
                        + ("  — all selected" if not _not_ticked else ""))
         _nc[1].button(f"🆕 Add new videos ({len(_not_ticked)})", on_click=_add_new_videos, args=(_not_ticked,),
-                      disabled=not _not_ticked, use_container_width=True, key="add_new_videos",
+                      disabled=not _not_ticked, width="stretch", key="add_new_videos",
                       help="Tick every video added recently, adding any that aren't in the top list. "
                            "New videos are also listed first, marked 🆕, in the dropdown below.")
 
@@ -3606,9 +3606,9 @@ if _recover_file.exists():
                         + " · ".join(b for b in _bits if b))
             _rc = st.columns([1, 1, 4])
             _rc[0].button("♻️ Restore it", type="primary", on_click=_restore_choice, args=("restore",),
-                          use_container_width=True, key="autosave_restore")
+                          width="stretch", key="autosave_restore")
             _rc[1].button("Discard", on_click=_restore_choice, args=("discard",),
-                          use_container_width=True, key="autosave_discard")
+                          width="stretch", key="autosave_discard")
 
 # Media Library → Renders → "Reopen in Planner": load that render's saved project
 # state (or the settings recovered from its plan) exactly like 📂 Load Project.
@@ -3738,10 +3738,10 @@ with _pb[0]:
     else:
         st.markdown("📁 **Unsaved project**  ·  :gray[save it to keep it and come back later]")
 if _loaded and _new_loaded_changes:
-    if _pb[1].button(f"💾 Save changes", type="primary", use_container_width=True, key="project_quick_save",
+    if _pb[1].button(f"💾 Save changes", type="primary", width="stretch", key="project_quick_save",
                      help=f"Save to '{_loaded['name']}'."):
         _do_save_project(_loaded["name"])
-with _pb[2].popover("🆕 New", use_container_width=True):
+with _pb[2].popover("🆕 New", width="stretch"):
     st.caption("Start again from a blank planner — default settings, no track work, no project "
                "loaded. Saved projects aren't touched, and you can bring back what's on screen "
                "now straight afterwards.")
@@ -3749,9 +3749,9 @@ with _pb[2].popover("🆕 New", use_container_width=True):
         st.warning(f"**{_new_loaded['name']}** has unsaved changes — save it first if you want to keep them.")
     st.text_input("Name (optional)", key="new_project_name", placeholder="my-new-compilation",
                   help="Filled in as the project name, ready for 💾 Save.")
-    st.button("🆕 Start new project", type="primary", on_click=_new_project, use_container_width=True,
+    st.button("🆕 Start new project", type="primary", on_click=_new_project, width="stretch",
               key="new_project_go")
-with _pb[3].popover("💾 Save / 📂 Open", use_container_width=True):
+with _pb[3].popover("💾 Save / 📂 Open", width="stretch"):
     st.caption("Saves every setting plus matching progress (Auto, Manual step-through, and "
                "Choreography all at once) so you can close this and pick up again later.")
     _save_name = st.text_input("Project name", key="project_save_name", placeholder="my-compilation",
@@ -3759,14 +3759,14 @@ with _pb[3].popover("💾 Save / 📂 Open", use_container_width=True):
                                     "new name to save a copy.")
     _overwrites = _save_name.strip() and (PROJECTS_DIR / f"{sanitize_filename(_save_name.strip())}.json").exists()
     if st.button("💾 Save Project" + (" (update)" if _overwrites else ""), disabled=not _save_name.strip(),
-                 use_container_width=True):
+                 width="stretch"):
         _do_save_project(_save_name.strip())
 
     st.divider()
     _existing_projects = list_saved_projects()
     if _existing_projects:
         _load_choice = st.selectbox("Open project", ["—"] + _existing_projects, key="project_load_choice")
-        if _load_choice != "—" and st.button("📂 Open Project", use_container_width=True):
+        if _load_choice != "—" and st.button("📂 Open Project", width="stretch"):
             _path = PROJECTS_DIR / f"{_load_choice}.json"
             _load_warnings = load_project(_path)
             _remember_project(_load_choice, json.loads(_path.read_text()))
@@ -4023,11 +4023,11 @@ def step_nav(back: str = None, nxt: str = None) -> None:
     st.divider()
     c = st.columns([1, 2, 1])
     if back:
-        c[0].button(f"⬅ {back.split(' ', 1)[1]}", on_click=_goto, args=(back,), use_container_width=True,
+        c[0].button(f"⬅ {back.split(' ', 1)[1]}", on_click=_goto, args=(back,), width="stretch",
                     key=f"nav_back_{back}")
     if nxt:
         c[2].button(f"{nxt.split(' ', 1)[1]} ➡", on_click=_goto, args=(nxt,), type="primary",
-                    use_container_width=True, key=f"nav_next_{nxt}")
+                    width="stretch", key=f"nav_next_{nxt}")
 
 
 # The step bar: the radio (same key and values as always — saved sessions and the
@@ -4073,7 +4073,7 @@ if ui_section == SECTION_AUDIO:
         _record_page_run()
         st.stop()
     _ac = st.columns([1, 2])
-    _ac[0].button("🎯 Auto-detect settings", on_click=_run_auto_tune, use_container_width=True,
+    _ac[0].button("🎯 Auto-detect settings", on_click=_run_auto_tune, width="stretch",
                   help="Analyses this track's tempo, energy and hits, then sets the cutting and split-screen "
                        "settings. Adjust anything afterwards to fine-tune.")
     with _ac[1]:
@@ -4098,7 +4098,7 @@ if ui_section == SECTION_VIDEOS:
             f"🎚️ {len(st.session_state['video_time_ranges'])} have a range set for this project"
             if st.session_state["video_time_ranges"] else "") if x))
         if st.session_state["video_time_ranges"] and _rc[1].button("Reset project ranges",
-                                                                    use_container_width=True,
+                                                                    width="stretch",
                                                                     help="Back to the Media Library ranges."):
             st.session_state["video_time_ranges"] = {}
             st.rerun()
@@ -4177,7 +4177,7 @@ with st.form("match_settings", border=False):
         _mt = st.tabs(["🎛️ Mode & order", "⚖️ Auto-fill weights", "🎬 Intro / Outro"])
     _fc = st.columns([1.4, 3])
     _fc[0].form_submit_button("▶️ Apply & match" if _has_plan else "▶️ Match", type="primary",
-                              use_container_width=True, on_click=_press_match,
+                              width="stretch", on_click=_press_match,
                               help="Builds the plan with these settings. Change as many settings as you like "
                                    "first — nothing reloads until you press this.")
     _fc[1].caption("Change any ⚙️ settings, then press ▶️ to update the plan." if _has_plan else
@@ -4294,7 +4294,7 @@ with _mt[1]:
                        "best few instead, for variety (Improved auto-fill), or adds random noise "
                        "(original scoring). Reproducible — the same seed gives the same picks.")
         st.form_submit_button("🎲 Reroll", on_click=_reroll_and_match, disabled=_autofill_disabled,
-                              use_container_width=True,
+                              width="stretch",
                               help=f"A different Variety draw with the same settings — and matches straight away "
                                    f"(draw {int(st.session_state.get('autofill_seed', 42))}).")
 
@@ -4470,7 +4470,7 @@ if _story_on:
                        "Available": f"{_supply.get(r, 0):.0f}s",
                        "": ("✅" if _supply.get(r, 0) >= _needs.get(r, 0)
                             else "⚠️ short" if _supply.get(r, 0) > 0 else "❌ none")}
-                      for r in _plan_roles_used], hide_index=True, use_container_width=True)
+                      for r in _plan_roles_used], hide_index=True, width="stretch")
 
 # ---------------------------------------------------------------------------
 # 📍 The planned path (in order, Manual step-through and Choreography): the same
@@ -4942,7 +4942,7 @@ with _status_slot:
         _sc = st.columns([4, 1.4])
         _sc[0].caption(_status_line)
         _n_rej = len(st.session_state["global_excluded_scenes"])
-        _sc[1].button("🧹 Reset clip changes", on_click=_reset_overrides, use_container_width=True,
+        _sc[1].button("🧹 Reset clip changes", on_click=_reset_overrides, width="stretch",
                       help="Clears Auto mode's per-block Swap / Reject / Remove changes"
                            + (f" and the {_n_rej} clip(s) rejected from this plan." if _n_rej else "."))
     else:
@@ -5031,7 +5031,7 @@ for _r in (_story_regions or []):
         fig.add_vrect(x0=_r["start"], x1=_r["end"], fillcolor=_role["colour"], opacity=0.16, line_width=0,
                       layer="below", annotation_text=f"{_role['emoji']} {_role['name']}",
                       annotation_position="top left", annotation_font_size=11)
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 # ---------------------------------------------------------------------------
 # Timeline table + thumbnails preview
@@ -6075,13 +6075,13 @@ st.divider()
 st.subheader("Finish", help="🎬 Render a preview to watch the plan · 💾 Save the plan for the Blender add-on "
                             "(and Google Drive) · ⬇️ download the plan's JSON.")
 _fin = st.columns([2, 1.5, 1.5, 0.7])
-_render_clicked = _fin[0].button("🎬 Render Preview", type="primary", use_container_width=True)
-_save_clicked = _fin[1].button("💾 Save plan", use_container_width=True)
+_render_clicked = _fin[0].button("🎬 Render Preview", type="primary", width="stretch")
+_save_clicked = _fin[1].button("💾 Save plan", width="stretch")
 _fin[2].download_button(
     "⬇️ Download plan", data=json.dumps(export_plan, indent=2), file_name=f"{track_id}_plan.json",
-    mime="application/json", use_container_width=True, help="The plan as JSON, for the Blender add-on.")
+    mime="application/json", width="stretch", help="The plan as JSON, for the Blender add-on.")
 _stream_sources = False
-with _fin[3].popover("⚙️", use_container_width=True, help="Render options"):
+with _fin[3].popover("⚙️", width="stretch", help="Render options"):
     if _DRIVE_SYNC_AVAILABLE:
         _stream_sources = st.toggle(
             "Stream original videos from Google Drive", value=True, key="render_stream_sources",

@@ -271,3 +271,15 @@ def verdict(mem: dict | None, cpu_info: dict | None, history: list, disk_pct: fl
         notes.append(("warn", f"The disk is {disk_pct:.0f}% full."))
     order = {"warn": 0, "info": 1, "ok": 2}
     return sorted(notes, key=lambda n: order[n[0]])
+
+
+def tested_streamlit() -> str | None:
+    """The Streamlit version requirements.txt pins (streamlit[...]==X), or None."""
+    import re
+    from pathlib import Path
+    try:
+        text = (Path(__file__).resolve().parent / "requirements.txt").read_text()
+    except OSError:
+        return None
+    m = re.search(r"^streamlit(?:\[[^\]]*\])?==([\w.]+)", text, re.M)
+    return m.group(1) if m else None

@@ -157,7 +157,7 @@ def render_videos():
         _dur = st.session_state.get("lib_duration")
         if _dur and tuple(_dur) != (0, max_minutes):
             _n_more += 1
-        with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", use_container_width=True):
+        with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", width="stretch"):
             actor_filter = st.multiselect("👤 Actors", all_actors(), key="lib_actors", placeholder="anyone",
                                           help="Set on each video in the Reviewer (🎬 Video details).")
             vtag_filter = st.multiselect("🏷️ Video tags", all_video_tags(), key="lib_vtags", placeholder="any",
@@ -258,7 +258,7 @@ def render_videos():
             _nc = st.columns([5, 1.6], vertical_alignment="center")
             _names = ", ".join(new_ids[:4]) + ("…" if len(new_ids) > 4 else "")
             _nc[0].markdown(f":blue-badge[🆕 {len(new_ids)} new] added in the last {CS.NEW_VIDEO_DAYS} days: {_names}")
-            _nc[1].button("Show them", on_click=_show_new_videos, use_container_width=True, key="lib_show_new")
+            _nc[1].button("Show them", on_click=_show_new_videos, width="stretch", key="lib_show_new")
 
     if not rows:
         if added_choice != "any":
@@ -320,7 +320,7 @@ def render_videos():
                 except Exception:   # page list unavailable (e.g. run on its own) — a plain link instead
                     st.markdown(f"[📝 Review](Reviewer?video={video.get('stem', vid)})")
                 _open = st.session_state["lib_open_picker"] == vid
-                if st.button("✕ Close" if _open else "⏱ Range", key=f"lib_toggle_{vid}", use_container_width=True,
+                if st.button("✕ Close" if _open else "⏱ Range", key=f"lib_toggle_{vid}", width="stretch",
                              help="Set the part of this video the Compilation Planner uses (its library range)."):
                     # One picker open at a time — each embeds a full video player.
                     st.session_state["lib_open_picker"] = None if st.session_state["lib_open_picker"] == vid else vid
@@ -624,7 +624,7 @@ def _render_upgrade(aa, tracks: dict) -> None:
     c = st.columns(2)
     bars_only = no_bars if have_bt else []
     if c[0].button(f"🥁 Bar lines only — {len(bars_only)} track(s) (~{max(1, round(len(bars_only) * 0.75))} min)",
-                   key="aa_up_bars", disabled=not bars_only, use_container_width=True,
+                   key="aa_up_bars", disabled=not bars_only, width="stretch",
                    help="Quick: beat_this bar lines and everything built on them. Vocals are kept as they are."):
         n = aa.enqueue([{"track_id": tid, "kind": "extra", "vocals": False} for tid in bars_only])
         aa.resume()
@@ -633,7 +633,7 @@ def _render_upgrade(aa, tracks: dict) -> None:
         st.rerun()
     full = sorted(set(no_bars if have_bt else []) | set(no_vocals if have_dm else []))
     if c[1].button(f"🎤 Bar lines + vocals — {len(full)} track(s) (~{max(1, len(full) * 4)} min)",
-                   key="aa_up_full", disabled=not full or not have_dm, use_container_width=True,
+                   key="aa_up_full", disabled=not full or not have_dm, width="stretch",
                    help="Everything, including Demucs vocal separation (slow on the server's processor). "
                         + ("" if have_dm else "Demucs isn't installed on the server.")):
         n = aa.enqueue([{"track_id": tid, "kind": "extra", "vocals": True} for tid in full])
@@ -682,7 +682,7 @@ def render_audio():
         _b = st.session_state.get("aud_bpm")
         _n_more += int(bool(_b) and bool(bpms) and tuple(_b) != (int(min(bpms)), int(max(bpms)) + 1))
         bpm_filter = None
-        with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", use_container_width=True):
+        with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", width="stretch"):
             duration_filter = st.slider("Duration (minutes)", 0, max_minutes, (0, max_minutes), key="aud_dur")
             if bpms:
                 lo, hi = int(min(bpms)), int(max(bpms)) + 1
@@ -752,31 +752,31 @@ def render_audio():
                     from audio_charts import mini_figure
                     st.plotly_chart(mini_figure(t["energy"], t["duration"], t["sections"] if t["extra"] else [],
                                                 t["drops"] if t["extra"] else []),
-                                    use_container_width=True, config={"displayModeBar": False},
+                                    width="stretch", config={"displayModeBar": False},
                                     key=f"aud_mini_{tid}")
 
             # Actions, labelled, on one row (only the ones that apply).
             sc = st.container(key=f"ml_wrap_act_{tid}").columns(4)
             _playing = st.session_state["aud_open_player"] == tid
-            if sc[0].button("⏹ Close" if _playing else "▶️ Play", key=f"aud_toggle_{tid}", use_container_width=True):
+            if sc[0].button("⏹ Close" if _playing else "▶️ Play", key=f"aud_toggle_{tid}", width="stretch"):
                 # One player open at a time.
                 st.session_state["aud_open_player"] = None if _playing else tid
                 st.rerun()
             _detail = st.session_state["aud_open_detail"] == tid
             if sc[1].button("✕ Analysis" if _detail else "🔬 Analysis", key=f"aud_detail_{tid}",
-                            disabled=not t["extra"], use_container_width=True,
+                            disabled=not t["extra"], width="stretch",
                             help="Sections, build-ups, drops, bar lines, drums, chord changes and vocals"
                             if t["extra"] else "Add the extra analysis (🔬 Audio analysis above) to see it here"):
                 st.session_state["aud_open_detail"] = None if _detail else tid
                 st.rerun()
             sc[2].button("🎭 Story map", key=f"aud_story_edit_{tid}",
-                         on_click=_open_story_editor, args=(tid,), use_container_width=True,
+                         on_click=_open_story_editor, args=(tid,), width="stretch",
                          help="Edit this track's story maps — the default (used by new projects, the recommender "
                               "and the analytics) and any named ones." if tid in _maps
                          else "Make a story map for this track.")
             if tid not in _maps:
                 sc[3].button("✨ Suggest", key=f"aud_story_new_{tid}", on_click=_suggest_story_map,
-                             args=(tid,), use_container_width=True, disabled=not t["extra"],
+                             args=(tid,), width="stretch", disabled=not t["extra"],
                              help="Saves the suggestion straight away as the track's default map: which parts of "
                                   "the song suit 🎬 Intro, 🌙 Slow, 💥 Action and 🏁 Outro."
                              if t["extra"] else "Needs the extra analysis (🔬 Audio analysis above) first.")
@@ -959,7 +959,7 @@ def render_story_editor() -> None:
     dirty = sm.get("dirty")
     top = st.columns([1.8, 5])
     top[0].button("← Back to tracks" if not dirty else "← Back without saving", key="aud_sm_back",
-                  use_container_width=True, on_click=_close_story_editor,
+                  width="stretch", on_click=_close_story_editor,
                   help="Unsaved changes are dropped." if dirty else None)
     top[1].subheader(f"🎭 Story map — {tid}")
 
@@ -984,20 +984,20 @@ def render_story_editor() -> None:
             if dirty:
                 st.caption(f"✏️ Unsaved changes to {_sm_target_name(sm['target'])}")
                 bc = st.columns(3)
-                bc[0].button("💾 Save", key="aud_sm_save", type="primary", use_container_width=True,
+                bc[0].button("💾 Save", key="aud_sm_save", type="primary", width="stretch",
                              on_click=_sm_save)
-                with bc[1].popover("📁 Save as…", use_container_width=True):
+                with bc[1].popover("📁 Save as…", width="stretch"):
                     nk = f"aud_sm_new_{sm.get('v', 0)}"
                     st.text_input("Name", key=nk, placeholder="e.g. Long intro")
                     st.button("📁 Save", key=f"{nk}_go", type="primary", on_click=_sm_save_as, args=(nk,))
-                bc[2].button("↩️ Undo", key="aud_sm_undo", use_container_width=True,
+                bc[2].button("↩️ Undo", key="aud_sm_undo", width="stretch",
                              on_click=_sm_load, args=(tid, sm["target"]))
             elif sm["target"] != "default" and sm.get("regions"):
                 bc = st.columns(2)
-                bc[0].button("⭐ Make this the default", key="aud_sm_mkdef", use_container_width=True,
+                bc[0].button("⭐ Make this the default", key="aud_sm_mkdef", width="stretch",
                              on_click=_sm_make_default,
                              help="Copies this map over the track's default map.")
-                bc[1].button("🗑️ Delete this map", key="aud_sm_del", use_container_width=True,
+                bc[1].button("🗑️ Delete this map", key="aud_sm_del", width="stretch",
                              on_click=_sm_delete)
             elif sm.get("regions"):
                 st.caption("Changes are only kept when you 💾 Save.")
@@ -1029,7 +1029,7 @@ def _render_analysis_detail(track_id: str) -> None:
         st.error(f"Couldn't read this track: {e}")
         return
     a = track.get("analysis") or {}
-    st.plotly_chart(track_figure(track), use_container_width=True, key=f"aud_detail_chart_{track_id}")
+    st.plotly_chart(track_figure(track), width="stretch", key=f"aud_detail_chart_{track_id}")
     secs = a.get("sections") or []
     bits = []
     if secs:
@@ -1140,7 +1140,7 @@ def render_renders():
         sort_by = fc[1].selectbox("Sort by", list(sorts), key="ren_sort")
         _n_more = int(bool(st.session_state.get("ren_videos"))) + int(st.session_state.get("ren_rating", "–") != "–") \
             + int(bool(st.session_state.get("ren_kept")))
-        with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", use_container_width=True):
+        with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", width="stretch"):
             video_filter = st.multiselect("Uses video", sorted(vid_use, key=str.lower), key="ren_videos",
                                           help="Show renders that use any of these videos.")
             min_rating = st.selectbox("Rating at least", STARS, key="ren_rating")
@@ -1198,7 +1198,7 @@ def render_renders():
         fc[0].caption(f"☁️ {len(_drive_only)} of the renders shown are only on Google Drive — they stream from "
                       f"Drive, which can buffer.")
         if fc[1].button(f"💾 Copy those {len(_drive_only)} to the server ({format_size(_sz)})",
-                        key="ren_fetch_all", use_container_width=True):
+                        key="ren_fetch_all", width="stretch"):
             _fetch_renders(_drive_only)
 
     by_name = {Path(r["path"]).name: r for r in renders}
@@ -1271,28 +1271,28 @@ def render_renders():
                     st.caption(f"📝 {user['notes']}")
             with cols[2]:
                 _playing = st.session_state["ren_open_player"] == name
-                if st.button("⏹ Close" if _playing else "▶️ Play", key=f"ren_play_{name}", use_container_width=True):
+                if st.button("⏹ Close" if _playing else "▶️ Play", key=f"ren_play_{name}", width="stretch"):
                     st.session_state["ren_open_player"] = None if _playing else name
                     st.rerun()
                 _detail = st.session_state["ren_open_detail"] == name
                 if st.button("✕ Details" if _detail else "ℹ️ Details", key=f"ren_detail_{name}",
-                             use_container_width=True,
+                             width="stretch",
                              help="Rate it, keep it, add notes; its clip list, settings and plan to download"):
                     st.session_state["ren_open_detail"] = None if _detail else name
                     st.rerun()
-                with st.popover("⋯ More", use_container_width=True):
+                with st.popover("⋯ More", width="stretch"):
                     comparing = name in st.session_state["ren_compare"]
                     if st.button("⚖️ Stop comparing" if comparing else "⚖️ Compare", key=f"ren_cmp_{name}",
-                                 use_container_width=True,
+                                 width="stretch",
                                  help=None if comparing else "Side by side with another render — pick two."):
                         _toggle_compare(name)
                         st.rerun()
                     in_list = name in st.session_state["ren_playlist"]
                     if st.button("🎞️ Remove from playlist" if in_list else "🎞️ Add to playlist",
-                                 key=f"ren_pl_{name}", use_container_width=True):
+                                 key=f"ren_pl_{name}", width="stretch"):
                         _toggle_playlist(name)
                         st.rerun()
-                    if st.button("↩️ Reopen in the planner", key=f"ren_reopen_{name}", use_container_width=True,
+                    if st.button("↩️ Reopen in the planner", key=f"ren_reopen_{name}", width="stretch",
                                  disabled=reopen_state(r)[0] is None,
                                  help="Open the Compilation Planner with this render's settings and matches"
                                  if r.get("project") else
@@ -1301,11 +1301,11 @@ def render_renders():
                         _reopen_in_planner(r)
                     _drive_only_r = not r.get("local") and on_drive(r)
                     if st.button("💾 Copy to server / download" if _drive_only_r else "⬇️ Download",
-                                 key=f"ren_dl_{name}", use_container_width=True):
+                                 key=f"ren_dl_{name}", width="stretch"):
                         st.session_state["ren_open_download"] = (
                             None if st.session_state.get("ren_open_download") == name else name)
                         st.rerun()
-                    if st.button("🗑️ Delete", key=f"ren_del_{name}", disabled=user["keep"], use_container_width=True,
+                    if st.button("🗑️ Delete", key=f"ren_del_{name}", disabled=user["keep"], width="stretch",
                                  help="Kept — unkeep it (ℹ️ Details) to delete" if user["keep"] else None):
                         st.session_state["ren_confirm_delete"] = name
                         st.rerun()
@@ -1370,18 +1370,18 @@ def _render_download_row(r: dict) -> None:
         dc[0].success("💾 On the server")
         with dc[1]:
             file_download_button(path, f"⬇️ Download to this device ({format_size(path.stat().st_size)})",
-                                 key=f"ren_dl_file_{path.name}", use_container_width=True)
+                                 key=f"ren_dl_file_{path.name}", width="stretch")
         dc[2].caption("Plays from the server. Download to watch it on this device.")
     elif on_drive(r):
         size = (r.get("drive") or {}).get("size")
         if dc[0].button(f"💾 Copy to the server" + (f" ({format_size(int(size))})" if size else ""),
-                        key=f"ren_fetch_{path.name}", type="primary", use_container_width=True,
+                        key=f"ren_fetch_{path.name}", type="primary", width="stretch",
                         help="Downloads it from Google Drive onto the server, so it plays from the server "
                              "instead of streaming from Drive."):
             _fetch_renders([r])
         fid = r["drive"]["file_id"]
         dc[1].link_button("⬇️ Download to this device", f"https://drive.google.com/uc?export=download&id={fid}",
-                          use_container_width=True)
+                          width="stretch")
         dc[2].caption("Only on Google Drive (cleared from the server), so it streams from Drive. Copy it to the "
                       "server for smooth playback. The download link needs a browser signed in to your Google account.")
 
@@ -1419,7 +1419,7 @@ def _render_playlist_panel(by_name: dict, rows: list, where) -> None:
     shown = [Path(r["path"]).name for r in rows]
     if not names:
         # Nothing picked yet: just a button beside the storage tools (no empty panel).
-        where.button(f"🎞️ Playlist of all {len(shown)}", key="ren_pl_addall", use_container_width=True,
+        where.button(f"🎞️ Playlist of all {len(shown)}", key="ren_pl_addall", width="stretch",
                      on_click=_playlist_set, args=(list(shown),),
                      help="Play every render shown back to back as one video (in the current sort order). "
                           "Or add single renders with 🎞️ in a card's ⋯ menu.")
@@ -1428,15 +1428,15 @@ def _render_playlist_panel(by_name: dict, rows: list, where) -> None:
         total = sum(float(by_name[n].get("duration_sec") or 0) for n in names)
         head = st.columns([4, 2, 1, 1, 1])
         head[0].markdown(f"**🎞️ Playlist** — {len(names)} render(s) · {format_mmss(total)}")
-        head[1].button(f"➕ Add all shown ({len(shown)})", key="ren_pl_addall2", use_container_width=True,
+        head[1].button(f"➕ Add all shown ({len(shown)})", key="ren_pl_addall2", width="stretch",
                        on_click=_playlist_set, args=(names + [n for n in shown if n not in names],),
                        help="Adds every render matching the filters, in the current sort order.")
-        head[2].button("🔀", key="ren_pl_shuffle", disabled=len(names) < 2, use_container_width=True,
+        head[2].button("🔀", key="ren_pl_shuffle", disabled=len(names) < 2, width="stretch",
                        on_click=_playlist_set, args=(_random.sample(names, len(names)),), help="Shuffle the order")
-        head[3].button("Clear", key="ren_pl_clear", disabled=not names, use_container_width=True,
+        head[3].button("Clear", key="ren_pl_clear", disabled=not names, width="stretch",
                        on_click=_playlist_set, args=([],))
         play = head[4].button("▶️ Play", key="ren_pl_play", type="primary", disabled=not names,
-                              use_container_width=True, help="Plays the renders back to back as one video.")
+                              width="stretch", help="Plays the renders back to back as one video.")
         if not names:
             return
         with st.expander("Order", expanded=not st.session_state.get("ren_playlist_built")):
@@ -1476,12 +1476,12 @@ def _render_playlist_panel(by_name: dict, rows: list, where) -> None:
         for i, (t, n) in enumerate(built["chapters"]):
             m = by_name.get(n, {})
             label = f"{i + 1}. {(m.get('track') or {}).get('track_id') or n} ({format_mmss(t)})"
-            if ccols[i % len(ccols)].button(label, key=f"ren_pl_ch_{i}", use_container_width=True):
+            if ccols[i % len(ccols)].button(label, key=f"ren_pl_ch_{i}", width="stretch"):
                 built["start"], built["autoplay"] = t, True
                 st.rerun()
         bc = st.columns([1, 1, 3])
         with bc[1]:
-            file_download_button(built["path"], "⬇️ Download playlist", key="ren_pl_dl", use_container_width=True)
+            file_download_button(built["path"], "⬇️ Download playlist", key="ren_pl_dl", width="stretch")
         if bc[0].button("⏹ Close player", key="ren_pl_close"):
             st.session_state.pop("ren_playlist_built", None)
             st.rerun()
@@ -1572,7 +1572,7 @@ def _render_compare_panel(by_name: dict, picked: list, ranges: dict) -> None:
             st.markdown("**Settings that differ**")
             if diff:
                 st.dataframe([{"Setting": k, "A": _fmt_setting(va), "B": _fmt_setting(vb)} for k, va, vb in diff],
-                             hide_index=True, use_container_width=True)
+                             hide_index=True, width="stretch")
             elif a.get("settings") or b.get("settings"):
                 st.caption("Same planner settings — the difference is in the picks (seed, swaps, manual choices).")
             else:
@@ -1583,7 +1583,7 @@ def _render_compare_panel(by_name: dict, picked: list, ranges: dict) -> None:
                 only_a = sum(1 for _, x, y in vids if x and not y)
                 only_b = sum(1 for _, x, y in vids if y and not x)
                 st.dataframe([{"Video": v, "A": round(x, 1), "B": round(y, 1)} for v, x, y in vids],
-                             hide_index=True, use_container_width=True, height=min(320, 38 + 35 * len(vids)))
+                             hide_index=True, width="stretch", height=min(320, 38 + 35 * len(vids)))
                 st.caption(f"{len(vids) - only_a - only_b} video(s) in both · {only_a} only in A · {only_b} only in B")
             else:
                 st.caption("Videos weren't recorded for these renders.")
@@ -1631,14 +1631,14 @@ def _render_render_detail(r: dict, update_user_fields) -> None:
                     "Length (s)": round(float(link.get("clip_duration_sec") or 0), 2),
                 })
     st.markdown(f"**Clips** ({len(clip_rows)})")
-    st.dataframe(clip_rows, hide_index=True, use_container_width=True, height=min(400, 38 + 35 * len(clip_rows)))
+    st.dataframe(clip_rows, hide_index=True, width="stretch", height=min(400, 38 + 35 * len(clip_rows)))
 
     per_video = [{"Video": v["video_id"], "Clips": v["clips"], "Seconds": round(v["seconds"], 1)}
                  for v in sorted(r.get("videos") or [], key=lambda v: -v["seconds"])]
     c = st.columns(2)
     with c[0]:
         st.markdown("**Footage per video**")
-        st.dataframe(per_video, hide_index=True, use_container_width=True)
+        st.dataframe(per_video, hide_index=True, width="stretch")
     with c[1]:
         st.markdown("**Planner settings**")
         st.json(r.get("settings") or {}, expanded=False)
@@ -1661,7 +1661,7 @@ def _render_drive_panel(renders: list, where) -> None:
     drive_only = [r for r in renders if not r.get("local") and on_drive(r)]
     token = drive_token()
     title = f"☁️ Drive · {len(not_uploaded)} to upload" if not_uploaded else "☁️ Drive"
-    with where.popover(title, use_container_width=True):
+    with where.popover(title, width="stretch"):
         st.markdown(f"**{len(drive_only) + len(clearable)}** on Google Drive · **{len(not_uploaded)}** only on "
                     "the server")
         st.caption("Renders are saved to **scene-labeling/previews** in your Google Drive as they're made "
@@ -1723,7 +1723,7 @@ def _render_drive_panel(renders: list, where) -> None:
 
 
 def _render_usage_panel(renders: list, vid_use, track_use, where) -> None:
-    with where.popover("📊 Usage", use_container_width=True):
+    with where.popover("📊 Usage", width="stretch"):
         known = [r for r in renders if not r.get("backfilled")]
         if not known:
             st.caption("No renders with saved details yet — new renders will show here.")
@@ -1735,11 +1735,11 @@ def _render_usage_panel(renders: list, vid_use, track_use, where) -> None:
         with c[0]:
             st.markdown("**Most-used videos**")
             st.dataframe([{"Video": v, "Renders": n} for v, n in vid_use.most_common(15)],
-                         hide_index=True, use_container_width=True)
+                         hide_index=True, width="stretch")
         with c[1]:
             st.markdown("**Most-rendered tracks**")
             st.dataframe([{"Track": t, "Renders": n} for t, n in track_use.most_common(15)],
-                         hide_index=True, use_container_width=True)
+                         hide_index=True, width="stretch")
         all_videos = set(load_library())
         unused = sorted(all_videos - set(vid_use), key=str.lower)
         if all_videos:
@@ -1748,7 +1748,7 @@ def _render_usage_panel(renders: list, vid_use, track_use, where) -> None:
 
 
 def _render_cleanup_panel(renders: list, delete_render, format_size, where) -> None:
-    with where.popover("🧹 Clean up", use_container_width=True):
+    with where.popover("🧹 Clean up", width="stretch"):
         c = st.columns(2)
         days = c[0].number_input("Older than (days)", 1, 3650, 30, key="ren_clean_days")
         unrated_only = c[1].toggle("Only unrated ones", value=True, key="ren_clean_unrated")
@@ -1827,7 +1827,7 @@ def _draw_chart(chart: dict, key: str) -> None:
             fig.update_xaxes(range=[0, 5.9], dtick=1)
         else:
             fig.update_xaxes(range=[0, max(xs + [1]) * 1.25])
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=key)
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key=key)
     elif kind == "scatter":
         pts = chart.get("points") or []
         if not pts:
@@ -1843,7 +1843,7 @@ def _draw_chart(chart: dict, key: str) -> None:
         _chart_layout(fig, 230, chart.get("x_title", ""), chart.get("y_title", "Rating (★)"))
         if rating_axis:
             fig.update_yaxes(range=[0.5, 5.5], dtick=1)
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=key)
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key=key)
 
 
 # ---------------------------------------------------------------------------
@@ -2125,7 +2125,7 @@ def render_rating_analytics():
                 st.markdown(f"**Try:** {card['recommendation']}")
                 if card.get("table"):
                     with st.expander("Data"):
-                        st.dataframe(card["table"], hide_index=True, use_container_width=True)
+                        st.dataframe(card["table"], hide_index=True, width="stretch")
 
 
 # ---------------------------------------------------------------------------

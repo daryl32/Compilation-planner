@@ -124,7 +124,7 @@ def _account_box(mb) -> None:
         if not drive_token():
             box.caption("Connect Google Drive (above) to save them.")
         elif box.button(f"☁️ Save {len(pending)} edit(s) to Drive", key="drive_save_pending",
-                        use_container_width=True):
+                        width="stretch"):
             _save_pending(box, len(pending))
 
     note = st.session_state.pop("_memory_reset_note", None)
@@ -135,7 +135,7 @@ def _account_box(mb) -> None:
         if saved:
             box.caption("Anything unsaved was kept and will be offered back in the planner.")
 
-    if box.button("Sign out", key="signout_btn", use_container_width=True):
+    if box.button("Sign out", key="signout_btn", width="stretch"):
         st.logout()
 
 
@@ -232,10 +232,10 @@ def _idle_signout() -> None:
     if IDLE_SIGNOUT_MIN <= 0:
         return
     try:
-        import streamlit.components.v1 as components
+        import embed
         import json as _json
         code = _IDLE_CODE.replace("__LIMIT__", f"{IDLE_SIGNOUT_MIN:g}")
-        components.html(_IDLE_JS.replace("__CODE__", _json.dumps(code).replace("</", "<\\/")), height=0)
+        embed.html(_IDLE_JS.replace("__CODE__", _json.dumps(code).replace("</", "<\\/")), height=0)
     except Exception:
         pass  # never break the page over it
 
@@ -243,8 +243,8 @@ def _idle_signout() -> None:
 def _idle_note() -> None:
     """On the sign-in screen: say why, when the last sign-out was the idle one."""
     try:
-        import streamlit.components.v1 as components
-        components.html(_IDLE_NOTE_JS.replace("__LIMIT__", f"{IDLE_SIGNOUT_MIN:g}"), height=32)
+        import embed
+        embed.html(_IDLE_NOTE_JS.replace("__LIMIT__", f"{IDLE_SIGNOUT_MIN:g}"), height=32)
     except Exception:
         pass
 
@@ -278,7 +278,7 @@ def _drive_panel(page_path: str) -> None:
         if OAUTH_AVAILABLE and not IS_TEST:
             if drive_token():
                 st.caption("Connected — saves upload to your Drive.")
-                if st.button("Disconnect Drive", key="drive_disconnect", use_container_width=True):
+                if st.button("Disconnect Drive", key="drive_disconnect", width="stretch"):
                     st.session_state.pop(DRIVE_SESSION_KEY, None)
                     st.rerun()
             else:
@@ -299,7 +299,7 @@ def _sync_now() -> None:
         return
     st.caption("Catalogues, audio, thumbnails, sprites and preview copies sync from Drive "
                "automatically every 12 hours. Sync now to pull straight away after processing in Colab.")
-    if st.button("🔄 Sync now", key="drive_sync_btn", use_container_width=True):
+    if st.button("🔄 Sync now", key="drive_sync_btn", width="stretch"):
         bar = st.progress(0.0, text="Starting sync…")
 
         def _progress(idx, total, name):
@@ -327,7 +327,7 @@ def _server_panel(mb) -> None:
         if mb is not None:
             st.caption(f"🧠 App memory: {mb:,.0f} MB")
         st.button("🧹 Free memory", key="reset_memory", on_click=_reset_memory,
-                  use_container_width=True,
+                  width="stretch",
                   help="Saves your work to the recovery file, then clears this page's working data, "
                        "cached data, and the videos and pictures held in memory for players. Saved "
                        "projects are untouched; unsaved planner work is offered back. For more "
@@ -394,14 +394,14 @@ def _switch_panel() -> None:
     st.markdown("**🔀 Live / test copy**")
     if done:
         st.success(f"The {o['name']} is running — this one switches off in a few seconds.")
-        st.link_button(f"Open the {o['name']} →", o["url"], type="primary", use_container_width=True)
+        st.link_button(f"Open the {o['name']} →", o["url"], type="primary", width="stretch")
         st.caption("Unsaved work here is kept and offered to you when you come back.")
         return
     running = AS.is_running(other)
     st.caption(f"You're on the **{AS.COPIES[me]['name']}**. The {o['name']} is "
                f"**{'running' if running else 'off'}**."
                + (" Only one runs at a time to save the server's memory." if not running else ""))
-    if st.button(f"🔀 Switch to the {o['name']}", key="switch_copy", use_container_width=True,
+    if st.button(f"🔀 Switch to the {o['name']}", key="switch_copy", width="stretch",
                  help=f"Starts the {o['name']}, takes you there, then switches this one off."):
         bar = st.progress(0.0, text=f"Starting the {o['name']}…")
         err = AS.start(other, progress=lambda f: bar.progress(min(max(f, 0.0), 1.0),
@@ -417,8 +417,8 @@ def _switch_panel() -> None:
         st.session_state["_switch_done"] = True
         st.rerun()
     if running:
-        st.link_button(f"Open the {o['name']} →", o["url"], use_container_width=True)
-        if st.button(f"⏹ Switch the {o['name']} off", key="switch_stop_other", use_container_width=True,
+        st.link_button(f"Open the {o['name']} →", o["url"], width="stretch")
+        if st.button(f"⏹ Switch the {o['name']} off", key="switch_stop_other", width="stretch",
                      help="Frees its memory. Live comes back on its own whenever the test copy stops."):
             err = AS.stop_now(other)
             if err:
@@ -464,8 +464,8 @@ def _reset_memory() -> None:
 
 def _lock_dropdown_typing() -> None:
     try:
-        import streamlit.components.v1 as components
-        components.html(_NO_DROPDOWN_TYPING_JS, height=0)
+        import embed
+        embed.html(_NO_DROPDOWN_TYPING_JS, height=0)
     except Exception:
         pass  # cosmetic only — never break the page over it
 

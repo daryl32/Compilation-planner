@@ -48,6 +48,12 @@ def render_diagnostics() -> None:
     except Exception:
         disk_pct = None
     with st.container(border=True):
+        tested = DG.tested_streamlit()
+        if tested and st.__version__ != tested:
+            st.warning(f"Streamlit {st.__version__} is installed here, but the app is tested with {tested} "
+                       f"(requirements.txt). To match: `venv/bin/pip install -r requirements.txt`, then restart.")
+        else:
+            st.caption(f"Streamlit {st.__version__}" + (" — the tested version" if tested else ""))
         if mem is None and cpu_info is None:
             st.caption("Server figures are only available on the server.")
         for kind, text in DG.verdict(mem, cpu_info, history, disk_pct):
@@ -88,7 +94,7 @@ def render_diagnostics() -> None:
                 [{"Step": t["step"], "Runs": t["runs"], "Typical": round(t["median"], 2),
                   "Slow (90%)": round(t["p90"], 2), "Slowest": round(t["max"], 2), "Last": round(t["last"], 2)}
                  for t in timings],
-                hide_index=True, use_container_width=True)
+                hide_index=True, width="stretch")
         else:
             st.caption("Step timings appear here once the planner has been used.")
 
@@ -215,18 +221,18 @@ with st.container(border=True):
             st.rerun()
 
     bc = st.columns(4)
-    if bc[0].button("🎞️ Release videos & pictures", use_container_width=True,
+    if bc[0].button("🎞️ Release videos & pictures", width="stretch",
                     help="Drops every video, music file and picture held for a player. Pages still open "
                          "load their players again next time they update."):
         b = LC.app_memory_mb()
         r = LC.free_shared_memory(release_media=True)
         mem_done(b, f"Released {r['media_files']} file(s) ({r['media_mb']:,.0f} MB) and cached data")
-    if bc[1].button("🗂️ Clear cached data", use_container_width=True,
+    if bc[1].button("🗂️ Clear cached data", width="stretch",
                     help="Cached and shared data only — rebuilt the next time a page needs it."):
         b = LC.app_memory_mb()
         LC.free_shared_memory(release_media=False)
         mem_done(b, "Cleared cached data")
-    if bc[2].button("🧹 Also clear this page's data", use_container_width=True,
+    if bc[2].button("🧹 Also clear this page's data", width="stretch",
                     help="Everything above, plus this browser tab's own working data (unsaved planner "
                          "work is saved to its recovery file first and offered back)."):
         b = LC.app_memory_mb()
@@ -234,7 +240,7 @@ with st.container(border=True):
         _reset_memory()
         mem_done(b, "Cleared")
     restart_ok = st.session_state.get("srv_restart_ok", False)
-    if bc[3].button("♻️ Restart the app", use_container_width=True, type="primary" if restart_ok else "secondary",
+    if bc[3].button("♻️ Restart the app", width="stretch", type="primary" if restart_ok else "secondary",
                     help="The only way to get ALL memory back. Takes ~20 seconds; every open page "
                          "reconnects by itself. Unsaved planner work is offered back afterwards."):
         if not restart_ok:
@@ -281,7 +287,7 @@ with st.container(border=True):
 # ---------------------------------------------------------------------------
 hc = st.columns([4, 1])
 hc[0].subheader("What's using the space")
-if hc[1].button("🔄 Measure again", use_container_width=True):
+if hc[1].button("🔄 Measure again", width="stretch"):
     breakdown.clear()
     st.rerun()
 rows = breakdown()
@@ -325,13 +331,13 @@ with st.container(border=True):
         bc = st.columns(2)
         if bc[0].button(f"🧹 Clear the {len(old)} unused for {SG.KEEP_DOWNLOADS_DAYS:g}+ days "
                         f"({SG.fmt_bytes(sum(f['size'] for f in old))})",
-                        disabled=not (allowed and old), use_container_width=True):
+                        disabled=not (allowed and old), width="stretch"):
             n, freed = SG.clear_originals(SG.KEEP_DOWNLOADS_DAYS)
             done(f"Cleared {n} original(s) — {SG.fmt_bytes(freed)} freed.")
         confirm = bc[1].checkbox("Also the ones used recently", key="srv_orig_all_ok",
                                  help="Safe — they'll stream from Drive, or download again if needed.")
         if confirm and bc[1].button(f"🧹 Clear all {len(orig)} ({SG.fmt_bytes(o_size)})", type="primary",
-                                    disabled=not allowed, use_container_width=True):
+                                    disabled=not allowed, width="stretch"):
             n, freed = SG.clear_originals(0)
             done(f"Cleared {n} original(s) — {SG.fmt_bytes(freed)} freed.")
 
@@ -343,7 +349,7 @@ with st.container(border=True):
                 f"{SG.fmt_bytes(r_size)}")
     st.caption("These play from Drive in Media Library → Renders; ratings, details and thumbnails stay.")
     if st.button(f"🧹 Clear {len(renders)} server copies", disabled=not (allowed and renders),
-                 use_container_width=True):
+                 width="stretch"):
         n, freed, errors = SG.clear_local_renders()
         for e in errors[:5]:
             st.error(e)
@@ -356,7 +362,7 @@ with st.container(border=True):
     st.markdown(f"**🗑️ Temporary files** — {len(temps)} item(s), {SG.fmt_bytes(t_size)}")
     st.caption("Reviewer frame grabs, half-finished downloads and leftover render folders. "
                "Cleared automatically after a day.")
-    if st.button("🧹 Clear temporary files", disabled=not (allowed and temps), use_container_width=True):
+    if st.button("🧹 Clear temporary files", disabled=not (allowed and temps), width="stretch"):
         n, freed = SG.clear_temp(0)
         done(f"Cleared {n} temporary item(s) — {SG.fmt_bytes(freed)} freed.")
 
@@ -368,11 +374,11 @@ with st.container(border=True):
     if journal is not None:
         sc[0].caption(f"System logs: {SG.fmt_bytes(journal)}")
         if sc[0].button("Shrink system logs to 200 MB", disabled=not allowed or journal < 220 * 2**20,
-                        use_container_width=True):
+                        width="stretch"):
             done(f"System logs: {SG.shrink_journal(200)}")
     pip_cache = SG.du(SG.Path.home() / ".cache" / "pip")
     if pip_cache is not None:
         sc[1].caption(f"pip download cache: {SG.fmt_bytes(pip_cache)}")
         if sc[1].button("Clear pip's download cache", disabled=not allowed or pip_cache < 2**20,
-                        use_container_width=True):
+                        width="stretch"):
             done(f"pip cache cleared — {SG.fmt_bytes(SG.clear_pip_cache())} freed.")

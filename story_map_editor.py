@@ -122,10 +122,10 @@ def _editor_css(ns: str) -> None:
 def render_empty(duration: float, analysis: dict, cut_times: list, *, set_regions, ns: str,
                  note: str = "Or skip this step — without a story map the planner works as before.") -> None:
     c = st.columns([2, 2, 3])
-    c[0].button("✨ Suggest a story map from the song", type="primary", use_container_width=True,
+    c[0].button("✨ Suggest a story map from the song", type="primary", width="stretch",
                 key=f"{ns}_suggest_first", disabled=analysis is None,
                 on_click=lambda: set_regions(STM.snap(STM.suggest(analysis, SR.all_roles()), cut_times)))
-    c[1].button("Start with an empty map", use_container_width=True, key=f"{ns}_blank_first",
+    c[1].button("Start with an empty map", width="stretch", key=f"{ns}_blank_first",
                 on_click=lambda: set_regions(STM.blank(duration)))
     if note:
         c[2].caption(note)
@@ -160,14 +160,14 @@ def render_editor(track: dict, segs: list, *, ns: str, get_regions, set_regions,
         st.session_state[f"{ns}_play"] = None if st.session_state.get(f"{ns}_play") == i else i
 
     tc = st.columns([2, 2, 2, 3])
-    tc[0].button("✨ Suggest again", use_container_width=True, key=f"{ns}_suggest", disabled=analysis is None,
+    tc[0].button("✨ Suggest again", width="stretch", key=f"{ns}_suggest", disabled=analysis is None,
                  on_click=_wrap(ns, None, lambda: set_regions(STM.snap(STM.suggest(analysis, SR.all_roles()),
                                                                        cut_times))),
                  help="Replaces the map with a fresh suggestion from the song (your edits are lost).")
-    tc[1].button("🧹 Clear the map", use_container_width=True, key=f"{ns}_clear",
+    tc[1].button("🧹 Clear the map", width="stretch", key=f"{ns}_clear",
                  on_click=_wrap(ns, None, lambda: set_regions(STM.blank(duration))),
                  help="One region, no role — then split and set roles yourself.")
-    tc[2].button("📐 Line up with the cuts", use_container_width=True, key=f"{ns}_snapall",
+    tc[2].button("📐 Line up with the cuts", width="stretch", key=f"{ns}_snapall",
                  on_click=_wrap(ns, None, edit, STM.snap, cut_times),
                  help="Moves every boundary onto the nearest cut, so no block straddles two parts. "
                       "Useful after changing the audio settings.")
@@ -184,7 +184,7 @@ def render_editor(track: dict, segs: list, *, ns: str, get_regions, set_regions,
         focus = None
     _editor_css(ns)
     with st.container(key=f"{ns}_pin"):
-        st.plotly_chart(story_chart(track, regions, segs, roles, playing, focus), use_container_width=True,
+        st.plotly_chart(story_chart(track, regions, segs, roles, playing, focus), width="stretch",
                         config={"displayModeBar": False}, key=f"{ns}_chart_{v}")
 
     tot = STM.totals(regions, segs)
@@ -221,13 +221,13 @@ def render_editor(track: dict, segs: list, *, ns: str, get_regions, set_regions,
                               on_click=_wrap(ns, part, edit, STM.set_role, i, alt["role"]),
                               help="The runner-up for this part of the song.")
             rc[4].button("⏹ Stop" if playing == i else "▶ Play", key=f"{ns}_play_{v}_{i}",
-                         use_container_width=True, on_click=_wrap(ns, part, toggle_play, i))
+                         width="stretch", on_click=_wrap(ns, part, toggle_play, i))
             inner = [t for t in cut_times if r["start"] < t < r["end"]]
             mid = min(inner, key=lambda t: abs(t - (r["start"] + r["end"]) / 2)) if inner else None
-            rc[5].button("✂️ Split", key=f"{ns}_split_{v}_{i}", use_container_width=True, disabled=mid is None,
+            rc[5].button("✂️ Split", key=f"{ns}_split_{v}_{i}", width="stretch", disabled=mid is None,
                          on_click=_wrap(ns, part, edit, STM.split, i, mid),
                          help="Split into two at the cut nearest the middle (then move the line below).")
-            rc[6].button("🔗 Join", key=f"{ns}_merge_{v}_{i}", use_container_width=True,
+            rc[6].button("🔗 Join", key=f"{ns}_merge_{v}_{i}", width="stretch",
                          disabled=i == len(regions) - 1, on_click=_wrap(ns, part, edit, STM.merge_next, i),
                          help="Join with the next part below (keeps this part's role).")
             if playing == i and play is not None:
