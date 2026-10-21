@@ -276,6 +276,11 @@ def run_job(job: dict, say) -> None:
 
 REC_MIN_FREE_MB_DEFAULT = 1200
 
+# 🌙 The nightly run uses every CPU (at most 4): nobody's using the app at 04:45, the
+# searches run at nice 10 so the app still comes first if someone is, and the memory
+# check above still holds back a search when memory runs short. REC_NIGHT_WORKERS in
+# config.py overrides it.
+
 
 def worker_count() -> int:
     try:
@@ -288,6 +293,19 @@ def worker_count() -> int:
     if os.name == "nt":
         return 1
     return max(1, min(4, (os.cpu_count() or 1) - 1))
+
+
+def nightly_worker_count() -> int:
+    try:
+        import config
+        n = getattr(config, "REC_NIGHT_WORKERS", None)
+        if n:
+            return max(1, int(n))
+    except Exception:
+        pass
+    if os.name == "nt":
+        return 1
+    return max(1, min(4, os.cpu_count() or 1))
 
 
 def _free_mb() -> float | None:
@@ -379,8 +397,10 @@ def _run_parallel(p: dict, n: int, poll_sec: float, stopped_exc) -> None:
         running = {}                       # future -> job
         audio_now = False
         if any(j["kind"] == "track" for j in queue):
-            try:   # read every video's fingerprint once here — the search processes inherit them
+            try:   # read every video's fingerprint (and content hash) once here — the search processes inherit them
                 RL.library_prints()
+                RL.video_sigs()
+                RL.save_hashes()
             except Exception:
                 traceback.print_exc()
         with heavy_slot("recommendations", on_wait=lambda _h: [
@@ -538,7 +558,7 @@ def run_nightly() -> dict:
             "queued_spotlights": sum(1 for j in jobs if j["kind"] == "spotlight"), "added": n}
     _write_json(p["nightly"], info)
     if not is_paused():
-        run_worker()
+        run_worker(workers=nightly_worker_count())
     info["finished"] = time.time()
     _write_json(p["nightly"], info)
     return info

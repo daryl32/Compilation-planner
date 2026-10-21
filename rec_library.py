@@ -14,6 +14,7 @@ plain Python process).
 from __future__ import annotations
 
 import datetime
+import gzip
 import hashlib
 import json
 import os
@@ -40,6 +41,8 @@ RESULTS_DIR = BASE_DIR / "results"
 PRINTS_DIR = BASE_DIR / "prints"
 SPOTLIGHT_DIR = RESULTS_DIR / "spotlight"
 SEEN_FILE = RESULTS_DIR / "seen_videos.json"
+CHECKS_DIR = BASE_DIR / "checks"         # ⚡ matcher runs kept from the last search of each track
+HASHES_FILE = BASE_DIR / "file_hashes.json"
 DEFAULT_VIDEOS = 4
 RESULTS_VERSION = 5          # bump when what's stored changes (older results are searched again)
 PRINTS_VERSION = 1           # bump when fingerprints change
@@ -184,27 +187,68 @@ def story_for(track_id: str, track: dict) -> tuple:
     return (regions, "suggested") if any(r.get("role") for r in regions) else (None, None)
 
 
-def plan_context(block_roles=None) -> CMATCH.PlanContext:
+def _durations() -> dict:
     # Same durations as the planner's get_video_duration (the last scene's end).
-    durations = {vid: CFOOT._tc_to_seconds(cat["scenes"][-1]["end_tc"]) if cat.get("scenes") else 0.0
-                 for vid, cat in CStore.all_catalogues().items()}
+    return {vid: CFOOT._tc_to_seconds(cat["scenes"][-1]["end_tc"]) if cat.get("scenes") else 0.0
+            for vid, cat in CStore.all_catalogues().items()}
+
+
+def plan_context(block_roles=None, *, durations: dict = None, curves_of=None,
+                 shape_memo: dict = None) -> CMATCH.PlanContext:
+    durations = _durations() if durations is None else durations
     # 🎭 With the story map in use, the planner reserves and locks the roles it uses
     # (its defaults: 'Keep role clips for their parts' on, Intro/Outro preference off).
     used = frozenset(r for r in (block_roles or []) if r)
     return CMATCH.PlanContext(time_ranges=library_ranges, duration_of=lambda v: durations.get(v, 0.0),
-                              curves_of=CStore.motion_curves, catalogue_dir=CATALOGUE_DIR,
+                              curves_of=curves_of or CStore.motion_curves, catalogue_dir=CATALOGUE_DIR,
                               reserved_roles=used, locked_roles=used, story_in_use=bool(used),
-                              planned_sequential=True)
+                              planned_sequential=True, shape_memo=shape_memo)
 
 
-def make_matcher(track: dict):
+def search_curves():
+    """⚡ curves_of for one search: each video's motion curves fetched once and kept for the
+    search (they're memory-mapped, so this costs little) — the shared cache's own lookup
+    is asked ~16,000 times in a search and only holds 20 videos."""
+    memo = {}
+
+    def curves_of(video_id):
+        got = memo.get(video_id)
+        if got is None:
+            got = memo[video_id] = CStore.motion_curves(video_id)
+        return got
+    return curves_of
+
+
+def make_matcher(track: dict, curves_of=None, *, track_id: str = None, kept: dict = None, record: dict = None):
     """The real matcher as Auto mode runs it with the planner's default settings
     (one clip per block, ✨ improved auto-fill, never the same video twice in a row),
-    with or without the story map and in sequential order when asked."""
+    with or without the story map and in sequential order when asked.
+    ⚡ One matcher serves one search: the library is read once, and shape-window scores
+    are kept (PlanContext.shape_memo) — the search asks about the same footage again and
+    again, and the answers can't change within it.
+    kept / record (with track_id): matcher runs from this track's last search to reuse, and
+    a dict that collects this search's runs to keep (see "Matcher runs kept between searches")."""
     cats = CStore.all_catalogues()
     ranges = library_ranges()
+    durations = _durations()
+    curves_of = curves_of or search_curves()
+    shape_memo = {}
+
+    if record is not None:
+        code, track_h, vsigs = matcher_code_sig(), track_hash(track_id), video_sigs()
+    kept = kept or {}
 
     def match(segments, video_ids, block_roles=None, sequential=False):
+        if record is None:
+            return run(segments, video_ids, block_roles, sequential)
+        key = _run_key(code, track_h, segments, video_ids, block_roles, sequential, vsigs)
+        rows = kept.get(key)
+        if rows is None:
+            rows = slim_timeline(run(segments, video_ids, block_roles, sequential))
+        record[key] = rows
+        return unslim_timeline(rows)
+
+    def run(segments, video_ids, block_roles=None, sequential=False):
         q = CFOOT.build_footage_queues(cats, tuple(video_ids), (), ranges, thumbnail_for=_thumb_for,
                                        roles_of=SR.scene_roles)
         roles = list(block_roles) if block_roles else [None] * len(segments)
@@ -214,7 +258,8 @@ def make_matcher(track: dict):
         timeline, _, _ = CMATCH.match_scenes_to_track(
             [dict(s) for s in segments], q, 1, 1, 0.0, 1.0, False, bool(sequential), {}, {}, set(), False, 0, 1.0,
             set(), set(), 2.0, 0.5, True, 1.5, 2.0, 42, weight_position=1.0 if sequential else 0.0,
-            repeat_fallbacks=set(), block_roles=roles, track=track, ctx=plan_context(block_roles))
+            repeat_fallbacks=set(), block_roles=roles, track=track,
+            ctx=plan_context(block_roles, durations=durations, curves_of=curves_of, shape_memo=shape_memo))
         return timeline
     return match
 
@@ -223,17 +268,174 @@ def make_matcher(track: dict):
 # "Has anything changed?" and stored results
 # ---------------------------------------------------------------------------
 
+# ⚡ What a search depends on is judged by CONTENT, not file times: a Drive sync that
+# brings down an unchanged file, or a copy that keeps the same bytes, no longer makes
+# every track look out of date. Hashes are kept per file (by size + modified time), so
+# a file is only read again when it might have changed.
+
+_HASH_MEMO: dict = {}        # path → (size, mtime, sha1), this process
+
+
+def _load_hashes() -> dict:
+    if not _HASH_MEMO:
+        try:
+            for k, v in json.loads(HASHES_FILE.read_text()).items():
+                _HASH_MEMO[k] = tuple(v)
+        except (OSError, ValueError, TypeError):
+            pass
+    return _HASH_MEMO
+
+
+def file_hash(p: Path) -> str:
+    """sha1 of a file's bytes ("" if it can't be read), remembered while its size and time stay put."""
+    memo = _load_hashes()
+    try:
+        st = p.stat()
+    except OSError:
+        return ""
+    got = memo.get(str(p))
+    if got and got[0] == st.st_size and got[1] == st.st_mtime:
+        return got[2]
+    try:
+        h = hashlib.sha1(p.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+    memo[str(p)] = (st.st_size, st.st_mtime, h)
+    return h
+
+
+def save_hashes() -> None:
+    """Keep the hashes for next time (only files that still exist)."""
+    try:
+        keep = {k: v for k, v in _HASH_MEMO.items() if Path(k).exists()}
+        BASE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = HASHES_FILE.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(keep))
+        tmp.replace(HASHES_FILE)
+    except OSError:
+        pass
+
+
+def video_sigs() -> dict:
+    """{video_id: what the matcher sees of that video} — its catalogue's content (scenes,
+    roles, tags, motion curves) and its library range. A video whose sig is unchanged
+    gives the matcher exactly the same footage."""
+    ranges = library_ranges()
+    out = {}
+    for vid, stem in sorted(_stems().items()):
+        h = file_hash(CStore.catalogue_path(stem))
+        out[vid] = hashlib.sha1(json.dumps([h, ranges.get(vid)], default=str).encode()).hexdigest()[:16]
+    return out
+
+
+def track_hash(track_id: str) -> str:
+    return file_hash(AUDIO_DIR / f"{track_id}.json")
+
+
 def library_state() -> list:
     """Everything about the library a search depends on (not the track)."""
-    files = sorted((p.name, round(_mtime(p))) for p in CStore.catalogue_paths())
-    return [files, sorted(library_ranges().items()), sorted(actors_by_video().items())]
+    return [sorted(video_sigs().items()), sorted(library_ranges().items()), sorted(actors_by_video().items())]
 
 
 def signature(track_id: str, n_videos: int, sequential: bool, story, state: list = None) -> str:
     return hashlib.sha1(json.dumps([RESULTS_VERSION, track_id, n_videos, bool(sequential),
-                                    round(_mtime(AUDIO_DIR / f"{track_id}.json")), state or library_state(),
+                                    track_hash(track_id), state or library_state(),
                                     REC.VARIANTS, REC.DROP_WEIGHT, story],
                                    default=str).encode()).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# ⚡ Matcher runs kept between searches
+# ---------------------------------------------------------------------------
+# A search runs the real matcher ~25 times (a cut of the track + a set of videos each).
+# The matcher only looks at the videos it's given, so when the same cut meets the same
+# videos — none of them changed — it gives the same picks. Each search keeps its runs
+# (CHECKS_DIR, gzipped, beside the results) and the next search of that track reuses
+# every one whose cut, story roles, order and videos are all unchanged; only runs that
+# touch a new or changed video (or a new combination) go through the matcher again.
+# The kept runs are also tied to the matcher's code: any change to it starts afresh.
+
+_MATCHER_FILES = ("core/*.py", "autofill.py", "scene_roles.py", "catalogue_store.py", "library_common.py",
+                  "curve_cache.py", "video_ranking.py", "rec_library.py")
+_CODE_SIG: list = []
+
+
+def matcher_code_sig() -> str:
+    if not _CODE_SIG:
+        here = Path(__file__).resolve().parent
+        h = hashlib.sha1()
+        for pattern in _MATCHER_FILES:
+            for f in sorted(here.glob(pattern)):
+                h.update(f.name.encode())
+                h.update(f.read_bytes())
+        _CODE_SIG.append(h.hexdigest()[:16])
+    return _CODE_SIG[0]
+
+
+def _checks_path(track_id: str, n_videos: int, sequential: bool) -> Path:
+    return CHECKS_DIR / (_results_path(track_id, n_videos, sequential).stem + ".json.gz")
+
+
+def load_checks(track_id: str, n_videos: int, sequential: bool) -> dict:
+    """{run key: slim timeline} kept from this track's last search ({} if none or from older code)."""
+    try:
+        with gzip.open(_checks_path(track_id, n_videos, sequential), "rt") as f:
+            data = json.load(f)
+    except (OSError, ValueError, EOFError):
+        return {}
+    if data.get("code") != matcher_code_sig() or data.get("version") != RESULTS_VERSION:
+        return {}
+    return data.get("runs") or {}
+
+
+def save_checks(track_id: str, n_videos: int, sequential: bool, runs: dict) -> None:
+    try:
+        CHECKS_DIR.mkdir(parents=True, exist_ok=True)
+        p = _checks_path(track_id, n_videos, sequential)
+        tmp = p.with_name(p.name + f".{os.getpid()}.tmp")
+        with gzip.open(tmp, "wt", compresslevel=6) as f:
+            json.dump({"version": RESULTS_VERSION, "code": matcher_code_sig(), "runs": runs}, f)
+        tmp.replace(p)
+    except OSError:
+        pass
+
+
+def _plain(x):
+    return x.item() if isinstance(x, np.generic) else x
+
+
+def slim_timeline(timeline: list) -> list:
+    """What's used of a matcher run (score_timeline + slim_plan): per block, per clip,
+    [video, scene, clip start, first link's video, scene, offset into scene, duration]."""
+    out = []
+    for block in timeline or []:
+        row = []
+        for c in block.get("scenes") or []:
+            link = (c.get("chain") or [None])[0]
+            row.append([_plain(x) for x in [c.get("video_id"), c.get("scene_id"), c.get("clip_start_sec")]
+                        + ([link.get("video_id"), link.get("scene_id"), link.get("offset_into_scene_sec"),
+                            link.get("clip_duration_sec")] if link else [])])
+        out.append(row)
+    return out
+
+
+def unslim_timeline(rows: list) -> list:
+    out = []
+    for row in rows:
+        scenes = []
+        for c in row:
+            slot = {"video_id": c[0], "scene_id": c[1], "clip_start_sec": c[2]}
+            if len(c) > 3:
+                slot["chain"] = [{"video_id": c[3], "scene_id": c[4], "offset_into_scene_sec": c[5],
+                                  "clip_duration_sec": c[6]}]
+            scenes.append(slot)
+        out.append({"scenes": scenes})
+    return out
+
+
+def _run_key(code: str, track_h: str, segments, video_ids, block_roles, sequential, vsigs: dict) -> str:
+    return hashlib.sha1(json.dumps([code, track_h, segments, list(video_ids), block_roles, bool(sequential),
+                                    [vsigs.get(v) for v in video_ids]], default=str).encode()).hexdigest()[:20]
 
 
 def _results_path(track_id: str, n_videos: int, sequential: bool) -> Path:
@@ -311,8 +513,11 @@ def run_track(track_id: str, n_videos: int = DEFAULT_VIDEOS, sequential: bool = 
         raise RuntimeError("Recommendations need at least two videos with motion data.")
     seed = int(sig, 16) % 2**31 if seed is None else int(seed)
     insights = {}
+    curves_of = search_curves()
+    kept, runs = load_checks(track_id, n_videos, sequential), {}
     results = REC.recommend_modes(
-        track, prints, match=make_matcher(track), curves_of=CStore.motion_curves,
+        track, prints, match=make_matcher(track, curves_of, track_id=track_id, kept=kept, record=runs),
+        curves_of=curves_of,
         n_videos=min(n_videos, len(prints)), story_regions=story_regions, role_seconds=role_seconds(),
         roles_of=scene_roles_lookup(), actors=actors_by_video(), similar_of=similar_finder(),
         sequential=sequential, wildcard_seed=seed, insights=insights,
@@ -321,6 +526,8 @@ def run_track(track_id: str, n_videos: int = DEFAULT_VIDEOS, sequential: bool = 
             "sequential": bool(sequential), "seed": seed, "story_source": story_source, "finished_at": _now(),
             "results": slim_results(results, story_regions), "insights": insights}
     save_results(data)
+    save_checks(track_id, n_videos, sequential, runs)
+    save_hashes()
     return data
 
 
@@ -330,7 +537,8 @@ def reroll_wildcard(data: dict, progress=None) -> dict:
     story_regions, _ = story_for(data["track_id"], track)
     prints = library_prints()
     seed = int(data.get("seed", 0)) + 1
-    res = REC.reroll_wildcard(track, prints, match=make_matcher(track), curves_of=CStore.motion_curves,
+    curves_of = search_curves()
+    res = REC.reroll_wildcard(track, prints, match=make_matcher(track, curves_of), curves_of=curves_of,
                               n_videos=min(data["n_videos"], len(prints)), story_regions=story_regions,
                               roles_of=scene_roles_lookup(), sequential=data["sequential"], seed=seed)
     new = slim_results([res], story_regions)[0]
@@ -427,14 +635,14 @@ def run_spotlight(video_id: str, progress=None, state: list = None) -> dict:
     prints = library_prints()
     plans = []
     top = sorted(fits.items(), key=lambda x: -x[1])[:SPOTLIGHT_TRACKS]
+    curves_of, role_secs, roles_of = search_curves(), role_seconds(), scene_roles_lookup()
     for i, (tid, fit) in enumerate(top):
         progress(i / max(len(top), 1), f"Building a plan for {tid}…")
         track = load_track(tid)
         story_regions, _ = story_for(tid, track)
-        plan = REC.plan_with_video(track, prints, video_id, match=make_matcher(track),
-                                   curves_of=CStore.motion_curves, n_videos=min(DEFAULT_VIDEOS, len(prints)),
-                                   story_regions=story_regions, role_seconds=role_seconds(),
-                                   roles_of=scene_roles_lookup())
+        plan = REC.plan_with_video(track, prints, video_id, match=make_matcher(track, curves_of),
+                                   curves_of=curves_of, n_videos=min(DEFAULT_VIDEOS, len(prints)),
+                                   story_regions=story_regions, role_seconds=role_secs, roles_of=roles_of)
         if plan:
             plans.append(dict(slim_plan(plan, story_regions), track_id=tid, fit=fit))
     data = {"version": RESULTS_VERSION, "sig": sig, "video_id": video_id, "finished_at": _now(),
