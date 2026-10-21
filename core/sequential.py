@@ -59,9 +59,10 @@ FLAT_FPS = 10.0        # the made-up curve for a scene with no motion curve
 CONTIGUOUS_SEC = 0.1   # scenes this close together are one run of footage (a window may cross them)
 
 
-def _runs(spans: list, curves: dict) -> list:
+def _runs(spans: list, curves: dict, cross_scenes: bool = True) -> list:
     """Back-to-back usable footage as runs: [{"start": abs s, "fps", "values": array, "pieces": [(abs start,
-    abs end, span)]}] — a window inside a run can cross from one scene into the next (it becomes a chain)."""
+    abs end, span)]}] — a window inside a run can cross from one scene into the next (it becomes a chain).
+    cross_scenes=False: one run per scene (Manual step-through and Choreography pick within one scene)."""
     runs = []
     for sp in sorted(spans, key=lambda x: x["scene_start_sec"] + x["offset_sec"]):
         c = curves[sp["scene_id"]]
@@ -74,7 +75,7 @@ def _runs(spans: list, curves: dict) -> list:
         t0 = sp["scene_start_sec"] + sp["offset_sec"]
         t1 = t0 + (b - a) / fps
         r = runs[-1] if runs else None
-        if r and abs(r["fps"] - fps) < 1e-6 and abs(t0 - r["pieces"][-1][1]) <= CONTIGUOUS_SEC:
+        if cross_scenes and r and abs(r["fps"] - fps) < 1e-6 and abs(t0 - r["pieces"][-1][1]) <= CONTIGUOUS_SEC:
             r["values"] = np.r_[r["values"], vals[a:b]]
             r["pieces"].append((r["pieces"][-1][1], r["pieces"][-1][1] + (b - a) / fps, sp))
         else:
@@ -111,7 +112,7 @@ def _chain(run: dict, t: float, dur: float) -> list:
 def plan_video_paths(timeline: list, segments: list, queues: dict, track: dict, curves_of, *,
                      block_roles: list = None, exclusive_roles=(), segment_exclusions: dict = None,
                      global_excluded=(), follow: float = 0.2, weight_shape: float = 2.0,
-                     weight_motion: float = 2.0) -> tuple:
+                     weight_motion: float = 2.0, cross_scenes: bool = True) -> tuple:
     """Pass 2 (see the module docstring). timeline: pass 1's (Auto, any order); queues: the footage
     BEFORE pass 1 used any (build_footage_queues); follow: 0–1, how strongly each video's clips are
     spread evenly through it (0 = purely the best fit to the music, still in order).
@@ -180,7 +181,7 @@ def plan_video_paths(timeline: list, segments: list, queues: dict, track: dict, 
             S, E, V, W = [], [], [], []
             allowed = [sp for sp in spans if (vid, sp["scene_id"]) not in excl
                        and (not only_role or role in (sp.get("roles") or []))]
-            runs = _runs(allowed, curves)
+            runs = _runs(allowed, curves, cross_scenes)
             use_runs.append(runs)
             for n, run in enumerate(runs):
                 w = _windows(run, dur, step_sec)
@@ -290,3 +291,27 @@ def in_order(timeline: list) -> bool:
 
 
 __all__ = ["plan_video_paths", "in_order"]
+
+
+# ---------------------------------------------------------------------------
+# 📍 The planned path, for the step-by-step modes
+# ---------------------------------------------------------------------------
+
+def planned_picks(timeline: list, segments: list, offset: int = 0) -> dict:
+    """{block index (+ offset): [pick, …]} — the single-scene, whole-block clips of an in-order
+    plan, in the shape Manual step-through and Choreography confirm ("video_id", "scene_id",
+    "offset_into_scene_sec", "clip_duration_sec", "clip_start_sec", …). A slot that's a chain
+    of several clips, or shorter than its block, isn't one of their picks and is left out."""
+    out = {}
+    for entry in timeline:
+        bi = entry["segment_index"]
+        sg = segments[bi]
+        need = float(sg["end"]) - float(sg["start"])
+        picks = []
+        for slot in entry["scenes"]:
+            chain = slot.get("chain") or []
+            if len(chain) != 1 or abs(float(chain[0]["clip_duration_sec"]) - need) > 0.05:
+                continue
+            picks.append(dict(chain[0]))
+        out[bi + offset] = picks
+    return out

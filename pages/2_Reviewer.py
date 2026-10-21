@@ -11,7 +11,7 @@ One view, always editable (there's no separate review mode any more):
   • Tag and checkbox edits stay on the page until 💾 Save (each card updates on
     its own, so ticking a box doesn't reload the whole page). Split, combine,
     undo and ⭐ save straight away — and save any unsaved edits with them.
-  • ⚡ Auto split cuts long scenes into parts close to a target length (sidebar),
+  • ⚡ Auto split cuts long scenes into parts close to a target length (sidebar → ✂️ Split & combine),
     nudging each cut to a sharp picture change nearby.
   • New parts get their own motion score, measured from the preview copy.
 """
@@ -33,7 +33,7 @@ import scene_edits as SE
 import scene_roles as SR
 
 # Sign-in, whitelist, Drive connect, title and the shared sidebar — see page_setup.py
-from page_setup import page_setup, push_file_with_oauth, drive_token
+from page_setup import page_setup, push_file_with_oauth, drive_token, top_button, wrap_css
 
 OUTPUT_DIR = CATALOGUE_DIR
 
@@ -48,19 +48,26 @@ def load_labels() -> list:
 CANDIDATE_LABELS = load_labels()
 
 page_setup("Reviewer", "pages/2_Reviewer.py", anchor="reviewer-top")
+# Rows of controls wrap onto a second line when the page is narrow (iPad portrait with the
+# sidebar open) instead of squashing every label to "…".
+top_button("reviewer-top",
+           wrap_css("rev_wrap", 135)
+           + "[class*='st-key-rev_wrap_card'] [data-testid='stColumn']{min-width:min(200px,100%)}"
+           "[class*='st-key-rev_wrap_card'] [class*='st-key-rev_wrap_act'] [data-testid='stColumn']"
+           "{min-width:min(105px,100%)}")
 
 # ---------------------------------------------------------------------------
 # Sidebar (this page's controls — the shared ones are drawn by page_setup)
 # ---------------------------------------------------------------------------
-st.sidebar.header("🔍 Reviewer")
+st.sidebar.header("Reviewer")
 use_library_range = st.sidebar.toggle(
     "Use library range", value=True,
     help="Only show scenes inside the video's Media Library time range. "
          "Turn off to see every scene in the original video.",
 )
 
-with st.sidebar.expander("💡 Split / combine suggestions", expanded=False):
-    show_suggestions = st.toggle("Show suggestions", value=True)
+with st.sidebar.expander("✂️ Split & combine", expanded=False):
+    show_suggestions = st.toggle("Suggest splits and combines", value=True)
     suggest_long_sec = st.number_input(
         "Suggest splitting clips longer than (seconds)", min_value=5.0, value=SE.DEFAULT_LONG_SEC, step=10.0,
         disabled=not show_suggestions,
@@ -70,17 +77,16 @@ with st.sidebar.expander("💡 Split / combine suggestions", expanded=False):
         step=0.5, disabled=not show_suggestions,
         help="Flags two or more touching clips in a row that are each shorter than this.",
     )
-
-with st.sidebar.expander("⚡ Auto split", expanded=False):
     auto_target_sec = st.number_input(
         "Target clip length (seconds)", min_value=2.0, value=30.0, step=5.0, key="rev_auto_target",
         help="⚡ Auto split cuts a scene into parts close to this length, adapted to the scene: "
              "a 95 s scene with a 30 s target becomes 3 parts of about 32 s. Each cut is moved to a "
              "sharp picture change nearby when the scene has a motion curve.",
     )
-    st.caption(f"Offered on scenes longer than {1.5 * auto_target_sec:g} s.")
+    st.caption(f"⚡ Auto split is offered on scenes longer than {1.5 * auto_target_sec:g} s.")
 
-with st.sidebar.expander("🏷️ Labels", expanded=False):
+_labels_box = st.sidebar.expander("🏷️ Labels & training data", expanded=False)
+with _labels_box:
     new_label = st.text_input("Add new label", placeholder="e.g. slow-motion")
     if st.button("Add label") and new_label:
         new_label = new_label.strip().lower()
@@ -118,7 +124,8 @@ def export_training_data():
     return len(examples), out_path
 
 
-with st.sidebar.expander("🧪 Processing & training data", expanded=False):
+with _labels_box:
+    st.divider()
     st.link_button("▶️ Open Google Colab", "https://colab.research.google.com", use_container_width=True)
     if st.button("Export corrections as training data", use_container_width=True):
         count, out_path = export_training_data()
@@ -196,8 +203,8 @@ def video_facts(v: dict) -> dict:
 
 facts = {stem: video_facts(v) for stem, v in index.items()}
 
-with st.container(border=True):
-    fc = st.columns([2, 3])
+with st.container(border=True, key="rev_wrap_find"):
+    fc = st.columns([3, 4, 2], vertical_alignment="bottom")
     name_query = fc[0].text_input("Find a video", placeholder="part of a video name", key="rev_find_name")
     find_flags = fc[1].multiselect(
         "Only videos that…",
@@ -210,19 +217,22 @@ with st.container(border=True):
 
     _details = video_details()
     _roles = SR.roles_by_id()
-    dc = st.columns([2, 2, 2, 2, 1])
-    find_actors = dc[0].multiselect("With actors", all_actors(), key="rev_find_actors", placeholder="anyone")
-    find_vtags = dc[1].multiselect("With video tags", all_video_tags(), key="rev_find_vtags", placeholder="any")
-    find_roles = dc[2].multiselect("With scenes marked", list(_roles), key="rev_find_roles", placeholder="any",
-                                   format_func=lambda r: SR.label(r, _roles),
-                                   help="Videos with at least one (not excluded) scene in that role.")
-    find_no_roles = dc[3].multiselect("Without scenes marked", list(_roles), key="rev_find_no_roles",
-                                      placeholder="—", format_func=lambda r: SR.label(r, _roles),
-                                      help="Videos with no (not excluded) scene in that role yet — "
-                                           "handy for finding videos still to mark.")
-    find_all = dc[4].toggle("Must have all", key="rev_find_all",
-                            disabled=not (find_actors or find_vtags or find_roles),
-                            help="Off: any of the picked actors / tags / roles. On: every one of them.")
+    # Actors / video tags / roles: less used, so in a popover (its label counts the ones in use).
+    _n_more = sum(bool(st.session_state.get(k)) for k in
+                  ("rev_find_actors", "rev_find_vtags", "rev_find_roles", "rev_find_no_roles"))
+    with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", use_container_width=True):
+        find_actors = st.multiselect("With actors", all_actors(), key="rev_find_actors", placeholder="anyone")
+        find_vtags = st.multiselect("With video tags", all_video_tags(), key="rev_find_vtags", placeholder="any")
+        find_roles = st.multiselect("With scenes marked", list(_roles), key="rev_find_roles", placeholder="any",
+                                    format_func=lambda r: SR.label(r, _roles),
+                                    help="Videos with at least one (not excluded) scene in that role.")
+        find_no_roles = st.multiselect("Without scenes marked", list(_roles), key="rev_find_no_roles",
+                                       placeholder="—", format_func=lambda r: SR.label(r, _roles),
+                                       help="Videos with no (not excluded) scene in that role yet — "
+                                            "handy for finding videos still to mark.")
+        find_all = st.toggle("Must have all of them", key="rev_find_all",
+                             disabled=not (find_actors or find_vtags or find_roles),
+                             help="Off: any of the picked actors / tags / roles. On: every one of them.")
 
     import datetime as _dt
     _today_start = _dt.datetime.combine(_dt.date.today(), _dt.time.min).timestamp()
@@ -292,8 +302,6 @@ with st.container(border=True):
     if not names:
         st.info(f"No videos match — {len(index)} video(s) in the library.")
         st.stop()
-    if len(names) < len(index):
-        st.caption(f"{len(names)} of {len(index)} videos match.")
     # The chosen video is kept outside the widget too (and in the address bar,
     # ?video=…), so a full reload — a card button, a reconnect, an app restart —
     # comes back to the same video instead of the first one in the list.
@@ -303,6 +311,8 @@ with st.container(border=True):
                 st.session_state["rev_video"] = _cand
                 break
     selected = st.selectbox("Video", names, format_func=video_label, key="rev_video")
+    if len(names) < len(index):
+        st.caption(f"{len(names)} of {len(index)} videos match.")
     st.session_state["_rev_video_keep"] = selected
     if st.query_params.get("video") != selected:
         st.query_params["video"] = selected
@@ -310,7 +320,7 @@ with st.container(border=True):
 
 _saved_msg = st.session_state.pop("rev_saved_msg", None)
 if _saved_msg:
-    st.success(_saved_msg)
+    st.toast(_saved_msg, icon="✅")
 
 cat_path = CS.catalogue_path(selected)
 data = CS.load_catalogue(selected)
@@ -323,7 +333,6 @@ thumbs_dir = OUTPUT_DIR / "thumbnails" / video_id
 sprite_path = OUTPUT_DIR / "timeline_sprites" / f"{video_id}.jpg"
 
 reviewed_count = sum(1 for s in data["scenes"] if s.get("reviewed"))
-st.caption(f"Source: {data.get('source_path', '')}  |  {len(data['scenes'])} scenes  |  {reviewed_count} reviewed")
 
 
 def video_paths() -> list:
@@ -342,26 +351,37 @@ def video_paths() -> list:
     return [p for p in paths if _here(p)]
 
 
-# ⭐ Master thumbnail — the picture used for this video in the Media Library
-# and the planner's video list. Chosen from the scenes below; saved at once.
+# One header row for the video: its ⭐ picture, then a single status line (scenes, reviewed,
+# library range, thumbnail) — the details sit in ⋯ instead of boxes of their own.
+lib_range = ranges.get(video_id) if use_library_range else None
+_mp = (CS.CATALOGUE_DIR / "thumbnails" / video_id / Path(scene_by_id[master_sid]["thumbnail_paths"][0]).name
+       if master_sid in scene_by_id and scene_by_id[master_sid].get("thumbnail_paths") else None)
 with st.container(border=True):
-    mt_cols = st.columns([1, 3])
-    _mp = (CS.CATALOGUE_DIR / "thumbnails" / video_id / Path(scene_by_id[master_sid]["thumbnail_paths"][0]).name
-           if master_sid in scene_by_id and scene_by_id[master_sid].get("thumbnail_paths") else None)
-    with mt_cols[0]:
+    hc = st.columns([1, 6, 1], vertical_alignment="center")
+    with hc[0]:
         if _mp and _mp.exists():
-            safe_image(str(_mp), width=160)
-    with mt_cols[1]:
-        if _mp:
-            st.markdown(f"**⭐ Video thumbnail:** scene {master_sid}")
-            if st.button("Use automatic instead", key=f"master_thumb_clear_{selected}"):
-                set_master_thumbnail(video_id, None)
-                st.session_state["rev_saved_msg"] = "Video thumbnail set to automatic."
-                st.rerun()
+            safe_image(str(_mp), width=120)
         else:
-            st.markdown("**⭐ Video thumbnail:** automatic")
-        st.caption("Pick one with ⭐ on any scene below. It's used for this video in the Media "
-                   "Library and the Compilation Planner's video list.")
+            st.caption("🖼️ automatic picture")
+    _bits = [f"**{len(data['scenes'])} scenes**", f"{reviewed_count} reviewed"]
+    if lib_range:
+        _outside = len(data["scenes"]) - len(in_range_scenes(data["scenes"], lib_range))
+        _bits.append(f"library range {format_mmss(lib_range[0])}–{format_mmss(lib_range[1])}"
+                     + (f" ({_outside} scene(s) outside hidden)" if _outside else ""))
+    elif use_library_range:
+        _bits.append("no library range — every scene shown")
+    else:
+        _bits.append("library range off — every scene shown")
+    _bits.append(f"⭐ thumbnail: scene {master_sid}" if _mp else "⭐ thumbnail: automatic")
+    hc[1].markdown("  ·  ".join(_bits))
+    with hc[2].popover("⋯", use_container_width=True):
+        st.caption(f"Source: {data.get('source_path', '')}")
+        st.caption("⭐ The video thumbnail is used for this video in the Media Library and the planner's "
+                   "video list — pick it with ⭐ on any scene below.")
+        if _mp and st.button("Use the automatic thumbnail", key=f"master_thumb_clear_{selected}"):
+            set_master_thumbnail(video_id, None)
+            st.session_state["rev_saved_msg"] = "Video thumbnail set to automatic."
+            st.rerun()
 
 # 🎬 Video details — actors and video tags, for searching on every page.
 def _vd_fill_from_clips(key_tags: str, suggested: list) -> None:
@@ -420,13 +440,6 @@ with st.expander(f"🎬 Video details — {len(_vd['actors'])} actor(s), {len(_v
     sc[1].caption("✏️ Unsaved changes" if _changed else "Saved with the library (synced to Google Drive like "
                                                          "library ranges).")
 
-lib_range = ranges.get(video_id) if use_library_range else None
-if lib_range:
-    _outside = len(data["scenes"]) - len(in_range_scenes(data["scenes"], lib_range))
-    st.info(f"📚 Showing the library range {format_mmss(lib_range[0])}–{format_mmss(lib_range[1])}"
-            + (f" — {_outside} scene(s) outside it are hidden." if _outside else "."))
-elif use_library_range:
-    st.caption("No library range set for this video — showing every scene.")
 
 
 # ---------------------------------------------------------------------------
@@ -769,62 +782,72 @@ def _thumb_dest(scene: dict) -> Path:
 
 
 _no_thumb = [s for s in ordered_all if not image_ok(_thumb_dest(s))]
-if _no_thumb:
-    with st.container(border=True):
-        tc_ = st.columns([3, 1])
-        tc_[0].warning(f"🖼️ {len(_no_thumb)} of {len(ordered_all)} scene(s) have a missing or unreadable thumbnail.")
-        if tc_[1].button(f"🔄 Remake all {len(_no_thumb)}", type="primary", use_container_width=True,
-                         key=f"remake_all_thumbs_{selected}",
-                         help="Takes a new picture for each one from the preview copy / video (or the timeline "
-                              "thumbnails) and queues them for Google Drive."):
-            bar = st.progress(0.0, text="Remaking thumbnails…")
-            made, failed = [], 0
-            vpaths = video_paths()
-            for n, scene in enumerate(_no_thumb, 1):
-                dest = _thumb_dest(scene)
-                if SE.write_thumbnail(data, scene, dest, vpaths, sprite_path):
-                    if not scene.get("thumbnail_paths"):
-                        scene["thumbnail_paths"] = [dest.name]
-                    made.append(dest)
-                else:
-                    failed += 1
-                bar.progress(n / len(_no_thumb), text=f"Remaking thumbnails… {n}/{len(_no_thumb)}")
-            bar.empty()
-            if not made:
-                st.error("Couldn't make any pictures — no preview copy, source video or timeline thumbnails "
-                         "for this video on the server.")
-            else:
-                write_catalogue(f"Remade {len(made)} thumbnail(s)"
-                                + (f" — {failed} couldn't be made." if failed else "."), new_thumbs=made)
 
-if sugg["split"] or sugg["merge"] or auto_ids:
-    with st.container(border=True):
-        hc = st.columns([3, 1])
-        parts_txt = []
-        if sugg["split"]:
-            parts_txt.append(f"{len(sugg['split'])} long clip(s) could be split")
-        if sugg["merge"]:
-            parts_txt.append(f"{len(sugg['merge'])} run(s) of short clips could be combined")
-        if auto_ids:
-            parts_txt.append(f"{len(auto_ids)} scene(s) are over {1.5 * auto_target_sec:g}s "
-                             f"(⚡ auto split target {auto_target_sec:g}s)")
-        hc[0].markdown("💡 " + " · ".join(parts_txt))
-        if auto_ids and hc[1].button(f"⚡ Auto split {len(auto_ids)}…", use_container_width=True,
-                                     key=f"bulk_auto_{selected}"):
+
+def _remake_missing_thumbs() -> None:
+    bar = st.progress(0.0, text="Remaking thumbnails…")
+    made, failed = [], 0
+    vpaths = video_paths()
+    for n, scene in enumerate(_no_thumb, 1):
+        dest = _thumb_dest(scene)
+        if SE.write_thumbnail(data, scene, dest, vpaths, sprite_path):
+            if not scene.get("thumbnail_paths"):
+                scene["thumbnail_paths"] = [dest.name]
+            made.append(dest)
+        else:
+            failed += 1
+        bar.progress(n / len(_no_thumb), text=f"Remaking thumbnails… {n}/{len(_no_thumb)}")
+    bar.empty()
+    if not made:
+        st.error("Couldn't make any pictures — no preview copy, source video or timeline thumbnails "
+                 "for this video on the server.")
+    else:
+        write_catalogue(f"Remade {len(made)} thumbnail(s)"
+                        + (f" — {failed} couldn't be made." if failed else "."), new_thumbs=made)
+
+
+# 💡 One "to do" line for this video: missing pictures and split / combine suggestions,
+# with their one-click fixes beside it.
+_todo = []
+if _no_thumb:
+    _todo.append(f"🖼️ {len(_no_thumb)} missing thumbnail(s)")
+if sugg["split"]:
+    _todo.append(f"✂️ {len(sugg['split'])} long clip(s) to split")
+if sugg["merge"]:
+    _todo.append(f"🔗 {len(sugg['merge'])} run(s) of short clips to combine")
+if auto_ids and not sugg["split"]:
+    _todo.append(f"⚡ {len(auto_ids)} scene(s) over {1.5 * auto_target_sec:g}s")
+if _todo:
+    with st.container(border=True, key="rev_wrap_todo"):
+        tc_ = st.columns([4, 1.4, 1.4], vertical_alignment="center")
+        tc_[0].markdown("**To do:** " + " · ".join(_todo),
+                        help=f"Split suggestions: clips over {suggest_long_sec:g}s; combine: runs of clips each under "
+                             f"{suggest_short_sec:g}s; ⚡ auto split targets {auto_target_sec:g}s parts — set them in "
+                             "the sidebar (✂️ Split & combine).")
+        if _no_thumb and tc_[1].button(f"🔄 Remake {len(_no_thumb)}", use_container_width=True,
+                                       key=f"remake_all_thumbs_{selected}",
+                                       help="Takes a new picture for each from the preview copy / video (or the "
+                                            "timeline thumbnails) and queues them for Google Drive."):
+            _remake_missing_thumbs()
+        if auto_ids and tc_[2].button(f"⚡ Auto split {len(auto_ids)}…", use_container_width=True,
+                                      key=f"bulk_auto_{selected}"):
             bulk_auto_split_dialog(auto_ids)
 
-fc = st.columns([2, 1, 1, 1, 1, 1])
-tag_filter = fc[0].text_input("Filter by tag (optional)")
-hide_excluded = fc[5].toggle("Hide excluded", key="rev_hide_excluded",
-                             help="Leave excluded scenes out of the list (they stay excluded). Stays on as you "
-                                  "move between videos.")
-show_only_excluded = fc[1].checkbox("Only excluded", value=False)
+# Which scenes: tag search, role and "only …" chips; hide excluded sits with the role tools below.
+_filters_box = st.container(key="rev_wrap_filters")
+fc = _filters_box.columns([2, 2, 4], vertical_alignment="bottom")
+tag_filter = fc[0].text_input("Scenes with tag", placeholder="any tag", key="rev_tag_filter")
 ROLE_ANY, ROLE_SOME, ROLE_NONE = "Any role", "With a role", "No role"
-role_filter = fc[2].selectbox("Role", [ROLE_ANY, ROLE_SOME, ROLE_NONE, *_roles], key="rev_role_filter",
-                              format_func=lambda r: r if r in (ROLE_ANY, ROLE_SOME, ROLE_NONE) else SR.label(r, _roles),
-                              label_visibility="collapsed")
-show_only_suggested = fc[3].checkbox("Only suggestions", value=False, disabled=not show_suggestions)
-show_only_unreviewed = fc[4].checkbox("Only not reviewed", value=False)
+role_filter = fc[1].selectbox("Role", [ROLE_ANY, ROLE_SOME, ROLE_NONE, *_roles], key="rev_role_filter",
+                              format_func=lambda r: r if r in (ROLE_ANY, ROLE_SOME, ROLE_NONE) else SR.label(r, _roles))
+ONLY_UNREVIEWED, ONLY_SUGGESTED, ONLY_EXCLUDED = "Not reviewed", "Suggestions", "Excluded"
+_only = fc[2].pills("Only", [ONLY_UNREVIEWED, ONLY_SUGGESTED, ONLY_EXCLUDED], selection_mode="multi",
+                    key="rev_only", help="Show only scenes that are… (pick several to narrow it further).") or []
+_tools = _filters_box.columns([1.2, 1.8, 1.4, 1.1], vertical_alignment="center")
+hide_excluded = _tools[0].toggle("Hide excluded", key="rev_hide_excluded")
+show_only_excluded = ONLY_EXCLUDED in _only
+show_only_suggested = ONLY_SUGGESTED in _only and show_suggestions
+show_only_unreviewed = ONLY_UNREVIEWED in _only
 
 # Which scenes to show (filters and the library range), in time order.
 shown = []
@@ -969,12 +992,12 @@ def role_manager() -> None:
 
 
 _shown_ids = [s["scene_id"] for s, _ in shown]
-rc_ = st.columns([2, 2, 3])
+rc_ = [_tools[2], _tools[3], _tools[1]]
 quick_mode = rc_[2].toggle("🎭 Quick role marking", key="rev_quick_roles",
                            help="A grid of the shown scenes' pictures: pick a role, then click scenes to "
                                 "add or remove it — no cards to open. 💾 Save when done. Uses the filters "
                                 "above (e.g. Role → No role to see just the unmarked ones).")
-with rc_[0].popover(f"🎭 Mark the {len(_shown_ids)} shown scene(s)…", use_container_width=True,
+with rc_[0].popover(f"🎭 Mark all {len(_shown_ids)}…", use_container_width=True,
                     disabled=not _shown_ids):
     _brole = st.selectbox("Role", list(_roles), format_func=lambda r: SR.label(r, _roles), key="rev_bulk_role")
     _bc = st.columns(2)
@@ -986,29 +1009,22 @@ with rc_[0].popover(f"🎭 Mark the {len(_shown_ids)} shown scene(s)…", use_co
               on_click=_bulk_hints, args=(_shown_ids,),
               help="Calmest fifth of this video's scenes → 🌙 Slow, busiest fifth → 💥 Action. Check them over.")
     st.caption("Unsaved until you 💾 save, like ticking each card.")
-with rc_[1].popover("🎭 Scene roles…", use_container_width=True):
+with rc_[1].popover("Roles…", use_container_width=True):
     role_manager()
 
 
 # ---------------------------------------------------------------------------
 # Scene cards
 # ---------------------------------------------------------------------------
-BACK_TO_TOP = (
-    '<a href="#reviewer-top" target="_self" style="display:inline-block;padding:0.4rem 0.9rem;'
-    'border:1px solid rgba(128,128,128,0.4);border-radius:0.5rem;text-decoration:none;">'
-    '⬆️ Back to top</a>'
-)
-
-
 def save_row(where: str) -> bool:
-    c = st.columns([3, 2, 2])
-    c[0].caption(f"{len(shown)} scene(s) shown. Tag and checkbox edits are kept until you save — "
-                 "changing the video or a filter discards them. Split, combine and ⭐ save straight away.")
-    c[1].checkbox("Also mark unchanged scenes reviewed", key=f"rev_mark_all_{where}",
+    c = st.container(key=f"rev_wrap_save_{where}").columns([2, 3, 2], vertical_alignment="center")
+    c[0].caption(f"{len(shown)} scene(s) shown")
+    c[1].checkbox("Mark all shown as reviewed", key=f"rev_mark_all_{where}",
                   help="Off: only scenes you changed are marked ✓ Reviewed. "
                        "On: every scene shown is marked reviewed (you've checked them all).")
-    label = "💾 Save all changes for this video" if where == "top" else "💾 Save all changes"
-    return c[2].button(label, type="primary", use_container_width=True, key=f"rev_save_{where}")
+    return c[2].button("💾 Save changes", type="primary", use_container_width=True, key=f"rev_save_{where}",
+                       help="Saves the tag, exclude and role edits on this video. They're kept until you save — "
+                            "changing the video or a filter discards them. Split, combine and ⭐ save straight away.")
 
 
 def merge_banner(grp: list) -> None:
@@ -1030,47 +1046,53 @@ def scene_card(sid, trimmed_to) -> None:
     scene = scene_by_id[sid]
     current_tags = scene_tags(scene)
     st.markdown(f'<div id="rev-scene-{sid}"></div>', unsafe_allow_html=True)
-    cols = st.columns([1, 2])
+    cols = st.container(key=f"rev_wrap_card_{sid}").columns([1, 2])
     with cols[0]:
         if scene.get("thumbnail_paths"):
             thumb_path = thumbs_dir / Path(scene["thumbnail_paths"][0]).name
             if image_ok(thumb_path):
                 safe_image(str(thumb_path), width=280)
             else:
-                st.warning(f"Thumbnail {'unreadable' if thumb_path.exists() else 'missing'}: {thumb_path.name}")
-                if st.button("🔄 Remake thumbnail", key=f"remake_thumb_{selected}_{sid}",
+                st.caption(f"🖼️ Picture {'unreadable' if thumb_path.exists() else 'missing'}")
+                if st.button("🔄 Remake picture", key=f"remake_thumb_{selected}_{sid}",
                              help="Takes a new picture from the video (or the timeline thumbnails) "
                                   "and queues it for Google Drive."):
                     back_to(sid)
                     remake_thumbnail(scene, thumb_path)
-        if sid == master_sid:
-            st.success("⭐ Video thumbnail")
-        elif scene.get("thumbnail_paths"):
-            if st.button("⭐ Use as video thumbnail", key=f"star_{selected}_{sid}"):
+        if sid != master_sid and scene.get("thumbnail_paths"):
+            if st.button("⭐ Use as video thumbnail", key=f"star_{selected}_{sid}",
+                         help="The picture shown for this video in the Media Library and the planner's video list."):
                 back_to(sid)
                 set_star(sid)
-        if trimmed_to:
-            st.warning(f"✂️ Trimmed by library range — uses {format_mmss(trimmed_to[0])}–{format_mmss(trimmed_to[1])}")
-        if scene.get("reviewed"):
-            st.success("✓ Reviewed")
     with cols[1]:
         dur = SE.scene_duration(scene)
-        st.markdown(f"**Scene {SE.scene_label(scene)}**  ·  {scene['start_tc']} → {scene['end_tc']}"
-                    f"  ·  {fmt_dur(dur)}  ·  {motion_text(scene)}")
+        # Header: scene, time, length, motion — then its state as small badges (not boxes).
+        st.markdown(f"**Scene {SE.scene_label(scene)}**  ·  {format_mmss(SE.scene_start_sec(scene))}"
+                    f"  ·  {fmt_dur(dur)}  ·  {motion_text(scene)}",
+                    help=f"{scene['start_tc']} → {scene['end_tc']}")
+        badges = []
+        if scene.get("reviewed"):
+            badges.append(":green-badge[✓ Reviewed]")
+        if sid == master_sid:
+            badges.append(":blue-badge[⭐ Video thumbnail]")
+        if trimmed_to:
+            badges.append(f":orange-badge[✂️ library range: uses {format_mmss(trimmed_to[0])}–"
+                          f"{format_mmss(trimmed_to[1])}]")
         if sid in split_sugg:
-            wc = st.columns([4, 1])
-            wc[0].warning(f"✂️ {fmt_dur(dur)} long — consider splitting.")
-            if wc[1].button("Dismiss", key=f"split_dismiss_{selected}_{sid}"):
+            badges.append(f":orange-badge[✂️ {fmt_dur(dur)} long — consider splitting]")
+        if badges or sid in split_sugg:
+            bc_ = st.columns([5, 1], vertical_alignment="center")
+            bc_[0].markdown(" ".join(badges))
+            if sid in split_sugg and bc_[1].button("Dismiss", key=f"split_dismiss_{selected}_{sid}",
+                                                   help="Hide the split suggestion for this scene."):
                 back_to(sid)
                 dismiss(SE.suggestion_key("split", [sid]))
         st.multiselect("Tags", options=sorted(set(CANDIDATE_LABELS) | set(current_tags)),
                        default=current_tags, key=wkey("tags", sid))
-        rc = st.columns([1, 3])
-        rc[0].checkbox("🚫 Exclude from planner", value=scene.get("excluded", False), key=wkey("excluded", sid))
         _rk = wkey("roles", sid)
         _cur = SR.scene_roles(scene)
         _opts = list(_roles) + [r for r in _cur if r not in _roles]
-        rc[1].pills("Roles", _opts, selection_mode="multi", key=_rk,
+        st.pills("Roles", _opts, selection_mode="multi", key=_rk,
                     default=None if _rk in st.session_state else _cur,
                     format_func=lambda r: SR.label(r, _roles), label_visibility="collapsed",
                     help="What this scene is for in the story. 🎬 Intro / 🏁 Outro: the start and end "
@@ -1078,32 +1100,39 @@ def scene_card(sid, trimmed_to) -> None:
                          "💥 Action: the high points. Add your own under 🎭 Scene roles. Independent of Exclude.")
         _hint = SR.motion_hint(motion_rank(scene))
         if _hint and _hint in _roles and _hint not in (st.session_state.get(_rk) or []):
-            st.caption(f"💡 One of the {'calmest' if _hint == 'slow' else 'busiest'} scenes in this video — "
-                       f"maybe {SR.label(_hint, _roles)}?")
+            st.caption(f":gray[*💡 one of the {'calmest' if _hint == 'slow' else 'busiest'} scenes here — "
+                       f"maybe {SR.label(_hint, _roles)}?*]")
         new = pending_fields(scene)
         if new is not None and is_changed(scene, new):
             st.caption("✏️ Unsaved changes")
 
-        bc = st.columns(4)
-        if bc[0].button("✂️ Split…", key=f"split_{selected}_{sid}", use_container_width=True):
+        # Only the buttons that apply, side by side (no gaps for missing ones).
+        nxt = next_of.get(sid)
+        edit = scene.get("edit") or {}
+        can_undo = edit.get("kind") in ("merge", "split") or "split_from" in scene
+        actions = ["split"] + (["auto"] if sid in auto_ids else []) + (["merge"] if nxt is not None else []) \
+            + (["undo"] if can_undo else [])
+        _row = st.container(key=f"rev_wrap_act_{sid}").columns(max(4, 1 + len(actions)),
+                                                               vertical_alignment="center")
+        _row[0].checkbox("🚫 Exclude", value=scene.get("excluded", False), key=wkey("excluded", sid))
+        bc = dict(zip(actions, _row[1:]))
+        if bc["split"].button("✂️ Split…", key=f"split_{selected}_{sid}", use_container_width=True):
             back_to(sid)
             st.session_state["rev_open_dialog"] = (selected, sid, False)
             st.rerun()
-        if sid in auto_ids and bc[1].button("⚡ Auto split", key=f"auto_{selected}_{sid}", use_container_width=True,
-                                            help=f"Splits it straight away into parts of about {auto_target_sec:g}s "
-                                                 "(↩️ Undo split puts it back). ✂️ Split… lets you place cuts by hand."):
+        if "auto" in bc and bc["auto"].button("⚡ Auto split", key=f"auto_{selected}_{sid}", use_container_width=True,
+                                              help=f"Splits it straight away into parts of about {auto_target_sec:g}s "
+                                                   "(↩️ Undo split puts it back). ✂️ Split… lets you place cuts by hand."):
             back_to(sid)
             do_split(sid, SE.auto_split_points(scene_by_id[sid], auto_target_sec))
-        nxt = next_of.get(sid)
-        if nxt is not None and bc[2].button("🔗 Combine with next", key=f"merge_next_{selected}_{sid}",
-                                            use_container_width=True,
-                                            help=f"Join this scene and scene {nxt} into one."):
+        if "merge" in bc and bc["merge"].button("🔗 Combine", key=f"merge_next_{selected}_{sid}",
+                                                use_container_width=True,
+                                                help=f"Join this scene and the next one (scene {nxt}) into one."):
             back_to(sid)
             do_merge([sid, nxt])
-        edit = scene.get("edit") or {}
-        if edit.get("kind") in ("merge", "split") or "split_from" in scene:
+        if "undo" in bc:
             label = "↩️ Undo combine" if edit.get("kind") == "merge" else "↩️ Undo split"
-            if bc[3].button(label, key=f"undo_{selected}_{sid}", use_container_width=True):
+            if bc["undo"].button(label, key=f"undo_{selected}_{sid}", use_container_width=True):
                 back_to(sid)
                 do_undo(sid)
 
@@ -1263,7 +1292,6 @@ else:
         scene_card(scene["scene_id"], trimmed_to)
         st.divider()
     save_bottom = save_row("bottom")
-    st.markdown(BACK_TO_TOP, unsafe_allow_html=True)
 
     if save_top or save_bottom:
         mark_all = st.session_state.get("rev_mark_all_top") or st.session_state.get("rev_mark_all_bottom")

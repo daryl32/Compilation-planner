@@ -309,3 +309,65 @@ def test_thumbnails_skip_excluded_and_out_of_range_scenes():
         save_library_meta(meta_before)
         for p in made:
             p.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_audio_goes_first_with_several_workers(tmp_path, workers):
+    """Same rule with ⚡ several searches at once: queued audio holds them back."""
+    import jobs as J
+    from config import AUDIO_DIR
+    from heavy_slot import heavy_slot
+    J.cancel_queued()
+    J.clear_finished()
+    aq = AUDIO_DIR / ".analysis"
+    aq.mkdir(parents=True, exist_ok=True)
+    (aq / "queue.json").write_text(json.dumps([{"track_id": "x", "kind": "extra"}]))
+    J.enqueue([{"kind": "track", "track_id": "song_short", "n_videos": 2, "sequential": False}])
+    jid = J.job_id({"kind": "track", "track_id": "song_short", "n_videos": 2, "sequential": False})
+    free_at = []
+
+    def audio():
+        time.sleep(1.0)
+        with heavy_slot("audio analysis"):
+            (aq / "queue.json").write_text("[]")
+            time.sleep(0.5)
+            free_at.append(time.time())
+
+    th = threading.Thread(target=audio)
+    th.start()
+    J.run_worker(poll_sec=0.2, workers=workers)
+    th.join()
+    st = J.read_status()[jid]
+    assert st["state"] == "done", st
+    assert st["updated"] >= free_at[0]
+    (aq / "queue.json").unlink(missing_ok=True)
+
+
+def test_several_searches_run_at_once_then_spotlights():
+    """⚡ Track searches run side by side in separate processes; a spotlight waits for them."""
+    import jobs as J
+    import rec_library as RL
+    J.cancel_queued()
+    J.clear_finished()
+    tracks = ["song_full", "song_slow", "song_noanalysis"]
+    jobs = [{"kind": "track", "track_id": t, "n_videos": 3, "sequential": False} for t in tracks]
+    vid = sorted(RL.list_tracks() and __import__("catalogue_store").all_catalogues())[0]
+    J.enqueue(jobs + [{"kind": "spotlight", "video_id": vid}])
+    try:
+        _check_parallel_run(J, RL, jobs, tracks, vid)
+    finally:
+        _clean()       # leave no stored plans behind (the Recommendations page tests start empty)
+
+
+def _check_parallel_run(J, RL, jobs, tracks, vid):
+    J.run_worker(poll_sec=0.1, workers=3)
+    st = J.read_status()
+    runs = [st[J.job_id(j)] for j in jobs]
+    assert all(r["state"] == "done" for r in runs), runs
+    spot = st[J.job_id({"kind": "spotlight", "video_id": vid})]
+    assert spot["state"] == "done", spot
+    assert spot["updated"] >= max(r["updated"] for r in runs)       # after every track search
+    for t in tracks:
+        assert RL.load_results(t, 3, False) is not None
+    assert not J.read_queue()
+    assert J.worker_count() >= 1

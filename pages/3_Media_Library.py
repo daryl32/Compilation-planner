@@ -1,10 +1,13 @@
 """
-Media Library — two libraries, picked at the top of the page:
+Media Library — the libraries, picked at the top of the page (each has its finder — search,
+sort and "More filters" — in the page, and a floating ⬆️ back-to-top button):
   Videos: search, filter and sort, and set each video's library time range
           (the part of the video the Compilation Planner should use).
   Audio:  search, filter and sort the music tracks, see their energy shape
           and play them; analyse new tracks (and add the extra cut-finding
           analysis to existing ones) on the server.
+  Mix:    🎚️ make new tracks from existing ones — extend / shorten a track,
+          mashups of several (mix_ui.py, mixer.py, mixes.py).
   Analytics: 📚 Library — progress (split pass, review, roles, actors), actors,
           role footage vs what your tracks need, clip lengths vs blocks
           (library_analytics.py); ⭐ Render ratings — what your rated renders say
@@ -31,14 +34,16 @@ from library_common import (
     render_range_picker, show_render_player, file_download_button,
 )
 
-from page_setup import page_setup, drive_token
+from page_setup import page_setup, drive_token, top_button, wrap_css, menu_css
 import catalogue_store as CS
 
 PAGE_SIZE = 20
 
-page_setup("Media Library", "pages/3_Media_Library.py", title="📁 Media Library")
-library_kind = st.radio("Library", ["🎬 Videos", "🎵 Audio", "🎞️ Renders", "📈 Analytics"], horizontal=True,
-                        key="lib_kind", label_visibility="collapsed")
+page_setup("Media Library", "pages/3_Media_Library.py", title="📁 Media Library", anchor="library-top")
+top_button("library-top", wrap_css("ml_wrap", 120) + menu_css())   # rows wrap on narrow screens (iPad portrait)
+with st.container(key="mainnav_lib"):   # the page's main menu — styled as tabs (menu_css)
+    library_kind = st.radio("Library", ["🎬 Videos", "🎵 Audio", "🎚️ Mix", "🎞️ Renders", "📈 Analytics"],
+                            horizontal=True, key="lib_kind", label_visibility="collapsed")
 
 
 # ---------------------------------------------------------------------------
@@ -133,65 +138,79 @@ def render_videos():
     added = CS.added_times()
     new_ids = sorted((vid for vid, ts in added.items() if CS.is_new_video(ts)), key=lambda v: -added[v])
 
-    st.sidebar.header("Filter")
-    name_query = st.sidebar.text_input("Search name", placeholder="part of a video name", key="lib_name_query")
-    added_choice = st.sidebar.selectbox(
-        "Added", list(ADDED_CHOICES), key="lib_added",
-        format_func=lambda k: ADDED_CHOICES[k][0] + (f" · {len(new_ids)}" if k == "new" else ""),
-        help="When the video was added — the date its catalogue first appeared in Google Drive.",
-    )
-    added_since = None
-    if added_choice == "since":
-        since_day = st.sidebar.date_input("Added on or after",
-                                          value=datetime.date.today() - datetime.timedelta(days=7),
-                                          key="lib_added_since", format="DD/MM/YYYY")
-        added_since = datetime.datetime.combine(since_day, datetime.time.min).timestamp()
-    elif ADDED_CHOICES[added_choice][1] is not None:
-        days = ADDED_CHOICES[added_choice][1]
-        added_since = datetime.datetime.combine(
-            datetime.date.today() - datetime.timedelta(days=days), datetime.time.min).timestamp()
     details = video_details()
-    actor_filter = st.sidebar.multiselect("👤 Actors", all_actors(), key="lib_actors", placeholder="anyone",
+    all_tags = sorted({t for v in library.values() for s in v["scenes"] for t in s["tags"]}, key=str.lower)
+    max_minutes = max(1, int(max((v["duration"] for v in library.values()), default=60) // 60) + 1)
+
+    # Find + sort on one row in the page (filters apply straight away); the less-used
+    # filters sit in "More filters", whose label counts the ones in use.
+    with st.container(border=True, key="ml_wrap_vfind"):
+        fc = st.columns([3, 2.4, 1.6], vertical_alignment="bottom")
+        name_query = fc[0].text_input("Find a video", placeholder="part of a video name", key="lib_name_query")
+        added_choice = fc[1].selectbox(
+            "Added", list(ADDED_CHOICES), key="lib_added",
+            format_func=lambda k: ADDED_CHOICES[k][0] + (f" · {len(new_ids)}" if k == "new" else ""),
+            help="When the video was added — the date its catalogue first appeared in Google Drive.",
+        )
+        _more_keys = ("lib_actors", "lib_vtags", "lib_tags", "lib_range_filter", "lib_review_filter")
+        _n_more = sum(bool(st.session_state.get(k)) and st.session_state.get(k) != "Any" for k in _more_keys)
+        _dur = st.session_state.get("lib_duration")
+        if _dur and tuple(_dur) != (0, max_minutes):
+            _n_more += 1
+        with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", use_container_width=True):
+            actor_filter = st.multiselect("👤 Actors", all_actors(), key="lib_actors", placeholder="anyone",
                                           help="Set on each video in the Reviewer (🎬 Video details).")
-    vtag_filter = st.sidebar.multiselect("🏷️ Video tags", all_video_tags(), key="lib_vtags", placeholder="any",
+            vtag_filter = st.multiselect("🏷️ Video tags", all_video_tags(), key="lib_vtags", placeholder="any",
                                          help="Tags for the whole video, set in the Reviewer (🎬 Video details).")
-    details_all = st.sidebar.toggle("Must have all of these", key="lib_details_all",
+            details_all = st.toggle("Must have all of these", key="lib_details_all",
                                     disabled=not (actor_filter or vtag_filter),
                                     help="Off: any of the picked actors / video tags. On: every one of them.")
-    all_tags = sorted({t for v in library.values() for s in v["scenes"] for t in s["tags"]}, key=str.lower)
-    tag_filter = st.sidebar.multiselect("Clip tags", all_tags)
-    match_all = st.sidebar.radio(
-        "Scenes must have", ["Any of these tags", "All of these tags"], horizontal=True,
-        disabled=not tag_filter,
-    ) == "All of these tags"
-    range_filter = st.sidebar.selectbox("Library range", ["Any", "Has a range", "No range"])
-    review_filter = st.sidebar.selectbox("Review status", ["Any", "Fully reviewed", "Not fully reviewed"])
-    max_minutes = max(1, int(max((v["duration"] for v in library.values()), default=60) // 60) + 1)
-    duration_filter = st.sidebar.slider("Duration (minutes)", 0, max_minutes, (0, max_minutes))
+            tag_filter = st.multiselect("Clip tags", all_tags, key="lib_tags", placeholder="any")
+            match_all = st.radio(
+                "Scenes must have", ["Any of these tags", "All of these tags"], horizontal=True,
+                disabled=not tag_filter, key="lib_tags_all",
+            ) == "All of these tags"
+            range_filter = st.selectbox("Library range", ["Any", "Has a range", "No range"], key="lib_range_filter")
+            review_filter = st.selectbox("Review status", ["Any", "Fully reviewed", "Not fully reviewed"],
+                                         key="lib_review_filter")
+            duration_filter = st.slider("Duration (minutes)", 0, max_minutes, (0, max_minutes), key="lib_duration")
+        rc = st.columns([3, 2.4, 1.6] if added_choice != "since" else [2, 2, 2.4, 1.6],
+                        vertical_alignment="bottom")
+        added_since = None
+        if added_choice == "since":
+            since_day = rc.pop(0).date_input("Added on or after",
+                                         value=datetime.date.today() - datetime.timedelta(days=7),
+                                         key="lib_added_since", format="DD/MM/YYYY")
+            added_since = datetime.datetime.combine(since_day, datetime.time.min).timestamp()
+        elif ADDED_CHOICES[added_choice][1] is not None:
+            days = ADDED_CHOICES[added_choice][1]
+            added_since = datetime.datetime.combine(
+                datetime.date.today() - datetime.timedelta(days=days), datetime.time.min).timestamp()
 
-    st.sidebar.header("Sort")
-    SORTS = {
-        "Tagged footage": lambda r: r["stats"]["tagged"],
-        "Name": lambda r: r["video"]["video_id"].lower(),
-        "Duration": lambda r: r["video"]["duration"],
-        "Usable duration": lambda r: r["stats"]["usable"],
-        "Scene count": lambda r: len(r["video"]["scenes"]),
-        "% reviewed": lambda r: r["stats"]["reviewed_pct"],
-        "Date added": lambda r: added.get(r["video"]["video_id"], 0),
-        "Times rendered": lambda r: vid_use.get(r["video"]["video_id"], 0),
-    }
-    sort_options = list(SORTS) if tag_filter else [k for k in SORTS if k != "Tagged footage"]
-    if st.session_state.get("lib_sort") not in sort_options:
-        # First visit (or the tag filter that allowed "Tagged footage" was cleared):
-        # newest first while an "Added" filter is on, else the first option.
-        st.session_state["lib_sort"] = "Date added" if added_choice != "any" else sort_options[0]
-    sort_by = st.sidebar.selectbox("Sort by", sort_options, key="lib_sort",
-                                   help="Tagged footage = seconds of usable footage whose scenes match the tag filter. "
-                                        "Date added = when the video's catalogue first appeared in Google Drive.")
-    if st.session_state.get("lib_desc_for") != sort_by:
-        st.session_state["lib_desc"] = sort_by != "Name"   # sensible default per sort, still switchable
-        st.session_state["lib_desc_for"] = sort_by
-    descending = st.sidebar.toggle("Descending", key="lib_desc")
+        SORTS = {
+            "Tagged footage": lambda r: r["stats"]["tagged"],
+            "Name": lambda r: r["video"]["video_id"].lower(),
+            "Duration": lambda r: r["video"]["duration"],
+            "Usable duration": lambda r: r["stats"]["usable"],
+            "Scene count": lambda r: len(r["video"]["scenes"]),
+            "% reviewed": lambda r: r["stats"]["reviewed_pct"],
+            "Date added": lambda r: added.get(r["video"]["video_id"], 0),
+            "Times rendered": lambda r: vid_use.get(r["video"]["video_id"], 0),
+        }
+        sort_options = list(SORTS) if tag_filter else [k for k in SORTS if k != "Tagged footage"]
+        if st.session_state.get("lib_sort") not in sort_options:
+            # First visit (or the tag filter that allowed "Tagged footage" was cleared):
+            # newest first while an "Added" filter is on, else the first option.
+            st.session_state["lib_sort"] = "Date added" if added_choice != "any" else sort_options[0]
+        sort_by = rc[-2].selectbox(
+            "Sort by", sort_options, key="lib_sort",
+            help="Tagged footage = seconds of usable footage whose scenes match the clip tag filter. "
+                 "Date added = when the video's catalogue first appeared in Google Drive.")
+        if st.session_state.get("lib_desc_for") != sort_by:
+            st.session_state["lib_desc"] = sort_by != "Name"   # sensible default per sort, still switchable
+            st.session_state["lib_desc_for"] = sort_by
+        descending = rc[-1].toggle("Descending", key="lib_desc")
+        status_slot = rc[0] if added_choice != "since" else st.container()
 
     # ---------------------------------------------------------------------------
     # Apply filters
@@ -227,24 +246,24 @@ def render_videos():
         st.info("No video catalogues found. Process a video in Colab, then sync from Google Drive.")
         st.stop()
 
-    if new_ids and added_choice == "any":
-        _nc = st.columns([5, 2])
-        _names = ", ".join(new_ids[:4]) + ("…" if len(new_ids) > 4 else "")
-        _nc[0].info(f"🆕 **{len(new_ids)} video(s) added in the last {CS.NEW_VIDEO_DAYS} days:** {_names}")
-        _nc[1].button("🆕 Show new videos", on_click=_show_new_videos, use_container_width=True)
-
-    metric_cols = st.columns(3)
-    metric_cols[0].metric("Videos shown", f"{len(rows)} / {len(library)}")
-    metric_cols[1].metric("Usable footage", format_mmss(sum(r["stats"]["usable"] for r in rows)))
+    # One status line instead of three big numbers.
+    _status = [f"**{len(rows)}** of {len(library)} videos", f"{format_mmss(sum(r['stats']['usable'] for r in rows))} usable"]
     if tag_filter:
-        metric_cols[2].metric("Tagged footage", format_mmss(sum(r["stats"]["tagged"] for r in rows)))
+        _status.append(f"{format_mmss(sum(r['stats']['tagged'] for r in rows))} tagged")
     else:
-        metric_cols[2].metric("With library range", sum(1 for r in rows if r["range"]))
+        _status.append(f"{sum(1 for r in rows if r['range'])} with a library range")
+    status_slot.markdown(" · ".join(_status))
+    if new_ids and added_choice == "any":
+        with st.container(key="ml_wrap_vnew"):
+            _nc = st.columns([5, 1.6], vertical_alignment="center")
+            _names = ", ".join(new_ids[:4]) + ("…" if len(new_ids) > 4 else "")
+            _nc[0].markdown(f":blue-badge[🆕 {len(new_ids)} new] added in the last {CS.NEW_VIDEO_DAYS} days: {_names}")
+            _nc[1].button("Show them", on_click=_show_new_videos, use_container_width=True, key="lib_show_new")
 
     if not rows:
         if added_choice != "any":
-            st.info("No videos match these filters in that period — try a longer one under **Added** in the "
-                    "sidebar. (Dates come from Google Drive: press ☁️ Sync if you've just added some.)")
+            st.info("No videos match these filters in that period — try a longer one under **Added**. "
+                    "(Dates come from Google Drive: press ☁️ Sync if you've just added some.)")
         else:
             st.info("No videos match these filters.")
         st.stop()
@@ -260,8 +279,8 @@ def render_videos():
         video, stats, rng = row["video"], row["stats"], row["range"]
         vid = video["video_id"]
 
-        with st.container(border=True):
-            cols = st.columns([2, 6, 1])
+        with st.container(border=True, key=f"ml_wrap_card_v_{vid}"):
+            cols = st.columns([2, 5, 1.6])
             with cols[0]:
                 # ⭐ master thumbnail chosen in the Reviewer, else the first usable scene's
                 _master = next((s["thumb"] for s in video["scenes"]
@@ -285,7 +304,7 @@ def render_videos():
                     line += f"  ·  🗓 added {CS.added_ago(_added_ts)}"
                 st.caption(line)
                 if rng:
-                    st.caption(f"📚 Library range {format_mmss(rng[0])}–{format_mmss(rng[1])}")
+                    st.markdown(f":orange-badge[📚 library range {format_mmss(rng[0])}–{format_mmss(rng[1])}]")
                 _d = details.get(vid) or {}
                 if _d.get("actors") or _d.get("tags"):
                     st.markdown(("👤 " + ", ".join(f"**{a}**" for a in _d.get("actors", [])) if _d.get("actors") else "")
@@ -300,7 +319,9 @@ def render_videos():
                                  help="Open this video in the Reviewer (tags, roles, splits, thumbnails).")
                 except Exception:   # page list unavailable (e.g. run on its own) — a plain link instead
                     st.markdown(f"[📝 Review](Reviewer?video={video.get('stem', vid)})")
-                if st.button("🎚️", key=f"lib_toggle_{vid}", help="Set the library time range for this video"):
+                _open = st.session_state["lib_open_picker"] == vid
+                if st.button("✕ Close" if _open else "⏱ Range", key=f"lib_toggle_{vid}", use_container_width=True,
+                             help="Set the part of this video the Compilation Planner uses (its library range)."):
                     # One picker open at a time — each embeds a full video player.
                     st.session_state["lib_open_picker"] = None if st.session_state["lib_open_picker"] == vid else vid
                     st.rerun()
@@ -385,6 +406,9 @@ def load_audio_library(signature: tuple) -> dict:
             "sections": [{"start": x["start"], "end": x["end"], "label": x["label"]}
                          for x in (t.get("analysis") or {}).get("sections") or []],
             "drops": list((t.get("analysis") or {}).get("drops") or []),
+            "key": t.get("key"),
+            "mix": t.get("mix"),
+            "stems": all((t.get("stems") or {}).get(p) for p in ("vocals", "instrumental")),
         }
     return tracks
 
@@ -467,7 +491,7 @@ def _analysis_progress(aa) -> None:
     icons = {"queued": "⏳", "running": "⚙️", "done": "✅", "error": "❌"}
     order = {"running": 0, "queued": 1, "error": 2, "done": 3}
     for tid, info in sorted(status.items(), key=lambda kv: (order.get(kv[1].get("state"), 9), kv[0].lower())):
-        kind = "new track" if info.get("kind") == "new" else "analysis"
+        kind = {"new": "new track", "key": "key"}.get(info.get("kind"), "analysis")
         st.caption(f"{icons.get(info.get('state'), '•')} **{tid}** — {kind}: {info.get('msg', '')}")
     if not active:
         if st.button("Clear finished", key="aa_clear"):
@@ -485,8 +509,15 @@ def render_analysis_panel(tracks: dict) -> None:
     cut-finding analysis (bars, drums, sections, build-ups, vocals) for
     tracks that only have the original Colab analysis."""
     missing_extra = sorted(tid for tid, t in tracks.items() if not t["extra"])
-    with st.expander(f"🔬 Audio analysis — {len(missing_extra)} track(s) without the extra analysis",
-                     expanded=bool(missing_extra) or bool(st.session_state.get("_aa_was_active"))):
+    missing_key = [tid for tid, t in tracks.items() if not t.get("key")]
+    todo = []
+    if missing_extra:
+        todo.append(f"{len(missing_extra)} without the extra analysis")
+    if missing_key:
+        todo.append(f"{len(missing_key)} without a key")
+    label = "🔬 Audio analysis" + (" — to do: " + ", ".join(todo) if todo else " — every track analysed ✅")
+    # Open while something is running; otherwise its title says what's left to do.
+    with st.expander(label, expanded=bool(st.session_state.get("_aa_was_active"))):
         aa, err = _audio_analysis_module()
         if aa is None:
             st.error(f"Audio analysis isn't available on this server: {err}. "
@@ -543,9 +574,28 @@ def render_analysis_panel(tracks: dict) -> None:
                         st.rerun()
 
         _render_upgrade(aa, tracks)
+        _render_keys(aa, tracks)
 
         if aa.read_status() or st.session_state.get("_aa_was_active"):
             _analysis_progress(aa)   # refreshes itself every few seconds
+
+
+def _render_keys(aa, tracks: dict) -> None:
+    """🎹 Key detection for tracks analysed before it existed (new tracks get it with
+    their analysis). Used by 🎚️ Mix to match keys in mashups."""
+    no_key = sorted(tid for tid, t in tracks.items() if not t.get("key"))
+    if not no_key:
+        return
+    st.divider()
+    st.markdown(f"**🎹 Keys** — {len(no_key)} track(s) without a key yet")
+    if st.button(f"🎹 Find the key of {len(no_key)} track(s) (~{max(1, round(len(no_key) * 5 / 60))} min)",
+                 key="aa_keys", help="A few seconds a track on the server (the audio is fetched from Google Drive "
+                                      "if needed). Nothing else about the tracks changes."):
+        n = aa.enqueue([{"track_id": tid, "kind": "key"} for tid in no_key])
+        aa.resume()
+        st.session_state["_aa_was_active"] = True
+        st.toast(f"Queued {n} track(s).")
+        st.rerun()
 
 
 def _render_upgrade(aa, tracks: dict) -> None:
@@ -603,17 +653,10 @@ def render_audio():
     _, track_use = render_usage()
     render_analysis_panel(tracks)
 
-    st.sidebar.header("Filter")
-    name_query = st.sidebar.text_input("Search name", placeholder="part of a track name", key="aud_name")
     max_minutes = max(1, int(max((t["duration"] for t in tracks.values()), default=600) // 60) + 1)
-    duration_filter = st.sidebar.slider("Duration (minutes)", 0, max_minutes, (0, max_minutes), key="aud_dur")
     bpms = [t["bpm"] for t in tracks.values() if t["bpm"]]
-    bpm_filter = None
-    if bpms:
-        lo, hi = int(min(bpms)), int(max(bpms)) + 1
-        bpm_filter = st.sidebar.slider("BPM", lo, hi, (lo, hi), key="aud_bpm")
-
-    st.sidebar.header("Sort")
+    import story_map as STM
+    _maps = STM.saved_maps()
     sorts = {
         "Name": lambda t: t["track_id"].lower(),
         "Duration": lambda t: t["duration"],
@@ -622,18 +665,34 @@ def render_audio():
         "Hits per minute": lambda t: t["hit_rate"],
         "Date added": lambda t: t["added"],
         "Times rendered": lambda t: track_use.get(t["track_id"], 0),
+        "Key (Camelot)": lambda t: _camelot_sort(t.get("key")),
     }
-    sort_by = st.sidebar.selectbox(
-        "Sort by", list(sorts), key="aud_sort",
-        help="Energy variation and hits per minute are what the planner matches videos on: "
-             "high = dynamic, punchy tracks; low = steady, calm ones.",
-    )
-    descending = st.sidebar.toggle("Descending", value=(sort_by != "Name"), key="aud_desc")
-    import story_map as STM
-    _maps = STM.saved_maps()
-    story_filter = st.sidebar.selectbox("🎭 Story map", ["Any", "Has one", "Not yet"], key="aud_story",
+    # Find + sort in the page (filters apply straight away); ranges and story map in "More filters".
+    with st.container(border=True, key="ml_wrap_afind"):
+        fc = st.columns([3, 2.4, 1.6], vertical_alignment="bottom")
+        name_query = fc[0].text_input("Find a track", placeholder="part of a track name", key="aud_name")
+        sort_by = fc[1].selectbox(
+            "Sort by", list(sorts), key="aud_sort",
+            help="Energy variation and hits per minute are what the planner matches videos on: "
+                 "high = dynamic, punchy tracks; low = steady, calm ones.",
+        )
+        _n_more = int(st.session_state.get("aud_story", "Any") != "Any")
+        _d = st.session_state.get("aud_dur")
+        _n_more += int(bool(_d) and tuple(_d) != (0, max_minutes))
+        _b = st.session_state.get("aud_bpm")
+        _n_more += int(bool(_b) and bool(bpms) and tuple(_b) != (int(min(bpms)), int(max(bpms)) + 1))
+        bpm_filter = None
+        with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", use_container_width=True):
+            duration_filter = st.slider("Duration (minutes)", 0, max_minutes, (0, max_minutes), key="aud_dur")
+            if bpms:
+                lo, hi = int(min(bpms)), int(max(bpms)) + 1
+                bpm_filter = st.slider("BPM", lo, hi, (lo, hi), key="aud_bpm")
+            story_filter = st.selectbox("🎭 Story map", ["Any", "Has one", "Not yet"], key="aud_story",
                                         help="Tracks with / without a saved story map (which parts of the "
                                              "song suit 🎬 Intro, 🌙 Slow, 💥 Action, 🏁 Outro…).")
+        rc = st.columns([3, 2.4, 1.6], vertical_alignment="center")
+        descending = rc[2].toggle("Descending", value=(sort_by != "Name"), key="aud_desc")
+        status_slot = rc[0]
 
     if not tracks:
         st.info("No audio catalogues yet — use **Check for new tracks** above, or sync from Google Drive.")
@@ -653,9 +712,7 @@ def render_audio():
         rows.append(t)
     rows.sort(key=sorts[sort_by], reverse=descending)
 
-    metric_cols = st.columns(2)
-    metric_cols[0].metric("Tracks shown", f"{len(rows)} / {len(tracks)}")
-    metric_cols[1].metric("Total length", format_mmss(sum(t["duration"] for t in rows)))
+    status_slot.markdown(f"**{len(rows)}** of {len(tracks)} tracks · {format_mmss(sum(t['duration'] for t in rows))}")
     if not rows:
         st.info("No tracks match these filters.")
         return
@@ -667,65 +724,79 @@ def render_audio():
 
     for t in rows[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]:
         tid = t["track_id"]
-        with st.container(border=True):
-            cols = st.columns([6, 3, 1, 1])
+        with st.container(border=True, key=f"ml_wrap_card_a_{tid}"):
+            cols = st.columns([5, 3])
             with cols[0]:
                 st.markdown(f"**{tid}**")
                 info = [f"⏱ {format_mmss(t['duration'])}"]
                 if t["bpm"]:
                     info.append(f"{t['bpm']:.0f} BPM")
+                if t.get("key"):
+                    info.append(f"🎹 {t['key']['name']} ({t['key']['camelot']})")
+                if t.get("stems"):
+                    info.append("🎤 stems")
                 info.append(f"energy variation {t['variance']:.2f}")
                 if t["hit_rate"]:
                     info.append(f"{t['hit_rate']:.1f} hits/min")
-                info.append(f"🔬 {t['extra_info']}" if t["extra"] else "basic analysis only")
                 if track_use.get(tid):
                     info.append(f"🎞️ in {track_use[tid]} render(s)")
-                st.caption("  ·  ".join(info))
+                st.caption("  ·  ".join(info), help=(f"🔬 {t['extra_info']}" if t["extra"] else "Basic analysis only "
+                                                     "— add the extra analysis (🔬 Audio analysis above)."))
+                if t.get("mix"):
+                    _src = " + ".join(t["mix"].get("made_from") or [])
+                    st.markdown(f":violet-badge[🎚️ {'Extended' if t['mix'].get('kind') == 'extend' else 'Mashup'}] "
+                                f"made from {_src}")
                 _story_strip(tid, _maps.get(tid), t["duration"])
             with cols[1]:
-                if t["energy"] and t["extra"]:
+                if t["energy"]:
                     from audio_charts import mini_figure
-                    st.plotly_chart(mini_figure(t["energy"], t["duration"], t["sections"], t["drops"]),
+                    st.plotly_chart(mini_figure(t["energy"], t["duration"], t["sections"] if t["extra"] else [],
+                                                t["drops"] if t["extra"] else []),
                                     use_container_width=True, config={"displayModeBar": False},
                                     key=f"aud_mini_{tid}")
-                elif t["energy"]:
-                    st.line_chart(t["energy"], height=70)
-            with cols[3]:
-                if st.button("🔬", key=f"aud_detail_{tid}", disabled=not t["extra"],
-                             help="Show the extra analysis: sections, build-ups, drops, bar lines, drums, "
-                                  "chord changes and vocals" if t["extra"]
-                             else "Add the extra analysis (panel above) to see it here"):
-                    st.session_state["aud_open_detail"] = (
-                        None if st.session_state["aud_open_detail"] == tid else tid)
-                    st.rerun()
-            with cols[2]:
-                if st.button("▶️", key=f"aud_toggle_{tid}", help="Play this track"):
-                    # One player open at a time.
-                    st.session_state["aud_open_player"] = (
-                        None if st.session_state["aud_open_player"] == tid else tid)
-                    st.rerun()
 
-            sc = st.columns([1, 1, 3])
-            sc[0].button("🎭 Edit story map" if tid in _maps else "🎭 Make a story map", key=f"aud_story_edit_{tid}",
+            # Actions, labelled, on one row (only the ones that apply).
+            sc = st.container(key=f"ml_wrap_act_{tid}").columns(4)
+            _playing = st.session_state["aud_open_player"] == tid
+            if sc[0].button("⏹ Close" if _playing else "▶️ Play", key=f"aud_toggle_{tid}", use_container_width=True):
+                # One player open at a time.
+                st.session_state["aud_open_player"] = None if _playing else tid
+                st.rerun()
+            _detail = st.session_state["aud_open_detail"] == tid
+            if sc[1].button("✕ Analysis" if _detail else "🔬 Analysis", key=f"aud_detail_{tid}",
+                            disabled=not t["extra"], use_container_width=True,
+                            help="Sections, build-ups, drops, bar lines, drums, chord changes and vocals"
+                            if t["extra"] else "Add the extra analysis (🔬 Audio analysis above) to see it here"):
+                st.session_state["aud_open_detail"] = None if _detail else tid
+                st.rerun()
+            sc[2].button("🎭 Story map", key=f"aud_story_edit_{tid}",
                          on_click=_open_story_editor, args=(tid,), use_container_width=True,
-                         help="Edit this track's story maps here — the default (used by new projects, the "
-                              "recommender and the analytics) and any named ones.")
+                         help="Edit this track's story maps — the default (used by new projects, the recommender "
+                              "and the analytics) and any named ones." if tid in _maps
+                         else "Make a story map for this track.")
             if tid not in _maps:
-                sc[1].button("✨ Suggest one", key=f"aud_story_new_{tid}", on_click=_suggest_story_map,
+                sc[3].button("✨ Suggest", key=f"aud_story_new_{tid}", on_click=_suggest_story_map,
                              args=(tid,), use_container_width=True, disabled=not t["extra"],
                              help="Saves the suggestion straight away as the track's default map: which parts of "
                                   "the song suit 🎬 Intro, 🌙 Slow, 💥 Action and 🏁 Outro."
-                             if t["extra"] else "Needs the extra analysis (panel above) first.")
+                             if t["extra"] else "Needs the extra analysis (🔬 Audio analysis above) first.")
             _sm_msg = st.session_state.pop(f"aud_story_msg_{tid}", None)
             if _sm_msg is True:
-                sc[2].success("✨ Story map suggested — 🎭 Edit story map to check and adjust it.")
+                st.toast(f"✨ Story map suggested for {tid} — 🎭 Story map to check and adjust it.")
             elif _sm_msg:
-                sc[2].error(_sm_msg)
+                st.error(_sm_msg)
 
             if st.session_state["aud_open_detail"] == tid:
                 _render_analysis_detail(tid)
             if st.session_state["aud_open_player"] == tid:
                 _render_audio_player(tid, t["source_path"])
+
+
+def _camelot_sort(key) -> tuple:
+    """1A, 1B, 2A … 12B; tracks without a key last."""
+    if not key or not key.get("camelot"):
+        return (99, "Z")
+    return (int(key["camelot"][:-1]), key["camelot"][-1])
 
 
 def _story_strip(track_id: str, regions, duration: float) -> None:
@@ -1050,14 +1121,6 @@ def render_renders():
     ranges = library_ranges()
     vid_use, track_use = render_usage()
 
-    st.sidebar.header("Filter")
-    name_query = st.sidebar.text_input("Search track", placeholder="part of a track name", key="ren_name")
-    video_filter = st.sidebar.multiselect("Uses video", sorted(vid_use, key=str.lower), key="ren_videos",
-                                          help="Show renders that use any of these videos.")
-    min_rating = st.sidebar.selectbox("Rating at least", STARS, key="ren_rating")
-    kept_only = st.sidebar.toggle("Kept only", key="ren_kept")
-
-    st.sidebar.header("Sort")
     sorts = {
         "Newest": lambda r: r.get("created") or "",
         "Track": lambda r: ((r.get("track") or {}).get("track_id") or "").lower(),
@@ -1066,26 +1129,25 @@ def render_renders():
         "Rating": lambda r: r["user"]["rating"],
         "Videos used": lambda r: len(r.get("videos") or []),
     }
-    sort_by = st.sidebar.selectbox("Sort by", list(sorts), key="ren_sort")
-    descending = st.sidebar.toggle("Descending", value=(sort_by != "Track"), key="ren_desc")
-
     if not renders:
         st.info("No renders yet — use **🎬 Render Preview** in the Compilation Planner.")
         return
 
-    # Storage
-    total_size = sum(r.get("size_bytes") or 0 for r in renders if r.get("local"))
-    try:
-        disk = shutil.disk_usage(PREVIEW_DIR)
-        st.progress(min(disk.used / disk.total, 1.0),
-                    text=f"💾 Server disk: {format_size(disk.used)} of {format_size(disk.total)} used "
-                         f"({format_size(disk.free)} free) — renders on the server take {format_size(total_size)}")
-    except OSError:
-        pass
-
-    _render_drive_panel(renders)
-    _render_usage_panel(renders, vid_use, track_use)
-    _render_cleanup_panel(renders, delete_render, format_size)
+    # Find + sort in the page (filters apply straight away); the rest in "More filters".
+    with st.container(border=True, key="ml_wrap_rfind"):
+        fc = st.columns([3, 2.4, 1.6], vertical_alignment="bottom")
+        name_query = fc[0].text_input("Find a render", placeholder="part of a track name", key="ren_name")
+        sort_by = fc[1].selectbox("Sort by", list(sorts), key="ren_sort")
+        _n_more = int(bool(st.session_state.get("ren_videos"))) + int(st.session_state.get("ren_rating", "–") != "–") \
+            + int(bool(st.session_state.get("ren_kept")))
+        with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", use_container_width=True):
+            video_filter = st.multiselect("Uses video", sorted(vid_use, key=str.lower), key="ren_videos",
+                                          help="Show renders that use any of these videos.")
+            min_rating = st.selectbox("Rating at least", STARS, key="ren_rating")
+            kept_only = st.toggle("📌 Kept only", key="ren_kept")
+        rc = st.columns([3, 2.4, 1.6], vertical_alignment="center")
+        descending = rc[2].toggle("Descending", value=(sort_by != "Track"), key="ren_desc")
+        status_slot = rc[0]
 
     rows = []
     wanted_rating = STARS.index(min_rating)
@@ -1102,16 +1164,33 @@ def render_renders():
         rows.append(r)
     rows.sort(key=sorts[sort_by], reverse=descending)
 
-    metric_cols = st.columns(3)
-    metric_cols[0].metric("Renders shown", f"{len(rows)} / {len(renders)}")
-    metric_cols[1].metric("Total length", format_mmss(sum(r.get("duration_sec") or 0 for r in rows)))
-    metric_cols[2].metric("Size", format_size(sum(r.get("size_bytes") or 0 for r in rows)))
+    # One status line (renders, length, size, server disk) and the storage tools as buttons.
+    total_size = sum(r.get("size_bytes") or 0 for r in renders if r.get("local"))
+    _status = [f"**{len(rows)}** of {len(renders)} renders",
+               format_mmss(sum(r.get("duration_sec") or 0 for r in rows)),
+               format_size(sum(r.get("size_bytes") or 0 for r in rows))]
+    _disk_help = None
+    try:
+        disk = shutil.disk_usage(PREVIEW_DIR)
+        _status.append(f"💾 server disk {disk.used / disk.total:.0%} full")
+        _disk_help = (f"{format_size(disk.used)} of {format_size(disk.total)} used ({format_size(disk.free)} free) — "
+                      f"renders on the server take {format_size(total_size)}.")
+    except OSError:
+        pass
+    status_slot.markdown(" · ".join(_status), help=_disk_help)
+    with st.container(key="ml_wrap_rtools"):
+        tools = st.columns(4)
+    _render_drive_panel(renders, tools[0])
+    _render_usage_panel(renders, vid_use, track_use, tools[1])
+    _render_cleanup_panel(renders, delete_render, format_size, tools[2])
+    _playlist_tools = tools[3]
+
     if not rows:
         st.info("No renders match these filters.")
         return
     _msg = st.session_state.pop("ren_fetch_msg", None)
     if _msg:
-        st.success(_msg)
+        st.toast(_msg)
     _drive_only = [r for r in rows if not r.get("local") and on_drive(r)]
     if _drive_only:
         _sz = sum(int((r.get("drive") or {}).get("size") or 0) for r in _drive_only)
@@ -1128,7 +1207,7 @@ def render_renders():
     _render_compare_panel(by_name, st.session_state["ren_compare"], ranges)
     st.session_state.setdefault("ren_playlist", [])
     st.session_state["ren_playlist"] = [n for n in st.session_state["ren_playlist"] if n in by_name]
-    _render_playlist_panel(by_name, rows)
+    _render_playlist_panel(by_name, rows, _playlist_tools)
 
     n_pages = (len(rows) - 1) // PAGE_SIZE + 1
     page = st.number_input(f"Page (of {n_pages})", 1, n_pages, 1, key="ren_page") if n_pages > 1 else 1
@@ -1141,90 +1220,95 @@ def render_renders():
         name = path.name
         track = r.get("track") or {}
         user = r["user"]
-        with st.container(border=True):
-            cols = st.columns([2, 6, 1, 1, 1, 1, 1, 1, 1])
+        with st.container(border=True, key=f"ml_wrap_card_r_{name}"):
+            cols = st.columns([2, 5, 1.7])
             with cols[0]:
                 thumb = make_thumbnail(path)
                 if thumb:
                     safe_image(str(thumb), width=220)
             with cols[1]:
-                title = f"**{track.get('track_id') or 'Unknown track'}**"
-                if user["keep"]:
-                    title += "  📌"
-                if user["rating"]:
-                    title += f"  {STARS[user['rating']]}"
-                st.markdown(title)
-                info = [f"🗓 {_when(r.get('created'))}", f"⏱ {format_mmss(r.get('duration_sec') or 0)}"]
-                if r.get("width"):
-                    info.append(f"{r['width']}×{r['height']}")
-                info.append(format_size(r.get("size_bytes")))
-                if on_drive(r):
-                    info.append("☁️ on Drive" + ("" if r.get("local") else " only (cleared from server)"))
-                else:
-                    info.append("💾 server only")
+                st.markdown(f"**{track.get('track_id') or 'Unknown track'}**"
+                            + (f"  {STARS[user['rating']]}" if user["rating"] else ""))
+                info = [f"🗓 {_when(r.get('created'))}", f"⏱ {format_mmss(r.get('duration_sec') or 0)}",
+                        format_size(r.get("size_bytes"))]
                 if r.get("segments") is not None:
-                    info.append(f"{r['segments']} segments ({r.get('split_segments') or 0} split-screen)")
                     info.append(f"{r.get('clip_count') or 0} clips from {len(r.get('videos') or [])} videos")
-                if r.get("render_seconds"):
-                    info.append(f"rendered in {format_mmss(r['render_seconds'])}")
                 mode = (r.get("settings") or {}).get("matching_mode")
                 if mode:
                     info.append(mode)
-                st.caption("  ·  ".join(info))
-                if r.get("videos"):
-                    st.markdown(" ".join(f"`{v['video_id']}` ×{v['clips']}" for v in r["videos"][:12])
-                                + (f" … +{len(r['videos']) - 12} more" if len(r["videos"]) > 12 else ""))
-                if r.get("backfilled"):
-                    st.caption("ℹ️ Made before render details were saved — the videos it used aren't known.")
+                more = []
+                if r.get("width"):
+                    more.append(f"{r['width']}×{r['height']}")
+                if r.get("segments") is not None:
+                    more.append(f"{r['segments']} segments ({r.get('split_segments') or 0} split-screen)")
+                if r.get("render_seconds"):
+                    more.append(f"rendered in {format_mmss(r['render_seconds'])}")
+                st.caption("  ·  ".join(info), help=" · ".join(more) or None)
+                # State as small badges
+                badges = []
+                if user["keep"]:
+                    badges.append(":blue-badge[📌 Kept]")
+                if on_drive(r):
+                    badges.append(":green-badge[☁️ On Drive]" if r.get("local") else ":gray-badge[☁️ Drive only]")
+                else:
+                    badges.append(":gray-badge[💾 Server only]")
+                if name in st.session_state["ren_compare"]:
+                    badges.append(":violet-badge[⚖️ Comparing]")
+                if name in st.session_state["ren_playlist"]:
+                    badges.append(f":violet-badge[🎞️ Playlist #{st.session_state['ren_playlist'].index(name) + 1}]")
                 stale = clips_outside_ranges(r, ranges)
                 if stale:
-                    st.caption(f"⚠️ {len(stale)} clip(s) are now outside their video's library range — "
-                               f"re-rendering this track would pick different footage.")
+                    badges.append(f":orange-badge[⚠️ {len(stale)} clip(s) outside library ranges]")
+                st.markdown(" ".join(badges),
+                            help=(f"{len(stale)} clip(s) are now outside their video's library range — re-rendering "
+                                  "this track would pick different footage.") if stale else None)
+                if r.get("videos"):
+                    st.markdown(" ".join(f"`{v['video_id']}` ×{v['clips']}" for v in r["videos"][:8])
+                                + (f" … +{len(r['videos']) - 8} more" if len(r["videos"]) > 8 else ""))
+                if r.get("backfilled"):
+                    st.caption("Made before render details were saved — the videos it used aren't known.")
                 if user["notes"]:
                     st.caption(f"📝 {user['notes']}")
             with cols[2]:
-                if st.button("▶️", key=f"ren_play_{name}", help="Play this render"):
-                    st.session_state["ren_open_player"] = None if st.session_state["ren_open_player"] == name else name
+                _playing = st.session_state["ren_open_player"] == name
+                if st.button("⏹ Close" if _playing else "▶️ Play", key=f"ren_play_{name}", use_container_width=True):
+                    st.session_state["ren_open_player"] = None if _playing else name
                     st.rerun()
-            with cols[8]:
-                if st.button("💾" if not r.get("local") and on_drive(r) else "⬇️", key=f"ren_dl_{name}",
-                             help="Only on Google Drive — copy it back to the server for smooth playback, or "
-                                  "download it" if not r.get("local") and on_drive(r)
-                             else "Download it to this device"):
-                    st.session_state["ren_open_download"] = (
-                        None if st.session_state.get("ren_open_download") == name else name)
+                _detail = st.session_state["ren_open_detail"] == name
+                if st.button("✕ Details" if _detail else "ℹ️ Details", key=f"ren_detail_{name}",
+                             use_container_width=True,
+                             help="Rate it, keep it, add notes; its clip list, settings and plan to download"):
+                    st.session_state["ren_open_detail"] = None if _detail else name
                     st.rerun()
-            with cols[3]:
-                if st.button("ℹ️", key=f"ren_detail_{name}",
-                             help="Clip list, settings, rating, notes, keep, and the plan to download"):
-                    st.session_state["ren_open_detail"] = None if st.session_state["ren_open_detail"] == name else name
-                    st.rerun()
-            with cols[4]:
-                comparing = name in st.session_state["ren_compare"]
-                if st.button("✅" if comparing else "⚖️", key=f"ren_cmp_{name}",
-                             help="Remove from the comparison" if comparing
-                             else "Compare side by side — pick two renders"):
-                    _toggle_compare(name)
-                    st.rerun()
-            with cols[5]:
-                in_list = name in st.session_state["ren_playlist"]
-                if st.button("☑️" if in_list else "🎞️", key=f"ren_pl_{name}",
-                             help=f"In the playlist (#{st.session_state['ren_playlist'].index(name) + 1}) — "
-                                  "click to remove" if in_list else "Add to the playlist"):
-                    _toggle_playlist(name)
-                    st.rerun()
-            with cols[6]:
-                if st.button("↩️", key=f"ren_reopen_{name}", disabled=reopen_state(r)[0] is None,
-                             help="Open the Compilation Planner with this render's settings and matches"
-                             if r.get("project") else
-                             "Open the Compilation Planner with this render's settings (matches are rebuilt)"
-                             if r.get("plan") else "No plan was saved with this render"):
-                    _reopen_in_planner(r)
-            with cols[7]:
-                if st.button("🗑️", key=f"ren_del_{name}", disabled=user["keep"],
-                             help="Kept — unkeep it (ℹ️) to delete" if user["keep"] else "Delete this render"):
-                    st.session_state["ren_confirm_delete"] = name
-                    st.rerun()
+                with st.popover("⋯ More", use_container_width=True):
+                    comparing = name in st.session_state["ren_compare"]
+                    if st.button("⚖️ Stop comparing" if comparing else "⚖️ Compare", key=f"ren_cmp_{name}",
+                                 use_container_width=True,
+                                 help=None if comparing else "Side by side with another render — pick two."):
+                        _toggle_compare(name)
+                        st.rerun()
+                    in_list = name in st.session_state["ren_playlist"]
+                    if st.button("🎞️ Remove from playlist" if in_list else "🎞️ Add to playlist",
+                                 key=f"ren_pl_{name}", use_container_width=True):
+                        _toggle_playlist(name)
+                        st.rerun()
+                    if st.button("↩️ Reopen in the planner", key=f"ren_reopen_{name}", use_container_width=True,
+                                 disabled=reopen_state(r)[0] is None,
+                                 help="Open the Compilation Planner with this render's settings and matches"
+                                 if r.get("project") else
+                                 "Open the Compilation Planner with this render's settings (matches are rebuilt)"
+                                 if r.get("plan") else "No plan was saved with this render"):
+                        _reopen_in_planner(r)
+                    _drive_only_r = not r.get("local") and on_drive(r)
+                    if st.button("💾 Copy to server / download" if _drive_only_r else "⬇️ Download",
+                                 key=f"ren_dl_{name}", use_container_width=True):
+                        st.session_state["ren_open_download"] = (
+                            None if st.session_state.get("ren_open_download") == name else name)
+                        st.rerun()
+                    if st.button("🗑️ Delete", key=f"ren_del_{name}", disabled=user["keep"], use_container_width=True,
+                                 help="Kept — unkeep it (ℹ️ Details) to delete" if user["keep"] else None):
+                        st.session_state["ren_confirm_delete"] = name
+                        st.rerun()
 
             if st.session_state["ren_confirm_delete"] == name:
                 c = st.columns([4, 1, 1])
@@ -1326,19 +1410,25 @@ def _playlist_set(names: list) -> None:
     st.session_state.pop("ren_playlist_built", None)
 
 
-def _render_playlist_panel(by_name: dict, rows: list) -> None:
+def _render_playlist_panel(by_name: dict, rows: list, where) -> None:
     """🎞️ Playlist: pick renders with 🎞️ on their cards (or add every one shown),
     order them, and play them back to back as one video with a chapter list."""
     import random as _random
     from renders import make_playlist_video
     names = st.session_state["ren_playlist"]
     shown = [Path(r["path"]).name for r in rows]
+    if not names:
+        # Nothing picked yet: just a button beside the storage tools (no empty panel).
+        where.button(f"🎞️ Playlist of all {len(shown)}", key="ren_pl_addall", use_container_width=True,
+                     on_click=_playlist_set, args=(list(shown),),
+                     help="Play every render shown back to back as one video (in the current sort order). "
+                          "Or add single renders with 🎞️ in a card's ⋯ menu.")
+        return
     with st.container(border=True):
         total = sum(float(by_name[n].get("duration_sec") or 0) for n in names)
         head = st.columns([4, 2, 1, 1, 1])
-        head[0].markdown(f"**🎞️ Playlist** — {len(names)} render(s) · {format_mmss(total)}" if names else
-                         "**🎞️ Playlist** — add renders with 🎞️ on their cards, or add every one shown")
-        head[1].button(f"➕ Add all shown ({len(shown)})", key="ren_pl_addall", use_container_width=True,
+        head[0].markdown(f"**🎞️ Playlist** — {len(names)} render(s) · {format_mmss(total)}")
+        head[1].button(f"➕ Add all shown ({len(shown)})", key="ren_pl_addall2", use_container_width=True,
                        on_click=_playlist_set, args=(names + [n for n in shown if n not in names],),
                        help="Adds every render matching the filters, in the current sort order.")
         head[2].button("🔀", key="ren_pl_shuffle", disabled=len(names) < 2, use_container_width=True,
@@ -1561,7 +1651,7 @@ def _render_render_detail(r: dict, update_user_fields) -> None:
                        help="The exact plan this render was made from — import it with the Blender add-on.")
 
 
-def _render_drive_panel(renders: list) -> None:
+def _render_drive_panel(renders: list, where) -> None:
     from renders import (on_drive, upload_render, clear_local, auto_clear_enabled, set_auto_clear,
                          format_size)
     for err in st.session_state.pop("ren_flash_errors", None) or []:
@@ -1570,9 +1660,10 @@ def _render_drive_panel(renders: list) -> None:
     clearable = [r for r in renders if r.get("local") and on_drive(r)]
     drive_only = [r for r in renders if not r.get("local") and on_drive(r)]
     token = drive_token()
-    title = (f"☁️ Google Drive — {len(drive_only) + len(clearable)} on Drive, "
-             f"{len(not_uploaded)} only on the server")
-    with st.expander(title, expanded=bool(not_uploaded or clearable)):
+    title = f"☁️ Drive · {len(not_uploaded)} to upload" if not_uploaded else "☁️ Drive"
+    with where.popover(title, use_container_width=True):
+        st.markdown(f"**{len(drive_only) + len(clearable)}** on Google Drive · **{len(not_uploaded)}** only on "
+                    "the server")
         st.caption("Renders are saved to **scene-labeling/previews** in your Google Drive as they're made "
                    "(when Drive is connected). Once there, the server copy can go — playback, thumbnails "
                    "and comparisons then read them from Drive.")
@@ -1631,8 +1722,8 @@ def _render_drive_panel(renders: list) -> None:
                 st.rerun()
 
 
-def _render_usage_panel(renders: list, vid_use, track_use) -> None:
-    with st.expander("📊 Usage across renders"):
+def _render_usage_panel(renders: list, vid_use, track_use, where) -> None:
+    with where.popover("📊 Usage", use_container_width=True):
         known = [r for r in renders if not r.get("backfilled")]
         if not known:
             st.caption("No renders with saved details yet — new renders will show here.")
@@ -1656,8 +1747,8 @@ def _render_usage_panel(renders: list, vid_use, track_use) -> None:
                        + (": " + ", ".join(unused[:20]) + (" …" if len(unused) > 20 else "") if unused else "."))
 
 
-def _render_cleanup_panel(renders: list, delete_render, format_size) -> None:
-    with st.expander("🧹 Clean up old renders"):
+def _render_cleanup_panel(renders: list, delete_render, format_size, where) -> None:
+    with where.popover("🧹 Clean up", use_container_width=True):
         c = st.columns(2)
         days = c[0].number_input("Older than (days)", 1, 3650, 30, key="ren_clean_days")
         unrated_only = c[1].toggle("Only unrated ones", value=True, key="ren_clean_unrated")
@@ -2003,8 +2094,9 @@ def render_library_analytics():
 
 
 def render_analytics_tab():
-    which = st.radio("Analytics", ["📚 Library", "⭐ Render ratings"], horizontal=True, key="ana_kind",
-                     label_visibility="collapsed")
+    with st.container(key="subnav_ana"):   # a sub menu — chips (menu_css)
+        which = st.radio("Analytics", ["📚 Library", "⭐ Render ratings"], horizontal=True, key="ana_kind",
+                         label_visibility="collapsed")
     if which == "📚 Library":
         render_library_analytics()
     else:
@@ -2042,6 +2134,9 @@ def render_rating_analytics():
 
 if library_kind == "🎵 Audio":
     render_audio()
+elif library_kind == "🎚️ Mix":
+    import mix_ui
+    mix_ui.render(load_audio_library(_audio_signature()))
 elif library_kind == "🎞️ Renders":
     render_renders()
 elif library_kind == "📈 Analytics":

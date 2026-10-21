@@ -43,13 +43,20 @@ def _envelope(track: dict) -> tuple:
 
 
 def cut_editor(track: dict, track_id: str, *, cuts: list, base_cuts: list, beats: list, bars: list,
-               doc_rev: int, audio_url: str = "", key: str = None):
-    """Draw the editor. Returns the latest value it sent ({"cuts", "doc_rev", "edited"})
-    or None before the first edit — Streamlit keeps returning the last value on later
-    runs, so callers compare doc_rev and the cuts with what they stored."""
+               doc_rev: int, audio_url: str = "", key: str = None, locked: list = (), ghosts: list = (),
+               compare: list = None, region: tuple = None):
+    """Draw the editor. Returns the latest value it sent — {"cuts", "locked", "doc_rev",
+    "edited": True} after an edit, or {"region": [start, end], "nonce", "edited": False} when
+    ▭ picks the part to re-cut — or None before the first. Streamlit keeps returning the last
+    value on later runs, so callers compare doc_rev / nonce with what they stored.
+    locked: 🔒 cut times; ghosts: 👻 idea times to show (tap to accept); compare: the ⚖️ A
+    cut set to show along the top; region: the part picked for re-cutting (shaded)."""
     env, rate = _envelope(track)
     return _COMPONENT(
         track_id=track_id, duration=float(track["duration_sec"]), env=env, env_rate=rate,
         beats=[round(float(b), 3) for b in beats], bars=[round(float(b), 3) for b in bars],
         cuts=list(cuts), base_cuts=list(base_cuts), doc_rev=int(doc_rev), audio_url=audio_url,
+        locked=[round(float(t), 3) for t in locked or []], ghosts=[round(float(t), 3) for t in ghosts or []],
+        compare=[round(float(t), 3) for t in compare] if compare is not None else None,
+        region=[round(float(region[0]), 3), round(float(region[1]), 3)] if region else None,
         key=key or f"cut_editor_{track_id}", default=None)

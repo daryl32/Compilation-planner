@@ -134,6 +134,30 @@ def chroma_from_stft(mag: np.ndarray) -> np.ndarray:
     return ch / np.maximum(ch.sum(axis=1, keepdims=True), 1e-9)
 
 
+def key_from_spectrum(mag: np.ndarray, rms: np.ndarray) -> dict | None:
+    """🎹 The track's key (core/keys.py): average chroma of the louder frames
+    (quiet intros/outros and silence say little about the key)."""
+    try:
+        from core.keys import estimate_key
+    except ImportError:          # a copy without the core/ folder (e.g. an older laptop folder): no key
+        return None
+    ch = chroma_from_stft(mag)
+    n = min(len(ch), len(rms))
+    if n < 10:
+        return None
+    ch, w = ch[:n], rms[:n].astype(float)
+    loud = w >= np.percentile(w, 40)
+    if loud.sum() < 10:
+        return None
+    return estimate_key((ch[loud] * w[loud, None]).sum(axis=0))
+
+
+def key_for_file(path) -> dict | None:
+    """Just the key — for tracks analysed before key detection existed."""
+    y = decode_audio(path)
+    return key_from_spectrum(stft_mag(y), frame_rms(y))
+
+
 def mfcc_from_logmel(logmel: np.ndarray, n: int = 13) -> np.ndarray:
     from scipy.fft import dct
     return dct(logmel, type=2, axis=1, norm="ortho")[:, 1:n]
@@ -491,16 +515,52 @@ def vocal_curve(path, n_out: int) -> np.ndarray | None:
             sources = apply_model(model, wav[None], device=TORCH_DEVICE, split=True, overlap=0.1, progress=False)[0]
         sources = sources.cpu()
         vocals = sources[model.sources.index("vocals")].mean(0).numpy()
-        hop = int(model.samplerate / OUT_RATE)
-        nfr = len(vocals) // hop
-        v = np.sqrt(np.mean(vocals[:nfr * hop].reshape(nfr, hop) ** 2, axis=1))
-        v = _norm01(v, 99.0)
-        if len(v) < n_out:
-            v = np.pad(v, (0, n_out - len(v)))
-        return v[:n_out]
+        return vocal_curve_from(vocals, int(model.samplerate), n_out)
     except Exception:
         traceback.print_exc()
         return None
+
+
+def vocal_curve_from(vocals: np.ndarray, sr: int, n_out: int) -> np.ndarray:
+    """Vocal loudness at OUT_RATE (0–1) from a vocal stem (mono, or (n, channels))."""
+    if vocals.ndim > 1:
+        vocals = vocals.mean(axis=1)
+    hop = max(1, int(sr / OUT_RATE))
+    nfr = len(vocals) // hop
+    v = np.sqrt(np.mean(vocals[:nfr * hop].astype(np.float64).reshape(nfr, hop) ** 2, axis=1))
+    v = _norm01(v, 99.0)
+    if len(v) < n_out:
+        v = np.pad(v, (0, n_out - len(v)))
+    return v[:n_out]
+
+
+def separate_stems(path) -> tuple:
+    """🎤 Split a song into (vocals, instrumental, sample rate) with Demucs (htdemucs):
+    float32 arrays (n, 2); instrumental = drums + bass + other. For 🎚️ mashups that put one
+    track's vocals over another's instrumental. Slow on CPU — analyse_audio_local.py runs it on
+    the laptop's GPU. Raises RuntimeError when Demucs isn't installed."""
+    try:
+        import torch  # type: ignore
+        from demucs.apply import apply_model  # type: ignore
+        from demucs.pretrained import get_model  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"Demucs isn't installed: {e}")
+    torch.set_num_threads(max(1, (os.cpu_count() or 2) - 1))
+    model = get_model("htdemucs")
+    model.eval()
+    sr = int(model.samplerate)
+    y = decode_audio(path, sr=sr, channels=2).T.copy()
+    wav = torch.from_numpy(y)
+    ref = wav.mean(0)
+    mean, std = ref.mean(), ref.std() + 1e-8
+    with torch.no_grad():
+        sources = apply_model(model, ((wav - mean) / std)[None], device=TORCH_DEVICE, split=True, overlap=0.25,
+                              progress=False)[0]
+    sources = (sources.cpu() * std + mean).numpy()          # back to the original level
+    vi = model.sources.index("vocals")
+    vocals = sources[vi]
+    inst = sum(sources[i] for i in range(len(model.sources)) if i != vi)
+    return vocals.T.astype(np.float32), inst.T.astype(np.float32), sr
 
 
 def vocal_phrases(v: np.ndarray, rate: float = OUT_RATE, on: float = 0.18, off: float = 0.10,
@@ -535,12 +595,17 @@ def _r(x, nd: int = 2) -> list:
 
 
 def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocals: bool = True,
-                 progress=None, model_beats: bool = False) -> dict:
+                 progress=None, model_beats: bool = False, beat_hint: dict = None,
+                 vocal_stem: tuple = None) -> dict:
     """Analyse one audio file. existing: the track's current catalogue (Colab),
     whose beats/energy are kept. Returns a dict of fields to merge into the
-    track JSON: always "analysis"; for a new track also the core fields.
+    track JSON: always "analysis" and "key"; for a new track also the core fields.
     model_beats: for a new track, take the beat grid from beat_this too (when
-    installed) instead of the built-in tracker — used by the local GPU script."""
+    installed) instead of the built-in tracker — used by the local GPU script.
+    beat_hint: {"beat_times", "downbeats"} already known exactly — a 🎚️ mix made
+    from analysed tracks carries its sources' beats and bar lines over.
+    vocal_stem: (vocals array, sample rate) from separate_stems() — the vocals are taken
+    from it instead of running Demucs again (the laptop script separates once for both)."""
     say = progress or (lambda msg: None)
     say("decoding audio")
     y = decode_audio(path)
@@ -583,6 +648,11 @@ def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocal
         bpm = float(existing.get("bpm") or 0) or (60.0 / float(np.median(np.diff(beat_times)))
                                                    if len(beat_times) > 1 else 120.0)
         beats_method = "existing"
+    elif beat_hint and len(beat_hint.get("beat_times") or []) > 8:
+        say("beat grid from the mix's source tracks")
+        beat_times = np.asarray(beat_hint["beat_times"], dtype=float)
+        bpm = 60.0 / float(np.polyfit(np.arange(len(beat_times)), beat_times, 1)[0])
+        beats_method = "mix"
     elif model_beats and (model_res := beats_from_model(path)) is not None and len(model_res[0]) > 8:
         say("beat grid from beat_this")
         beat_times = model_res[0]
@@ -607,8 +677,12 @@ def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocal
     energy_jump = _norm01(energy_jump, 99)
 
     say("finding downbeats")
-    model_db = model_res[1] if model_res is not None else downbeats_from_model(path)
-    if model_db is not None and len(model_db) >= 2 and len(beat_times):
+    hint_db = (beat_hint or {}).get("downbeats") if beats_method == "mix" else None
+    model_db = None if hint_db else (model_res[1] if model_res is not None else downbeats_from_model(path))
+    if hint_db and len(hint_db) >= 2:
+        downbeats = _snap_to_beats(np.asarray(hint_db, dtype=float), beat_times) or list(hint_db)
+        db_method = "mix"
+    elif model_db is not None and len(model_db) >= 2 and len(beat_times):
         downbeats = _snap_to_beats(model_db, beat_times) or list(model_db)
         db_method = "beat_this"
     else:
@@ -636,7 +710,10 @@ def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocal
                                           section_starts=[x["start"] for x in sections])
 
     vocals = vocal_starts = vocal_ends = None
-    if with_vocals and demucs_available():
+    if vocal_stem is not None:
+        vocals = vocal_curve_from(vocal_stem[0], int(vocal_stem[1]), n_out)
+        vocal_starts, vocal_ends = vocal_phrases(vocals)
+    elif with_vocals and demucs_available():
         say("separating vocals (slow)")
         v = vocal_curve(path, n_out)
         if v is not None:
@@ -657,7 +734,8 @@ def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocal
         "vocals": _r(vocals) if vocals is not None else None,
         "vocal_starts": vocal_starts, "vocal_ends": vocal_ends,
     }
-    out = {"analysis": analysis}
+    say("finding the key")
+    out = {"analysis": analysis, "key": key_from_spectrum(mag, rms)}
     if beats_method != "existing":
         n_env = int(duration / ENERGY_ENVELOPE_SEC) + 1
         step = int(OUT_RATE * ENERGY_ENVELOPE_SEC)
@@ -822,7 +900,7 @@ def _process(job: dict, say) -> None:
     from config import AUDIO_DIR
     tid = job["track_id"]
     json_path = AUDIO_DIR / f"{tid}.json"
-    existing = _read_json(json_path, None) if job["kind"] == "extra" else None
+    existing = _read_json(json_path, None) if job["kind"] in ("extra", "key") else None
     source_path = (existing or {}).get("source_path") or f"/content/drive/MyDrive/{job['drive_rel']}"
     local = _local_audio_path(source_path)
     if not local.exists():
@@ -832,8 +910,18 @@ def _process(job: dict, say) -> None:
         err = download_source_video(rel, local)
         if err:
             raise RuntimeError(f"download failed: {err}")
+    if job["kind"] == "key":
+        # 🎹 Key only (tracks analysed before key detection existed) — a few seconds.
+        say("finding the key")
+        key = key_for_file(local)
+        track = _read_json(json_path, existing)
+        track["key"] = key
+        _write_json(json_path, track)
+        _mark_audio_pending(tid)
+        return
     with_vocals = job.get("vocals", True)
-    result = analyse_file(local, existing=existing, progress=say, with_vocals=with_vocals)
+    result = analyse_file(local, existing=existing, progress=say, with_vocals=with_vocals,
+                          beat_hint=job.get("beat_hint"))
     if existing is not None:
         track = _read_json(json_path, existing)   # re-read: never clobber a newer edit
         old = track.get("analysis") or {}
@@ -846,7 +934,13 @@ def _process(job: dict, say) -> None:
         track.update(result)
     else:
         track = {"track_id": tid, "source_path": source_path, **result}
+        if job.get("mix"):
+            track["mix"] = job["mix"]          # 🎚️ lineage: which mix recipe made it, from which tracks
     _write_json(json_path, track)
+    _mark_audio_pending(tid)
+
+
+def _mark_audio_pending(tid: str) -> None:
     try:
         from library_common import mark_pending
         mark_pending(f"audio:{tid}")

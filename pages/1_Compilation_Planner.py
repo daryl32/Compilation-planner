@@ -51,6 +51,7 @@ import core.targets as CTGT
 import core.cut_edits as CED
 import core.matching as CMATCH
 import core.styles as CSTY
+import core.sequential as SEQ
 from core.matching import prefer_role, widen_for_repeat_rule, cand_key, why_key, format_mmss
 from cut_editor import cut_editor as _cut_editor_widget, media_url as _media_url
 from core.shape import SHAPE_MATCH_POINTS, resample_curve, shape_score, get_block_audio_curve
@@ -383,7 +384,7 @@ def render_choreography_block(
     seg_idx: int, seg: dict, selected_videos: list, max_chor_videos: int,
     rec_count: int, queues: dict, sequential_mode: bool, global_excluded: set,
     catalogues: dict, prev_block_videos: set = None, video_stats: dict = None,
-    role_filter: str = None, weighting: dict = None, track: dict = None,
+    role_filter: str = None, weighting: dict = None, track: dict = None, planned: dict = None,
 ) -> None:
     """One block's choreography grid: one column per source video (up to
     max_chor_videos).  Each column has:
@@ -419,6 +420,9 @@ def render_choreography_block(
     exactly what Confirm & Next will actually do. None falls back to plain
     closest-motion-match.
 
+    planned: {video_id: pick} — the 📍 planned path's clips for this block (in order); a planned
+    video's column shows its planned clip as the Auto pick.
+
     Overrides are stored in session_state["chor_overrides"][seg_idx][video_id]
     as (scene_id, offset_sec).  Pick state lives in
     session_state["chor_pick_{seg_idx}_{video_id}"] as a bool, same pattern
@@ -437,8 +441,13 @@ def render_choreography_block(
                                                          global_excluded, role_filter=role_filter,
                                                          role_reach=_reach)
                      for vid in selected_videos}
+    planned = planned or {}
+    _pclips = {vid: planned_clip(queues, p, block_duration) for vid, p in planned.items()}
+    _pclips = {vid: c for vid, c in _pclips.items() if c is not None and vid in _clips_by_vid}
+    for vid, c in _pclips.items():
+        _clips_by_vid[vid] = clips_with_planned(_clips_by_vid[vid], c)
     eligible = [vid for vid in selected_videos if _clips_by_vid[vid]]
-    shown = eligible[:max_chor_videos]
+    shown = chor_shown(eligible, _pclips, max_chor_videos)
     hidden = len(eligible) - len(shown)
 
     if not shown:
@@ -459,6 +468,22 @@ def render_choreography_block(
     )
 
     overrides = st.session_state.setdefault("chor_overrides", {}).setdefault(seg_idx, {})
+    if _pclips:
+        _pl_cols = st.columns([2, 3])
+        with _pl_cols[0]:
+            if st.button(f"📍 Use the planned picks ({len(_pclips)})", key=f"chor_use_plan_{seg_idx}",
+                         use_container_width=True,
+                         help="Tick the planned path's videos (each on its planned clip) and untick the rest. "
+                              "Each video's clips are planned for all its remaining blocks together, in order, "
+                              "so none runs short later — picking something else plans the rest again."):
+                for vid in shown:
+                    st.session_state[f"chor_pick_{seg_idx}_{vid}"] = vid in _pclips
+                    if vid in _pclips:
+                        overrides.pop(vid, None)
+                rerun_fragment()
+        with _pl_cols[1]:
+            st.caption("📍 **Planned path:** " + ", ".join(f"`{v}`" for v in _pclips)
+                       + " — their Auto picks are the planned clips.")
     chor_cols = st.columns(len(shown))
     highlight_keys = []
     _show_clip = {}  # video_id -> (clip shown, all its clips, index) for the preview panel
@@ -490,6 +515,8 @@ def render_choreography_block(
                     display_clip = next((c for c in clips
                                         if c["scene_id"] == current_key[0]
                                         and abs(c["offset_sec"] - current_key[1]) < 0.1), None)
+                if display_clip is None and video_id in _pclips:
+                    display_clip = next((c for c in clips if c.get("planned")), None)   # 📍
                 if display_clip is None and clips:
                     # "Auto" is selected: show what it would actually pick on Confirm,
                     # not just the chronologically-first clip (which could be a
@@ -570,7 +597,8 @@ def render_choreography_block(
                               help="Drag to skip through this video's trimmed clips")
 
                 if display_clip is not None:
-                    auto_tag = "⭐ Auto pick — " if current_key is None else ""
+                    auto_tag = (("📍 Planned pick — " if display_clip.get("planned") else "⭐ Auto pick — ")
+                                if current_key is None else "📍 " if display_clip.get("planned") else "")
                     role_suffix = f"  {role_chips(display_clip)}" if display_clip.get("roles") else ""
                     pos = f"  ·  {sel_idx + 1}/{len(clips)}" if sel_idx is not None else ""
                     st.caption(
@@ -797,8 +825,13 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
                 sequential=autofill_weights.get("sequential", False),
                 videos_per_block=recommended_count,
             )
-            chosen = select_autofill_picks(ranked, recommended_count,
-                                           autofill_weights.get("allow_same_video", False))
+            _plan = [c for c in candidates if c.get("planned")]
+            if _plan:
+                # 📍 In order: the planned path's clips (it already weighed everything above).
+                chosen = _plan
+            else:
+                chosen = select_autofill_picks(ranked, recommended_count,
+                                               autofill_weights.get("allow_same_video", False))
             chosen_keys = {cand_key(c) for c in chosen}
             for c in candidates:
                 st.session_state[f"adv_pick_{current_block}_{cand_key(c)}"] = cand_key(c) in chosen_keys
@@ -835,6 +868,8 @@ def render_candidate_grid(candidates: list, current_block: int, already_keys: se
             with box:
                 if is_repeat:
                     st.caption("🔵 same video as previous block")
+                if c.get("planned"):
+                    st.caption("📍 on the planned path")
                 if c.get("similar"):
                     st.caption(f"✨ {c['similar']}% like {c['similar_to']} — {c['similar_reason']}")
                 if c.get("roles"):
@@ -1544,7 +1579,7 @@ AUDIO_SETTINGS_KEYS = [
     "react_to_hits", "hit_threshold", "snap_secs",
     "fast_energy_thresh", "fast_max_bars", "fast_cooldown_bars",
     "phrase_lock_bars", "cinematic_bars", "dynamic_priority_override", "override_delta_thresh",
-    "override_clear_secs",
+    "override_clear_secs", "on_beat",
     *CS.DEFAULTS.keys(),
     *SM.DEFAULTS.keys(),
 ]
@@ -1682,7 +1717,7 @@ def _pace_row(_pc, _styles, _style_now) -> None:
 
 AIM_MODES = {"avg": "Average clip length", "count": "Number of segments"}
 ADAPTIVE_DIAL_KEYS = ["change_window_secs", "change_threshold", "min_segment_sec", "max_segment_sec",
-                      "react_to_hits", "hit_threshold", "snap_secs"]
+                      "react_to_hits", "hit_threshold", "snap_secs", "on_beat"]
 
 
 def _aim_adaptive() -> None:
@@ -1767,25 +1802,115 @@ def _keep_cut_edits(sig: str) -> None:
         e["base_sig"] = sig
 
 
+def _keep_new_with_locks(sig: str, base_cuts: list, duration: float) -> None:
+    """♻️ The new settings' cuts, with this project's 🔒 locked cuts kept where they are."""
+    e = _cut_edits()
+    if not e:
+        return
+    locked = CED.clean_locked(e.get("locked"), e["cuts"])
+    cuts = CED.merge_locked(base_cuts, locked, duration)
+    st.session_state["cut_edits"] = {**e, "cuts": cuts, "locked": locked, "base_sig": sig}
+    _bump_cut_edit_rev()
+
+
+_STYLE_CUTS_CACHE = "_ced_style_cuts"
+
+
+def _style_cuts(track: dict, tid: str, style: str, pace: int, bpb: int) -> list:
+    """The cut times a 🎨 cutting style would make on this whole track (kept per session)."""
+    key = (tid, float(track["duration_sec"]), style, int(pace), int(bpb))
+    cache = st.session_state.setdefault(_STYLE_CUTS_CACHE, {})
+    if key not in cache:
+        method, settings, _ = CSTY.style_settings(track, style, int(pace), int(bpb))
+        cache[key] = CED.base_cut_times(build_segments(track, {"method": method, "beats_per_bar": int(bpb),
+                                                               **settings}))
+        while len(cache) > 12:
+            cache.pop(next(iter(cache)))
+    return cache[key]
+
+
+def _idea_cuts(track: dict, tid: str, bpb: int) -> list:
+    """👻 Candidate cuts: the current style one step busier, Smart busier and On the beat."""
+    style, pace = st.session_state.get("cut_style", "custom"), int(st.session_state.get("cut_style_pace", 0))
+    out = []
+    if style in CSTY.STYLES and pace < 2:
+        out += _style_cuts(track, tid, style, pace + 1, bpb)
+    out += _style_cuts(track, tid, "smart", 1, bpb)
+    out += _style_cuts(track, tid, "beat", 0, bpb)
+    return out
+
+
+def _set_cut_edits(tid: str, cuts: list, locked: list, sig: str, base_cuts: list) -> None:
+    """Store this project's cuts (or drop the edit when it's exactly the method's, unlocked)."""
+    e = _cut_edits(tid)
+    locked = CED.clean_locked(locked, cuts)
+    if not locked and not CED.diff(base_cuts, cuts)["added"] and len(cuts) == len(base_cuts):
+        st.session_state.pop("cut_edits", None)       # back to exactly the method's cuts
+    else:
+        st.session_state["cut_edits"] = {"track_id": tid, "cuts": cuts, "locked": locked,
+                                         "base_sig": e.get("base_sig", sig) if e else sig}
+
+
+def _recut_region(track: dict, tid: str, sig: str, base_cuts: list, bpb: int, rng) -> None:
+    """🎨 Re-cut the picked part (rng = (start, end), as the slider showed it) in the picked
+    style (🔒 locked cuts stay)."""
+    if not isinstance(rng, (list, tuple)) or len(rng) != 2 or rng[1] <= rng[0]:
+        return
+    e = _cut_edits(tid)
+    cuts = e["cuts"] if e else base_cuts
+    locked = CED.clean_locked((e or {}).get("locked"), cuts)
+    style, pace = st.session_state.get("ced_rstyle", "hyper"), int(st.session_state.get("ced_rpace", 0))
+    region_cuts = _style_cuts(track, tid, style, pace, bpb)
+    new = CED.recut_region(cuts, region_cuts, rng[0], rng[1], float(track["duration_sec"]), locked)
+    _set_cut_edits(tid, new, locked, sig, base_cuts)
+    st.session_state["ced_recut_msg"] = (f"🎨 Re-cut {format_mmss(rng[0])}–{format_mmss(rng[1])} as "
+                                         f"{CSTY.STYLES[style]['label']} ({CSTY.PACE_LABELS[pace]}) — "
+                                         f"↶ Undo in the editor puts it back.")
+    _bump_cut_edit_rev()
+
+
+def _ab_keep(tid: str, cuts: list) -> None:
+    st.session_state["cut_ab"] = {"track_id": tid, "A": list(cuts)}
+
+
+def _ab_swap(tid: str, sig: str, base_cuts: list) -> None:
+    """⇄ Put the A cuts back in the editor; what's there now becomes A."""
+    ab = st.session_state.get("cut_ab")
+    if not ab or ab.get("track_id") != tid:
+        return
+    e = _cut_edits(tid)
+    now = e["cuts"] if e else base_cuts
+    _set_cut_edits(tid, list(ab["A"]), (e or {}).get("locked") or [], sig, base_cuts)
+    st.session_state["cut_ab"] = {"track_id": tid, "A": list(now)}
+    _bump_cut_edit_rev()
+
+
 def _render_cut_editor(track: dict) -> None:
-    """✂️ Listen and edit the cuts — see cut_editor.py."""
+    """✂️ Listen and edit the cuts — see cut_editor.py. Extras: 🔒 lock cuts, 🎨 re-cut a part in
+    another style, 👻 ideas to tap in, ⚖️ compare with a kept set (A)."""
     tid = st.session_state["track_id"]
     cfg = segmentation_settings()
     sig = CED.settings_signature(cfg)
     bpb = int(st.session_state.get("beats_per_bar", 4))
+    duration = float(track["duration_sec"])
     base_cuts = CED.base_cut_times(build_segments(track, cfg))
     e = _cut_edits(tid)
     st.subheader("✂️ Listen and edit the cuts")
     if e and e.get("base_sig") != sig:
         d = CED.diff(base_cuts, e["cuts"])
+        n_locked = len(CED.clean_locked(e.get("locked"), e["cuts"]))
         with st.container(border=True):
             st.warning(f"You edited these cuts by hand, then changed the cutting settings. The plan still uses "
                        f"your edited cuts ({len(e['cuts']) + 1} segments) — the new settings would give "
                        f"{len(base_cuts) + 1}, with {len(d['added'])} of your cuts not among them.")
-            bc = st.columns(2)
+            bc = st.columns(3 if n_locked else 2)
             bc[0].button("✋ Keep my edited cuts", on_click=_keep_cut_edits, args=(sig,), use_container_width=True)
-            bc[1].button("♻️ Use the new settings (drop my edits)", on_click=_drop_cut_edits,
-                         use_container_width=True)
+            if n_locked:
+                bc[1].button(f"♻️ New settings + my {n_locked} 🔒 cut(s)", on_click=_keep_new_with_locks,
+                             args=(sig, base_cuts, duration), use_container_width=True, type="primary",
+                             help="The new settings' cuts, with your locked cuts kept exactly where they are.")
+            bc[-1].button("♻️ Use the new settings (drop my edits)", on_click=_drop_cut_edits,
+                          use_container_width=True)
 
     audio_url = ""
     audio_path, missing = _local_media(track.get("source_path", ""))
@@ -1814,29 +1939,98 @@ def _render_cut_editor(track: dict) -> None:
         _bump_cut_edit_rev()
     rev = int(st.session_state["cut_edit_rev"])
     cuts_now = e["cuts"] if e else base_cuts
+    locked_now = CED.clean_locked((e or {}).get("locked"), cuts_now)
+    ab = st.session_state.get("cut_ab")
+    ab = ab if isinstance(ab, dict) and ab.get("track_id") == tid else None
+    show_ideas = bool(st.session_state.get("ced_ideas"))
+    ghosts = CED.ghost_cuts(_idea_cuts(track, tid, bpb), cuts_now, duration) if show_ideas else []
+    region = st.session_state.get("ced_region") if st.session_state.get("ced_region_on") else None
     val = _cut_editor_widget(track, tid, cuts=cuts_now, base_cuts=base_cuts,
                              beats=CS.beat_grid(track)[0], bars=CS.bar_lines(track, bpb), doc_rev=rev,
-                             audio_url=audio_url)
+                             audio_url=audio_url, locked=locked_now, ghosts=ghosts,
+                             compare=ab["A"] if ab else None, region=region)
     if isinstance(val, dict) and val.get("edited") and int(val.get("doc_rev", -1)) == rev:
-        new = CED.clean_cuts(val.get("cuts") or [], float(track["duration_sec"]))
-        if new != cuts_now:
-            if not CED.diff(base_cuts, new)["added"] and len(new) == len(base_cuts):
-                st.session_state.pop("cut_edits", None)       # back to exactly the method's cuts
-            else:
-                st.session_state["cut_edits"] = {"track_id": tid, "cuts": new,
-                                                 "base_sig": e.get("base_sig", sig) if e else sig}
+        new = CED.clean_cuts(val.get("cuts") or [], duration)
+        new_locked = CED.clean_locked(val.get("locked") or [], new)
+        if new != cuts_now or new_locked != locked_now:
+            _set_cut_edits(tid, new, new_locked, sig, base_cuts)
             e = _cut_edits(tid)
+            cuts_now, locked_now = (e["cuts"], e.get("locked") or []) if e else (base_cuts, [])
+    elif isinstance(val, dict) and val.get("region") and val.get("nonce") != st.session_state.get("_ced_region_nonce"):
+        # ▭ This view as the part: snap to the nearest bar lines for the slider below.
+        st.session_state["_ced_region_nonce"] = val.get("nonce")
+        lines = _region_lines(track, bpb)
+        a, b = val["region"]
+        st.session_state["ced_region"] = (min(lines, key=lambda x: abs(x - a)), min(lines, key=lambda x: abs(x - b)))
+        st.session_state["ced_region_on"] = True
+        st.session_state["ced_region_open"] = True
+
     if e:
         d = CED.diff(base_cuts, e["cuts"])
         ec = st.columns([4, 2])
         ec[0].caption(f"✏️ **Edited by hand:** {len(e['cuts']) + 1} segments — {len(d['added'])} cut(s) added or "
-                      f"moved, {len(d['removed'])} of the method's removed. Saved with this project. "
-                      f"🟠 = your cuts · 🔵 = the method's · dashed = removed.")
+                      f"moved, {len(d['removed'])} of the method's removed"
+                      + (f", {len(locked_now)} 🔒 locked" if locked_now else "")
+                      + ". Saved with this project.",
+                      help="🟠 your cuts · 🔵 the method's · 🟩 locked · dashed = removed · 👻 dotted = ideas · "
+                           "purple ticks along the top = the kept set A.")
         ec[1].button("↺ Undo all edits", on_click=_drop_cut_edits, use_container_width=True,
                      help="Drops your hand edits for this track (Undo in the editor can't bring them back).")
     else:
         st.caption("▶ Play and listen — tap ✂️ *Cut here* on the beat, drag a cut to move it, or select one and "
                    "🗑 remove it. Your edits are saved with this project.")
+    msg = st.session_state.pop("ced_recut_msg", None)
+    if msg:
+        st.toast(msg)
+
+    # Extras: 👻 ideas · ⚖️ compare · 🎨 re-cut a part
+    xc = st.columns([1.3, 1.3, 1.6], vertical_alignment="center")
+    xc[0].toggle("👻 Show ideas", key="ced_ideas",
+                 help="Faint dotted lines where other cutting styles (this one busier, 🧠 Smart busier and "
+                      "🥁 On the beat) would cut — tap one in the editor to make it a cut.")
+    if ab:
+        xc[1].button("⇄ Swap with A", key="ced_ab_swap", on_click=_ab_swap, args=(tid, sig, base_cuts),
+                     use_container_width=True,
+                     help="Puts the kept set (A) back in the editor and keeps what's there now as A — listen to "
+                          "one, swap, listen to the other.")
+    else:
+        xc[1].button("📌 Keep as A", key="ced_ab_keep", on_click=_ab_keep, args=(tid, cuts_now),
+                     use_container_width=True,
+                     help="Keep these cuts as set A, then try something else and compare (A shows as purple ticks "
+                          "along the top of the editor).")
+    if ab:
+        sa, sb = CED.cut_stats(ab["A"], duration), CED.cut_stats(cuts_now, duration)
+        diff_n = len(CED.diff(ab["A"], cuts_now)["added"]) + len(CED.diff(ab["A"], cuts_now)["removed"])
+        xc[2].markdown(f"⚖️ **A** {sa['segments']} segments, avg {sa['average']:.1f}s · **now** {sb['segments']}, "
+                       f"avg {sb['average']:.1f}s · {diff_n} cut(s) differ",
+                       help=f"Shortest / longest — A: {sa['shortest']:.1f}s / {sa['longest']:.1f}s · now: "
+                            f"{sb['shortest']:.1f}s / {sb['longest']:.1f}s.")
+        xc[1].button("✕ Forget A", key="ced_ab_forget", use_container_width=True,
+                     on_click=lambda: st.session_state.pop("cut_ab", None))
+    with st.expander("🎨 Re-cut a part in another style", expanded=bool(st.session_state.pop("ced_region_open", False))):
+        lines = _region_lines(track, bpb)
+        if not isinstance(st.session_state.get("ced_region"), (list, tuple)) or \
+                any(x not in lines for x in st.session_state["ced_region"]):
+            st.session_state["ced_region"] = (lines[0], lines[min(len(lines) - 1, 8)])
+        part = st.select_slider("Part of the track", options=lines, key="ced_region", format_func=format_mmss,
+                         help="On bar lines. Or zoom the editor to the part and press ▭ This view as the part.")
+        st.session_state.setdefault("ced_region_on", False)
+        st.toggle("Shade it in the editor", key="ced_region_on")
+        rc = st.columns([2, 1.4, 1.6], vertical_alignment="bottom")
+        st.session_state.setdefault("ced_rstyle", "hyper")
+        st.session_state.setdefault("ced_rpace", 0)
+        rc[0].selectbox("Style", list(CSTY.STYLES), key="ced_rstyle", format_func=lambda k: CSTY.STYLES[k]["label"])
+        rc[1].selectbox("Pace", list(CSTY.PACE_LABELS), key="ced_rpace", format_func=lambda k: CSTY.PACE_LABELS[k])
+        rc[2].button("🎨 Re-cut this part", key="ced_recut", type="primary", use_container_width=True,
+                     on_click=_recut_region, args=(track, tid, sig, base_cuts, bpb, part),
+                     help="Replaces the cuts inside the part with the style's — 🔒 locked cuts stay, and the "
+                          "rest of the track is untouched. ↶ Undo in the editor takes it back.")
+
+
+def _region_lines(track: dict, bpb: int) -> list:
+    """Times the re-cut part can start / end on: the track's start and end, and its bar lines."""
+    dur = round(float(track["duration_sec"]), 3)
+    return sorted({0.0, dur, *[round(float(b), 3) for b in CS.bar_lines(track, bpb) if 0 < float(b) < dur]})
 
 
 def _smart_reset() -> None:
@@ -2077,6 +2271,11 @@ def render_audio_settings_section(track: dict) -> None:
                 st.caption(line)
 
     _custom = dict(on_change=_mark_audio_custom)
+    if segmentation_method in (SEG_SCORED, SEG_ADAPTIVE, SEG_RHYTHM):
+        st.toggle("🥁 Land every cut on the beat", value=bool(_v("on_beat")), key="on_beat", **_custom,
+                  help="Moves each cut onto the nearest beat — onto a bar line when one is within a beat, for "
+                       "changes in the music (energy changes, sections, drops, bar styles). Off = cuts can fall "
+                       "between beats, exactly on a hit or a loudness jump.")
     if segmentation_method == SEG_SMART:
         _render_smart_cut_settings(track, _v)
     elif segmentation_method == SEG_SCORED:
@@ -2089,7 +2288,7 @@ def render_audio_settings_section(track: dict) -> None:
                       step=0.01, key="change_threshold", **_custom,
                       help="How big a jump in loudness counts as a change worth cutting on. Lower = more cuts.")
             react = st.toggle("Cut on big hits", value=bool(_v("react_to_hits")), key="react_to_hits", **_custom,
-                              help="Also cut exactly on the strongest hits, wherever they fall.")
+                              help="Also cut on the strongest hits — exactly on the hit, or on its beat with 🥁 on.")
             st.slider("Big-hit threshold", 0.5, 1.0, value=float(_v("hit_threshold")), step=0.01,
                       key="hit_threshold", disabled=not react, **_custom,
                       help="How strong a hit must be (0–1) to become a cut. Lower = more cuts.")
@@ -2105,7 +2304,8 @@ def render_audio_settings_section(track: dict) -> None:
                          key="change_window_secs", **_custom,
                          help="Compares the loudness this long after each moment with this long before it.")
             ac[1].slider("Snap radius (s)", 0.0, 1.0, value=float(_v("snap_secs")), step=0.05, key="snap_secs",
-                         **_custom, help="Energy-change cuts move onto the strongest hit within this distance.")
+                         **_custom, help="Energy-change cuts move onto the strongest hit within this distance "
+                                        "(then onto the beat, with 🥁 on).")
     else:
         col1, col2 = st.columns(2)
         with col1:
@@ -2849,6 +3049,7 @@ DIAL_DEFAULTS = {
     "dynamic_priority_override": False,
     "override_delta_thresh": 0.15,
     "override_clear_secs": 1.0,
+    "on_beat": True,              # 🥁 Adaptive / Rhythm Engine / Scored: every cut on the beat
     # Segmentation — Scored cuts
     **CS.DEFAULTS,
     # Segmentation — Smart
@@ -4085,8 +4286,8 @@ with _mt[1]:
                            "order, so a video can never run short halfway. 0 = each clip is simply the best fit "
                            "to its block's music (still in order). Higher = the clips are also pulled into an "
                            "even walk through the whole video, beginning → middle → end. "
-                           "(Manual step-through and Choreography: how far a pick may skip ahead within a video, "
-                           "and the pull towards its beginning, middle and end.)")
+                           "Manual step-through and Choreography plan the same way from the block you're on — "
+                           "the 📍 planned clips — and plan the rest again whenever you pick something else.")
         st.slider("Variety", 0.0, 5.0, step=0.1, key="weight_random",
                   disabled=_autofill_disabled,
                   help="(B) 0 = always the top-scoring clip. Higher = picks more often from the next "
@@ -4270,6 +4471,148 @@ if _story_on:
                        "": ("✅" if _supply.get(r, 0) >= _needs.get(r, 0)
                             else "⚠️ short" if _supply.get(r, 0) > 0 else "❌ none")}
                       for r in _plan_roles_used], hide_index=True, use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# 📍 The planned path (in order, Manual step-through and Choreography): the same
+# "plan each video's clips for all its blocks together" Auto uses, from the block
+# you're on to the end — each clip inside one scene, as these modes pick. It's
+# worked out again only when you pick something the plan didn't (or a setting
+# changes): following it keeps the rest of it valid.
+# ---------------------------------------------------------------------------
+
+def _queues_fp(q: dict) -> str:
+    """What footage is still free — a planned path is only good for the footage it was planned on."""
+    return hashlib.sha1(json.dumps(sorted(
+        (v, sp["scene_id"], round(float(sp["offset_sec"]), 1), round(float(sp["remaining_sec"]), 1))
+        for v, spans in q.items() for sp in spans), default=str).encode()).hexdigest()
+
+
+def planned_ahead(from_block: int, q: dict) -> dict:
+    """{block: [pick, …]} for blocks from_block onward — the planned path on the footage in q
+    (as it stands when from_block is reached). {} when not in order."""
+    import copy
+    import dataclasses
+    if not sequential_mode or track is None or from_block >= len(segments):
+        return {}
+    excl = st.session_state["segment_exclusions"]
+    base = hashlib.sha1(json.dumps([
+        track_id, [(round(sg["start"], 3), round(sg["end"], 3), round(sg.get("intensity", 0), 4)) for sg in segments],
+        sorted(q), min_clips, max_clips, ramp_start, ramp_end, allow_same_video, min_clip_len_sec,
+        sorted((k, sorted(map(list, v))) for k, v in excl.items()),
+        sorted(map(list, st.session_state["global_excluded_scenes"])),
+        sorted(intro_blocks_0based), sorted(outro_blocks_0based), weight_shape, weight_random, avoid_repeat,
+        weight_spread, weight_motion, autofill_seed, weight_position, plan_block_roles,
+        bool(st.session_state.get("autofill_v2", True)), bool(st.session_state.get("intro_outro_exclusive")),
+        bool(st.session_state.get("story_reserve", True)),
+    ], default=str).encode()).hexdigest()
+    fp = _queues_fp(q)
+    cache = st.session_state.get("_planned_path")
+    if cache and cache["base"] == base and cache["expect"].get(from_block) == fp:
+        return {b: p for b, p in cache["picks"].items() if b >= from_block}
+    segs = segments[from_block:]
+    work = copy.deepcopy(q)
+    ctx = dataclasses.replace(plan_context(), planned_sequential=True, plan_within_scenes=True)
+    with st.spinner("📍 Planning each video's path through the rest of the track…"), \
+            _timed("Planned path", f"from block {from_block + 1}, {len(segs)} blocks"):
+        tl, _, _ = CMATCH.match_scenes_to_track(
+            segs, work, min_clips, max_clips, ramp_start, ramp_end, allow_same_video, True,
+            {k - from_block: v for k, v in excl.items() if k >= from_block}, {},
+            st.session_state["global_excluded_scenes"], False, int(count_seed), min_clip_len_sec,
+            {b - from_block for b in intro_blocks_0based if b >= from_block},
+            {b - from_block for b in outro_blocks_0based if b >= from_block},
+            weight_shape, weight_random, avoid_repeat, weight_spread, weight_motion, autofill_seed,
+            weight_position=weight_position, repeat_fallbacks=set(),
+            block_roles=list(plan_block_roles[from_block:]), track=track, ctx=ctx)
+    picks = SEQ.planned_picks(tl, segs, offset=from_block)
+    # The footage each later block will see if the plan is followed — so following it reuses it.
+    sim, expect = copy.deepcopy(q), {from_block: fp}
+    for b in range(from_block, len(segments)):
+        dur = segments[b]["end"] - segments[b]["start"]
+        kept = []
+        for p in picks.get(b, []):
+            try:
+                carve_span(sim, p["video_id"], p["scene_id"], p["offset_into_scene_sec"], dur, True)
+                kept.append(p)
+            except ValueError:
+                pass
+        picks[b] = kept
+        expect[b + 1] = _queues_fp(sim)
+    st.session_state["_planned_path"] = {"base": base, "expect": expect, "picks": picks}
+    return picks
+
+
+def _planned_span(q: dict, p: dict, dur: float):
+    """(span, offset in scene) of the free footage holding planned pick p, or (None, None)."""
+    for sp in q.get(p["video_id"], []):
+        if sp["scene_id"] != p["scene_id"]:
+            continue
+        lo, hi = float(sp["offset_sec"]), float(sp["offset_sec"]) + float(sp["remaining_sec"])
+        off = float(p["offset_into_scene_sec"])
+        # (within carve_span's snap — a frame either way, as the plan's own carving allows)
+        if lo - 0.05 <= off and off + dur <= hi + 0.05:
+            return sp, max(lo, min(off, hi - dur))
+    return None, None
+
+
+def planned_candidates(picks: list, q: dict, seg: dict, audio_curve) -> list:
+    """Manual step-through: the planned picks as candidate cards (marked 📍)."""
+    dur = seg["end"] - seg["start"]
+    out = []
+    for p in picks:
+        sp, off = _planned_span(q, p, dur)
+        if sp is None:
+            continue
+        vals, fps = _clip_curve(p["video_id"], p["scene_id"], off, dur)
+        score = 0.0
+        if vals is not None and len(vals) and audio_curve is not None and len(audio_curve):
+            score = float(CMATCH.find_best_shape_window(vals, len(vals), audio_curve)[0])
+        out.append({
+            "video_id": sp["video_id"], "scene_id": sp["scene_id"], "scene_start_sec": sp["scene_start_sec"],
+            "window_offset_sec": off, "window_duration_sec": dur, "score": round(score, 3),
+            "motion_norm": sp["motion_norm"],
+            "curve_slice": vals if vals is not None else np.array([]), "fps": fps or 25.0,
+            "tags": sp["tags"], "thumbnail": sp["thumbnail"],
+            "intro_candidate": sp.get("intro_candidate", False),
+            "outro_candidate": sp.get("outro_candidate", False),
+            "roles": sp.get("roles", []), "planned": True,
+        })
+    return out
+
+
+def with_planned(candidates: list, planned: list) -> list:
+    """The grid's candidates with the planned ones in (a planned clip replaces the same scene's card)."""
+    keys = {cand_key(c) for c in planned}
+    rest = [c for c in candidates if not c.get("similar") and cand_key(c) not in keys]
+    return (sorted(planned + rest, key=lambda c: -c["score"])            # rank stays the shape-score order
+            + [c for c in candidates if c.get("similar")])
+
+
+def planned_clip(q: dict, p: dict, dur: float):
+    """Choreography: planned pick p as one of its video's trimmed clips (marked 📍), or None."""
+    sp, off = _planned_span(q, p, dur)
+    if sp is None:
+        return None
+    abs_start = sp["scene_start_sec"] + off
+    role_tag = f"  {role_chips(sp)}" if sp.get("roles") else ""
+    return {**sp, "offset_sec": off, "abs_start": abs_start, "planned": True,
+            "label": f"📍 Scene {sp['scene_id']}  {format_mmss(abs_start)} – {format_mmss(abs_start + dur)}"
+                     f"  motion {sp['motion_norm']:.2f}{role_tag}"}
+
+
+def clips_with_planned(clips: list, pclip) -> list:
+    """A video's trimmed clips with its planned clip in its place in time (replacing one at the same spot)."""
+    if pclip is None:
+        return clips
+    rest = [c for c in clips if not (c["scene_id"] == pclip["scene_id"]
+                                     and abs(c["offset_sec"] - pclip["offset_sec"]) < 0.1)]
+    return sorted(rest + [pclip], key=lambda c: c["abs_start"])
+
+
+def chor_shown(eligible: list, planned_vids, n: int) -> list:
+    """The columns shown: the planned path's videos first (so they always get one), then the rest."""
+    first = [v for v in eligible if v in planned_vids]
+    return (first + [v for v in eligible if v not in planned_vids])[:max(n, len(first))]
+
 
 if matching_mode == "Auto":
     # The shape search is real work, so the plan is remembered and only worked out
@@ -4897,6 +5240,10 @@ elif matching_mode == "Choreography":
                     f"confirm those blocks first."
                 )
 
+        # 📍 In order: the planned path's clip for each of its videos in this block.
+        _chor_plan = ({p["video_id"]: p for p in planned_ahead(chor_block, queues).get(chor_block, [])}
+                      if sequential_mode and chor_editing is None else {})
+
         if chor_editing is None and st.button(f"⚡⚡ Auto-fill ALL remaining blocks ({len(segments) - chor_block} left)",
                      key="chor_autofill_all",
                      help="Automatically fills every block from here to the end using each block's own "
@@ -4908,6 +5255,30 @@ elif matching_mode == "Choreography":
                 seg_b = segments[b]
                 block_duration_b = seg_b["end"] - seg_b["start"]
                 rec_b = recommended_counts[b]
+                if sequential_mode:
+                    # 📍 Follow the planned path; a block it can't fill falls back to the picks below.
+                    _placed_b = []
+                    for _p in planned_ahead(b, queues).get(b, []):
+                        _pc = planned_clip(queues, _p, block_duration_b)
+                        if _pc is None:
+                            continue
+                        try:
+                            _placed_b.append(carve_span(queues, _p["video_id"], _pc["scene_id"], _pc["offset_sec"],
+                                                        block_duration_b, True))
+                        except ValueError:
+                            continue
+                        st.session_state[f"chor_pick_{b}_{_p['video_id']}"] = True
+                        st.session_state.setdefault("chor_overrides", {}).setdefault(b, {})[_p["video_id"]] = \
+                            (_pc["scene_id"], _pc["offset_sec"])
+                    if _placed_b:
+                        for vid in selected_videos:
+                            if all(vid != q["video_id"] for q in _placed_b):
+                                st.session_state[f"chor_pick_{b}_{vid}"] = False
+                        _prev_b = {p["video_id"] for p in chor_confirmed.get(b - 1, [])} if b > 0 else set()
+                        if repeat_fallback_videos(_placed_b, _prev_b, avoid_repeat):
+                            _chor_rep_fallbacks.append(b + 1)
+                        chor_confirmed[b] = _placed_b
+                        continue
                 seg_target_b = seg_b.get("intensity", seg_b["energy"])
 
                 role_filter_b = plan_block_roles[b]
@@ -5038,7 +5409,9 @@ elif matching_mode == "Choreography":
                                        excluded_for_block(queues, st.session_state["global_excluded_scenes"],
                                                           chor_role_filter),
                                        role_filter=chor_role_filter, role_reach=_chor_reach)]
-                shown_videos = eligible_videos[:int(max_chor_videos)]
+                _pcs = {v: planned_clip(queues, p, block_duration) for v, p in _chor_plan.items()}
+                _pcs = {v: c for v, c in _pcs.items() if c is not None}
+                shown_videos = chor_shown(eligible_videos, _pcs, int(max_chor_videos))
                 seg_target = seg.get("intensity", seg["energy"])
 
                 # Confirm only the ticked columns (checkbox state drives this, not position)
@@ -5051,6 +5424,7 @@ elif matching_mode == "Choreography":
                         queues, video_id, block_duration, sequential_mode,
                         excluded_for_block(queues, st.session_state["global_excluded_scenes"], chor_role_filter),
                         role_filter=chor_role_filter, role_reach=_chor_reach)
+                    clips = clips_with_planned(clips, _pcs.get(video_id))
                     if not clips:
                         continue
 
@@ -5063,6 +5437,10 @@ elif matching_mode == "Choreography":
                             continue
                         use_scene_id = target["scene_id"]
                         use_offset = target["offset_sec"]
+                    elif video_id in _pcs:
+                        # 📍 Auto on a planned video: its planned clip.
+                        use_scene_id = _pcs[video_id]["scene_id"]
+                        use_offset = _pcs[video_id]["offset_sec"]
                     else:
                         # Auto: weighted pick, same Auto-fill weighting used everywhere else
                         # (A has no effect here — Choreography has no shape score). Sequential
@@ -5124,7 +5502,7 @@ elif matching_mode == "Choreography":
             chor_rec_count, queues, sequential_mode,
             excluded_for_block(queues, st.session_state["global_excluded_scenes"], chor_role_filter), catalogues,
             chor_prev_block_videos, chor_video_stats, chor_role_filter, chor_weighting,
-            track=track,
+            track=track, planned=_chor_plan,
         )
 
 else:
@@ -5235,6 +5613,23 @@ else:
             for b in range(current_block, len(segments)):
                 seg_b = segments[b]
                 audio_curve_b = get_block_audio_curve(track, seg_b["start"], seg_b["end"])
+                if sequential_mode:
+                    # 📍 In order: follow the planned path; a block it can't fill falls back below.
+                    _pl_b = planned_candidates(planned_ahead(b, queues).get(b, []), queues, seg_b, audio_curve_b)
+                    _placed_b = []
+                    for c in _pl_b:
+                        try:
+                            _placed_b.append(carve_span(queues, c["video_id"], c["scene_id"],
+                                                        c["window_offset_sec"], c["window_duration_sec"], True))
+                            st.session_state[f"adv_pick_{b}_{cand_key(c)}"] = True
+                        except ValueError:
+                            pass
+                    if _placed_b:
+                        _prev_b = {p["video_id"] for p in confirmed.get(b - 1, [])} if b > 0 else set()
+                        if repeat_fallback_videos(_placed_b, _prev_b, avoid_repeat):
+                            _adv_rep_fallbacks.append(b + 1)
+                        confirmed[b] = _placed_b
+                        continue
                 _excl_b = st.session_state["segment_exclusions"].get(b, set())
                 _rf_b = plan_block_roles[b]
                 _global_excl = excluded_for_block(queues, st.session_state["global_excluded_scenes"], _rf_b)
@@ -5489,6 +5884,16 @@ else:
             st.session_state[f"adv_search_cache_{current_block}"] = {
                 "key": search_key, "candidates": candidates, "missing": missing_curve_videos,
             }
+
+        # 📍 In order: the planned path's clips for this block join the grid (Auto-fill ticks them).
+        _adv_planned = (planned_candidates(planned_ahead(current_block, queues).get(current_block, []),
+                                           queues, seg, block_audio_curve)
+                        if sequential_mode and adv_editing is None else [])
+        if _adv_planned:
+            candidates = with_planned(candidates, _adv_planned)
+            st.caption(f"📍 **Planned path:** {len(_adv_planned)} clip(s) here — each video's clips are planned "
+                       f"for all its remaining blocks together, so none runs short later. ⚡ Auto-fill ticks them; "
+                       f"picking something else plans the rest again.")
 
         # Marked intro/outro blocks surface their tagged candidates first rather than
         # hiding the rest — you're already choosing by hand here, so a highlight that

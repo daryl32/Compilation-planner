@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root { --bg:#ffffff; --fg:#262730; --muted:#8a8f98; --line:#d9dce1; --accent:#ff4b4b;
-          --cut:#3b6fd8; --edit:#e8890c; --sel:#ff4b4b; --wave:#7aa2ff; --panel:#f3f4f7; }
+          --cut:#3b6fd8; --edit:#e8890c; --sel:#ff4b4b; --wave:#7aa2ff; --panel:#f3f4f7;
+          --lock:#2e9e5b; --ghost:#8a8f98; --cmp:#9b59d0; --region:rgba(255,75,75,0.08); }
   html, body { margin:0; padding:0; background:transparent; color:var(--fg);
                font-family: "Source Sans Pro", -apple-system, system-ui, sans-serif; font-size:15px;
                -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color: transparent; }
@@ -45,7 +46,9 @@
   <button id="del" title="Remove the selected cut (Delete)" disabled>🗑 Remove cut</button>
   <button id="prev" title="Move the selected cut earlier (←)" disabled>◀ Earlier</button>
   <button id="next" title="Move the selected cut later (→)" disabled>Later ▶</button>
+  <button id="lock" title="Lock the selected cut (L) — locked cuts stay put when you change the cutting settings or re-cut a part" disabled>🔒 Lock</button>
   <span class="grow"></span>
+  <button id="region" title="Make what's on screen the part to re-cut (below the editor)">▭ This view</button>
   <button id="undo" title="Undo (Ctrl/Cmd+Z)" disabled>↶ Undo</button>
 </div>
 <div class="hint" id="hint">Tap the chart to move the playhead · tap a cut to select it, then drag it · double-tap to add a cut</div>
@@ -65,6 +68,7 @@ function sendValue(v) { post("streamlit:setComponentValue", {value: v, dataType:
 // ---------------------------------------------------------------------------
 let A = null;                 // latest args from Python
 let cuts = [];                // edited cut times (sorted)
+let locked = [];              // 🔒 cut times that stay put (always also in cuts)
 let baseCuts = [];            // the method's cuts (to show what was removed / added)
 let docRev = -1;              // Python's revision of the cut list
 let undoStack = [];
@@ -107,12 +111,16 @@ function clean(list) {
   });
   return out;
 }
+function isLocked(t) { return locked.some(l => Math.abs(l - t) <= 0.02); }
+function keepLocked() { locked = locked.filter(l => cuts.some(c => Math.abs(c - l) <= 0.02)); }
+function send() { sendValue({cuts: cuts, locked: locked, doc_rev: docRev, edited: true}); }
 function commit(newCuts, keepSelectAt) {
-  undoStack.push(cuts.slice());
+  undoStack.push({cuts: cuts.slice(), locked: locked.slice()});
   if (undoStack.length > 100) undoStack.shift();
-  cuts = clean(newCuts);
+  cuts = clean(newCuts.concat(locked));
+  keepLocked();
   selected = keepSelectAt == null ? -1 : nearestIdx(cuts, keepSelectAt);
-  sendValue({cuts: cuts, doc_rev: docRev, edited: true});
+  send();
   refreshButtons(); draw();
 }
 
@@ -151,6 +159,8 @@ function draw() {
   const [g, w, h] = fit(main);
   g.clearRect(0, 0, w, h);
   const t0 = view.start, t1 = view.start + view.span, X = t => (t - t0) / (t1 - t0) * w;
+  // the part picked for re-cutting
+  if (A.region) { g.fillStyle = css("--region"); g.fillRect(X(A.region[0]), 0, X(A.region[1]) - X(A.region[0]), h); }
   // beats & bars
   g.lineWidth = 1;
   g.strokeStyle = css("--line");
@@ -167,15 +177,31 @@ function draw() {
     g.beginPath(); g.moveTo(X(b), 0); g.lineTo(X(b), h); g.stroke();
   });
   g.setLineDash([]);
-  // cuts
+  // 👻 ideas: faint dotted lines with a hollow ring at the foot — tap one to make it a cut
+  (A.ghosts || []).forEach(t => {
+    if (t < t0 || t > t1) return;
+    const x = X(t);
+    g.setLineDash([2, 5]); g.strokeStyle = css("--ghost"); g.lineWidth = 1.5; g.globalAlpha = 0.8;
+    g.beginPath(); g.moveTo(x, 22); g.lineTo(x, h - 20); g.stroke(); g.setLineDash([]);
+    g.beginPath(); g.arc(x, h - 26, 6, 0, Math.PI * 2); g.stroke(); g.globalAlpha = 1;
+  });
+  // ⚖️ the other cut set (A) as short ticks along the top
+  if (A.compare) {
+    g.strokeStyle = css("--cmp"); g.lineWidth = 2; g.fillStyle = css("--cmp"); g.font = "bold 11px sans-serif";
+    g.fillText("A", 3, 30);
+    A.compare.forEach(t => { if (t >= t0 && t <= t1) { g.beginPath(); g.moveTo(X(t), 20); g.lineTo(X(t), 34); g.stroke(); } });
+  }
+  // cuts (🔒 locked ones green with a square handle)
   cuts.forEach((c, i) => {
     if (c < t0 - 1 || c > t1 + 1) return;
-    const sel = i === selected, x = X(c);
-    g.strokeStyle = sel ? css("--sel") : (isBase(c) ? css("--cut") : css("--edit"));
+    const sel = i === selected, x = X(c), lk = isLocked(c);
+    g.strokeStyle = sel ? css("--sel") : lk ? css("--lock") : (isBase(c) ? css("--cut") : css("--edit"));
     g.lineWidth = sel ? 3 : 2;
     g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
     g.fillStyle = g.strokeStyle;
-    g.beginPath(); g.arc(x, 10, sel ? 9 : 6, 0, Math.PI * 2); g.fill();   // handle
+    if (lk) { const s = sel ? 16 : 12; g.fillRect(x - s / 2, 10 - s / 2, s, s);
+              g.fillStyle = "#fff"; g.font = "9px sans-serif"; g.fillText("🔒", x - 6, 13); }
+    else { g.beginPath(); g.arc(x, 10, sel ? 9 : 6, 0, Math.PI * 2); g.fill(); }   // handle
   });
   // playhead
   const p = now();
@@ -193,8 +219,9 @@ function draw() {
   o.clearRect(0, 0, ow, oh);
   drawWave(o, ow, oh, 0, dur(), 0.45);
   const OX = t => t / dur() * ow;
+  if (A.region) { o.fillStyle = css("--region"); o.fillRect(OX(A.region[0]), 0, OX(A.region[1]) - OX(A.region[0]), oh); }
   o.lineWidth = 1;
-  cuts.forEach(c => { o.strokeStyle = isBase(c) ? css("--cut") : css("--edit"); o.beginPath(); o.moveTo(OX(c), 0); o.lineTo(OX(c), oh); o.stroke(); });
+  cuts.forEach(c => { o.strokeStyle = isLocked(c) ? css("--lock") : isBase(c) ? css("--cut") : css("--edit"); o.beginPath(); o.moveTo(OX(c), 0); o.lineTo(OX(c), oh); o.stroke(); });
   o.strokeStyle = css("--fg"); o.lineWidth = 1.5; o.strokeRect(OX(t0), 1, Math.max(3, OX(t1) - OX(t0)), oh - 2);
   o.fillStyle = css("--accent"); o.fillRect(OX(p) - 1, 0, 2, oh);
   $("time").textContent = fmt(p) + " / " + fmt(dur());
@@ -240,9 +267,19 @@ function seek(t) { t = Math.min(Math.max(t, 0), dur()); try { audio.currentTime 
 // ---------------------------------------------------------------------------
 function hint(s) { $("hint").textContent = s; }
 function refreshButtons() {
-  const has = selected >= 0;
-  $("del").disabled = !has; $("prev").disabled = !has; $("next").disabled = !has;
+  const has = selected >= 0, lk = has && isLocked(cuts[selected]);
+  $("del").disabled = !has || lk; $("prev").disabled = !has || lk; $("next").disabled = !has || lk;
+  $("lock").disabled = !has;
+  $("lock").textContent = lk ? "🔓 Unlock" : "🔒 Lock";
   $("undo").disabled = !undoStack.length;
+}
+function toggleLock() {
+  if (selected < 0) return;
+  const t = cuts[selected];
+  undoStack.push({cuts: cuts.slice(), locked: locked.slice()});
+  if (isLocked(t)) { locked = locked.filter(l => Math.abs(l - t) > 0.02); hint("Unlocked the cut at " + fmt(t) + "."); }
+  else { locked = locked.concat([t]).sort((a, b) => a - b); hint("🔒 Locked the cut at " + fmt(t) + " — it stays put when you change the settings or re-cut a part."); }
+  send(); refreshButtons(); draw();
 }
 function addCutAt(t) {
   t = snap(t);
@@ -255,12 +292,14 @@ function addCutAt(t) {
 function removeSelected() {
   if (selected < 0) return;
   const t = cuts[selected];
+  if (isLocked(t)) { hint("That cut is 🔒 locked — unlock it first."); return; }
   commit(cuts.filter((_, i) => i !== selected), null);
   hint("Removed the cut at " + fmt(t) + ".");
 }
 function nudge(dir) {
   if (selected < 0) return;
   const t = cuts[selected];
+  if (isLocked(t)) { hint("That cut is 🔒 locked — unlock it first."); return; }
   let nt;
   if (snapOn && A.beats.length) {
     const i = nearestIdx(A.beats, t);
@@ -275,9 +314,18 @@ function nudge(dir) {
 }
 function undo() {
   if (!undoStack.length) return;
-  cuts = undoStack.pop(); selected = -1;
-  sendValue({cuts: cuts, doc_rev: docRev, edited: true});
+  const st = undoStack.pop();
+  cuts = st.cuts; locked = st.locked; selected = -1;
+  send();
   refreshButtons(); draw(); hint("Undone.");
+}
+function ghostNear(e) {
+  const g = A.ghosts || [];
+  if (!g.length) return -1;
+  const r = main.getBoundingClientRect(), x = e.clientX - r.left, tol = (e.pointerType === "touch" ? 22 : 10);
+  let best = -1, bd = 1e9;
+  g.forEach((t, i) => { const d = Math.abs((t - view.start) / view.span * r.width - x); if (d < bd) { bd = d; best = i; } });
+  return bd <= tol ? best : -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +365,9 @@ function drawPreview(tmp) { const keep = cuts; cuts = tmp; draw(); cuts = keep; 
 main.addEventListener("pointerup", e => {
   if (!ptr || e.pointerId !== ptr.id) return;
   const p = ptr; ptr = null;
+  if (p.cut >= 0 && p.moved && p.dragT != null && isLocked(cuts[p.cut])) {
+    hint("That cut is 🔒 locked — unlock it first."); draw(); return;
+  }
   if (p.cut >= 0 && p.moved && p.dragT != null) {
     const nt = snap(p.dragT), others = cuts.filter((_, k) => k !== p.cut);
     if (others.some(o => Math.abs(o - nt) < MIN_GAP)) { hint("Too close to another cut — left where it was."); draw(); return; }
@@ -330,6 +381,12 @@ main.addEventListener("pointerup", e => {
     addCutAt(t); lastTap = {t: 0, x: -99}; return;   // double-tap
   }
   lastTap = {t: nowMs, x: e.clientX};
+  const gi = p.cut < 0 ? ghostNear(e) : -1;
+  if (gi >= 0) {                                  // 👻 accept an idea
+    const gt = A.ghosts[gi];
+    if (cuts.some(c => Math.abs(c - gt) < MIN_GAP)) { hint("Too close to another cut."); return; }
+    commit(cuts.concat([gt]), gt); hint("Added the idea at " + fmt(gt) + " as a cut."); return;
+  }
   if (p.cut < 0) { selected = -1; refreshButtons(); seek(t); }
 });
 main.addEventListener("pointercancel", () => { ptr = null; draw(); });
@@ -353,6 +410,13 @@ $("del").onclick = removeSelected;
 $("prev").onclick = () => nudge(-1);
 $("next").onclick = () => nudge(1);
 $("undo").onclick = undo;
+$("lock").onclick = toggleLock;
+$("region").onclick = () => {
+  sendValue({cuts: cuts, locked: locked, doc_rev: docRev, edited: false,
+             region: [Math.round(view.start * 1000) / 1000, Math.round((view.start + view.span) * 1000) / 1000],
+             nonce: Date.now()});
+  hint("That part is picked — choose a style below and re-cut it.");
+};
 document.addEventListener("keydown", e => {
   if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
   if (e.code === "Space") { e.preventDefault(); togglePlay(); }
@@ -363,6 +427,7 @@ document.addEventListener("keydown", e => {
   else if (e.key === "[") $("zout").click();
   else if (e.key === "]") $("zin").click();
   else if ((e.ctrlKey || e.metaKey) && e.key === "z") { e.preventDefault(); undo(); }
+  else if (e.key === "l" || e.key === "L") toggleLock();
 });
 
 // ---------------------------------------------------------------------------
@@ -390,7 +455,10 @@ window.addEventListener("message", ev => {
   A = args;
   baseCuts = args.base_cuts || [];
   if (firstTime || trackChanged || args.doc_rev !== docRev) {   // Python changed the cut list (load, reset, re-cut)
+    // A change from Python (a re-cut, a reset) can be undone here too — unless it's a new track.
+    if (!firstTime && !trackChanged) { undoStack.push({cuts: cuts.slice(), locked: locked.slice()}); }
     cuts = clean(args.cuts || []);
+    locked = (args.locked || []).filter(l => cuts.some(c => Math.abs(c - l) <= 0.02));
     docRev = args.doc_rev;
     if (trackChanged) { undoStack = []; view.start = 0; }
     selected = -1;

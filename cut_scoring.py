@@ -219,6 +219,26 @@ def snapped_marks(track: dict, marks: list, beats_per_bar: int) -> list:
     return out
 
 
+def on_grid(track: dict, marks: list, beats_per_bar: int) -> list:
+    """Each time moved onto the beat grid: the nearest bar line when one is within a beat,
+    otherwise the nearest beat."""
+    beats = np.asarray(beat_grid(track)[0], dtype=float)
+    if len(beats) < 2 or not marks:
+        return [float(m) for m in marks]
+    beat = float(np.median(np.diff(beats)))
+    bars = np.asarray(bar_lines(track, beats_per_bar), dtype=float)
+    out = []
+    for m in marks:
+        m = float(m)
+        t = float(beats[int(np.argmin(np.abs(beats - m)))])
+        if len(bars):
+            b = float(bars[int(np.argmin(np.abs(bars - m)))])
+            if abs(b - m) <= 1.01 * beat:
+                t = b
+        out.append(t)
+    return out
+
+
 def phrase_marks(track: dict, beats_per_bar: int) -> list:
     """[{time, level}] every 4 bars from each section start (16 / 8 / 4) — the
     server's own when its bars were right, else rebuilt on the corrected bars."""
@@ -250,8 +270,9 @@ def candidate_scores(track: dict, cfg: dict) -> tuple:
     arate = float(a.get("rate", 30))
     bpb = int(cfg.get("beats_per_bar", 4))
 
+    on_beat = bool(cfg.get("on_beat", True)) and len(beats) >= 4
     times = list(beats)
-    if len(onset):   # strong hits that fall between beats
+    if len(onset) and not on_beat:   # strong hits that fall between beats
         pk = np.flatnonzero((onset[1:-1] >= onset[:-2]) & (onset[1:-1] > onset[2:]) & (onset[1:-1] >= 0.6)) + 1
         for p in pk:
             t = p / rate
@@ -259,6 +280,8 @@ def candidate_scores(track: dict, cfg: dict) -> tuple:
                 times.append(t)
     drop_marks = snapped_marks(track, a.get("drops") or [], bpb)
     section_marks = snapped_marks(track, [s["start"] for s in (a.get("sections") or [])[1:]], bpb)
+    if on_beat:   # 🥁 sections and drops onto the grid too (a bar line within a beat, else the nearest beat)
+        drop_marks, section_marks = on_grid(track, drop_marks, bpb), on_grid(track, section_marks, bpb)
     times += drop_marks + section_marks
     times = np.array(sorted(t for t in set(round(x, 3) for x in times) if 0.05 < t < duration - 0.05))
     if not len(times):

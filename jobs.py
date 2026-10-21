@@ -1,7 +1,9 @@
 """
 ⏳ Background recommendation searches — a small queue and worker, the same shape
 as audio analysis's (audio_analysis.py), sharing its one heavy slot (heavy_slot.py):
-only one heavy job runs at a time, and queued audio analysis always goes first.
+audio analysis and recommendations never run at the same time, and queued audio
+analysis always goes first. Within a batch, several track searches run side by side
+(⚡ worker_count(), each in its own process).
 
 Jobs
   track      — search one track (the five plans) and store them (rec_library.run_track)
@@ -262,7 +264,182 @@ def run_job(job: dict, say) -> None:
         raise ValueError(f"unknown job kind {job['kind']!r}")
 
 
-def run_worker(poll_sec: float = STOP_WAIT_SEC) -> None:
+# ---------------------------------------------------------------------------
+# ⚡ Several searches at once
+# ---------------------------------------------------------------------------
+# Each track's search is independent (its own results file), so the worker runs a few at
+# once in separate processes — the server has 4 CPUs and 8 GB since 20 Oct 2026. How many:
+# REC_WORKERS in config.py, else one fewer than the CPUs (at most 4), and only while the
+# server has REC_MIN_FREE_MB of memory free (a search takes a few hundred MB). Spotlights
+# use the tracks' results, so they start once no track search is running or waiting. The
+# processes run at low priority (nice 10), so the live app stays responsive.
+
+REC_MIN_FREE_MB_DEFAULT = 1200
+
+
+def worker_count() -> int:
+    try:
+        import config
+        n = getattr(config, "REC_WORKERS", None)
+        if n:
+            return max(1, int(n))
+    except Exception:
+        pass
+    if os.name == "nt":
+        return 1
+    return max(1, min(4, (os.cpu_count() or 1) - 1))
+
+
+def _free_mb() -> float | None:
+    """MemAvailable from /proc/meminfo, or None off Linux."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _min_free_mb() -> float:
+    try:
+        import config
+        return float(getattr(config, "REC_MIN_FREE_MB", REC_MIN_FREE_MB_DEFAULT))
+    except Exception:
+        return float(REC_MIN_FREE_MB_DEFAULT)
+
+
+def _make_say(p: dict, job: dict):
+    jid, label, last = job_id(job), job_label(job), [0.0]
+
+    def say(frac, msg="", force=False):
+        if isinstance(frac, str):          # say("message")
+            frac, msg = None, frac
+        now = time.time()
+        if not force and now - last[0] < 1.5:
+            return
+        last[0] = now
+        with _Edit():
+            st = _read_json(p["status"], {})
+            cur = st.get(jid, {})
+            st[jid] = {"state": "running", "label": label, "msg": msg,
+                       "progress": cur.get("progress", 0.0) if frac is None else round(float(frac), 3),
+                       "started": cur.get("started") or now, "updated": now}
+            _write_json(p["status"], st)
+    return say
+
+
+def _finish(p: dict, job: dict, state: str, msg: str) -> None:
+    jid = job_id(job)
+    with _Edit():
+        st = _read_json(p["status"], {})
+        if state == "queued":
+            st[jid] = {"state": "queued", "label": job_label(job), "msg": msg, "progress": 0.0,
+                       "updated": time.time()}
+        else:
+            st[jid] = {"state": state, "label": job_label(job), "msg": msg, "progress": 1.0, "updated": time.time()}
+            _write_json(p["queue"], [j for j in _read_json(p["queue"], []) if job_id(j) != jid])
+        _write_json(p["status"], st)
+
+
+def _child(job: dict) -> tuple:
+    """One job in a worker process: (state, message)."""
+    import signal as _signal
+    _signal.signal(_signal.SIGTERM, _signal.SIG_DFL)      # the parent stops us by terminating
+    p = _paths()
+    say = _make_say(p, job)
+    say(0.0, "starting", force=True)
+    try:
+        run_job(job, say)
+        return "done", "finished"
+    except Exception as e:
+        traceback.print_exc()
+        return "error", str(e)[-300:]
+
+
+def _run_parallel(p: dict, n: int, poll_sec: float, stopped_exc) -> None:
+    """Work through the queue with up to n jobs at once (see the note above)."""
+    import multiprocessing as mp
+    from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+    from heavy_slot import heavy_slot
+    ctx = mp.get_context("fork")
+    min_free = _min_free_mb()
+    while True:
+        queue = read_queue()
+        if not queue or p["pause"].exists():
+            return
+        # Audio analysis goes first (between batches — running searches are left to finish).
+        while _audio_waiting() and not p["pause"].exists():
+            for j in queue[:n]:
+                _make_say(p, j)(None, "waiting for audio analysis to finish", force=True)
+            time.sleep(poll_sec)
+        if p["pause"].exists():
+            return
+        running = {}                       # future -> job
+        audio_now = False
+        if any(j["kind"] == "track" for j in queue):
+            try:   # read every video's fingerprint once here — the search processes inherit them
+                RL.library_prints()
+            except Exception:
+                traceback.print_exc()
+        with heavy_slot("recommendations", on_wait=lambda _h: [
+                _make_say(p, j)(None, "waiting for audio analysis", force=True) for j in queue[:n]]):
+            pool = ProcessPoolExecutor(max_workers=n, mp_context=ctx)
+            try:
+                while True:
+                    for fut in [f for f in running if f.done()]:
+                        job = running.pop(fut)
+                        try:
+                            state, msg = fut.result()
+                        except Exception as e:          # the process died (e.g. out of memory)
+                            state, msg = "error", f"the search process stopped: {e}"[-300:]
+                        _finish(p, job, state, msg)
+                    if p["pause"].exists():
+                        if not running:
+                            return
+                    elif _audio_waiting():
+                        audio_now = True
+                        if not running:
+                            break
+                    else:
+                        busy = {job_id(j) for j in running.values()}
+                        todo = [j for j in read_queue() if job_id(j) not in busy]
+                        if not todo and not running:
+                            return
+                        tracks_left = any(j["kind"] == "track" for j in running.values()) or \
+                            any(j["kind"] == "track" for j in todo)
+                        for job in todo:
+                            if len(running) >= n:
+                                break
+                            if job["kind"] == "spotlight" and tracks_left:
+                                break              # spotlights read the tracks' results — after them
+                            free = _free_mb()
+                            if running and free is not None and free < min_free:
+                                break              # not enough memory for one more right now
+                            running[pool.submit(_child, job)] = job
+                            if job["kind"] == "track":
+                                tracks_left = True
+                    if running:
+                        wait(list(running), timeout=poll_sec, return_when=FIRST_COMPLETED)
+                    else:
+                        time.sleep(poll_sec)
+            except stopped_exc:
+                for job in running.values():
+                    _finish(p, job, "queued", "stopped — will restart on resume")
+                for proc in list((getattr(pool, "_processes", None) or {}).values()):
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                raise
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+        if not audio_now:
+            return
+
+
+def run_worker(poll_sec: float = STOP_WAIT_SEC, workers: int = None) -> None:
     p = _paths()
     try:
         os.nice(10)
@@ -284,7 +461,14 @@ def run_worker(poll_sec: float = STOP_WAIT_SEC) -> None:
     except ValueError:           # not the main thread (tests)
         pass
     from heavy_slot import heavy_slot
+    n = worker_count() if workers is None else max(1, int(workers))
     try:
+        if n > 1:
+            try:
+                _run_parallel(p, n, poll_sec, _Stopped)
+            except _Stopped:
+                pass
+            return
         while True:
             queue = read_queue()
             if not queue or p["pause"].exists():

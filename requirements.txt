@@ -34,6 +34,10 @@ google-auth-oauthlib>=1.1.0
 # Install with: pip install "streamlit[auth]"
 # The [auth] extra is required for st.login() / st.logout() / st.user
 
+# --- 🎚️ Mix (mixer.py) ---
+# Uses ffmpeg's rubberband filter for tempo / key changes (Ubuntu's ffmpeg has it;
+# falls back to atempo without it) and libmp3lame for quick previews.
+
 # --- Preview renderer ---
 # ffmpeg is also required by render_preview.py but is not a Python package.
 # Install it separately:

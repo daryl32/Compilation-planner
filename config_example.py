@@ -59,3 +59,21 @@ WHITELISTED_EMAILS = [
 # cleared after this many days unused by the 12-hourly sync (0 = never automatically).
 # ---------------------------------------------------------------------------
 # KEEP_DOWNLOADS_DAYS = 3
+
+# ---------------------------------------------------------------------------
+# Optional: sign out after this many minutes without using the app (no tap,
+# click, key or scroll, and nothing playing) — in every tab of that browser.
+# 0 = never. Default 60.
+# ---------------------------------------------------------------------------
+# IDLE_SIGNOUT_MIN = 60
+
+# Optional: ⚡ how many recommendation searches the nightly job (jobs.py) runs side by
+# side, each in its own process. Default: one fewer than the server's CPUs, at most 4.
+# A new search only starts while at least REC_MIN_FREE_MB of memory is free.
+# ---------------------------------------------------------------------------
+# REC_WORKERS = 3
+# REC_MIN_FREE_MB = 1200
+
+# Optional: the app clears its caches when it uses more memory than this (MB). Default
+# 1800 (set for a 4 GB server); 3500 suits an 8 GB one.
+# MEMORY_LIMIT_MB = 3500

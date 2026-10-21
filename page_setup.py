@@ -59,6 +59,7 @@ def _sign_in_screen(name: str) -> None:
     st.title(name)
     st.caption(f"v{APP_VERSION}")
     st.divider()
+    _idle_note()
     st.subheader("Please sign in to continue")
     st.button("🔐 Sign in with Google", on_click=st.login, type="primary")
     st.stop()
@@ -139,6 +140,113 @@ def _account_box(mb) -> None:
 
 
 _PAGE_PATH = {}   # this run's page, for the Connect link (set by page_setup)
+
+# ---------------------------------------------------------------------------
+# ⏱ Sign out after a while without use
+# ---------------------------------------------------------------------------
+# The browser keeps the time of the last tap / click / key / scroll (or a video or song
+# playing) in localStorage — shared by every tab of the app in that browser — and checks it
+# every 20 s, and as soon as a sleeping tab wakes up. Past the limit it opens the page with
+# ?signed_out=idle, which page_setup() answers with st.logout(). Installed once into the page
+# (like the dropdown script), so Streamlit's reruns don't reset it; only real use does.
+import config as _config  # noqa: E402
+
+IDLE_SIGNOUT_MIN = float(getattr(_config, "IDLE_SIGNOUT_MIN", 60) or 0)   # minutes; 0 = never
+
+_IDLE_CODE = r"""
+(function () {
+  const doc = document, win = window;
+  const LIMIT_MS = __LIMIT__ * 60000, KEY = "mp_last_active", THROTTLE_MS = Math.min(15000, LIMIT_MS / 4);
+  function store() { try { return win.localStorage; } catch (e) { return null; } }
+  function last() { const st = store(); const v = st ? parseInt(st.getItem(KEY) || "0", 10) : 0; return isNaN(v) ? 0 : v; }
+  let wrote = 0;
+  function touch() {
+    const t = Date.now(); if (t - wrote < THROTTLE_MS) return; wrote = t;
+    try { store().setItem(KEY, String(t)); } catch (e) {}
+  }
+  function playing(d) {
+    try {
+      if ([...d.querySelectorAll("video, audio")].some(m => !m.paused && !m.ended)) return true;
+      return [...d.querySelectorAll("iframe")].some(f => { try { return playing(f.contentDocument); } catch (e) { return false; } });
+    } catch (e) { return false; }
+  }
+  function check() {
+    if (playing(doc)) { wrote = 0; touch(); return false; }
+    const l = last();
+    if (l && Date.now() - l > LIMIT_MS) {
+      try { store().setItem("mp_idle_out", "1"); store().removeItem(KEY); } catch (e) {}
+      const u = new URL(win.location.href); u.search = "?signed_out=idle"; win.location.replace(u.toString());
+      return true;
+    }
+    return false;
+  }
+  // A tab reopened (or reloaded by the browser) after the limit signs out straight away;
+  // otherwise opening the app counts as using it.
+  if (check()) return;
+  touch();
+  ["pointerdown", "keydown", "wheel", "touchstart", "scroll"].forEach(ev =>
+    doc.addEventListener(ev, touch, {capture: true, passive: true}));
+  // taps inside the app's own components (cut editor, story map editor…) count too
+  new MutationObserver(() => doc.querySelectorAll("iframe").forEach(f => {
+    try { if (!f.dataset.mpIdle && f.contentDocument) { f.dataset.mpIdle = "1";
+          ["pointerdown", "keydown", "touchstart"].forEach(ev => f.contentDocument.addEventListener(ev, touch, true)); } }
+    catch (e) {}
+  })).observe(doc.body, {childList: true, subtree: true});
+  win.setInterval(check, Math.min(20000, LIMIT_MS / 3));
+  doc.addEventListener("visibilitychange", () => { if (doc.visibilityState === "visible") check(); });
+  win.addEventListener("focus", check);
+})();
+"""
+
+# Put into the PAGE itself (not this component's iframe, which Streamlit throws away on reruns).
+_IDLE_JS = """
+<script>
+(function () {
+  const doc = window.parent.document;
+  if (doc.getElementById("mp-idle-signout")) return;
+  const s = doc.createElement("script");
+  s.id = "mp-idle-signout";
+  s.textContent = __CODE__;
+  doc.head.appendChild(s);
+})();
+</script>
+"""
+
+_IDLE_NOTE_JS = """
+<div id="n" style="display:none;font-family:sans-serif;font-size:15px;color:#555;padding:4px 0">
+  ⏱ You were signed out after __LIMIT__ minutes without using the app.</div>
+<script>
+try { if (window.parent.localStorage.getItem("mp_idle_out")) {
+  document.getElementById("n").style.display = "block"; window.parent.localStorage.removeItem("mp_idle_out"); } }
+catch (e) {}
+</script>
+"""
+
+
+def _idle_signout() -> None:
+    """Install the browser-side idle timer, and sign out when it asks (?signed_out=idle)."""
+    if st.query_params.get("signed_out") == "idle":
+        st.query_params.clear()
+        st.logout()
+        st.stop()
+    if IDLE_SIGNOUT_MIN <= 0:
+        return
+    try:
+        import streamlit.components.v1 as components
+        import json as _json
+        code = _IDLE_CODE.replace("__LIMIT__", f"{IDLE_SIGNOUT_MIN:g}")
+        components.html(_IDLE_JS.replace("__CODE__", _json.dumps(code).replace("</", "<\\/")), height=0)
+    except Exception:
+        pass  # never break the page over it
+
+
+def _idle_note() -> None:
+    """On the sign-in screen: say why, when the last sign-out was the idle one."""
+    try:
+        import streamlit.components.v1 as components
+        components.html(_IDLE_NOTE_JS.replace("__LIMIT__", f"{IDLE_SIGNOUT_MIN:g}"), height=32)
+    except Exception:
+        pass
 
 
 def _save_pending(box, n: int) -> None:
@@ -377,7 +485,65 @@ def page_setup(name: str, page_path: str, *, title: str = None, anchor: str = No
         _sign_in_screen(name)
     if st.user.email not in WHITELISTED_EMAILS:
         _access_denied()
+    _idle_signout()
     _handle_drive_callback(page_path)
     st.title(title or name, anchor=anchor)
     mb = memory_check(name)
     _sidebar(page_path, mb)
+
+
+def top_button(anchor: str, css: str = "") -> None:
+    """A round ⬆️ button that floats in the bottom-right corner on long pages and
+    jumps back to the page heading (page_setup(..., anchor=anchor)). Always in
+    reach — no scrolling to the bottom to find it (iPad friendly).
+    css: more page CSS to inject in the same element (e.g. wrap_css()), so the page
+    doesn't get an extra empty row."""
+    st.markdown(
+        f'<a href="#{anchor}" target="_self" class="mp-top-btn" title="Back to the top">⬆️</a>'
+        "<style>.mp-top-btn{position:fixed;right:1.2rem;bottom:1.4rem;z-index:999990;width:3rem;height:3rem;"
+        "display:flex;align-items:center;justify-content:center;border-radius:50%;font-size:1.35rem;"
+        "text-decoration:none!important;background:rgba(127,127,127,.22);"
+        "backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);"
+        "border:1px solid rgba(128,128,128,.45);box-shadow:0 2px 10px rgba(0,0,0,.18);opacity:.92}"
+        ".mp-top-btn:hover {opacity:1;box-shadow:0 3px 14px rgba(0,0,0,.28)}" + css + "</style>",
+        unsafe_allow_html=True)
+
+
+def menu_css() -> str:
+    """CSS for page menus made of horizontal radios (same keys and values as always):
+    a radio inside a container keyed "mainnav…" is the page's main menu — big, equal-width
+    tabs with the chosen one underlined; one inside "subnav…" is a sub menu — small rounded
+    chips, so the two rows never look alike."""
+    m, s_ = "[class*='st-key-mainnav']", "[class*='st-key-subnav']"
+    # (a space before every "{": Streamlit's markdown reads ":first-child{…}" as a directive and drops it)
+    return (
+        f"{m} .stElementContainer,{m} .stRadio {{width:100%!important}}"
+        f"{m} [role='radiogroup'] {{display:grid!important;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));"
+        f"gap:.5rem;width:100%}}"
+        f"{m} [role='radiogroup']>div {{margin:0!important;border-radius:.6rem;border:1px solid rgba(128,128,128,.35);"
+        f"background:rgba(128,128,128,.07)}}"
+        f"{m} [role='radiogroup']>div:hover {{border-color:rgba(255,75,75,.6)}}"
+        f"{m} [role='radiogroup']>div[data-selected='true'] {{border-color:#ff4b4b;background:rgba(255,75,75,.12);"
+        f"box-shadow:inset 0 -3px 0 #ff4b4b}}"
+        f"{m} label[data-testid='stRadioOption'] {{width:100%;justify-content:center;padding:.65rem .8rem;margin:0;"
+        f"cursor:pointer}}"
+        f"{m} label[data-testid='stRadioOption']>div>div:first-child {{display:none}}"
+        f"{m} [data-testid='stMarkdownContainer'] p {{font-weight:650;font-size:1.02rem;margin:0}}"
+        f"{m} {{margin-bottom:.4rem}}"
+        f"{s_} [role='radiogroup'] {{display:flex!important;flex-wrap:wrap;gap:.4rem}}"
+        f"{s_} [role='radiogroup']>div {{margin:0!important;border-radius:999px;border:1px solid rgba(128,128,128,.30);"
+        f"background:transparent}}"
+        f"{s_} [role='radiogroup']>div:hover {{border-color:rgba(255,75,75,.55)}}"
+        f"{s_} [role='radiogroup']>div[data-selected='true'] {{border-color:rgba(255,75,75,.7);"
+        f"background:rgba(255,75,75,.10)}}"
+        f"{s_} label[data-testid='stRadioOption'] {{padding:.22rem .8rem;margin:0;cursor:pointer}}"
+        f"{s_} label[data-testid='stRadioOption']>div>div:first-child {{display:none}}"
+        f"{s_} [data-testid='stMarkdownContainer'] p {{font-size:.88rem;margin:0}}"
+    )
+
+
+def wrap_css(prefix: str, min_px: int = 135) -> str:
+    """CSS: rows of columns inside containers keyed "<prefix>…" wrap onto a second line on a
+    narrow page (iPad portrait with the sidebar open) instead of squashing labels to "…"."""
+    return (f"[class*='st-key-{prefix}'] [data-testid='stHorizontalBlock']{{flex-wrap:wrap;row-gap:.5rem}}"
+            f"[class*='st-key-{prefix}'] [data-testid='stColumn']{{min-width:min({min_px}px,100%)}}")

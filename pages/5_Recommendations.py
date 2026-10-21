@@ -26,9 +26,10 @@ import rec_library as RL
 import scene_roles as SR
 import core.footage as CFOOT
 from library_common import library_ranges, master_thumbnail_path, safe_image, scene_thumbnail_path
-from page_setup import page_setup
+from page_setup import page_setup, top_button, wrap_css
 
-page_setup("Recommendations", "pages/5_Recommendations.py", title="🔮 Recommendations")
+page_setup("Recommendations", "pages/5_Recommendations.py", title="🔮 Recommendations", anchor="recs-top")
+top_button("recs-top", wrap_css("rc_wrap", 130))   # rows wrap on narrow screens (iPad portrait)
 
 DEFAULT_VIDEOS = RL.DEFAULT_VIDEOS
 FEED_SIZE = 10
@@ -79,7 +80,7 @@ def _strip(scores: dict, which: str = "overall") -> go.Figure:
         fig.add_annotation(x=scores["weakest_block"] + 1, y=vals[scores["weakest_block"]], text="▼",
                            showarrow=False, yshift=10, font=dict(size=12),
                            hovertext=f"Weakest block ({scores['weakest_block'] + 1})")
-    fig.update_layout(height=150, margin=dict(t=10, b=10, l=10, r=10), yaxis=dict(range=[0, 100], title=None),
+    fig.update_layout(height=105, margin=dict(t=8, b=4, l=4, r=4), yaxis=dict(range=[0, 100], title=None),
                       xaxis=dict(title=None, showticklabels=False), showlegend=False)
     return fig
 
@@ -132,10 +133,17 @@ NAMES = {"overall": "Overall", "shape": "Shape", "intensity": "Motion", "story":
          "action_story": "Action clips"}
 
 
-def _metrics(sc: dict, keys: list) -> None:
-    m = st.columns(len(keys) if len(keys) > 1 else 4)
-    for col, k in zip(m, keys):
-        col.metric(NAMES[k], _pct(sc.get(k)), help=HELPS[k])
+def _badge(name: str, v) -> str:
+    colour = "gray" if v is None else "green" if v >= 70 else "orange" if v >= 50 else "red"
+    return f":{colour}-badge[{name} {_pct(v)}]"
+
+
+def _metrics(sc: dict, keys: list, about: str = "", about_help: str = "") -> None:
+    """The plan's scores as coloured badges (green ≥ 70 %, orange ≥ 50 %, red below), then what the
+    plan is (style, videos…) on the same line; what each score means is in the tooltip."""
+    st.markdown(" ".join(_badge(NAMES[k], sc.get(k)) for k in keys) + (f"  :gray[{about}]" if about else ""),
+                help="  \n".join(f"**{NAMES[k]}** — {HELPS[k]}" for k in keys)
+                + (f"  \n\n{about_help}" if about_help else ""))
 
 
 def _videos_row(videos: list, small: bool = False) -> None:
@@ -151,10 +159,9 @@ def _videos_row(videos: list, small: bool = False) -> None:
 def render_result(track_id: str, rank: int, result: dict, data: dict) -> None:
     mode = result["mode"]
     plan = result.get("plan")
-    with st.container(border=True):
-        h = st.columns([2.4, 1])
-        title = f"### {rank} · {REC.MODE_LABELS[mode]}"
-        h[0].markdown(title)
+    with st.container(border=True, key=f"rc_wrap_card_{mode}"):
+        h = st.columns([3, 1], vertical_alignment="center")
+        h[0].markdown(f"**{rank} · {REC.MODE_LABELS[mode]}**")
         if not plan:
             h[0].caption(REC.MODE_HELP[mode])
             st.info(result.get("note") or "No plan found.")
@@ -165,14 +172,14 @@ def render_result(track_id: str, rank: int, result: dict, data: dict) -> None:
             bits.append("🎭 story map on")
         if plan.get("sequential"):
             bits.append("in order")
-        h[0].caption(" · ".join(bits), help=REC.MODE_HELP[mode])
         open_now = h[1].button("🎬 Open", key=f"open_{track_id}_{mode}", type="primary", width="stretch")
         if mode == "verses" and plan.get("actors"):
             a, b = (", ".join(plan["actors"].get(v) or ["?"]) for v in plan["videos"][:2])
             st.markdown(f"**👤 {a}  vs  👤 {b}**")
         # What each card leads with: 📐 shape, 🎭 story, the rest overall + the three parts.
         lead = {"shape": "shape", "story": "story"}.get(mode, "overall")
-        _metrics(sc, [lead] if mode in ("shape", "story") else ["overall", "shape", "intensity", "story"])
+        _metrics(sc, [lead] if mode in ("shape", "story") else ["overall", "shape", "intensity", "story"],
+                 about=" · ".join(bits), about_help=REC.MODE_HELP[mode])
         st.plotly_chart(_strip(sc, lead), width="stretch", key=f"strip_{track_id}_{mode}",
                         config={"displayModeBar": False})
         _videos_row(plan["videos"])
@@ -186,13 +193,13 @@ def render_result(track_id: str, rank: int, result: dict, data: dict) -> None:
 
 def feed_card(key: str, rank: int, track_id: str, plan: dict, metrics: list, extra: str = "") -> None:
     """A compact plan card for the feeds."""
-    with st.container(border=True):
-        h = st.columns([2.4, 1])
+    with st.container(border=True, key=f"rc_wrap_feed_{key}"):
+        h = st.columns([3, 1], vertical_alignment="center")
         h[0].markdown(f"**{rank} · 🎵 {track_id}**" + (f"  ·  {extra}" if extra else ""))
-        h[0].caption(f"{_mode_label(plan['mode'])} · {plan['variant']} · {len(plan['videos'])} videos"
-                     + (" · 🎭 story map on" if plan.get("story") else ""))
         open_now = h[1].button("🎬 Open", key=f"open_{key}", type="primary", width="stretch")
-        _metrics(plan["scores"], metrics)
+        _metrics(plan["scores"], metrics,
+                 about=f"{_mode_label(plan['mode'])} · {plan['variant']} · {len(plan['videos'])} videos"
+                 + (" · 🎭 story map on" if plan.get("story") else ""))
         _videos_row(plan["videos"], small=True)
     if open_now:
         open_plan(track_id, plan, rank)
@@ -231,7 +238,8 @@ def background_panel() -> None:
     night = J.nightly_status()
     if running:
         r = running[0]
-        head = f"⏳ Background searches — {r['label']} {100 * r.get('progress', 0):.0f}%"
+        head = (f"⏳ Background searches — {r['label']} {100 * r.get('progress', 0):.0f}%" if len(running) == 1
+                else f"⏳ Background searches — {len(running)} running at once")
         if queued:
             head += f" · {len(queued)} queued"
     elif queued:
@@ -242,7 +250,8 @@ def background_panel() -> None:
         st.caption("Every night at 04:45 the server searches the tracks whose plans are out of date (new or "
                    "changed videos, ranges, actors, roles or story maps) with the default settings — "
                    f"{DEFAULT_VIDEOS} videos, normal order — then builds the 🆕 new-video spotlights. Audio "
-                   "analysis always goes first; only one heavy job runs at a time.")
+                   f"analysis always goes first; up to {J.worker_count()} searches run side by side (each in its own process, "
+                   "at low priority so the app stays quick).")
         if night:
             st.caption(f"Last nightly run: {_ago(night.get('started'))} — {night.get('queued_tracks', 0)} track(s), "
                        f"{night.get('queued_spotlights', 0)} spotlight(s).")
@@ -279,7 +288,7 @@ def background_panel() -> None:
 # ---------------------------------------------------------------------------
 
 def for_this_track(tracks: list) -> None:
-    c = st.columns([3, 2, 2])
+    c = st.container(key="rc_wrap_controls").columns([3, 2, 2])
     default_track = st.session_state.get("track_id") if st.session_state.get("track_id") in tracks else tracks[0]
     track_id = c[0].selectbox("🎵 Track", tracks, index=tracks.index(default_track), key="rec_track")
     n_videos = c[1].slider("Videos per plan", 2, 15, DEFAULT_VIDEOS, key="rec_n_videos",
@@ -325,16 +334,20 @@ def for_this_track(tracks: list) -> None:
                 "every video's motion, so it takes a little while; after that it's quicker.")
         return
     st.session_state.setdefault("rec_results", {})[(track_id, int(n_videos), bool(sequential))] = data
-    if not fresh:
-        st.warning("These plans are out of date — the library or the track has changed since they were found. "
-                   "Press **🔄 Search again** (or wait for tonight's run) before relying on the scores.")
-    else:
-        st.caption(f"Found {_ago(_ts(data.get('finished_at')))}.")
+    # One status line: when they were found (or that they're out of date) and which story map scores them.
+    bits = [f"Found {_ago(_ts(data.get('finished_at')))}" if fresh else
+            ":orange-badge[⚠️ Out of date] — the library or the track changed; 🔄 Search again"]
+    helps = ["Plans searched across your whole library and checked with the real matcher — the scores are what "
+             "you get when you open one. 🎬 Open makes a plan a new project in the planner (what you had there is "
+             "saved first)."]
     if story_source == "saved":
-        st.caption("🎭 Story fit uses this track's story map; its action parts count extra in the motion score.")
+        bits.append("🎭 its story map")
+        helps.append("Story fit uses this track's story map; its action parts count extra in the motion score.")
     elif story_source == "suggested":
-        st.caption("🎭 This track has no saved story map, so story fit uses the one the story map wizard suggests "
-                   "(Media Library → 🎭 Story map to make your own). Plans that use it open with it.")
+        bits.append("🎭 suggested story map")
+        helps.append("This track has no saved story map, so story fit uses the one the story map wizard suggests "
+                     "(Media Library → 🎭 Story map to make your own). Plans that use it open with it.")
+    st.markdown(" · ".join(bits), help="  \n\n".join(helps))
     for i, result in enumerate(data["results"], start=1):
         render_result(track_id, i, result, data)
 
@@ -350,13 +363,19 @@ def _ts(iso):
 # Feeds
 # ---------------------------------------------------------------------------
 
+def _intro(short: str, long: str) -> None:
+    """A feed's one-line intro; the full explanation (and where the plans come from) in the tooltip."""
+    st.caption(short, help=long + (f"  \n\n{_from}" if _from else ""))
+
+
 def _no_searches() -> None:
     st.info("No background searches yet. They run every night at 04:45 — or open **⏳ Background searches** above "
             "and press **⏳ Search changed tracks now**.")
 
 
 def feed_top(results: dict) -> None:
-    st.caption("The best plans across every track you've got (at most two per track), by overall match.")
+    _intro("The best plans across all your tracks.",
+           "The best plans across every track you've got (at most two per track), by overall match.")
     if not results:
         return _no_searches()
     for i, item in enumerate(FEEDS.top_plans(results, FEED_SIZE), start=1):
@@ -364,8 +383,9 @@ def feed_top(results: dict) -> None:
 
 
 def feed_action(results: dict) -> None:
-    st.caption("Plans whose drops and action parts land best: high-motion footage on the big moments, and 💥 Action "
-               "clips in the story map's action parts.")
+    _intro("Plans that land best on the drops and action parts.",
+           "Plans whose drops and action parts land best: high-motion footage on the big moments, and 💥 Action "
+           "clips in the story map's action parts.")
     if not results:
         return _no_searches()
     items = FEEDS.best_action(results, FEED_SIZE)
@@ -377,8 +397,9 @@ def feed_action(results: dict) -> None:
 
 
 def feed_new(results: dict) -> None:
-    st.caption(f"Videos added in the last {RL.NEW_DAYS} days: the videos most like them, the tracks they fit, and "
-               f"a ready-made plan built around each one for its {RL.SPOTLIGHT_TRACKS} best tracks.")
+    _intro(f"Videos added in the last {RL.NEW_DAYS} days, with plans built around them.",
+           f"Videos added in the last {RL.NEW_DAYS} days: the videos most like them, the tracks they fit, and "
+           f"a ready-made plan built around each one for its {RL.SPOTLIGHT_TRACKS} best tracks.")
     new = RL.new_videos()
     if not new:
         st.info(f"No new videos in the last {RL.NEW_DAYS} days.")
@@ -394,7 +415,7 @@ def feed_new(results: dict) -> None:
             h[1].markdown(f"**🆕 {vid}**")
             h[1].caption(f"Added {_ago(_ts(first))}")
             if not spot:
-                h[1].info("Its spotlight is built in tonight's run.")
+                h[1].caption("Its spotlight is built in tonight's run.")
                 if h[1].button("⏳ Build it now (in the background)", key=f"spot_{vid}"):
                     J.enqueue([{"kind": "spotlight", "video_id": vid}], why="by hand")
                     st.toast(f"⏳ {vid}: {J.start_worker()}")
@@ -411,8 +432,9 @@ def feed_new(results: dict) -> None:
 
 
 def feed_gems(results: dict) -> None:
-    st.caption("Videos that fit many of your tracks well but that you've rarely used in your recent projects and "
-               "renders.")
+    _intro("Good fits you rarely use.",
+           "Videos that fit many of your tracks well but that you've rarely used in your recent projects and "
+           "renders.")
     if not results:
         return _no_searches()
     gems = FEEDS.hidden_gems(results, RL.video_usage())
@@ -431,8 +453,9 @@ def feed_gems(results: dict) -> None:
 
 
 def feed_gaps(results: dict) -> None:
-    st.caption("What your library is short of — the story roles your tracks need more footage for, and kinds of "
-               "block nothing in the library matches well. Ideas for what to film or find next.")
+    _intro("What your library is short of — ideas for what to film or find next.",
+           "The story roles your tracks need more footage for, and kinds of block nothing in the library matches "
+           "well.")
     if not results:
         return _no_searches()
     supply = {}
@@ -474,10 +497,6 @@ def feed_gaps(results: dict) -> None:
 # Page
 # ---------------------------------------------------------------------------
 
-st.caption("Plans searched across your whole library and checked with the real matcher — the scores are what you "
-           "get when you open one. **🎬 Open** makes a plan a new project in the planner (what you had there is "
-           "saved first).")
-
 tracks = RL.list_tracks()
 if not tracks:
     st.info("No audio tracks found.")
@@ -488,10 +507,8 @@ tabs = st.tabs(["🎵 For this track", "🏆 Top plans", "💥 Best action", "�
 with tabs[0]:
     for_this_track(tracks)
 stored = RL.all_results()
-if stored:
-    for t in tabs[1:]:
-        t.caption(f"From the background searches of {len(stored)} of your {len(tracks)} tracks "
-                  f"({DEFAULT_VIDEOS} videos per plan, normal order).")
+_from = (f"From the background searches of {len(stored)} of your {len(tracks)} tracks "
+         f"({DEFAULT_VIDEOS} videos per plan, normal order)." if stored else "")
 with tabs[1]:
     feed_top(stored)
 with tabs[2]:
