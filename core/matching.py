@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import random
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -48,8 +49,26 @@ class PlanContext:
     role_chips: Callable = lambda _c: ""         # how a clip's roles are written in labels
     planned_sequential: bool = False             # in-order Auto: plan each video's path in one go (core/sequential.py)
     plan_within_scenes: bool = False             # …with every clip inside one scene (📍 planned path, step modes)
-    shape_memo: dict | None = None               # ⚡ a dict to reuse shape-window scores across matcher runs on the
-                                                 # same library (recommendation searches); None = off
+    shape_memo: dict | None = None               # ⚡ a dict to reuse shape-window scores across matcher runs
+                                                 # (keyed on the curve's numbers, so always safe); None = off
+
+
+SHAPE_MEMO_MAX = 120_000      # entries (~25 MB) — a long track's Auto match adds ~25,000
+
+
+def _curves_memo(curves_of):
+    """curves_of, answering each video from memory after the first ask (one matcher run)."""
+    if getattr(curves_of, "_is_memo", False):
+        return curves_of
+    seen = {}
+
+    def memo(video_id):
+        got = seen.get(video_id)
+        if got is None:
+            got = seen[video_id] = curves_of(video_id)
+        return got
+    memo._is_memo = True
+    return memo
 
 
 def _skip_budget(c: PlanContext, available_windows, remaining_blocks, weight_position, n_videos=1) -> int:
@@ -259,13 +278,17 @@ def find_shape_candidates(
         # find_best_shape_window), not just every SHAPE_SEARCH_STEP_SEC —
         # faster AND exhaustive rather than a speed/precision compromise.
         memo = pctx.shape_memo if bias is None else None
-        mkey = (span["video_id"], span["scene_id"], fps, len(values), span_start_frame, search_end_frame,
+        # keyed on the footage's own numbers (not just where it is), so a memo kept between runs
+        # can never answer for a curve that has since changed
+        mkey = (hashlib.sha1(values[span_start_frame:search_end_frame].tobytes()).digest(), fps,
                 window_frames, audio_key) if memo is not None else None
         hit = memo.get(mkey) if memo is not None else None
         if hit is None:
             hit = find_best_shape_window(values[span_start_frame:search_end_frame], window_frames, audio_ready,
                                          bias=bias)
             if memo is not None:
+                if len(memo) >= SHAPE_MEMO_MAX:      # kept small: a fresh start beats unbounded growth
+                    memo.clear()
                 memo[mkey] = hit
         best_score, best_offset = hit
         best_start_frame = span_start_frame + best_offset
@@ -779,6 +802,7 @@ def match_scenes_to_track(
     by candidate order rather than by motion closeness. The practical
     default (weight_motion=1.0) avoids this in normal use."""
     pctx = ctx or PlanContext()
+    pctx = dataclasses.replace(pctx, curves_of=_curves_memo(pctx.curves_of))   # ⚡ each video's curves fetched once
     if sequential and pctx.planned_sequential and track is not None:
         # In order, planned per video (core/sequential.py): pass 1 chooses the video for each block with
         # the normal Auto matcher; pass 2 chooses each video's clips for all its blocks together, in order.

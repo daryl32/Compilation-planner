@@ -96,7 +96,10 @@ def find_best_shape_window(values: np.ndarray, window_frames: int, audio_curve: 
     if n_positions <= 0:
         return -2.0, 0
 
-    windows = np.lib.stride_tricks.sliding_window_view(values, window_frames)  # (n_positions, window_frames), no copy
+    values = np.asarray(values)
+    st = values.strides[0]
+    windows = np.lib.stride_tricks.as_strided(values, (n_positions, window_frames), (st, st),
+                                              writeable=False)   # (n_positions, window_frames), no copy
     W = _make_interp_matrix(window_frames, n_points)
     resampled = windows @ W.T  # (n_positions, n_points)
 
@@ -105,9 +108,15 @@ def find_best_shape_window(values: np.ndarray, window_frames: int, audio_curve: 
     else:
         audio_c, audio_std, _ = prepare_audio(audio_curve, n_points)
 
-    row_mean = resampled.mean(axis=1, keepdims=True)
-    row_std = resampled.std(axis=1)
-    numerator = (resampled - row_mean) @ audio_c
+    # ⚡ Row mean, centred rows and std with the very ufunc calls ndarray.mean / .std make (same
+    # numbers to the last bit), minus their per-call overhead — and the mean worked out once
+    # (std works it out again internally). This function runs ~25,000 times per Auto match.
+    row_mean = np.add.reduce(resampled, axis=1, keepdims=True)
+    np.true_divide(row_mean, n_points, out=row_mean)
+    centred = resampled - row_mean
+    numerator = centred @ audio_c
+    np.multiply(centred, centred, out=centred)
+    row_std = np.sqrt(np.add.reduce(centred, axis=1) / n_points)
     with np.errstate(divide="ignore", invalid="ignore"):
         scores = np.where((row_std > 1e-9) & (audio_std > 1e-9),
                           numerator / (n_points * row_std * audio_std), 0.0)

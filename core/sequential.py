@@ -166,6 +166,7 @@ def plan_video_paths(timeline: list, segments: list, queues: dict, track: dict, 
         has_role = {r for sp in spans for r in (sp.get("roles") or [])}
 
         # Every candidate window for every use, scored.
+        win_memo = {}       # ⚡ the same run of footage at the same length gives the same windows
         use_runs = []
         cand = []                                # per use: (starts, ends, scores, (span index per window))
         for j, (bi, si, gi, dur) in enumerate(vuses):
@@ -184,7 +185,11 @@ def plan_video_paths(timeline: list, segments: list, queues: dict, track: dict, 
             runs = _runs(allowed, curves, cross_scenes)
             use_runs.append(runs)
             for n, run in enumerate(runs):
-                w = _windows(run, dur, step_sec)
+                wkey = (tuple((a, b, sp["scene_id"], sp["offset_sec"]) for a, b, sp in run["pieces"]),
+                        run["fps"], dur, step_sec)
+                if wkey not in win_memo:
+                    win_memo[wkey] = _windows(run, dur, step_sec)
+                w = win_memo[wkey]
                 if w is None:
                     continue
                 starts, shapes, levels = w

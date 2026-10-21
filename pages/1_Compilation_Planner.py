@@ -31,7 +31,7 @@ import smart_cuts as SM
 import story_map as STM
 import story_map_editor as SME
 import scene_roles as SR
-from audio_charts import add_analysis_overlays
+from audio_charts import add_analysis_overlays, add_vrects
 import preview_snippets
 from library_common import (safe_image, video_details, all_actors, all_video_tags, matches_details, scene_tags, render_range_picker, library_ranges, master_thumbnail_path, proxy_path,
                             refresh_caches_after_sync, show_render_player, shared_cache,
@@ -293,8 +293,17 @@ def plan_context() -> CMATCH.PlanContext:
         time_ranges=effective_time_ranges, duration_of=get_video_duration,
         curves_of=load_motion_curves_for_video, catalogue_dir=CATALOGUE_DIR,
         why_store=lambda: st.session_state.setdefault(WHY_KEY, {}), role_chips=role_chips,
-        planned_sequential=True,
+        planned_sequential=True, shape_memo=_shape_memo(),
     )
+
+
+@shared_cache
+@st.cache_resource
+def _shape_memo() -> dict:
+    """⚡ Shape-window scores kept between matches, shared by every session: matching again with
+    the same cuts and videos (after changing weights, order, F…) skips the heaviest work. Keyed on
+    the curves' own numbers, so it can't go stale; capped in core.matching (SHAPE_MEMO_MAX)."""
+    return {}
 
 
 def plan_clips_per_block() -> float:
@@ -1308,6 +1317,9 @@ def story_role_need(track_id: str) -> dict:
     return out
 
 
+shared_cache(VR.clear_memos)        # 🧠 memory reset clears the ranking's in-memory copies too
+
+
 def compute_video_rankings(track: dict, tag_filter: tuple, time_ranges: dict,
                            weights: dict, experimental: bool) -> list[dict]:
     """Match score (0–100) for every video with usable footage, best first — see
@@ -1327,13 +1339,13 @@ def compute_video_rankings(track: dict, tag_filter: tuple, time_ranges: dict,
 
     feats, reference = {}, {}
     for vid in video_ids:
-        summary = VR.load_summary(CATALOGUE_DIR, vid)
-        if summary is None:
+        if VR.load_summary(CATALOGUE_DIR, vid) is None:
             continue
         scenes_by_id = {sc["scene_id"]: sc for sc in catalogues[vid]["scenes"]}
         rng = time_ranges.get(vid)
-        reference[vid] = VR.video_features(summary, scenes_by_id, rng, ())
-        feats[vid] = (VR.video_features(summary, scenes_by_id, rng, tuple(tag_filter))
+        # ⚡ kept in memory until the video's catalogue changes (they don't depend on the track)
+        reference[vid] = VR.cached_video_features(CATALOGUE_DIR, vid, scenes_by_id, rng, ())
+        feats[vid] = (VR.cached_video_features(CATALOGUE_DIR, vid, scenes_by_id, rng, tuple(tag_filter))
                       if tag_filter else reference[vid])
     return VR.score_videos(
         track, load_all_audio_tracks(), feats, reference, weights, tuple(tag_filter),
@@ -2185,7 +2197,7 @@ def block_chart(track: dict, segments: list, marks: dict = None, height: int = 2
     fig = go.Figure()
     if track.get("hires"):
         _rate = float(track["hires"]["rate"])
-        fig.add_trace(go.Scatter(x=[i / _rate for i in range(len(track["hires"]["rms"]))], y=track["hires"]["rms"],
+        fig.add_trace(go.Scatter(x=np.arange(len(track["hires"]["rms"])) / _rate, y=np.asarray(track["hires"]["rms"], dtype=float),
                                  mode="lines", line=dict(color="rgba(100,150,255,0.55)", width=1), hoverinfo="skip"))
     else:
         fig.add_trace(go.Scatter(x=[e["time"] for e in track["energy_envelope"]],
@@ -2193,13 +2205,16 @@ def block_chart(track: dict, segments: list, marks: dict = None, height: int = 2
                                  line=dict(color="rgba(100,150,255,0.55)"), hoverinfo="skip"))
     add_cut_markers(fig, segments)
     step = max(1, len(segments) // 40)          # label every block on short plans, every few on long ones
+    _rects, _nums = [], []
     for i, sg in enumerate(segments):
         mark = (marks or {}).get(i)
         if mark:
-            fig.add_vrect(x0=sg["start"], x1=sg["end"], fillcolor=mark[1], opacity=0.25, line_width=0, layer="below")
+            _rects.append({"x0": sg["start"], "x1": sg["end"], "fillcolor": mark[1], "opacity": 0.25})
         if i % step == 0 or mark or i == len(segments) - 1:
-            fig.add_annotation(x=(sg["start"] + sg["end"]) / 2, y=1.0, yref="paper", text=str(i + 1),
-                               showarrow=False, font=dict(size=10), yanchor="bottom")
+            _nums.append(dict(x=(sg["start"] + sg["end"]) / 2, y=1.0, yref="paper", text=str(i + 1),
+                              showarrow=False, font=dict(size=10), yanchor="bottom"))
+    add_vrects(fig, _rects)                     # ⚡ shapes and labels in one go (see audio_charts.add_vrects)
+    fig.update_layout(annotations=[*fig.layout.annotations, *_nums])
     fig.add_trace(go.Scatter(x=[(sg["start"] + sg["end"]) / 2 for sg in segments], y=[0.02] * len(segments),
                              mode="markers", marker=dict(size=14, opacity=0), showlegend=False,
                              customdata=[[i + 1, sg["start"], sg["end"]] for i, sg in enumerate(segments)],
@@ -2366,11 +2381,11 @@ def render_audio_settings_section(track: dict) -> None:
     afig = go.Figure()
     if track.get("hires"):
         _rate = float(track["hires"]["rate"])
-        _t = [i / _rate for i in range(len(track["hires"]["rms"]))]
-        afig.add_trace(go.Scatter(x=_t, y=track["hires"]["rms"], mode="lines",
+        _t = np.arange(len(track["hires"]["rms"])) / _rate
+        afig.add_trace(go.Scatter(x=_t, y=np.asarray(track["hires"]["rms"], dtype=float), mode="lines",
                                   name="Track energy (30 Hz)",
                                   line=dict(color="rgba(100,150,255,0.5)", width=1)))
-        afig.add_trace(go.Scatter(x=_t, y=track["hires"]["onset"], mode="lines",
+        afig.add_trace(go.Scatter(x=_t, y=np.asarray(track["hires"]["onset"], dtype=float), mode="lines",
                                   name="Onset strength",
                                   line=dict(color="rgba(150,150,150,0.35)", width=1),
                                   visible="legendonly"))
@@ -2447,7 +2462,7 @@ def render_audio_simple(track: dict) -> None:
     fig = go.Figure()
     if track.get("hires"):
         _rate = float(track["hires"]["rate"])
-        fig.add_trace(go.Scatter(x=[i / _rate for i in range(len(track["hires"]["rms"]))], y=track["hires"]["rms"],
+        fig.add_trace(go.Scatter(x=np.arange(len(track["hires"]["rms"])) / _rate, y=np.asarray(track["hires"]["rms"], dtype=float),
                                  mode="lines", name="Energy", line=dict(color="rgba(100,150,255,0.55)", width=1),
                                  hoverinfo="skip"))
     else:
@@ -4965,10 +4980,10 @@ if matching_mode != "Choreography":
 fig = go.Figure()
 if track.get("hires"):
     _rate = float(track["hires"]["rate"])
-    _t = [i / _rate for i in range(len(track["hires"]["rms"]))]
-    fig.add_trace(go.Scatter(x=_t, y=track["hires"]["rms"], mode="lines", name="Track energy (30 Hz)",
+    _t = np.arange(len(track["hires"]["rms"])) / _rate
+    fig.add_trace(go.Scatter(x=_t, y=np.asarray(track["hires"]["rms"], dtype=float), mode="lines", name="Track energy (30 Hz)",
                               line=dict(color="rgba(100,150,255,0.5)", width=1)))
-    fig.add_trace(go.Scatter(x=_t, y=track["hires"]["onset"], mode="lines", name="Onset strength",
+    fig.add_trace(go.Scatter(x=_t, y=np.asarray(track["hires"]["onset"], dtype=float), mode="lines", name="Onset strength",
                               line=dict(color="rgba(150,150,150,0.35)", width=1), visible="legendonly"))
 else:
     fig.add_trace(go.Scatter(x=[e["time"] for e in track["energy_envelope"]],
