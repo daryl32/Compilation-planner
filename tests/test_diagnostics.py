@@ -97,3 +97,28 @@ def test_verdict():
     v = DG.verdict({**mem, "used": 1000, "swap_used": 0}, {"cores": 2, "load1": 3, "load5": 3, "load15": 3}, [], 90)
     kinds = [k for k, _ in v]
     assert kinds.count("warn") == 2 and any("CPU is overloaded" in t for _, t in v)
+
+
+def test_memory_history_counts_only_todays_clears(tmp_path):
+    """Clears at an old limit, or measured the old way, are kept apart (old_clears)."""
+    import library_common as LC
+    log = tmp_path / "memory.csv"
+    t = datetime.datetime.now().isoformat(timespec="seconds")
+    new = LC.CLEAR_NOTE.format(limit=3500)
+    log.write_text("time,where,memory_mb,note\n"
+                   f"{t},planner,1900,over 1800 MB: cleared caches and 2 held\n"
+                   f"{t},planner,3600,over 3500 MB: cleared caches and 0 held\n"
+                   f"{t},Reviewer,3600,{new}: cleared caches and 1 held media file(s) -> 900 MB\n")
+    h = DG.memory_history(7, path=log, clear_note=new)
+    assert h[0]["clears"] == 1 and h[0]["old_clears"] == 2 and "Reviewer" in h[0]["last_clear"]
+    assert DG.memory_history(7, path=log)[0]["clears"] == 3          # without a note: every clear
+
+
+def test_private_memory_leaves_out_mapped_files():
+    import library_common as LC
+    f = LC._status_mb("Name:\tpython\nVmRSS:\t 3600000 kB\nRssAnon:\t 900000 kB\nRssFile:\t 2690000 kB\n"
+                      "RssShmem:\t 10240 kB\n")
+    assert round(LC.private_mb(f)) == round((900000 + 10240) / 1024)
+    assert LC.private_mb({"VmRSS": 123.0}) == 123.0                     # older kernels
+    mb = LC.app_memory_mb()
+    assert mb is None or mb > 0

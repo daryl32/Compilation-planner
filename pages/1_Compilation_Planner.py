@@ -5,6 +5,7 @@ energy/beat timeline, with a live visualization and JSON export for the VSE add-
 
 import hashlib
 import inspect
+import io
 import json
 import math
 import os
@@ -117,14 +118,32 @@ from page_setup import (page_setup, push_file_with_oauth, APP_VERSION, drive_tok
                         OAUTH_AVAILABLE as _OAUTH_AVAILABLE, DRIVE_SESSION_KEY as _OAUTH_SESSION_KEY)
 page_setup("Compilation Planner", "pages/1_Compilation_Planner.py")
 _PAGE_T0 = time.perf_counter()   # 🩺 whole-page run time — see _record_page_run
+_PAGE_MARKS = [("start", _PAGE_T0)]
+SLOW_RUN_SEC = 0.5               # a full run slower than this also logs which parts took the time
+SLOW_PART_SEC = 0.1
+
+
+def _mark(part: str) -> None:
+    """🩺 The time since the previous mark went on `part` (see _record_page_run)."""
+    _PAGE_MARKS.append((part, time.perf_counter()))
 
 
 def _record_page_run() -> None:
     """🩺 How long this full run of the page took, for the Server page's timings
-    (fragment reruns and runs that stop early — e.g. no track yet — aren't counted)."""
+    (fragment reruns and runs that stop early — e.g. no track yet — aren't counted).
+    Logged per step ("Planner page: 3. Matching") as well as overall; a slow run also logs its
+    slow parts ("Planner part: block cards") so the Server page shows where the time went."""
     import diagnostics as _diag
-    _diag.record("Planner page (full run)", time.perf_counter() - _PAGE_T0,
-                 str(st.session_state.get("ui_section", ""))[:2].strip())
+    now = time.perf_counter()
+    total = now - _PAGE_T0
+    step = str(st.session_state.get("ui_section", ""))
+    _diag.record("Planner page (full run)", total, step[:2].strip())
+    _diag.record(f"Planner page: {step[2:].strip() or '?'}", total)
+    if total >= SLOW_RUN_SEC:
+        marks = _PAGE_MARKS + [("rest of the page", now)]
+        for (_, t_prev), (part, t) in zip(marks[:-1], marks[1:]):
+            if t - t_prev >= SLOW_PART_SEC:
+                _diag.record(f"Planner part: {part}", t - t_prev, step[:2].strip())
 # The background Drive sync timer may have pulled new catalogues/audio since
 # the caches were filled — reload them once if so.
 refresh_caches_after_sync()
@@ -1430,7 +1449,7 @@ RECOMMENDED_COUNT = 10   # how many best-matching videos are listed by default
 # Shared, not copied per call (cache_data handed every thumbnail crop its own full
 # copy of the sprite sheet). Only ever cropped, which makes a new small image.
 @shared_cache
-@st.cache_resource(max_entries=16, ttl=1800, show_spinner=False)
+@st.cache_resource(max_entries=6, ttl=1800, show_spinner=False)
 def load_timeline_sprite(sprite_path: str):
     """The whole per-video sprite sheet, loaded and cached once per video —
     cropping a specific tile from it (get_nearest_thumbnail) is cheap and
@@ -1485,17 +1504,42 @@ def get_nearest_thumbnail(catalogues: dict, video_id: str, clip_start_sec: float
     # the Windows laptop, or the Hetzner server), so it can point somewhere that doesn't
     # exist, or worse, somewhere unrelated, on whichever environment reads it back.
     sprite_path = CATALOGUE_DIR / "timeline_sprites" / f"{video_id}.jpg"
-    if not Path(sprite_path).exists():
+    try:
+        mtime = sprite_path.stat().st_mtime
+    except OSError:
         return None
-    sprite = load_timeline_sprite(str(sprite_path))
 
     tile_w, tile_h, columns, count, interval = (
         meta["tile_width"], meta["tile_height"], meta["columns"], meta["count"], meta["interval_sec"]
     )
     # ceil, not round: the nearest tile at-or-after clip_start_sec, never one before it.
     idx = min(count - 1, max(0, math.ceil(clip_start_sec / interval)))
-    r, c = divmod(idx, columns)
-    return sprite.crop((c * tile_w, r * tile_h, (c + 1) * tile_w, (r + 1) * tile_h))
+    # ⚡ The finished picture is kept (a few KB), so a page run never decodes a whole sprite sheet
+    # (tens of MB for a long video) or encodes the same tile again. JPEG at quality 100 — the bytes
+    # st.image itself makes from a PIL image, so what's shown is unchanged.
+    tiles = _tile_bytes()
+    key = (str(sprite_path), mtime, idx, tile_w, tile_h, columns)
+    got = tiles.get(key)
+    if got is None:
+        sprite = load_timeline_sprite(str(sprite_path))
+        r, c = divmod(idx, columns)
+        buf = io.BytesIO()
+        sprite.crop((c * tile_w, r * tile_h, (c + 1) * tile_w, (r + 1) * tile_h)).save(buf, format="JPEG", quality=100)
+        got = buf.getvalue()
+        if len(tiles) >= TILE_CACHE_MAX:
+            tiles.clear()
+        tiles[key] = got
+    return got
+
+
+TILE_CACHE_MAX = 6000      # ~50 MB of finished thumbnails
+
+
+@shared_cache
+@st.cache_resource
+def _tile_bytes() -> dict:
+    """(sprite file, modified time, tile …) → JPEG bytes of that tile, shared by every session."""
+    return {}
 
 
 def _usage_signature() -> tuple:
@@ -4080,6 +4124,7 @@ with st.container(key="stepstatus"):
         _col.caption(_txt)
 _BACK_FROM_VIDEOS = SECTION_STORY if _advanced else SECTION_AUDIO
 
+_mark("setup, track and settings")
 if ui_section == SECTION_AUDIO:
     render_track_picker()
     if not _advanced:
@@ -4094,12 +4139,14 @@ if ui_section == SECTION_AUDIO:
     with _ac[1]:
         render_split_screen_settings()
     render_audio_settings_section(track)
+    _mark("cutting dials and chart")
     step_nav(nxt=SECTION_STORY)
     _record_page_run()
     st.stop()
 
 if ui_section == SECTION_STORY:
     render_story_map_section(track)
+    _mark("story map")
     step_nav(back=SECTION_AUDIO, nxt=SECTION_VIDEOS)
     _record_page_run()
     st.stop()
@@ -4118,6 +4165,7 @@ if ui_section == SECTION_VIDEOS:
             st.session_state["video_time_ranges"] = {}
             st.rerun()
     render_video_selection_section(track, all_video_ids, all_tag_options, catalogues, simple=not _advanced)
+    _mark("video list")
     step_nav(back=_BACK_FROM_VIDEOS, nxt=SECTION_MATCH)
     _record_page_run()
     st.stop()
@@ -4629,6 +4677,7 @@ def chor_shown(eligible: list, planned_vids, n: int) -> list:
     return (first + [v for v in eligible if v not in planned_vids])[:max(n, len(first))]
 
 
+_mark("matching settings")
 if matching_mode == "Auto":
     # The shape search is real work, so the plan is remembered and only worked out
     # again when something that changes it changes (settings, videos, footage
@@ -4977,6 +5026,7 @@ if matching_mode != "Manual step-through":
 if matching_mode != "Choreography":
     chor_block = 0
 
+_mark("making the plan / mode screen")
 fig = go.Figure()
 if track.get("hires"):
     _rate = float(track["hires"]["rate"])
@@ -5047,6 +5097,7 @@ for _r in (_story_regions or []):
                       layer="below", annotation_text=f"{_role['emoji']} {_role['name']}",
                       annotation_position="top left", annotation_font_size=11)
 st.plotly_chart(fig, width="stretch")
+_mark("chart")
 
 # ---------------------------------------------------------------------------
 # Timeline table + thumbnails preview
@@ -6053,6 +6104,7 @@ for _entry in timeline:
         for _link in _slot["chain"]:
             _link["source_path"] = colab_to_local(catalogues[_link["video_id"]]["source_path"])
 
+_mark("block cards")
 export_plan = {
     "track_id": track_id,
     "matching_mode": matching_mode,
@@ -6240,6 +6292,7 @@ if _render_clicked:
         else:
             st.session_state["render_drive_note"] = ("info", f"Rendered {out_path.name}. Connect Google Drive (sidebar) "
                                                      f"to save renders there — then upload it from Media Library → Renders.")
+        st.session_state["preview_just_rendered"] = out_path.name      # opens its player below
         st.rerun()
     except Exception as e:
         st.error(f"Render failed: {e}")
@@ -6250,9 +6303,25 @@ _drive_note = st.session_state.pop("render_drive_note", None)
 if _drive_note:
     getattr(st, _drive_note[0])(_drive_note[1])
 
+def _toggle_preview_player(name: str) -> None:
+    """▶️ on a preview: show / hide its player — at most two at once (picking a third drops the oldest)."""
+    shown = [n for n in st.session_state.get("preview_players", []) if n != name]
+    if name not in st.session_state.get("preview_players", []):
+        shown = (shown + [name])[-2:]
+    st.session_state["preview_players"] = shown
+
+
+_mark("save, render and download")
 versions = existing_preview_versions()
 if versions:
-    st.caption(f"{len(versions)} preview(s) for this track — compare side by side below.")
+    # ⚡ A player is only made for the previews picked with ▶️: st.video given a file reads the whole
+    # video into the app's memory and fingerprints it on every run — every preview, every click.
+    if out_name := st.session_state.pop("preview_just_rendered", None):
+        st.session_state["preview_players"] = [n for n in st.session_state.get("preview_players", [])
+                                               if n != out_name][-1:] + [out_name]
+    _shown = [n for n in st.session_state.get("preview_players", []) if any(p.name == n for p in versions)]
+    st.session_state["preview_players"] = _shown
+    st.caption(f"{len(versions)} preview(s) for this track — ▶️ play one, or two to compare side by side.")
     cols_per_row = 2
     for row_start in range(0, len(versions), cols_per_row):
         row = versions[row_start:row_start + cols_per_row]
@@ -6262,8 +6331,13 @@ if versions:
                 _meta = load_render(path)
                 if _meta is None:
                     continue
-                show_render_player(_meta, height=300)
-                st.caption(path.name + ("  ·  ☁️ on Drive" if _meta.get("drive") else ""))
+                _on = path.name in _shown
+                st.button(("⏹ Hide " if _on else "▶️ Play ") + path.name, key=f"play_preview_{path.name}",
+                          on_click=_toggle_preview_player, args=(path.name,), width="stretch",
+                          type="primary" if _on else "secondary")
+                if _on:
+                    show_render_player(_meta, height=300)
+                st.caption(("☁️ on Drive" if _meta.get("drive") else "on the server only"))
                 if st.button("🗑️ Delete", key=f"delete_preview_{path.name}",
                              help="Deletes it from the server and moves the Google Drive copy to the Drive bin."):
                     _del_err = delete_render(path, drive_token())   # also its metadata and thumbnail

@@ -140,9 +140,11 @@ def _read_csv(path: Path) -> list:
     return rows
 
 
-def memory_history(days: int = 7, path: Path = None) -> list:
-    """[{"day", "peak_mb", "median_mb", "samples", "clears"}] for the last `days`
-    days, oldest first. clears = times the app cleared its caches at the limit."""
+def memory_history(days: int = 7, path: Path = None, clear_note: str = None) -> list:
+    """[{"day", "peak_mb", "median_mb", "samples", "clears", "old_clears", "last_clear"}] for the
+    last `days` days, oldest first. clears = times the app cleared its caches at the limit;
+    with clear_note, only clears whose note contains it (today's measure and limit) count —
+    the rest are old_clears."""
     path = path or MEMORY_LOG
     cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
     by_day: dict = {}
@@ -154,15 +156,21 @@ def memory_history(days: int = 7, path: Path = None) -> list:
             continue
         if t < cutoff:
             continue
-        d = by_day.setdefault(t.date().isoformat(), {"values": [], "clears": 0})
+        d = by_day.setdefault(t.date().isoformat(), {"values": [], "clears": 0, "old_clears": 0, "last_clear": None})
         d["values"].append(mb)
-        if "clear" in (r.get("note") or "").lower():
-            d["clears"] += 1
+        note = r.get("note") or ""
+        if "clear" in note.lower():
+            if clear_note is None or clear_note in note:
+                d["clears"] += 1
+                d["last_clear"] = f"{t:%a %H:%M} ({r.get('where') or '?'})"
+            else:
+                d["old_clears"] += 1
     out = []
     for day in sorted(by_day):
         v = sorted(by_day[day]["values"])
         out.append({"day": day, "peak_mb": v[-1], "median_mb": v[len(v) // 2], "samples": len(v),
-                    "clears": by_day[day]["clears"]})
+                    "clears": by_day[day]["clears"], "old_clears": by_day[day]["old_clears"],
+                    "last_clear": by_day[day]["last_clear"]})
     return out
 
 
