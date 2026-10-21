@@ -44,6 +44,14 @@ def q_escape(value: str) -> str:
     return str(value).replace("\\", "\\\\").replace("'", "\\'")
 
 
+def name_key(name: str) -> str:
+    """A file name for comparing: accents written either way count as the same ("Ã" can be one
+    character, or "A" plus a combining tilde — iPhones and Macs often save the second), and case
+    doesn't matter. Drive's own name search only finds exact matches."""
+    import unicodedata
+    return unicodedata.normalize("NFC", str(name)).casefold().strip()
+
+
 def _get_service():
     from googleapiclient.discovery import build
     from google.oauth2 import service_account
@@ -141,6 +149,9 @@ def _upload_file(service, local_path: Path, folder_id: str) -> None:
         fields="files(id)",
     ).execute(num_retries=DRIVE_RETRIES)
     existing = resp.get("files", [])
+    if not existing:      # the same name written another way (accents, case) — update it, don't add a twin
+        want = name_key(local_path.name)
+        existing = [f for f in _list_files(service, folder_id) if name_key(f.get("name", "")) == want]
 
     media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
 
@@ -390,7 +401,16 @@ def find_drive_file(drive_rel_path: str, service=None) -> tuple:
     ).execute(num_retries=DRIVE_RETRIES)
     files = resp.get("files", [])
     if not files:
-        return None, f"'{file_name}' not found in Drive folder '{parts[-2]}'"
+        # The same name written another way (accents, case)? Look through the folder.
+        listing = _list_files(service, parent_id)
+        want = name_key(file_name)
+        files = [f for f in listing if name_key(f.get("name", "")) == want]
+        if not files:
+            import difflib
+            close = difflib.get_close_matches(want, [name_key(f.get("name", "")) for f in listing], n=1, cutoff=0.8)
+            hint = next((f" — closest there: '{f['name']}' (renamed?)" for f in listing
+                         if close and name_key(f.get("name", "")) == close[0]), "")
+            return None, f"'{file_name}' not found in Drive folder '{parts[-2]}'{hint}"
     return files[0], None
 
 
