@@ -220,15 +220,66 @@ def build_summary(catalogue: dict) -> dict:
     }
 
 
+# ⚡ In-memory copies, so a re-ranking (another track, a tag, a weight) doesn't read and work
+# everything out again. Each is keyed on what it was made from (a file's modified time, or
+# the very track object), so a change shows up at once; each is capped.
+_MEMO_MAX = 4000
+_SUMMARY_MEMO: dict = {}      # (catalogue path, mtime) → summary
+_FEATURE_MEMO: dict = {}      # (catalogue path, mtime, range, tags) → video_features
+_TRACK_MEMO: dict = {}        # id(track) → (track, track_features)
+_USAGE_MEMO: dict = {}        # (file, mtime, size) → set of video ids
+
+
+def clear_memos() -> None:
+    for m in (_SUMMARY_MEMO, _FEATURE_MEMO, _TRACK_MEMO, _USAGE_MEMO):
+        m.clear()
+
+
+clear_memos.clear = clear_memos      # so library_common.shared_cache can clear them with the rest
+
+
+def _remember(memo: dict, key, value):
+    if len(memo) >= _MEMO_MAX:
+        memo.clear()
+    memo[key] = value
+    return value
+
+
 def load_summary(catalogue_dir: Path, video_id: str) -> dict | None:
     """The cached summary, rebuilt if the catalogue file is newer. None if the
-    catalogue can't be read."""
+    catalogue can't be read. Shared — read only."""
     cat_path = catalogue_dir / f"{video_id}.json"
-    cache = _summary_path(catalogue_dir, video_id)
     try:
         cat_mtime = cat_path.stat().st_mtime
     except OSError:
         return None
+    key = (str(cat_path), cat_mtime)
+    if key in _SUMMARY_MEMO:
+        return _SUMMARY_MEMO[key]
+    summary = _load_summary(catalogue_dir, video_id, cat_path, cat_mtime)
+    return _remember(_SUMMARY_MEMO, key, summary) if summary is not None else None
+
+
+def cached_video_features(catalogue_dir: Path, video_id: str, scenes_by_id: dict, time_range,
+                          tag_filter: tuple) -> dict | None:
+    """video_features for a video, kept until its catalogue file changes (the summary and the
+    scenes both come from it). Shared — read only."""
+    cat_path = catalogue_dir / f"{video_id}.json"
+    try:
+        cat_mtime = cat_path.stat().st_mtime
+    except OSError:
+        return None
+    key = (str(cat_path), cat_mtime, tuple(time_range) if time_range else None, tuple(tag_filter))
+    if key in _FEATURE_MEMO:
+        return _FEATURE_MEMO[key]
+    summary = load_summary(catalogue_dir, video_id)
+    if summary is None:
+        return None
+    return _remember(_FEATURE_MEMO, key, video_features(summary, scenes_by_id, time_range, tuple(tag_filter)))
+
+
+def _load_summary(catalogue_dir: Path, video_id: str, cat_path: Path, cat_mtime: float) -> dict | None:
+    cache = _summary_path(catalogue_dir, video_id)
     if cache.exists():
         try:
             with np.load(cache) as z:
@@ -258,6 +309,8 @@ def missing_summaries(catalogue_dir: Path, video_ids: list) -> list:
         cache = _summary_path(catalogue_dir, vid)
         try:
             cat_mtime = (catalogue_dir / f"{vid}.json").stat().st_mtime
+            if (str(catalogue_dir / f"{vid}.json"), cat_mtime) in _SUMMARY_MEMO:
+                continue                                  # ⚡ already in memory, so up to date
             with np.load(cache) as z:
                 if float(z["source_mtime"]) == cat_mtime:
                     continue
@@ -322,6 +375,13 @@ def video_features(summary: dict, scenes_by_id: dict, time_range, tag_filter: tu
 
 
 def track_features(track: dict) -> dict:
+    got = _TRACK_MEMO.get(id(track))
+    if got is not None and got[0] is track:      # the same (shared, read-only) track object
+        return got[1]
+    return _remember(_TRACK_MEMO, id(track), (track, _track_features(track)))[1]
+
+
+def _track_features(track: dict) -> dict:
     hires = track.get("hires") or {}
     if hires.get("rms"):
         rms = np.asarray(hires["rms"], dtype=float)
@@ -352,13 +412,25 @@ def recent_project_usage(projects_dir: Path) -> dict:
     except OSError:
         return usage
     for p in files[:RECENT_PROJECTS]:
-        try:
-            data = json.loads(p.read_text())
-        except (ValueError, OSError):
-            continue
-        for vid in set(data.get("committed_selected_videos") or []):
+        for vid in _file_videos(p, lambda data: set(data.get("committed_selected_videos") or [])):
             usage[vid] = usage.get(vid, 0) + 1
     return usage
+
+
+def _file_videos(p: Path, pick) -> set:
+    """The video ids pick(data) finds in a JSON file — read once per version of the file."""
+    try:
+        st = p.stat()
+    except OSError:
+        return set()
+    key = (str(p), st.st_mtime, st.st_size)
+    if key not in _USAGE_MEMO:
+        try:
+            vids = pick(json.loads(p.read_text()))
+        except (ValueError, OSError, AttributeError, TypeError):
+            vids = set()
+        _remember(_USAGE_MEMO, key, frozenset(vids))
+    return _USAGE_MEMO[key]
 
 
 def recent_render_usage(preview_dir: Path) -> dict:
@@ -371,13 +443,9 @@ def recent_render_usage(preview_dir: Path) -> dict:
     except OSError:
         return usage
     for p in files[:RECENT_RENDERS]:
-        try:
-            data = json.loads(p.read_text())
-        except (ValueError, OSError):
-            continue
-        for vid in {v.get("video_id") for v in data.get("videos") or [] if isinstance(v, dict)}:
-            if vid:
-                usage[vid] = usage.get(vid, 0) + 1
+        for vid in _file_videos(p, lambda data: {v.get("video_id") for v in data.get("videos") or []
+                                                 if isinstance(v, dict)} - {None, ""}):
+            usage[vid] = usage.get(vid, 0) + 1
     return usage
 
 

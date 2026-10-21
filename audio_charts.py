@@ -4,6 +4,7 @@ drops, bar lines, drum / chord / vocal curves) — shared by the Compilation
 Planner's charts and the Media Library. No Streamlit in here.
 """
 
+import numpy as np
 import plotly.graph_objects as go
 
 SECTION_SHADES = ["rgba(120,120,220,0.10)", "rgba(220,140,60,0.12)", "rgba(60,180,120,0.12)",
@@ -14,19 +15,36 @@ def section_shade(label: str) -> str:
     return SECTION_SHADES[(ord((label or "A")[0]) - ord("A")) % len(SECTION_SHADES)]
 
 
+def add_vrects(fig, rects: list) -> None:
+    """⚡ Many fig.add_vrect(...) at once — the same shapes and labels add_vrect makes (one
+    single-axis chart), added in one layout update. add_vrect re-processes every shape already on
+    the figure each time, so a dozen of them cost a noticeable part of a page run.
+    rects: [{"x0", "x1", "fillcolor", "opacity"?, "label"?, "label_size"?, "label_color"?}]."""
+    shapes, notes = [], []
+    for r in rects:
+        sh = {"type": "rect", "xref": "x", "yref": "y domain", "x0": r["x0"], "x1": r["x1"], "y0": 0, "y1": 1,
+              "fillcolor": r["fillcolor"], "line": {"width": 0}, "layer": "below"}
+        if r.get("opacity") is not None:
+            sh["opacity"] = r["opacity"]
+        shapes.append(sh)
+        if r.get("label"):
+            font = {k: v for k, v in (("size", r.get("label_size")), ("color", r.get("label_color"))) if v is not None}
+            notes.append({"text": r["label"], "x": r["x0"], "xref": "x", "y": 1, "yref": "y domain",
+                          "xanchor": "left", "yanchor": "top", "showarrow": False, **({"font": font} if font else {})})
+    if shapes:
+        fig.update_layout(shapes=[*fig.layout.shapes, *shapes], annotations=[*fig.layout.annotations, *notes])
+
+
 def add_analysis_overlays(fig, track: dict) -> None:
     """Sections (shaded + labelled), build-ups, drops, bar lines and the extra
     curves from the server analysis — most hidden until clicked in the legend."""
     a = track.get("analysis") or {}
     if not a:
         return
-    for sec in a.get("sections") or []:
-        fig.add_vrect(x0=sec["start"], x1=sec["end"], fillcolor=section_shade(sec["label"]),
-                      line_width=0, layer="below",
-                      annotation_text=sec["label"], annotation_position="top left",
-                      annotation_font_size=10, annotation_font_color="rgba(90,90,90,0.9)")
-    for b in a.get("builds") or []:
-        fig.add_vrect(x0=b["start"], x1=b["end"], fillcolor="rgba(250,200,0,0.10)", line_width=0, layer="below")
+    add_vrects(fig, [{"x0": sec["start"], "x1": sec["end"], "fillcolor": section_shade(sec["label"]),
+                      "label": sec["label"], "label_size": 10, "label_color": "rgba(90,90,90,0.9)"}
+                     for sec in a.get("sections") or []]
+               + [{"x0": b["start"], "x1": b["end"], "fillcolor": "rgba(250,200,0,0.10)"} for b in a.get("builds") or []])
     rate = float(a.get("rate", 30))
     curves = [("kick", "Kick", "rgba(200,60,40,0.6)"), ("snare", "Snare", "rgba(40,140,200,0.6)"),
               ("hat", "Hi-hat", "rgba(120,120,120,0.5)"), ("harmony", "Chord change", "rgba(60,170,90,0.7)"),
@@ -34,7 +52,7 @@ def add_analysis_overlays(fig, track: dict) -> None:
     for key, name, colour in curves:
         vals = a.get(key)
         if vals:
-            fig.add_trace(go.Scatter(x=[i / rate for i in range(len(vals))], y=vals, mode="lines", name=name,
+            fig.add_trace(go.Scatter(x=np.arange(len(vals)) / rate, y=np.asarray(vals, dtype=float), mode="lines", name=name,
                                      line=dict(color=colour, width=1), visible="legendonly"))
     xs, ys = [], []
     for t in a.get("downbeats") or []:
@@ -57,11 +75,11 @@ def track_figure(track: dict, height: int = 380) -> go.Figure:
     hires = track.get("hires") or {}
     if hires.get("rms"):
         rate = float(hires["rate"])
-        t = [i / rate for i in range(len(hires["rms"]))]
-        fig.add_trace(go.Scatter(x=t, y=hires["rms"], mode="lines", name="Energy",
+        t = np.arange(len(hires["rms"])) / rate
+        fig.add_trace(go.Scatter(x=t, y=np.asarray(hires["rms"], dtype=float), mode="lines", name="Energy",
                                  line=dict(color="rgba(100,150,255,0.7)", width=1)))
         if hires.get("onset"):
-            fig.add_trace(go.Scatter(x=t, y=hires["onset"], mode="lines", name="Onset strength",
+            fig.add_trace(go.Scatter(x=t, y=np.asarray(hires["onset"], dtype=float), mode="lines", name="Onset strength",
                                      line=dict(color="rgba(150,150,150,0.4)", width=1), visible="legendonly"))
     elif track.get("energy_envelope"):
         env = track["energy_envelope"]
@@ -80,10 +98,9 @@ def mini_figure(energy: list, duration: float, sections: list, drops: list, heig
     n = max(1, len(energy))
     fig.add_trace(go.Scatter(x=[duration * i / n for i in range(n)], y=energy, mode="lines",
                              line=dict(color="rgba(100,150,255,0.9)", width=1), hoverinfo="skip"))
-    for sec in sections or []:
-        fig.add_vrect(x0=sec["start"], x1=sec["end"], fillcolor=section_shade(sec["label"]), line_width=0,
-                      layer="below", annotation_text=sec["label"], annotation_position="top left",
-                      annotation_font_size=9, annotation_font_color="rgba(90,90,90,0.9)")
+    add_vrects(fig, [{"x0": sec["start"], "x1": sec["end"], "fillcolor": section_shade(sec["label"]),
+                      "label": sec["label"], "label_size": 9, "label_color": "rgba(90,90,90,0.9)"}
+                     for sec in sections or []])
     for d in drops or []:
         fig.add_vline(x=d, line=dict(color="rgba(220,40,40,0.8)", width=1, dash="dot"))
     fig.update_layout(height=height, margin=dict(t=0, b=0, l=0, r=0), showlegend=False,
