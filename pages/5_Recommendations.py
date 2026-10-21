@@ -238,7 +238,8 @@ def background_panel() -> None:
     night = J.nightly_status()
     if running:
         r = running[0]
-        head = f"⏳ Background searches — {r['label']} {100 * r.get('progress', 0):.0f}%"
+        head = (f"⏳ Background searches — {r['label']} {100 * r.get('progress', 0):.0f}%" if len(running) == 1
+                else f"⏳ Background searches — {len(running)} running at once")
         if queued:
             head += f" · {len(queued)} queued"
     elif queued:
@@ -249,7 +250,8 @@ def background_panel() -> None:
         st.caption("Every night at 04:45 the server searches the tracks whose plans are out of date (new or "
                    "changed videos, ranges, actors, roles or story maps) with the default settings — "
                    f"{DEFAULT_VIDEOS} videos, normal order — then builds the 🆕 new-video spotlights. Audio "
-                   "analysis always goes first; only one heavy job runs at a time.")
+                   f"analysis always goes first; up to {J.worker_count()} searches run side by side (each in its own process, "
+                   "at low priority so the app stays quick).")
         if night:
             st.caption(f"Last nightly run: {_ago(night.get('started'))} — {night.get('queued_tracks', 0)} track(s), "
                        f"{night.get('queued_spotlights', 0)} spotlight(s).")

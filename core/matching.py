@@ -25,7 +25,7 @@ import core.picking as CPICK
 from core.footage import carve_span, consume_span, get_candidate_spans, has_role, role_scarcity
 from core.picking import _stable_random_unit, position_closeness, repeat_fallback_videos, select_autofill_picks
 from core.segmentation import clips_for_intensity
-from core.shape import find_best_shape_window, get_block_audio_curve
+from core.shape import find_best_shape_window, get_block_audio_curve, prepare_audio
 
 
 @dataclass
@@ -168,6 +168,7 @@ def find_shape_candidates(
     video_curves_cache = {}  # video_id -> {scene_id: curve}, fetched at most once per call, not per span
 
     search_spans = get_candidate_spans(queues, sequential, global_excluded, min_duration=block_duration)
+    audio_ready = prepare_audio(audio_curve)    # the block's music curve, resampled once for every span
     span_limit = {}   # (video, scene) -> seconds of this span the search may reach (restrict_to_front)
     if restrict_to_front and sequential:
         # The skip budget counts windows across the WHOLE video (not just its front
@@ -249,7 +250,7 @@ def find_shape_candidates(
         # find_best_shape_window), not just every SHAPE_SEARCH_STEP_SEC —
         # faster AND exhaustive rather than a speed/precision compromise.
         best_score, best_offset = find_best_shape_window(
-            values[span_start_frame:search_end_frame], window_frames, audio_curve, bias=bias
+            values[span_start_frame:search_end_frame], window_frames, audio_ready, bias=bias
         )
         best_start_frame = span_start_frame + best_offset
         # Frame rounding can put the window a fraction outside the span; keep it inside.

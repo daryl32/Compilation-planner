@@ -6,19 +6,28 @@ Pure functions. Moved unchanged from the planner page."""
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import numpy as np
 
 
 SHAPE_MATCH_POINTS = 40      # both curves are resampled to this many points before comparing
 
 
+@lru_cache(maxsize=512)
+def _grid(n: int) -> np.ndarray:
+    """np.linspace(0, 1, n), made once per length (it's asked for tens of thousands of times
+    in a recommendation search). Read-only, so a cached copy can't be changed by a caller."""
+    g = np.linspace(0, 1, n)
+    g.flags.writeable = False
+    return g
+
+
 def resample_curve(values, n_points: int) -> np.ndarray:
     values = np.asarray(values, dtype=float)
     if len(values) < 2:
         return np.full(n_points, float(values[0]) if len(values) else 0.0)
-    x_old = np.linspace(0, 1, len(values))
-    x_new = np.linspace(0, 1, n_points)
-    return np.interp(x_new, x_old, values)
+    return np.interp(_grid(n_points), _grid(len(values)), values)
 
 
 def shape_score(curve_a, curve_b, n_points: int = SHAPE_MATCH_POINTS) -> float:
@@ -36,6 +45,7 @@ def shape_score(curve_a, curve_b, n_points: int = SHAPE_MATCH_POINTS) -> float:
     return float(np.corrcoef(a, b)[0, 1])
 
 
+@lru_cache(maxsize=512)
 def _make_interp_matrix(src_len: int, n_points: int) -> np.ndarray:
     """Precomputed linear-interpolation weights: resampling any uniformly-
     sampled src_len-point signal to n_points is a FIXED linear combination —
@@ -45,9 +55,11 @@ def _make_interp_matrix(src_len: int, n_points: int) -> np.ndarray:
     windows stacked as rows) instead of calling np.interp per window.
     Verified to reproduce np.interp's own output exactly."""
     if src_len < 2:
-        return np.ones((n_points, max(src_len, 1)))
-    x_old = np.linspace(0, 1, src_len)
-    x_new = np.linspace(0, 1, n_points)
+        W = np.ones((n_points, max(src_len, 1)))
+        W.flags.writeable = False
+        return W
+    x_old = _grid(src_len)
+    x_new = _grid(n_points)
     idx = np.clip(np.searchsorted(x_old, x_new, side="right") - 1, 0, src_len - 2)
     x0, x1 = x_old[idx], x_old[idx + 1]
     frac = np.where(x1 > x0, (x_new - x0) / (x1 - x0), 0.0)
@@ -55,7 +67,18 @@ def _make_interp_matrix(src_len: int, n_points: int) -> np.ndarray:
     rows = np.arange(n_points)
     W[rows, idx] += 1 - frac
     W[rows, idx + 1] += frac
+    W.flags.writeable = False      # cached (lru_cache): the same weights for every window of this length
     return W
+
+
+class PreparedAudio(tuple):
+    """(centred resampled curve, its std, n_points) — a block's music curve made ready once for
+    the many find_best_shape_window calls of one search (prepare_audio)."""
+
+
+def prepare_audio(audio_curve, n_points: int = SHAPE_MATCH_POINTS) -> PreparedAudio:
+    audio_r = resample_curve(audio_curve, n_points)
+    return PreparedAudio((audio_r - audio_r.mean(), audio_r.std(), n_points))
 
 
 def find_best_shape_window(values: np.ndarray, window_frames: int, audio_curve: np.ndarray,
@@ -77,9 +100,10 @@ def find_best_shape_window(values: np.ndarray, window_frames: int, audio_curve: 
     W = _make_interp_matrix(window_frames, n_points)
     resampled = windows @ W.T  # (n_positions, n_points)
 
-    audio_r = resample_curve(audio_curve, n_points)
-    audio_c = audio_r - audio_r.mean()
-    audio_std = audio_r.std()
+    if isinstance(audio_curve, PreparedAudio) and audio_curve[2] == n_points:
+        audio_c, audio_std, _ = audio_curve
+    else:
+        audio_c, audio_std, _ = prepare_audio(audio_curve, n_points)
 
     row_mean = resampled.mean(axis=1, keepdims=True)
     row_std = resampled.std(axis=1)

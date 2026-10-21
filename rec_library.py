@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -91,7 +92,7 @@ def _save_print(vp, key: str) -> None:
         arrays = {"key": np.array(key), "scale": np.array(vp.scale), "lengths": np.array(sorted(vp.by_len))}
         for L, (z, lv) in vp.by_len.items():
             arrays[f"z_{L:g}"], arrays[f"l_{L:g}"] = z, lv
-        tmp = _print_file(vp.video_id).with_suffix(".tmp.npz")
+        tmp = _print_file(vp.video_id).with_suffix(f".{os.getpid()}.tmp.npz")   # several searches may write at once
         np.savez(tmp, **arrays)
         tmp.replace(_print_file(vp.video_id))
     except OSError:
@@ -286,7 +287,7 @@ def save_results(data: dict) -> None:
     try:
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         p = _results_path(data["track_id"], data["n_videos"], data["sequential"])
-        tmp = p.with_suffix(".tmp")
+        tmp = p.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(data))
         tmp.replace(p)
     except OSError:
