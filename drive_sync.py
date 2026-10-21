@@ -33,6 +33,11 @@ DRIVE_SCENE_LABELING = "scene-labeling"
 SYNC_WORKERS = 8
 
 
+# Google Drive sometimes answers a request with a passing "500 Unknown Error" (or 429 / 503).
+# Reads and in-place updates are tried again up to this many times, waiting a little longer
+# each time (googleapiclient's own back-off); creating a file isn't, so it can't be made twice.
+DRIVE_RETRIES = 4
+
 def q_escape(value: str) -> str:
     """Escape a value for a Drive search query (q=…name='…'): backslashes and
     single quotes must be backslash-escaped, e.g. "Movin' To The Sun"."""
@@ -53,7 +58,7 @@ def _find_folder(service, name: str, parent_id: str = None) -> str | None:
     q = f"name='{q_escape(name)}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
     if parent_id:
         q += f" and '{parent_id}' in parents"
-    resp = service.files().list(q=q, fields="files(id, name)").execute()
+    resp = service.files().list(q=q, fields="files(id, name)").execute(num_retries=DRIVE_RETRIES)
     files = resp.get("files", [])
     return files[0]["id"] if files else None
 
@@ -70,7 +75,7 @@ def _find_folders(service, name: str, parent_id: str = None) -> list[dict]:
     out, page_token = [], None
     while True:
         resp = service.files().list(q=q, fields="nextPageToken, files(id, name, createdTime)",
-                                    pageSize=1000, pageToken=page_token).execute()
+                                    pageSize=1000, pageToken=page_token).execute(num_retries=DRIVE_RETRIES)
         out.extend(resp.get("files", []))
         page_token = resp.get("nextPageToken")
         if not page_token:
@@ -85,7 +90,7 @@ def _list_subfolders(service, folder_id: str) -> list[dict]:
         resp = service.files().list(
             q=f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
             fields="nextPageToken, files(id, name, createdTime)", pageSize=1000, pageToken=page_token,
-        ).execute()
+        ).execute(num_retries=DRIVE_RETRIES)
         out.extend(resp.get("files", []))
         page_token = resp.get("nextPageToken")
         if not page_token:
@@ -103,7 +108,7 @@ def _list_files(service, folder_id: str) -> list[dict]:
             fields="nextPageToken, files(id, name, modifiedTime, createdTime, size)",
             pageSize=1000,
             pageToken=page_token,
-        ).execute()
+        ).execute(num_retries=DRIVE_RETRIES)
         results.extend(resp.get("files", []))
         page_token = resp.get("nextPageToken")
         if not page_token:
@@ -120,7 +125,7 @@ def _download_file(service, file_id: str, dest_path: Path) -> None:
         downloader = MediaIoBaseDownload(f, request)
         done = False
         while not done:
-            _, done = downloader.next_chunk()
+            _, done = downloader.next_chunk(num_retries=DRIVE_RETRIES)
 
 
 def _upload_file(service, local_path: Path, folder_id: str) -> None:
@@ -134,7 +139,7 @@ def _upload_file(service, local_path: Path, folder_id: str) -> None:
     resp = service.files().list(
         q=f"name='{q_escape(local_path.name)}' and '{folder_id}' in parents and trashed=false",
         fields="files(id)",
-    ).execute()
+    ).execute(num_retries=DRIVE_RETRIES)
     existing = resp.get("files", [])
 
     media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
@@ -143,7 +148,7 @@ def _upload_file(service, local_path: Path, folder_id: str) -> None:
         service.files().update(
             fileId=existing[0]["id"],
             media_body=media,
-        ).execute()
+        ).execute(num_retries=DRIVE_RETRIES)
     else:
         service.files().create(
             body={"name": local_path.name, "parents": [folder_id]},
@@ -382,7 +387,7 @@ def find_drive_file(drive_rel_path: str, service=None) -> tuple:
     resp = service.files().list(
         q=f"name='{q_escape(file_name)}' and '{parent_id}' in parents and trashed=false",
         fields="files(id, name, size)",
-    ).execute()
+    ).execute(num_retries=DRIVE_RETRIES)
     files = resp.get("files", [])
     if not files:
         return None, f"'{file_name}' not found in Drive folder '{parts[-2]}'"
@@ -466,7 +471,7 @@ def download_source_video(drive_rel_path: str, dest: Path, progress_callback=Non
             downloader = MediaIoBaseDownload(f, request, chunksize=32 * 1024 * 1024)
             done = False
             while not done:
-                status, done = downloader.next_chunk()
+                status, done = downloader.next_chunk(num_retries=DRIVE_RETRIES)
                 if progress_callback and status:
                     progress_callback(status.progress())
         tmp.replace(dest)
@@ -499,7 +504,7 @@ def list_drive_audio(folder_path: str = "Audio-Library") -> tuple:
             resp = service.files().list(
                 q=f"'{fid}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
                 fields="files(id, name)", pageSize=1000,
-            ).execute()
+            ).execute(num_retries=DRIVE_RETRIES)
             for sub in resp.get("files", []):
                 stack.append((sub["id"], f"{rel}/{sub['name']}"))
         return sorted(out, key=lambda f: f["rel"].lower()), None
