@@ -42,7 +42,7 @@ import library_common as LC
 def render_diagnostics() -> None:
     st.subheader("🩺 Diagnostics")
     mem, cpu_info = DG.system_memory(), DG.cpu()
-    history = DG.memory_history(7)
+    history = DG.memory_history(7, clear_note=LC.CLEAR_NOTE.format(limit=LC.MEMORY_LIMIT_MB))
     try:
         disk_pct = SG.disk_usage()["pct"]
     except Exception:
@@ -85,8 +85,15 @@ def render_diagnostics() -> None:
             df.columns = ["Peak MB", "Typical MB"]
             st.bar_chart(df, stack=False, height=220)
             clears = sum(d["clears"] for d in history)
+            old = sum(d.get("old_clears", 0) for d in history)
+            last = next((d["last_clear"] for d in reversed(history) if d.get("last_clear")), None)
             if clears:
-                st.caption(f"Hit the {LC.MEMORY_LIMIT_MB:,.0f} MB limit and cleared caches {clears} time(s).")
+                st.caption(f"Hit the {LC.MEMORY_LIMIT_MB:,.0f} MB limit and cleared caches {clears} time(s) — "
+                           + ", ".join(f"{d['day'][5:]}: {d['clears']}" for d in history if d["clears"])
+                           + (f". Last: {last}." if last else "."))
+            if old:
+                st.caption(f"{old} earlier clear(s) this week don't count: they were at the old 1,800 MB limit "
+                           "or measured the old way (memory-mapped curve files included).")
         timings = DG.timing_summary(7)
         if timings:
             st.markdown("**How long things take** (last 7 days, seconds)")
@@ -207,6 +214,7 @@ with st.container(border=True):
             rows.append(("📝 Open pages' working data", br["sessions"],
                          "Everything each open page (yours and other tabs) is holding — planner progress etc."))
         known = sum(r[1] for r in rows)
+        mapped = LC.app_mapped_mb()
         rows.append(("⚙️ The app itself & memory not yet handed back", max(mb - known, 0.0),
                      "Python, its libraries, and memory freed but not yet returned to the server. "
                      "Only ♻️ Restart brings this right down."))
@@ -215,6 +223,13 @@ with st.container(border=True):
             rc[0].markdown(f"**{label}**")
             rc[1].markdown(f"{size:,.0f} MB")
             rc[2].caption(note)
+        if mapped:
+            rc = st.columns([3, 1, 4])
+            rc[0].markdown("📄 *Files read straight from disk (not counted)*")
+            rc[1].markdown(f"*{mapped:,.0f} MB*")
+            rc[2].caption("Motion-curve cache files the app reads in place. They show in the server's memory "
+                          "figures, but the system drops them by itself when it needs the room — so they don't "
+                          "count towards the limit.")
         if not deep and st.button("📏 Also measure the open pages' working data",
                                   help="Walks every open page's data — can take a few seconds."):
             st.session_state["srv_mem_deep"] = True

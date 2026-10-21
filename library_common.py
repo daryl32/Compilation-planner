@@ -580,20 +580,52 @@ def clear_shared_data_caches() -> None:
 # the freed memory back — the page just reloads its data on the next click.
 
 MEMORY_LIMIT_MB = float(getattr(config, "MEMORY_LIMIT_MB", 1800))
+# How a clear is written in the memory log. The Server page counts only clears written this way at
+# today's limit — older ones (VmRSS, or the 1800 MB limit before the 8 GB upgrade) don't apply now.
+CLEAR_NOTE = "own memory over {limit:.0f} MB"
 MEMORY_LOG = CATALOGUE_DIR.parent / "logs" / "memory.csv"
 _MEMORY_LOG_MAX_BYTES = 2_000_000
 
 
+def _status_mb(text: str) -> dict:
+    """{"VmRSS", "RssAnon", "RssFile", "RssShmem"} in MB from /proc/<pid>/status text."""
+    out = {}
+    for line in text.splitlines():
+        key = line.split(":", 1)[0]
+        if key in ("VmRSS", "RssAnon", "RssFile", "RssShmem"):
+            try:
+                out[key] = int(line.split()[1]) / 1024
+            except (IndexError, ValueError):
+                pass
+    return out
+
+
+def private_mb(fields: dict):
+    """The memory this app really holds: its own (anonymous + shared) pages. Not VmRSS — that
+    also counts files it has read through memory-mapping (the motion-curve cache), pages the
+    system can drop at any moment; a long planner session pushed VmRSS past the limit and
+    cleared the caches for nothing (21 Oct 2026). Falls back to VmRSS on older kernels."""
+    if "RssAnon" in fields:
+        return fields["RssAnon"] + fields.get("RssShmem", 0.0)
+    return fields.get("VmRSS")
+
+
 def app_memory_mb():
-    """This app's resident memory in MB (Linux), or None elsewhere."""
+    """This app's own memory in MB (private_mb — what the limit is about), or None off Linux."""
     try:
         with open("/proc/self/status") as f:
-            for line in f:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) / 1024
-    except (OSError, ValueError, IndexError):
-        pass
-    return None
+            return private_mb(_status_mb(f.read()))
+    except OSError:
+        return None
+
+
+def app_mapped_mb():
+    """Files the app has read through memory-mapping, in MB (shown, never counted), or None."""
+    try:
+        with open("/proc/self/status") as f:
+            return _status_mb(f.read()).get("RssFile")
+    except OSError:
+        return None
 
 
 @st.cache_resource
@@ -718,7 +750,8 @@ def memory_check(where: str):
         state["last_clear"] = _time.time()
         freed = free_shared_memory()
         after = app_memory_mb() or mb
-        note = f"over {MEMORY_LIMIT_MB:.0f} MB: cleared caches and {freed['media_files']} held media file(s) -> {after:.0f} MB"
+        note = (f"{CLEAR_NOTE.format(limit=MEMORY_LIMIT_MB)}: cleared caches and {freed['media_files']} held "
+                f"media file(s) -> {after:.0f} MB")
         mb = after
     now = _time.time()
     if note or abs(mb - state["last_mb"]) >= 25 or now - state["last_time"] >= 300:
