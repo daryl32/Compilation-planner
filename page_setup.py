@@ -297,8 +297,10 @@ def _sync_now() -> None:
     if not available:
         st.caption("Drive sync unavailable — no service account credentials on this machine.")
         return
-    st.caption("Catalogues, audio, thumbnails, sprites and preview copies sync from Drive "
-               "automatically every 12 hours. Sync now to pull straight away after processing in Colab.")
+    st.caption("Catalogues, audio, thumbnails, sprites and preview copies sync from Drive when you press "
+               "Sync now (there's no automatic sync) — e.g. after processing new videos or tracks.")
+    _last_sync_line()
+    _old_timer_notice()
     if st.button("🔄 Sync now", key="drive_sync_btn", width="stretch"):
         bar = st.progress(0.0, text="Starting sync…")
 
@@ -318,6 +320,58 @@ def _sync_now() -> None:
             st.success(f"Synced {result['synced']} file(s), skipped {result['skipped']} unchanged.")
             st.cache_data.clear()
             clear_shared_data_caches()
+
+
+def _last_sync_line() -> None:
+    """When Drive was last synced and what it brought — under the Sync now button."""
+    try:
+        from auto_sync import read_sync_status
+        from library_common import sync_time_text
+        status = read_sync_status()
+        if not status.get("finished_at"):
+            st.caption("🕒 Last sync: never on this copy.")
+            return
+        line = f"🕒 Last sync: **{sync_time_text(status['finished_at'])}** — {status.get('synced', 0)} file(s) " \
+               f"updated"
+        if status.get("errors"):
+            line += f", {len(status['errors'])} error(s)"
+        st.caption(line + ".")
+    except Exception:
+        pass  # informational only
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _old_sync_timer_on() -> bool:
+    """True while the server's old 12-hourly sync timer (mediaplanner-sync.timer) is still
+    switched on. Drive now syncs only on 🔄 Sync now."""
+    import os
+    import shutil
+    import subprocess
+    if os.name != "posix" or shutil.which("systemctl") is None:
+        return False
+    try:
+        proc = subprocess.run(["systemctl", "is-enabled", "mediaplanner-sync.timer"],
+                              capture_output=True, text=True, timeout=5)
+        return proc.stdout.strip() in ("enabled", "enabled-runtime")
+    except Exception:
+        return False
+
+
+def _old_timer_notice() -> None:
+    """One-time clean-up: offer to switch off the old automatic sync timer on the server."""
+    if IS_TEST or not _old_sync_timer_on():
+        return
+    st.warning("The old automatic 12-hour sync timer is still switched on on the server.")
+    if st.button("🛑 Switch off automatic sync", key="drive_sync_timer_off", width="stretch"):
+        import subprocess
+        proc = subprocess.run(["systemctl", "disable", "--now", "mediaplanner-sync.timer"],
+                              capture_output=True, text=True)
+        _old_sync_timer_on.clear()
+        if proc.returncode == 0:
+            st.success("Automatic sync switched off — Drive now syncs only when you press 🔄 Sync now.")
+        else:
+            st.error("Couldn't switch it off: " + (proc.stderr or proc.stdout or "systemctl failed").strip()
+                     + " — on the server run: sudo systemctl disable --now mediaplanner-sync.timer")
 
 
 def _server_panel(mb) -> None:

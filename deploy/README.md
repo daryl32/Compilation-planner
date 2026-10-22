@@ -8,7 +8,7 @@
 | Data | `/root/data` | `/root/data-dev` (copy; videos, audio and preview copies shared) |
 | Service | `mediaplanner` (port 8501) | `mediaplanner-dev` (port 8502) |
 | Google Drive | reads and writes | reads only (writes switched off) |
-| Background sync | every 12 h (`mediaplanner-sync.timer`) | none — refresh by hand |
+| Drive sync | 🔄 Sync now only (no timer) | none — refresh by hand |
 
 A push to `main` deploys production; a push to `dev` deploys the test copy
 (`/root/webhook.py`, from `deploy/webhook.py`). Other branches are ignored.
@@ -26,7 +26,8 @@ A push to `main` deploys production; a push to `dev` deploys the test copy
   a switched-off copy shows a page with links instead of 502 (safe to re-run).
 - `setup_dev.sh` — one-time setup of the test copy (safe to re-run).
 - `refresh_dev_data.sh` — replace the test copy's data with a fresh copy of production's.
-- `install_timers.sh` — production's Drive sync, nightly preview-copy and nightly 🔮 recommendation-search timers.
+- `install_timers.sh` — production's nightly preview-copy and nightly 🔮 recommendation-search timers
+  (and removes the old 12-hourly Drive sync timer — Drive syncs only on 🔄 Sync now).
 
 ## Handy commands
 ```

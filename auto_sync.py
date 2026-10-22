@@ -1,7 +1,7 @@
 """
 Drive → server sync with a recorded result, so every page can show
-"Drive synced N min ago". Run by the mediaplanner-sync systemd timer
-(see deploy/) and by the planner's "Sync now" button.
+"Last Drive sync: …". Run by the sidebar's 🔄 Sync now button (there's no
+automatic timer any more), or by hand on the server.
 
 Usage:
     python auto_sync.py

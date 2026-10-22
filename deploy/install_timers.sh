@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Installs three systemd timers on the server (run once, as root; safe to re-run):
-#   mediaplanner-sync     — Drive → server sync every 12 hours (auto_sync.py)
+# Installs two systemd timers on the server (run once, as root; safe to re-run):
 #   mediaplanner-proxies  — nightly fast-preview copies at 03:30 (make_proxies.py)
 #   mediaplanner-recs     — nightly 🔮 recommendation searches at 04:45, only what's changed (jobs.py)
+# Drive → server sync has no timer any more (Oct 2026): it runs only from the app's 🔄 Sync now
+# button (auto_sync.py). Re-running this switches off and removes the old 12-hourly sync timer.
 #
 #   sudo bash /root/Compilation-planner/deploy/install_timers.sh
 #
@@ -24,31 +25,11 @@ PYTHON="${PYTHON:-$(command -v python3)}"
 echo "App dir: $APP_DIR"
 echo "Python:  $PYTHON"
 
-cat > /etc/systemd/system/mediaplanner-sync.service <<UNIT
-[Unit]
-Description=Media Planner: sync catalogues from Google Drive
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-WorkingDirectory=$APP_DIR
-ExecStart=$PYTHON $APP_DIR/auto_sync.py
-TimeoutStartSec=20min
-UNIT
-
-cat > /etc/systemd/system/mediaplanner-sync.timer <<UNIT
-[Unit]
-Description=Media Planner: Drive sync every 12 hours
-
-[Timer]
-OnBootSec=2min
-OnUnitInactiveSec=12h
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-UNIT
+# The old 12-hourly Drive sync timer — switched off and removed (sync is manual now).
+if systemctl list-unit-files mediaplanner-sync.timer --no-legend 2>/dev/null | grep -q mediaplanner-sync; then
+  systemctl disable --now mediaplanner-sync.timer || true
+fi
+rm -f /etc/systemd/system/mediaplanner-sync.timer /etc/systemd/system/mediaplanner-sync.service
 
 cat > /etc/systemd/system/mediaplanner-proxies.service <<UNIT
 [Unit]
@@ -101,9 +82,7 @@ WantedBy=timers.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now mediaplanner-sync.timer mediaplanner-proxies.timer mediaplanner-recs.timer
-systemctl start mediaplanner-sync.service || true
+systemctl enable --now mediaplanner-proxies.timer mediaplanner-recs.timer
 echo
 systemctl list-timers 'mediaplanner-*' --no-pager
 echo
-journalctl -u mediaplanner-sync.service -n 5 --no-pager

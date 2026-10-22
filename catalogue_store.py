@@ -103,6 +103,7 @@ def _slim_video(stem: str, cat: dict, mtime: float) -> dict:
             "outro": bool(s.get("outro_candidate")),
             "roles": _roles(s),
             "reviewed": bool(s.get("reviewed")),
+            "roles_reviewed": bool(s.get("roles_reviewed")),
             "thumb": Path(thumbs[0]).name if thumbs else None,
             "motion": s.get("motion_intensity"),
             "has_curve": bool((s.get("motion_curve") or {}).get("values")),
