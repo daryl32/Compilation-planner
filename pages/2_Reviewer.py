@@ -1243,6 +1243,18 @@ def scene_card(sid, trimmed_to) -> None:
 
 
 QUICK_PAGE = 36   # pictures per page in quick role marking
+# Cards per row in quick role marking: 6 with a mouse / trackpad (laptop), 5 on a touch screen wider than a
+# phone (iPad — its width overlaps a laptop's, so "touch" tells them apart), 1 on a phone.
+QUICK_GRID_CSS = (
+    ".st-key-rev_qr_grid {display:grid!important;grid-template-columns:repeat(6,minmax(0,1fr));gap:1rem;"
+    "align-items:start}"
+    ".st-key-rev_qr_grid>div {width:auto!important;min-width:0}"
+    "@media (hover:none) and (pointer:coarse) {.st-key-rev_qr_grid {grid-template-columns:repeat(5,minmax(0,1fr))}}"
+    "@media (max-width:640px) {.st-key-rev_qr_grid {grid-template-columns:minmax(0,1fr)}}"
+    # ✂️ ⚡ 🚫 under each picture: no side padding, so the icon still shows on a narrow card
+    "[class*='st-key-rev_qr_card_'] [data-testid='stColumn'] button {padding-left:0!important;"
+    "padding-right:0!important;min-width:0!important}"
+    "[class*='st-key-rev_qr_card_'] [data-testid='stHorizontalBlock'] {gap:.35rem}")
 
 
 def _qr_page_key() -> str:
@@ -1349,7 +1361,7 @@ def _qr_save(changed: list) -> None:
 def quick_role_grid(ids: list) -> None:
     """🎭 Quick role marking — every role as a button on each picture: tap to add or
     remove it. Clicks only rerun this grid; 💾 Save writes them all at once."""
-    st.markdown('<div id="rev-qr-top"></div>', unsafe_allow_html=True)
+    st.markdown('<div id="rev-qr-top"></div><style>' + QUICK_GRID_CSS + '</style>', unsafe_allow_html=True)
     changed = _qr_changed()
     n_pages = (len(ids) - 1) // QUICK_PAGE + 1
     pk = _qr_page_key()
@@ -1383,13 +1395,13 @@ def quick_role_grid(ids: list) -> None:
                  help="Calmest fifth of this video's scenes → 🌙 Slow, busiest fifth → 💥 Action.")
 
     ver = _qr_ver()
-    per_row = 6
-    for i in range(0, len(page_ids), per_row):
-        cols = st.columns(per_row)
-        for col, sid in zip(cols, page_ids[i:i + per_row]):
+    # One grid of cards (not rows of st.columns) so CSS sets how many fit a row: 6 with a mouse /
+    # trackpad, 5 on a touch tablet (iPad), 1 on a phone — see QUICK_GRID_CSS.
+    with st.container(key="rev_qr_grid"):
+        for sid in page_ids:
             sc = scene_by_id[sid]
             cur = _qr_roles(sid)
-            with col.container(border=True):
+            with st.container(border=True, key=f"rev_qr_card_{sid}"):
                 paths = sc.get("thumbnail_paths") or []
                 tp = thumbs_dir / Path(paths[0]).name if paths else None
                 if tp is not None and image_ok(tp):
