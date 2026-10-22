@@ -45,7 +45,7 @@ SEEN_FILE = RESULTS_DIR / "seen_videos.json"
 CHECKS_DIR = BASE_DIR / "checks"         # ⚡ matcher runs kept from the last search of each track
 HASHES_FILE = BASE_DIR / "file_hashes.json"
 DEFAULT_VIDEOS = 4
-RESULTS_VERSION = 5          # bump when what's stored changes (older results are searched again)
+RESULTS_VERSION = 6          # bump when what's stored changes (older results are searched again)
 PRINTS_VERSION = 1           # bump when fingerprints change
 NEW_DAYS = 14                # a video counts as new (🆕 spotlight) for this many days
 SPOTLIGHT_TRACKS = 3         # ready-made plans per new video
@@ -147,19 +147,55 @@ def _thumb_for(stored, vid):
     return CATALOGUE_DIR / "thumbnails" / vid / Path(stored).name
 
 
+# ⚡ Library-wide data that's the same for every track (role footage, "find similar", scene
+# roles, durations): worked out once and kept while the library is unchanged — the nightly
+# worker reads them before it starts its searches, so every search process inherits them.
+_LIB_MEMO: dict = {}
+
+
+def _lib_key():
+    """Changes whenever a catalogue or the library file (ranges, actors) changes."""
+    import library_common as LC
+    try:
+        meta = LC.LIBRARY_META_FILE.stat().st_mtime_ns
+    except (OSError, AttributeError):
+        meta = None
+    return CStore.all_catalogues(), meta     # the catalogues dict is replaced whenever one changes
+
+
+def _lib_memo(name: str, fn):
+    key = _lib_key()
+    got = _LIB_MEMO.get(name)
+    if got is None or got[0][0] is not key[0] or got[0][1] != key[1]:
+        got = _LIB_MEMO[name] = (key, fn())
+    return got[1]
+
+
+def warm_library_data() -> None:
+    """Work out the shared library data now (before forking search processes)."""
+    role_seconds()
+    scene_roles_lookup()
+    similar_finder()
+    _durations()
+
+
 def role_seconds() -> dict:
     """{video_id: {role: seconds of usable footage marked with it}} (library ranges applied)."""
-    cats = CStore.all_catalogues()
-    q = CFOOT.build_footage_queues(cats, tuple(cats), (), library_ranges(), thumbnail_for=_thumb_for,
-                                   roles_of=SR.scene_roles)
-    return {vid: CFOOT.role_supply({vid: spans}) for vid, spans in q.items()}
+    def build():
+        cats = CStore.all_catalogues()
+        q = CFOOT.build_footage_queues(cats, tuple(cats), (), library_ranges(), thumbnail_for=_thumb_for,
+                                       roles_of=SR.scene_roles)
+        return {vid: CFOOT.role_supply({vid: spans}) for vid, spans in q.items()}
+    return _lib_memo("role_seconds", build)
 
 
 def scene_roles_lookup():
     """roles_of(video_id, scene_id) → the scene's role ids (for the Story score)."""
-    table = {(vid, sc["scene_id"]): SR.scene_roles(sc)
-             for vid, cat in CStore.all_catalogues().items() for sc in cat.get("scenes", [])}
-    return lambda vid, sid: table.get((vid, sid), ())
+    def build():
+        table = {(vid, sc["scene_id"]): SR.scene_roles(sc)
+                 for vid, cat in CStore.all_catalogues().items() for sc in cat.get("scenes", [])}
+        return lambda vid, sid: table.get((vid, sid), ())
+    return _lib_memo("scene_roles", build)
 
 
 def actors_by_video() -> dict:
@@ -169,10 +205,18 @@ def actors_by_video() -> dict:
 def similar_finder():
     """similar_of(video_id) → [(similarity, reason, video_id)] across the library, best first —
     the planner's ✨ Similar videos ("find similar") scoring."""
-    cats = CStore.all_catalogues()
-    videos = SIM.library_video_inputs(cats, library_ranges(), CATALOGUE_DIR)
-    idf = SIM.tag_idf(cats, lambda sc: sc.get("tags", []))
-    return lambda vid: SIM.rank_similar_videos(vid, videos, idf, top=len(videos))
+    def build():
+        cats = CStore.all_catalogues()
+        videos = SIM.library_video_inputs(cats, library_ranges(), CATALOGUE_DIR)
+        idf = SIM.tag_idf(cats, lambda sc: sc.get("tags", []))
+        memo = {}
+
+        def similar_of(vid):
+            if vid not in memo:
+                memo[vid] = SIM.rank_similar_videos(vid, videos, idf, top=len(videos))
+            return memo[vid]
+        return similar_of
+    return _lib_memo("similar", build)
 
 
 def story_for(track_id: str, track: dict) -> tuple:
@@ -190,8 +234,9 @@ def story_for(track_id: str, track: dict) -> tuple:
 
 def _durations() -> dict:
     # Same durations as the planner's get_video_duration (the last scene's end).
-    return {vid: CFOOT._tc_to_seconds(cat["scenes"][-1]["end_tc"]) if cat.get("scenes") else 0.0
-            for vid, cat in CStore.all_catalogues().items()}
+    return _lib_memo("durations", lambda: {
+        vid: CFOOT._tc_to_seconds(cat["scenes"][-1]["end_tc"]) if cat.get("scenes") else 0.0
+        for vid, cat in CStore.all_catalogues().items()})
 
 
 def plan_context(block_roles=None, *, durations: dict = None, curves_of=None,
@@ -341,7 +386,7 @@ def library_state() -> list:
 def signature(track_id: str, n_videos: int, sequential: bool, story, state: list = None) -> str:
     return hashlib.sha1(json.dumps([RESULTS_VERSION, track_id, n_videos, bool(sequential),
                                     track_hash(track_id), state or library_state(),
-                                    REC.VARIANTS, REC.DROP_WEIGHT, story],
+                                    REC.SEARCH_VERSION, REC.DROP_WEIGHT, story],
                                    default=str).encode()).hexdigest()[:16]
 
 
@@ -604,7 +649,7 @@ def _spot_path(video_id: str) -> Path:
 
 
 def spotlight_signature(video_id: str, fits: dict, state: list = None) -> str:
-    return hashlib.sha1(json.dumps([RESULTS_VERSION, video_id, state or library_state(), REC.VARIANTS,
+    return hashlib.sha1(json.dumps([RESULTS_VERSION, video_id, state or library_state(), REC.SEARCH_VERSION,
                                     sorted(fits.items())], default=str).encode()).hexdigest()[:16]
 
 

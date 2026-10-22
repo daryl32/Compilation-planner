@@ -399,6 +399,7 @@ def _run_parallel(p: dict, n: int, poll_sec: float, stopped_exc) -> None:
         if any(j["kind"] == "track" for j in queue):
             try:   # read every video's fingerprint (and content hash) once here — the search processes inherit them
                 RL.library_prints()
+                RL.warm_library_data()      # role footage, "find similar", … — the same for every track
                 RL.video_sigs()
                 RL.save_hashes()
             except Exception:

@@ -15,13 +15,17 @@ How it works
   1. Fingerprint every video (once, cached by the page): every window of every
      scene at a ladder of lengths (0.75 s … 20 s), each one's motion SHAPE
      (24 points, z-scored) and motion LEVEL (0–1 for the video).
-  2. Cut the track: 📐 / 🎭 / 🏆 all use Smart at normal pace; 🥊 Verses searches the
-     other cutting styles (core/styles.py); fingerprint each block the same way
-     from the music energy.
-  3. Score every video against every block (best window of the nearest length):
-     shape = correlation, level = 1 − |motion level − block intensity|; story =
-     how much of the song's need for each role the videos' role footage covers.
-  4. Pick video sets greedily for each mode's objective.
+  2. Cut the track ONCE with Smart at normal pace (📐 / 🎭 / 🏆 all use it) and
+     fingerprint each block the same way from the music energy.
+  3. Score every video in the library against every block (best window of the
+     nearest length): shape = correlation, level = 1 − |motion level − block
+     intensity|; story = how much of the song's need for each role the videos'
+     role footage covers.
+  4. ⚡ Shortlist: the videos that can matter for this track (best on their own
+     overall / for the story / for shape, the most role footage) — the rest of
+     the search only looks at those. Pick video sets greedily for each mode.
+     🥊 Verses and 🎲 Wildcard pick their (random) cutting style FIRST and cut the
+     track that one extra way, scoring only their own candidate videos.
   5. Run the REAL matcher (core.matching, Auto mode — story map on unless it's
      the shape-fit plan, sequential when asked) on the leading candidates and
      score what it actually picked, so the % shown is what you get when you open it.
@@ -440,7 +444,15 @@ MODE_HELP = {m[0]: m[2] for m in MODES}
 # 📐 / 🎭 / 🏆 all use Smart at normal pace (so they compare like for like); 🥊 Verses picks
 # from the other styles (normal pace); 🎲 Wildcard rolls any style and pace.
 TOP_STYLE = ("smart", 0)
+# Cutting styles Verses / Wildcard can roll (each picks one first, then cuts only that way).
 VARIANTS = [TOP_STYLE, ("cinematic", 0), ("beat", 0), ("energy", 0), ("drop", 0), ("vocal", 0), ("hyper", 0)]
+# ⚡ Shortlist per track (see shortlist()): the most each list can add.
+SHORT_OVERALL = 24          # best on their own, as Best overall judges them
+SHORT_STORY = 12            # best on their own for the story fit
+SHORT_SHAPE = 12            # best on their own for shape
+SHORT_ROLE = 6              # most footage marked with each role the song needs
+SHORT_BLOCK = int(__import__("os").environ.get("REC_SHORT_BLOCK", 3))   # best at each block (shape, and shape + motion)
+SEARCH_VERSION = ("smart-first", SHORT_OVERALL, SHORT_STORY, SHORT_SHAPE, SHORT_ROLE, SHORT_BLOCK, 1)
 CHECKS = {"shape": 3, "story": 2, "overall": 3}   # ⚡ trimmed 21 Oct 2026 from 4/4/5 (shape kept at 3: at 2 it lost ~1.4 pts)
 DEPTH_RANK = 5                                    # 🕳️ Gaps: a block's depth = the 5th-best video's fit   # leading candidates run through the real matcher
 SWAP_BUDGET = 4                                   # Best overall: one-video swaps tried on the best plan (was 10)
@@ -448,9 +460,54 @@ VERSES_SEEDS = 3                                  # Verses: top picks tried
 VERSES_POOL = 5                                   # Verses: similar videos (different actors) per top pick
 
 
+def solo_values(v: Variant, role_secs: list) -> dict:
+    """Each video's fit on its own (0–1) for every objective: {"overall", "story", "shape"} → array."""
+    nb = len(v.segments)
+    out = {}
+    for mode in ("overall", "story", "shape"):
+        if mode == "story" and not v.story_active:
+            continue
+        value_of, w = objective(v, mode, role_secs)
+        wsum = max(float(w.sum()), 1e-9)
+        out[mode] = np.array([float(value_of([k]) @ w) / wsum for k in range(len(v.vids))]) if nb else \
+            np.zeros(len(v.vids))
+    return out
+
+
+def shortlist(v: Variant, role_secs: list, solos: dict = None) -> tuple:
+    """⚡ The videos that can matter for this track: (sorted indices into v.vids, thresholds).
+    Best on their own overall / for the story / for shape, plus the ones with the most footage
+    of each role the song needs. thresholds: what a video must beat to get on each list (a
+    changed or new video that beats none of them can't change this track's plans)."""
+    n = len(v.vids)
+    solos = solos if solos is not None else solo_values(v, role_secs)
+    keep, th = set(), {}
+    for mode, top in (("overall", SHORT_OVERALL), ("story", SHORT_STORY), ("shape", SHORT_SHAPE)):
+        if mode not in solos:
+            continue
+        order = np.argsort(-solos[mode], kind="stable")[:top]
+        keep.update(int(k) for k in order)
+        th[mode] = float(solos[mode][order[-1]]) if n > top else -1.0
+    # Best at each moment of the song (Best shape fit is built from these).
+    for M, name in ((v.SH, "block_shape"), (v.S, "block")):
+        if n and SHORT_BLOCK and len(v.segments):
+            order = np.argsort(-M, axis=0, kind="stable")[:SHORT_BLOCK]
+            keep.update(int(k) for k in order.ravel())
+            th[name] = [round(float(M[order[-1, bi], bi]), 4) if n > SHORT_BLOCK else -1.0
+                        for bi in range(len(v.segments))]
+    th["role"] = {}
+    for role in v.need():
+        secs = np.array([float(role_secs[k].get(role, 0.0)) for k in range(n)])
+        order = [int(k) for k in np.argsort(-secs, kind="stable")[:SHORT_ROLE] if secs[k] > 0]
+        keep.update(order)
+        th["role"][role] = float(secs[order[-1]]) if n > SHORT_ROLE and order else 0.0
+    return sorted(keep), th
+
+
 def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: int = 4, story_regions: list = None,
                     role_seconds: dict = None, roles_of=None, actors: dict = None, similar_of=None,
-                    sequential: bool = False, wildcard_seed: int = 0, progress=None, insights: dict = None) -> list:
+                    sequential: bool = False, wildcard_seed: int = 0, progress=None, insights: dict = None,
+                    use_shortlist: bool = True) -> list:
     """The five recommendations for `track`, in MODES order: [{"mode", "plan" (or None), "note"}].
 
     prints: {video_id: VideoPrint}. match(segments, video_ids, block_roles, sequential) runs the
@@ -462,27 +519,30 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
     actors: {video_id: [names]}; similar_of(video_id) → [(similarity, reason, video_id)] best first.
     Each plan: {"mode", "variant", "style", "pace", "method", "settings", "videos", "story",
     "sequential", "estimate", "scores", "timeline", "segments"} (+ "actors" for Verses).
-    insights: a dict to fill with what the feeds need (see library_insights)."""
+    insights: a dict to fill with what the feeds need (see library_insights) and the shortlist.
+    use_shortlist: False searches every video (for checking the shortlist changes nothing)."""
     progress = progress or (lambda f, t: None)
     role_seconds = role_seconds or {}
     actors = actors or {}
     scale = {v: p.scale for v, p in prints.items()}
     n_videos = max(1, min(n_videos, len(prints)))
-    total_steps = len(VARIANTS) + sum(CHECKS.values()) + SWAP_BUDGET + VERSES_SEEDS + 2
+    total_steps = 3 + sum(CHECKS.values()) + SWAP_BUDGET + VERSES_SEEDS + 2
     step = [0]
 
     def tick(text):
         progress(min(step[0] / total_steps, 0.99), text)
         step[0] += 1
 
-    variants = []
-    for style, pace in VARIANTS:
-        tick(f"Cutting the track ({variant_label(style, pace)})…")
-        variants.append(make_variant(track, style, pace, prints, story_regions))
-    by_key = {(v.style, v.pace): v for v in variants}
-    vids = variants[0].vids
+    # One cut (Smart, normal pace), scored against the whole library.
+    tick(f"Cutting the track ({variant_label(*TOP_STYLE)})…")
+    top_v = make_variant(track, *TOP_STYLE, prints, story_regions)
+    vids = top_v.vids
     role_secs = [role_seconds.get(vid, {}) for vid in vids]
-    story_on = any(v.story_active for v in variants)
+    story_on = top_v.story_active
+    tick("Shortlisting the videos that fit…")
+    solos = solo_values(top_v, role_secs)
+    short, thresholds = shortlist(top_v, role_secs, solos)
+    allowed = short if use_shortlist else None
 
     checked = {}
 
@@ -499,7 +559,6 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
                             "timeline": timeline, "segments": v.segments, "_variant": v}
         return checked[key]
 
-    top_v = by_key[TOP_STYLE]
     if insights is not None:
         insights.update(library_insights(top_v, role_secs))
 
@@ -507,7 +566,7 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
         """The top three modes all use the one Smart cut (TOP_STYLE)."""
         out = []
         value_of, w = objective(top_v, mode, role_secs)
-        for plan in greedy_sets(vids, value_of, w, n_videos, max(CHECKS.values()) + 1):
+        for plan in greedy_sets(vids, value_of, w, n_videos, max(CHECKS.values()) + 1, allowed=allowed):
             out.append((plan["estimate"], top_v, plan["videos"]))
         out.sort(key=lambda c: -c[0])
         return out
@@ -551,7 +610,7 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
         best = max(free, key=lambda p: p["scores"]["overall"])
         bv = best["_variant"]
         value_of, w = objective(bv, "overall", role_secs)
-        alone = sorted(range(len(vids)), key=lambda k: -float(value_of([k]) @ w))
+        alone = sorted(allowed if allowed is not None else range(len(vids)), key=lambda k: -float(value_of([k]) @ w))
         pool = [vids[k] for k in alone if vids[k] not in best["videos"]]
         done, improved = 0, True
         while improved and done < SWAP_BUDGET and pool:
@@ -581,20 +640,45 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
             note = "No plan found — the library needs more videos with motion data."
         out.append({"mode": mode, "plan": chosen.get(mode), "note": note})
 
-    # 🥊 Verses — a cutting style none of the top three use, two similar videos with different actors.
+    # 🥊 Verses — a random cutting style none of the top three use, two similar videos with different actors.
     tick(f"{MODE_LABELS['verses']}: finding a pair…")
-    out.append(_verses(variants, vids, role_secs, actors, similar_of, [chosen.get(m) for m in ("shape", "story", "overall")],
-                       check, tick))
+    verses_info = {}
+    out.append(_verses(track, prints, story_regions, top_v, role_seconds, solos, actors, similar_of,
+                       [chosen.get(m) for m in ("shape", "story", "overall")], check, tick, wildcard_seed,
+                       verses_info))
 
     # 🎲 Wildcard — a random style and random videos.
     tick(f"{MODE_LABELS['wildcard']}: rolling the dice…")
-    out.append(wildcard(track, prints, vids, by_key, story_regions, n_videos, wildcard_seed, check))
+    out.append(wildcard(track, prints, vids, story_regions, n_videos, wildcard_seed, check))
+
+    if insights is not None:
+        # What the next "has anything changed?" check needs (rec_library): the videos this search
+        # depended on, and what a changed / new video must beat to change it.
+        plan_videos = {v for r in out if r["plan"] for v in r["plan"]["videos"]}
+        insights["shortlist"] = {"videos": sorted({vids[k] for k in short} | plan_videos
+                                                  | set(verses_info.get("pool", []))),
+                                 "thresholds": dict(thresholds, verses=verses_info.get("threshold", -1.0))}
+        insights["block_top"] = block_top(top_v)
 
     progress(1.0, "Done")
     for r in out:
         if r["plan"]:
             r["plan"] = {k: v for k, v in r["plan"].items() if k != "_variant"}
             r["plan"]["mode"] = r["mode"]
+    return out
+
+
+BLOCK_TOP = DEPTH_RANK + 3          # per block, the best few videos' fits kept (for updating 🕳️ Gaps)
+
+
+def block_top(v: Variant) -> list:
+    """Per block: [[video, fit], …] for its BLOCK_TOP best videos (best first)."""
+    out = []
+    if not len(v.vids):
+        return [[] for _ in v.segments]
+    order = np.argsort(-v.S, axis=0, kind="stable")[:BLOCK_TOP]
+    for bi in range(len(v.segments)):
+        out.append([[v.vids[int(k)], round(float(v.S[int(k), bi]), 4)] for k in order[:, bi]])
     return out
 
 
@@ -652,72 +736,79 @@ def _shared_actor(a: list, b: list) -> bool:
     return bool({x.lower() for x in a} & {x.lower() for x in b})
 
 
-def _verses(variants, vids, role_secs, actors, similar_of, top3, check, tick) -> dict:
+VERSES_SEEDS_LOOKED_AT = 2 * VERSES_SEEDS     # actor-tagged videos considered as the first of the pair
+
+
+def _verses(track, prints, story_regions, top_v, role_seconds, solos, actors, similar_of, top3, check, tick,
+            seed, info) -> dict:
+    """🥊 Verses: pick the cutting style FIRST (a random one the top three don't use — same seed,
+    same style), then cut the track that one way and score only the videos it could pair:
+    the best-fitting actor-tagged videos and their similar videos with a different actor.
+    info gets {"pool": videos looked at, "threshold": fit a tagged video must beat to be one}."""
+    from core.styles import STYLES
+    vids = top_v.vids
     tagged = [k for k, vid in enumerate(vids) if actors.get(vid)]
     if len({a.lower() for k in tagged for a in actors[vids[k]]}) < 2 or len(tagged) < 2:
         return {"mode": "verses", "plan": None,
                 "note": "Verses needs videos tagged with at least two different actors — add them in the Reviewer "
                         "(🎬 Video details)."}
     used_styles = {p["style"] for p in top3 if p} | {TOP_STYLE[0]}
-    styles = [v for v in variants if v.style not in used_styles] or variants
-    # one variant per remaining style (normal pace first)
-    seen, pick_from = set(), []
-    for v in sorted(styles, key=lambda v: abs(v.pace)):
-        if v.style not in seen:
-            seen.add(v.style)
-            pick_from.append(v)
+    options = [st for st in STYLES if st not in used_styles] or [st for st in STYLES if st != TOP_STYLE[0]]
+    style = options[int(np.random.default_rng(int(seed) + 7919).integers(len(options)))]
 
-    def pair_value(v, a, b):
-        value_of, w = objective(v, "overall", role_secs)
-        return float(value_of([a, b]) @ w) / max(float(w.sum()), 1e-9)
+    # The first of the pair: the actor-tagged videos that fit best on the Smart scores.
+    solo_overall = solos["overall"]
+    seeds = sorted(tagged, key=lambda k: -solo_overall[k])[:VERSES_SEEDS_LOOKED_AT]
+    info["threshold"] = float(solo_overall[seeds[-1]]) if len(tagged) > len(seeds) else -1.0
 
-    def solo(v):
-        value_of, w = objective(v, "overall", role_secs)
-        return sorted(tagged, key=lambda k: -float(value_of([k]) @ w))
+    def partner_ids(vid):
+        sims = similar_of(vid) if similar_of else []
+        order = [v for _, _, v in sims] + [v for v in vids if v not in {s[2] for s in sims}]
+        return [v for v in order if v in prints and v != vid and actors.get(v)
+                and not _shared_actor(actors[v], actors[vid])][:VERSES_POOL]
 
-    def partners(v, seed):
-        sims = similar_of(vids[seed]) if similar_of else []
-        order = [vid for _, _, vid in sims] + [vid for vid in vids if vid not in {s[2] for s in sims}]
-        idx = {vid: k for k, vid in enumerate(vids)}
-        pool = [idx[vid] for vid in order if vid in idx and vid != vids[seed] and actors.get(vid)
-                and not _shared_actor(actors[vid], actors[vids[seed]])][:VERSES_POOL]
-        return sorted(pool, key=lambda k: -pair_value(v, seed, k))
+    seed_ids = [vids[k] for k in seeds]
+    partners_of = {vid: partner_ids(vid) for vid in seed_ids}
+    pool = sorted(set(seed_ids) | {p for ps in partners_of.values() for p in ps})
+    info["pool"] = pool
+    v = make_variant(track, style, 0, {vid: prints[vid] for vid in pool if vid in prints}, story_regions)
+    role_secs = [role_seconds.get(vid, {}) for vid in v.vids]
+    idx = {vid: k for k, vid in enumerate(v.vids)}
+    value_of, w = objective(v, "overall", role_secs)
+    wsum = max(float(w.sum()), 1e-9)
 
-    # The style whose best pair (top pick + best similar partner) fits the song best.
-    best_v, best_val = None, -1.0
-    for v in pick_from:
-        for seed in solo(v)[:1]:
-            ps = partners(v, seed)
-            if ps and pair_value(v, seed, ps[0]) > best_val:
-                best_v, best_val = v, pair_value(v, seed, ps[0])
-    if best_v is None:
-        return {"mode": "verses", "plan": None,
-                "note": "No two videos with different actors could be paired — tag more videos' actors in the "
-                        "Reviewer (🎬 Video details)."}
+    def pair_value(a, b):
+        return float(value_of([a, b]) @ w) / wsum
+
+    ranked = sorted((idx[vid] for vid in seed_ids if vid in idx), key=lambda k: -float(value_of([k]) @ w) / wsum)
     tried = []
-    for seed in solo(best_v):
+    for k in ranked:
         if len(tried) >= VERSES_SEEDS:
             break
-        ps = partners(best_v, seed)
+        ps = sorted((idx[p] for p in partners_of[v.vids[k]] if p in idx), key=lambda q: -pair_value(k, q))
         if not ps:
             continue
         tick(f"{MODE_LABELS['verses']}: checking a pair with the real matcher…")
-        tried.append(check(best_v, [vids[seed], vids[ps[0]]], "verses", pair_value(best_v, seed, ps[0])))
+        tried.append(check(v, [v.vids[k], v.vids[ps[0]]], "verses", pair_value(k, ps[0])))
+    if not tried:
+        return {"mode": "verses", "plan": None,
+                "note": "No two videos with different actors could be paired — tag more videos' actors in the "
+                        "Reviewer (🎬 Video details)."}
     best = max(tried, key=lambda p: p["scores"]["overall"])
     plan = dict(best, mode="verses", actors={vid: list(actors.get(vid) or []) for vid in best["videos"]})
     return {"mode": "verses", "plan": plan, "note": ""}
 
 
-def wildcard(track, prints, vids, by_key, story_regions, n_videos, seed, check) -> dict:
+def wildcard(track, prints, vids, story_regions, n_videos, seed, check) -> dict:
     """🎲 A random cutting style (calmer / normal / busier) and n random videos, matched for
-    the best overall fit. Same seed → same roll."""
+    the best overall fit. Same seed → same roll. The style and videos are picked first, so the
+    track is cut that one way and no other video is scored."""
     from core.styles import STYLES
     rng = np.random.default_rng(int(seed))
     style = list(STYLES)[int(rng.integers(len(STYLES)))]
     pace = int(rng.integers(-1, 2))
-    v = by_key.get((style, pace)) or make_variant(track, style, pace, prints, story_regions)
-    by_key[(style, pace)] = v
     videos = sorted(rng.choice(vids, size=min(n_videos, len(vids)), replace=False).tolist())
+    v = make_variant(track, style, pace, {vid: prints[vid] for vid in videos}, story_regions)
     plan = check(v, videos, "wildcard")
     return {"mode": "wildcard", "plan": dict(plan, mode="wildcard"), "note": ""}
 
@@ -735,7 +826,7 @@ def reroll_wildcard(track: dict, prints: dict, *, match, curves_of, n_videos: in
                 "videos": list(videos), "story": use_story, "sequential": bool(sequential), "estimate": estimate,
                 "scores": score_timeline(track, v.segments, timeline, v.weights, scale, curves_of, v.roles, roles_of),
                 "timeline": timeline, "segments": v.segments}
-    return wildcard(track, prints, vids, {}, story_regions, max(1, min(n_videos, len(vids))), seed, check)
+    return wildcard(track, prints, vids, story_regions, max(1, min(n_videos, len(vids))), seed, check)
 
 
 def library_signature(prints_meta: dict, track_meta) -> str:
@@ -752,5 +843,5 @@ def print_size_mb(prints: dict) -> float:
 
 __all__ = ["VideoPrint", "fingerprint_video", "block_weights", "cut_variant", "block_prints", "score_matrix",
            "choose_sets", "greedy_sets", "score_timeline", "recommend_modes", "reroll_wildcard", "make_variant",
-           "library_insights", "plan_with_video",
+           "library_insights", "plan_with_video", "shortlist", "solo_values", "block_top", "SEARCH_VERSION",
            "library_signature", "VARIANTS", "MODES", "DROP_WEIGHT"]
