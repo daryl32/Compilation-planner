@@ -22,10 +22,12 @@ def test_quick_marking_cards_split_and_show_motion(tmp_path):
         at.session_state["rev_auto_target"] = 2.0
         at.run()
         assert not errors(at), errors(at)
-        cards = lambda: [b for b in at.button if (b.key or "").startswith("rev_qr_t_")]  # noqa: E731
+        cards = lambda: [b for b in at.button if (b.key or "").startswith("rev_qr_split_")]  # noqa: E731
         n = len(cards())
         assert sum(c.value.startswith("🏃 motion") for c in at.caption) == n
-        assert len([b for b in at.button if (b.key or "").startswith("rev_qr_split_")]) == n
+        # every role as a button on each card
+        role_btns = [g for g in at.button_group if (g.key or "").startswith("rev_qr_p_")]
+        assert len(role_btns) == n
         autos = [b for b in at.button if (b.key or "").startswith("rev_qr_auto_") and not b.disabled]
         assert autos
         autos[0].click().run()

@@ -57,7 +57,7 @@ catalogue_store.py              # THE way to read/write video catalogues (shared
 library_common.py               # Library meta (ranges, ⭐), Drive "pending" list, memory guard, helpers
 scene_edits.py                  # Split / combine / undo, suggestions, auto split, motion for new parts
 storage.py                      # What's on the server's disk; clearing temporary files
-auto_sync.py / drive_sync.py    # Drive → server sync (12-hourly timer + Sync now), then auto clean-up
+auto_sync.py / drive_sync.py    # Drive → server sync (🔄 Sync now), then auto clean-up
 drive_oauth.py                  # Personal Drive writes (save plans, projects, edits)
 render_preview.py / renders.py  # Render a plan to MP4; saved renders and their details
 video_ranking.py, similarity.py, cut_scoring.py, audio_analysis.py, audio_charts.py, preview_snippets.py

@@ -262,6 +262,8 @@ def merge_scenes(data: dict, scene_ids: list) -> int:
     common = [r for r in SR.scene_roles(group[0]) if all(r in SR.scene_roles(s) for s in group[1:])]
     SR.set_scene_roles(merged, common)    # roles every part had (as with the old flags)
     merged["reviewed"] = False
+    # "No role — checked" carries over only if every part was checked (a role they all had counts anyway).
+    merged["roles_reviewed"] = all(bool(s.get("roles_reviewed")) for s in group)
     merged["edit"] = {"kind": "merge", "originals": [copy.deepcopy(s) for s in group]}
 
     ids = {s["scene_id"] for s in group}
@@ -483,7 +485,7 @@ def cut_suggestions_from_sprite(catalogue: dict, sprite_path: Path, scene: dict,
 # Auto split: cut long scenes into parts of roughly a target length
 # ---------------------------------------------------------------------------
 
-def auto_split_points(scene: dict, target_sec: float, min_part_sec: float = 1.0) -> list:
+def auto_split_points(scene: dict, target_sec: float, min_part_sec: float = 1.0, cap: bool = False) -> list:
     """Cut times (seconds into the video) that split `scene` into parts close to
     target_sec long, adapted to the scene's length: a 95s scene with a 30s
     target becomes 3 parts of ~32s rather than 30+30+30+5.
@@ -491,11 +493,20 @@ def auto_split_points(scene: dict, target_sec: float, min_part_sec: float = 1.0)
     Each evenly spaced cut is nudged (up to a quarter of a part either way) to
     the sharpest picture change nearby, taken from the scene's motion curve
     when it has one — so cuts land on a camera move or a flash rather than
-    mid-shot. [] when the scene is already short enough."""
+    mid-shot. [] when the scene is already short enough.
+
+    cap=True: target_sec is a maximum instead — any scene longer than it is
+    split, into the fewest parts that are each no longer than it (a 95s scene
+    with a 30s cap becomes 4 parts of ~24s), and the nudging never makes a part
+    longer than the cap. The Reviewer uses this, so a part never gets flagged
+    as "too long" again straight after an auto split."""
     start, end = scene_start_sec(scene), scene_end_sec(scene)
     length = end - start
     target = max(float(target_sec), min_part_sec)
-    n_parts = max(1, int(round(length / target)))
+    if cap:
+        n_parts = max(1, math.ceil(length / target - 1e-9))
+    else:
+        n_parts = max(1, int(round(length / target)))
     if n_parts < 2:
         return []
     part = length / n_parts
@@ -510,9 +521,15 @@ def auto_split_points(scene: dict, target_sec: float, min_part_sec: float = 1.0)
     typical = statistics.median(vals) or 1e-6
     window = part / 4
     cuts, prev = [], start
-    for t in even:
+    for k, t in enumerate(even, start=1):
         lo = max(prev + min_part_sec, t - window)
         hi = min(end - min_part_sec, t + window)
+        if cap:
+            # This part ≤ target, and what's left still fits in the remaining parts.
+            hi = min(hi, prev + target)
+            lo = max(lo, end - target * (n_parts - k))
+            if lo > hi:          # can't happen with ceil(); keep this part within the cap
+                lo = hi
         a, b = int((lo - start) * fps), int((hi - start) * fps)
         best = t
         if b > a:
@@ -521,6 +538,10 @@ def auto_split_points(scene: dict, target_sec: float, min_part_sec: float = 1.0)
             # Only move to a real spike — otherwise keep the even spacing.
             if seg[i] >= 3 * typical:
                 best = start + (a + i) / fps
+        if cap:
+            best = min(max(best, lo), hi)
+            r = round(best, 1)          # rounding mustn't push a part over the cap
+            best = math.floor(hi * 10) / 10 if r > hi else math.ceil(lo * 10) / 10 if r < lo else r
         best = round(best, 1)
         if best - prev >= min_part_sec and end - best >= min_part_sec:
             cuts.append(best)
@@ -528,12 +549,43 @@ def auto_split_points(scene: dict, target_sec: float, min_part_sec: float = 1.0)
     return cuts
 
 
-def auto_split_candidates(scenes: list, target_sec: float, factor: float = 1.5) -> list:
+def auto_split_candidates(scenes: list, target_sec: float, factor: float = 1.5, cap: bool = False) -> list:
     """Scenes (time order) long enough to auto-split: over factor × target and
     not excluded."""
     return [s for s in sorted_scenes(scenes)
             if not s.get("excluded") and scene_duration(s) > factor * target_sec
-            and auto_split_points(s, target_sec)]
+            and auto_split_points(s, target_sec, cap=cap)]
+
+
+# ---------------------------------------------------------------------------
+# Auto combine: join runs of very short clips
+# ---------------------------------------------------------------------------
+
+def auto_combine_groups(scenes: list, runs: list, max_sec: float | None = None) -> list:
+    """The combines to make for the suggested runs of short clips (suggest_edits()
+    ["merge"]). With max_sec, a long run is cut into consecutive groups that are
+    each no longer than max_sec, so a combined clip never becomes a "too long —
+    split it" one; a group needs 2+ clips. [[scene_id, ...], ...] in time order."""
+    by_id = {s["scene_id"]: s for s in scenes}
+    groups = []
+    for run in runs:
+        run = [i for i in run if i in by_id]
+        if max_sec is None:
+            if len(run) >= 2:
+                groups.append(list(run))
+            continue
+        cur, total = [], 0.0
+        for sid in run:
+            d = scene_duration(by_id[sid])
+            if cur and total + d > max_sec:
+                if len(cur) >= 2:
+                    groups.append(cur)
+                cur, total = [], 0.0
+            cur.append(sid)
+            total += d
+        if len(cur) >= 2:
+            groups.append(cur)
+    return groups
 
 
 # ---------------------------------------------------------------------------
