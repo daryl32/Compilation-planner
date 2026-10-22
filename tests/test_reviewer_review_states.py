@@ -107,3 +107,27 @@ def test_auto_combine_from_the_to_do_bar(restore_catalogues):
     assert not errors(at), errors(at)
     assert [b for b in at.button if b.label.startswith("🔗 Combine into")]
     assert any("short clips" in m.value for m in at.markdown)
+
+
+def test_quick_marking_exclude_counts_as_role_marked(restore_catalogues):
+    from tests.apptest_util import errors
+    at = _app("vid_f")
+    at.run()
+    at.session_state["rev_quick_roles"] = True
+    at.run()
+    assert not errors(at), errors(at)
+    btn = [b for b in at.button if (b.key or "").startswith("rev_qr_x_vid_f_")][0]
+    sid = int(btn.key[len("rev_qr_x_vid_f_"):])
+    assert not next(s for s in _scenes("vid_f") if s["scene_id"] == sid).get("excluded")
+    btn.click().run()
+    assert not errors(at), errors(at)
+    at.button(key="rev_qr_save_bottom").click().run()
+    assert not errors(at), errors(at)
+    sc = next(s for s in _scenes("vid_f") if s["scene_id"] == sid)
+    assert sc["excluded"] is True
+    # an excluded scene no longer shows under "Not role marked"
+    at.session_state["rev_quick_roles"] = False
+    at.session_state["rev_only"] = ["Not role marked"]
+    at.run()
+    assert not errors(at), errors(at)
+    assert not [w for w in at.multiselect if w.key == f"tags_vid_f_{sid}"]
