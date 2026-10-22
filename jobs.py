@@ -10,9 +10,11 @@ Jobs
   spotlight  — 🆕 a new video's spotlight (rec_library.run_spotlight)
 
 Nightly (systemd timer, deploy/install_timers.sh) — "only changed":
-  every track whose stored results no longer match the library (never searched, or
-  videos / ranges / actors / roles / the track / its story map changed since), then a
-  spotlight for each new video whose spotlight is out of date.
+  every track whose stored results are out of date (never searched; the track or its story
+  map changed; or a video it depends on — its shortlist — changed), and a quick check for
+  tracks where only other videos changed (searched in full only if one of them would make
+  its shortlist — rec_library.refresh_track); then a spotlight for each new video whose
+  spotlight is out of date.
 
 Usage:
     python jobs.py --worker      work through the queue
@@ -225,12 +227,16 @@ def changed_jobs() -> list:
         except (OSError, ValueError):
             continue
         STM.ensure_default(tid, tracks[tid])    # 🎭 tracks analysed before default maps existed get one
-    state = RL.library_state()
+    current = RL.video_sigs_full()
     for tid, track in tracks.items():
         story, _ = RL.story_for(tid, track)
-        sig = RL.signature(tid, RL.DEFAULT_VIDEOS, False, story, state)
-        if RL.load_results(tid, RL.DEFAULT_VIDEOS, False, sig) is None:
+        sig = RL.signature(tid, RL.DEFAULT_VIDEOS, False, story)
+        state, _, _ = RL.staleness(RL.load_results(tid, RL.DEFAULT_VIDEOS, False), sig, current)
+        if state == "stale":
             jobs.append({"kind": "track", "track_id": tid, "n_videos": RL.DEFAULT_VIDEOS, "sequential": False})
+        elif state == "check":    # only videos outside its shortlist changed — a quick check first
+            jobs.append({"kind": "track", "track_id": tid, "n_videos": RL.DEFAULT_VIDEOS, "sequential": False,
+                         "check": True})
     for vid, _ in RL.new_videos():
         jobs.append({"kind": "spotlight", "video_id": vid})   # checked again when it runs (needs fresh fits)
     return jobs
@@ -251,10 +257,16 @@ def _audio_waiting() -> bool:
     return bool(_read_json(d / "queue.json", [])) and not (d / "paused").exists()
 
 
-def run_job(job: dict, say) -> None:
+def run_job(job: dict, say) -> str:
+    """Run one job; returns its finished message."""
     if job["kind"] == "track":
-        RL.run_track(job["track_id"], int(job.get("n_videos", RL.DEFAULT_VIDEOS)), bool(job.get("sequential")),
-                     progress=say)
+        args = (job["track_id"], int(job.get("n_videos", RL.DEFAULT_VIDEOS)), bool(job.get("sequential")))
+        if job.get("check"):
+            got = RL.refresh_track(*args, progress=say)      # searches in full only if it has to
+            return {"fresh": "already up to date", "checked": "checked — the plans can't change",
+                    "searched": "searched again"}[got]
+        RL.run_track(*args, progress=say)
+        return "finished"
     elif job["kind"] == "spotlight":
         fits = RL.track_fits(job["video_id"])
         sig = RL.spotlight_signature(job["video_id"], fits)
@@ -369,8 +381,7 @@ def _child(job: dict) -> tuple:
     say = _make_say(p, job)
     say(0.0, "starting", force=True)
     try:
-        run_job(job, say)
-        return "done", "finished"
+        return "done", run_job(job, say) or "finished"
     except Exception as e:
         traceback.print_exc()
         return "error", str(e)[-300:]
@@ -399,6 +410,7 @@ def _run_parallel(p: dict, n: int, poll_sec: float, stopped_exc) -> None:
         if any(j["kind"] == "track" for j in queue):
             try:   # read every video's fingerprint (and content hash) once here — the search processes inherit them
                 RL.library_prints()
+                RL.warm_library_data()      # role footage, "find similar", … — the same for every track
                 RL.video_sigs()
                 RL.save_hashes()
             except Exception:
@@ -522,8 +534,8 @@ def run_worker(poll_sec: float = STOP_WAIT_SEC, workers: int = None) -> None:
             try:
                 with heavy_slot("recommendations", on_wait=lambda _h: say(None, "waiting for audio analysis",
                                                                           force=True)):
-                    run_job(job, say)
-                state, msg = "done", "finished"
+                    msg = run_job(job, say) or "finished"
+                state = "done"
             except _Stopped:
                 with _Edit():
                     st = _read_json(p["status"], {})
