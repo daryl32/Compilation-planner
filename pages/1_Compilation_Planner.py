@@ -292,41 +292,69 @@ if _loaded and _new_loaded_changes:
     if _pb[1].button(f"💾 Save changes", type="primary", width="stretch", key="project_quick_save",
                      help=f"Save to '{_loaded['name']}'."):
         _do_save_project(_loaded["name"])
-with _pb[2].popover("🆕 New", width="stretch"):
-    st.caption("Start again from a blank planner — default settings, no track work, no project "
-               "loaded. Saved projects aren't touched, and you can bring back what's on screen "
-               "now straight afterwards.")
-    if _new_loaded and _new_loaded_changes:
-        st.warning(f"**{_new_loaded['name']}** has unsaved changes — save it first if you want to keep them.")
-    st.text_input("Name (optional)", key="new_project_name", placeholder="my-new-compilation",
-                  help="Filled in as the project name, ready for 💾 Save.")
-    st.button("🆕 Start new project", type="primary", on_click=_new_project, width="stretch",
-              key="new_project_go")
-with _pb[3].popover("💾 Save / 📂 Open", width="stretch"):
-    st.caption("Saves every setting plus matching progress (Auto, Manual step-through, and "
-               "Choreography all at once) so you can close this and pick up again later.")
-    _save_name = st.text_input("Project name", key="project_save_name", placeholder="my-compilation",
-                               help="Filled in with the project you loaded — save to update it, or type a "
-                                    "new name to save a copy.")
-    _overwrites = _save_name.strip() and (PROJECTS_DIR / f"{sanitize_filename(_save_name.strip())}.json").exists()
-    if st.button("💾 Save Project" + (" (update)" if _overwrites else ""), disabled=not _save_name.strip(),
-                 width="stretch"):
-        _do_save_project(_save_name.strip())
+# 🆕 New and 💾 Save / 📂 Open open a panel inside the project bar (not a pop-over: on a phone a pop-over
+# re-positions itself while its dropdown is open, so it jumped around under your finger).
+_PANEL_KEY = "_project_panel"
 
-    st.divider()
-    _existing_projects = list_saved_projects()
-    if _existing_projects:
-        _load_choice = st.selectbox("Open project", ["—"] + _existing_projects, key="project_load_choice")
-        if _load_choice != "—" and st.button("📂 Open Project", width="stretch"):
-            _path = PROJECTS_DIR / f"{_load_choice}.json"
-            _load_warnings = load_project(_path)
-            _remember_project(_load_choice, json.loads(_path.read_text()))
-            st.session_state["_prefill_project_name"] = _load_choice
-            st.session_state["_project_notices"] = ([("warning", _w) for _w in _load_warnings]
-                                                    + [("success", f"Opened '{_load_choice}'.")])
-            st.rerun()
-    else:
-        st.caption("No saved projects yet.")
+
+def _toggle_project_panel(which: str) -> None:
+    st.session_state[_PANEL_KEY] = None if st.session_state.get(_PANEL_KEY) == which else which
+
+
+def _start_new_project() -> None:
+    st.session_state[_PANEL_KEY] = None
+    _new_project()
+
+
+_panel = st.session_state.get(_PANEL_KEY)
+_pb[2].button("✕ Close" if _panel == "new" else "🆕 New", width="stretch", key="project_panel_new",
+              type="primary" if _panel == "new" else "secondary", on_click=_toggle_project_panel, args=("new",))
+_pb[3].button("✕ Close" if _panel == "file" else "💾 Save / 📂 Open", width="stretch", key="project_panel_file",
+              type="primary" if _panel == "file" else "secondary", on_click=_toggle_project_panel, args=("file",))
+if _panel == "new":
+    with _pbar:
+        st.caption("Start again from a blank planner — default settings, no track work, no project "
+                   "loaded. Saved projects aren't touched, and you can bring back what's on screen "
+                   "now straight afterwards.")
+        if _new_loaded and _new_loaded_changes:
+            st.warning(f"**{_new_loaded['name']}** has unsaved changes — save it first if you want to keep them.")
+        _nc = st.columns([3, 2], vertical_alignment="bottom")
+        _nc[0].text_input("Name (optional)", key="new_project_name", placeholder="my-new-compilation",
+                          help="Filled in as the project name, ready for 💾 Save.")
+        _nc[1].button("🆕 Start new project", type="primary", width="stretch", key="new_project_go",
+                      on_click=_start_new_project)
+elif _panel == "file":
+    with _pbar:
+        _fc = st.columns(2)
+        with _fc[0]:
+            st.markdown("**💾 Save**")
+            st.caption("Every setting plus matching progress (Auto, Manual step-through and Choreography), so "
+                       "you can pick up again later.")
+            _save_name = st.text_input("Project name", key="project_save_name", placeholder="my-compilation",
+                                       help="Filled in with the project you loaded — save to update it, or type a "
+                                            "new name to save a copy.")
+            _overwrites = _save_name.strip() and (PROJECTS_DIR / f"{sanitize_filename(_save_name.strip())}.json").exists()
+            if st.button("💾 Save Project" + (" (update)" if _overwrites else ""), disabled=not _save_name.strip(),
+                         width="stretch", type="primary"):
+                st.session_state[_PANEL_KEY] = None
+                _do_save_project(_save_name.strip())
+        with _fc[1]:
+            st.markdown("**📂 Open**")
+            _existing_projects = list_saved_projects()
+            if _existing_projects:
+                _load_choice = st.selectbox("Open project", ["—"] + _existing_projects, key="project_load_choice",
+                                            label_visibility="collapsed")
+                if st.button("📂 Open Project", width="stretch", disabled=_load_choice == "—"):
+                    _path = PROJECTS_DIR / f"{_load_choice}.json"
+                    _load_warnings = load_project(_path)
+                    _remember_project(_load_choice, json.loads(_path.read_text()))
+                    st.session_state["_prefill_project_name"] = _load_choice
+                    st.session_state["_project_notices"] = ([("warning", _w) for _w in _load_warnings]
+                                                            + [("success", f"Opened '{_load_choice}'.")])
+                    st.session_state[_PANEL_KEY] = None
+                    st.rerun()
+            else:
+                st.caption("No saved projects yet.")
 if _new_notice:
     _pbar.success("🆕 New project started" + (f" — **{_new_notice}**" if isinstance(_new_notice, str) else "")
                   + ". Pick a track and videos to begin.")

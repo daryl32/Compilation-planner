@@ -413,19 +413,47 @@ _NO_DROPDOWN_TYPING_JS = """
   const doc = window.parent.document;
   if (doc.getElementById("no-dropdown-typing")) return;
   const style = doc.createElement("style");
-  style.textContent = '[data-baseweb="select"] input { caret-color: transparent !important; cursor: pointer !important; }';
+  // Streamlit ≤ 1.6x drew dropdowns with BaseWeb; 1.66 uses React Aria comboboxes — cover both.
+  const SEL = '[data-baseweb="select"] input, .stSelectbox input[role="combobox"], .stMultiSelect input[role="combobox"]';
+  style.textContent = SEL + ' { caret-color: transparent !important; cursor: pointer !important; }';
   doc.head.appendChild(style);
   const s = doc.createElement("script");
   s.id = "no-dropdown-typing";
   s.textContent = `
     (function () {
       function fix() {
-        document.querySelectorAll('[data-baseweb="select"] input').forEach(function (el) {
+        document.querySelectorAll('` + SEL + `').forEach(function (el) {
           if (!el.readOnly) { el.readOnly = true; el.setAttribute("inputmode", "none"); }
         });
       }
       fix();
       new MutationObserver(fix).observe(document.body, { childList: true, subtree: true });
+      // 1.66's single-choice dropdown opens from its ▾ button (or by typing) — with typing off, a tap
+      // on the text part would do nothing, so pass it on to the ▾ button.
+      // A touch doesn't reach that as a click, so taps count when the finger lifts — only if it barely
+      // moved (a swipe that starts on a dropdown still just scrolls the page).
+      function openFor(el) {
+        if (!el || el.tagName !== "INPUT" || !el.readOnly || el.getAttribute("role") !== "combobox") return;
+        if (el.getAttribute("aria-expanded") === "true") return;
+        var group = el.closest('[role="group"]');
+        var btn = group && group.querySelector('button[aria-haspopup="listbox"]');
+        if (btn && btn.getAttribute("aria-expanded") !== "true") btn.click();
+      }
+      var down = null;
+      document.addEventListener("pointerdown", function (e) {
+        down = e.pointerType === "mouse" ? null : { x: e.clientX, y: e.clientY, t: e.target };
+      }, true);
+      document.addEventListener("pointerup", function (e) {
+        if (!down || e.pointerType === "mouse") return;
+        var moved = Math.abs(e.clientX - down.x) + Math.abs(e.clientY - down.y);
+        var target = down.t;
+        down = null;
+        if (moved < 12) setTimeout(function () { openFor(target); }, 0);
+      }, true);
+      document.addEventListener("click", function (e) {
+        if (e.pointerType && e.pointerType !== "mouse") return;   // touch: handled on pointerup
+        openFor(e.target);
+      }, true);
     })();
   `;
   doc.head.appendChild(s);
