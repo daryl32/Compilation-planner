@@ -13,9 +13,9 @@ One view, always editable (there's no separate review mode any more):
   • Tag and checkbox edits stay on the page until 💾 Save (each card updates on
     its own, so ticking a box doesn't reload the whole page). Split, combine,
     undo and ⭐ save straight away — and save any unsaved edits with them.
-  • One target clip length (sidebar → ✂️ Split & combine): clips longer than it are
-    suggested for splitting and offered ⚡ Auto split, which cuts them into the fewest
-    parts no longer than it, nudging each cut to a sharp picture change nearby.
+  • Sidebar → ✂️ Split & combine: clips longer than the split value are suggested for
+    splitting and offered ⚡ Auto split, which cuts them into the fewest parts no longer
+    than the target clip length, nudging each cut to a sharp picture change nearby.
     🔗 Auto combine joins runs of very short clips.
   • New parts get their own motion score, measured from the preview copy.
 """
@@ -72,15 +72,20 @@ use_library_range = st.sidebar.toggle(
 
 with st.sidebar.expander("✂️ Split & combine", expanded=False):
     show_suggestions = st.toggle("Suggest splits and combines", value=True)
+    suggest_long_sec = st.number_input(
+        "Suggest splitting clips longer than (seconds)", min_value=5.0, value=SE.DEFAULT_LONG_SEC, step=10.0,
+        key="rev_long_sec",
+        help="Clips longer than this are suggested for splitting (To do bar → ⚡ Auto split) and get "
+             "⚡ Auto split on their card.",
+    )
     auto_target_sec = st.number_input(
         "Target clip length (seconds)", min_value=2.0, value=30.0, step=5.0, key="rev_auto_target",
-        help="Clips longer than this are suggested for splitting and get ⚡ Auto split, which cuts them "
-             "into the fewest parts that are each no longer than it — a 95 s scene with a 30 s target "
-             "becomes 4 parts of about 24 s. Each cut is moved to a sharp picture change nearby when the "
-             "scene has a motion curve (never making a part longer than the target).",
+        help="⚡ Auto split cuts a clip into the fewest parts that are each no longer than this — a 95 s "
+             "scene with a 30 s target becomes 4 parts of about 24 s. Each cut is moved to a sharp picture "
+             "change nearby when the scene has a motion curve (never making a part longer than the target).",
     )
-    # One value: split suggestions and ⚡ Auto split both use the target length.
-    suggest_long_sec = auto_target_sec
+    # Parts must also stay under the split value, or they'd be suggested for splitting again.
+    split_part_sec = min(auto_target_sec, suggest_long_sec)
     suggest_short_sec = st.number_input(
         "Suggest combining runs of clips shorter than (seconds)", min_value=0.1, value=SE.DEFAULT_SHORT_SEC,
         step=0.5, disabled=not show_suggestions, key="rev_short_sec",
@@ -88,7 +93,10 @@ with st.sidebar.expander("✂️ Split & combine", expanded=False):
              "(in the To do bar) joins each run into one clip — a long run into several, each no longer "
              "than the target length.",
     )
-    st.caption(f"✂️ Split suggestions and ⚡ Auto split: clips over {auto_target_sec:g} s.  \n"
+    st.caption(f"✂️ Split suggestions and ⚡ Auto split: clips over {suggest_long_sec:g} s, cut into parts "
+               f"of up to {split_part_sec:g} s"
+               + (" (the split value — the target is longer)" if auto_target_sec > suggest_long_sec else "")
+               + ".  \n"
                f"🔗 Combine suggestions and Auto combine: runs of clips under {suggest_short_sec:g} s.")
 
 _labels_box = st.sidebar.expander("🏷️ Labels & training data", expanded=False)
@@ -684,7 +692,7 @@ def split_dialog(sid, auto: bool = False):
     start, end = SE.scene_start_sec(scene), SE.scene_end_sec(scene)
     cuts_key, pos_key = f"split_cuts_{video_id}_{sid}", f"split_pos_{video_id}_{sid}"
     if auto and not st.session_state.get(cuts_key):
-        st.session_state[cuts_key] = SE.auto_split_points(scene, auto_target_sec, cap=True)
+        st.session_state[cuts_key] = SE.auto_split_points(scene, split_part_sec, cap=True)
     cuts = st.session_state.setdefault(cuts_key, [])
     st.markdown(f"**Scene {SE.scene_label(scene)}** · {fmt_precise(start)} → {fmt_precise(end)} "
                 f"({fmt_dur(end - start)})")
@@ -715,11 +723,11 @@ def split_dialog(sid, auto: bool = False):
     if st.session_state.get(pos_key) not in positions:
         st.session_state[pos_key] = snap(st.session_state.get(pos_key, (start + end) / 2))
 
-    auto_cuts = SE.auto_split_points(scene, auto_target_sec, cap=True)
+    auto_cuts = SE.auto_split_points(scene, split_part_sec, cap=True)
     ac = st.columns([3, 2])
     ac[0].caption(f"⚡ Auto: {len(auto_cuts) + 1} parts of about {fmt_dur((end - start) / (len(auto_cuts) + 1))}, "
-                  f"none over the {auto_target_sec:g}s target (set in the sidebar)." if auto_cuts
-                  else f"⚡ Auto: already within the {auto_target_sec:g}s target — no cuts needed.")
+                  f"none over {split_part_sec:g}s (target, set in the sidebar)." if auto_cuts
+                  else f"⚡ Auto: already within {split_part_sec:g}s — no cuts needed.")
     ac[1].button("⚡ Use auto cuts", key=f"{pos_key}_auto", on_click=_set_state, args=(cuts_key, auto_cuts),
                  disabled=not auto_cuts, width="stretch")
 
@@ -773,7 +781,7 @@ def bulk_auto_split_dialog(candidate_ids: list):
     plans = []
     for sid in candidate_ids:
         s = scene_by_id[sid]
-        cuts = SE.auto_split_points(s, auto_target_sec, cap=True)
+        cuts = SE.auto_split_points(s, split_part_sec, cap=True)
         if cuts:
             plans.append((sid, cuts, SE.scene_duration(s)))
     if not plans:
@@ -781,7 +789,7 @@ def bulk_auto_split_dialog(candidate_ids: list):
         return
     total_parts = sum(len(c) + 1 for _, c, _ in plans)
     st.markdown(f"Split **{len(plans)} scene(s)** into **{total_parts} parts**, each no longer than "
-                f"**{auto_target_sec:g}s**:")
+                f"**{split_part_sec:g}s**:")
     for sid, cuts, dur in plans:
         st.markdown(f"- Scene {sid} · {fmt_dur(dur)} → {len(cuts) + 1} parts of ~{fmt_dur(dur / (len(cuts) + 1))}")
     st.caption("Each split can be undone on its own afterwards. New parts get thumbnails and motion "
@@ -799,7 +807,7 @@ def bulk_auto_split_dialog(candidate_ids: list):
             new_thumbs += finish_new_parts(ids)
             done += 1
         bar.progress(1.0, text="Saving…")
-        msg = f"⚡ Auto split {done} scene(s) into parts of up to {auto_target_sec:g}s."
+        msg = f"⚡ Auto split {done} scene(s) into parts of up to {split_part_sec:g}s."
         if unsaved:
             msg += f" Your unsaved changes to {unsaved} scene(s) were saved too."
         write_catalogue(msg, new_thumbs)
@@ -816,7 +824,7 @@ def bulk_auto_combine_dialog(groups: list):
         total = sum(SE.scene_duration(scene_by_id[i]) for i in g)
         st.markdown(f"- Scenes {g[0]}–{g[-1]} · {len(g)} clips → one clip of {fmt_dur(total)}")
     st.caption(f"Runs of touching clips that are each under {suggest_short_sec:g}s (sidebar). A long run is "
-               f"combined into several clips, each no longer than the {auto_target_sec:g}s target. Each "
+               f"combined into several clips, each no longer than {split_part_sec:g}s (the target). Each "
                "combine can be undone on its own afterwards (↩️ Undo combine on its card).")
     if st.button(f"🔗 Combine into {len(groups)} clip(s)", type="primary", width="stretch"):
         unsaved = apply_pending()
@@ -850,11 +858,12 @@ else:
     sugg = {"split": [], "merge": []}
 split_sugg = set(sugg["split"])
 merge_group_of = {sid: grp for grp in sugg["merge"] for sid in grp}
-# ⚡ Auto split on a card: any (not excluded) scene longer than the target length. The To do bar's
+# ⚡ Auto split on a card: any (not excluded) scene longer than the split value. The To do bar's
 # bulk ⚡ / 🔗 use the suggestions (so a dismissed suggestion is left alone).
-auto_ids = [s["scene_id"] for s in SE.auto_split_candidates(in_range, auto_target_sec, factor=1.0, cap=True)]
+auto_ids = [s["scene_id"] for s in SE.auto_split_candidates(in_range, split_part_sec,
+                                                            factor=suggest_long_sec / split_part_sec, cap=True)]
 bulk_split_ids = [i for i in sugg["split"] if i in set(auto_ids)]
-combine_groups = SE.auto_combine_groups(in_range, sugg["merge"], max_sec=auto_target_sec)
+combine_groups = SE.auto_combine_groups(in_range, sugg["merge"], max_sec=split_part_sec)
 
 # Scenes whose thumbnail is missing or unreadable — remake them all in one go.
 def _thumb_dest(scene: dict) -> Path:
@@ -893,14 +902,14 @@ _todo = []
 if _no_thumb:
     _todo.append(f"🖼️ {len(_no_thumb)} missing thumbnail(s)")
 if sugg["split"]:
-    _todo.append(f"✂️ {len(sugg['split'])} clip(s) over {auto_target_sec:g}s to split")
+    _todo.append(f"✂️ {len(sugg['split'])} clip(s) over {suggest_long_sec:g}s to split")
 if sugg["merge"]:
     _todo.append(f"🔗 {len(sugg['merge'])} run(s) of clips under {suggest_short_sec:g}s to combine")
 if _todo:
     with st.container(border=True, key="rev_wrap_todo"):
         tc_ = st.columns([4, 1.3, 1.3, 1.3], vertical_alignment="center")
         tc_[0].markdown("**To do:** " + " · ".join(_todo),
-                        help=f"Split: clips over the {auto_target_sec:g}s target length; combine: runs of clips "
+                        help=f"Split: clips over {suggest_long_sec:g}s, cut into parts of up to {split_part_sec:g}s; combine: runs of clips "
                              f"each under {suggest_short_sec:g}s — set both in the sidebar (✂️ Split & combine).")
         if _no_thumb and tc_[1].button(f"🔄 Remake {len(_no_thumb)}", width="stretch",
                                        key=f"remake_all_thumbs_{selected}",
@@ -910,7 +919,7 @@ if _todo:
         if bulk_split_ids and tc_[2].button(f"⚡ Auto split {len(bulk_split_ids)}…", width="stretch",
                                             key=f"bulk_auto_{selected}",
                                             help=f"Splits every suggested clip into parts no longer than "
-                                                 f"{auto_target_sec:g}s (you see the list first)."):
+                                                 f"{split_part_sec:g}s (you see the list first)."):
             bulk_auto_split_dialog(bulk_split_ids)
         if combine_groups and tc_[3].button(f"🔗 Auto combine {len(sugg['merge'])}…", width="stretch",
                                             key=f"bulk_combine_{selected}",
@@ -1219,10 +1228,10 @@ def scene_card(sid, trimmed_to) -> None:
             st.session_state["rev_open_dialog"] = (selected, sid, False)
             st.rerun()
         if "auto" in bc and bc["auto"].button("⚡ Auto split", key=f"auto_{selected}_{sid}", width="stretch",
-                                              help=f"Splits it straight away into parts of about {auto_target_sec:g}s "
+                                              help=f"Splits it straight away into parts of up to {split_part_sec:g}s "
                                                    "(↩️ Undo split puts it back). ✂️ Split… lets you place cuts by hand."):
             back_to(sid)
-            do_split(sid, SE.auto_split_points(scene_by_id[sid], auto_target_sec, cap=True))
+            do_split(sid, SE.auto_split_points(scene_by_id[sid], split_part_sec, cap=True))
         if "merge" in bc and bc["merge"].button("🔗 Combine", key=f"merge_next_{selected}_{sid}",
                                                 width="stretch",
                                                 help=f"Join this scene and the next one (scene {nxt}) into one."):
@@ -1394,11 +1403,11 @@ def quick_role_grid(ids: list) -> None:
                     st.rerun(scope="app")
                 if ec[1].button("⚡", key=f"rev_qr_auto_{selected}_{sid}", width="stretch",
                                 disabled=sid not in auto_ids,
-                                help=(f"Auto split into parts no longer than {auto_target_sec:g}s (↩️ undo on its "
+                                help=(f"Auto split into parts no longer than {split_part_sec:g}s (↩️ undo on its "
                                       "card outside quick marking)." if sid in auto_ids else
-                                      f"Auto split is offered on scenes over the {auto_target_sec:g}s target "
-                                      "length (sidebar → ✂️ Split & combine).")):
-                    do_split(sid, SE.auto_split_points(scene_by_id[sid], auto_target_sec, cap=True))
+                                      f"Auto split is offered on scenes over {suggest_long_sec:g}s "
+                                      "(sidebar → ✂️ Split & combine).")):
+                    do_split(sid, SE.auto_split_points(scene_by_id[sid], split_part_sec, cap=True))
 
     # Bottom: save and page buttons, so there's no scrolling back up after each page.
     changed = _qr_changed()

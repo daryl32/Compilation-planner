@@ -20,6 +20,7 @@ def test_quick_marking_cards_split_and_show_motion(tmp_path):
         at.run()
         at.session_state["rev_quick_roles"] = True
         at.session_state["rev_auto_target"] = 2.0
+        at.session_state["rev_long_sec"] = 5.0
         at.run()
         assert not errors(at), errors(at)
         cards = lambda: [b for b in at.button if (b.key or "").startswith("rev_qr_split_")]  # noqa: E731
