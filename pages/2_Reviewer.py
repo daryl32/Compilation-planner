@@ -1167,14 +1167,11 @@ def scene_card(sid, trimmed_to) -> None:
                 safe_image(str(thumb_path), width=280)
             else:
                 st.caption(f"🖼️ Picture {'unreadable' if thumb_path.exists() else 'missing'}")
-                if st.button("🔄 Remake picture", key=f"remake_thumb_{selected}_{sid}",
-                             help="Takes a new picture from the video (or the timeline thumbnails) "
-                                  "and queues it for Google Drive."):
+                if st.button("🔄 Remake picture", key=f"remake_thumb_{selected}_{sid}"):
                     back_to(sid)
                     remake_thumbnail(scene, thumb_path)
         if sid != master_sid and scene.get("thumbnail_paths"):
-            if st.button("⭐ Use as video thumbnail", key=f"star_{selected}_{sid}",
-                         help="The picture shown for this video in the Media Library and the planner's video list."):
+            if st.button("⭐ Use as video thumbnail", key=f"star_{selected}_{sid}"):
                 back_to(sid)
                 set_star(sid)
     with cols[1]:
@@ -1198,8 +1195,7 @@ def scene_card(sid, trimmed_to) -> None:
         if badges or sid in split_sugg:
             bc_ = st.columns([5, 1], vertical_alignment="center")
             bc_[0].markdown(" ".join(badges))
-            if sid in split_sugg and bc_[1].button("Dismiss", key=f"split_dismiss_{selected}_{sid}",
-                                                   help="Hide the split suggestion for this scene."):
+            if sid in split_sugg and bc_[1].button("Dismiss", key=f"split_dismiss_{selected}_{sid}"):
                 back_to(sid)
                 dismiss(SE.suggestion_key("split", [sid]))
         st.multiselect("Tags", options=sorted(set(CANDIDATE_LABELS) | set(current_tags)),
@@ -1209,10 +1205,7 @@ def scene_card(sid, trimmed_to) -> None:
         _opts = list(_roles) + [r for r in _cur if r not in _roles]
         st.pills("Roles", _opts, selection_mode="multi", key=_rk,
                     default=None if _rk in st.session_state else _cur,
-                    format_func=lambda r: SR.label(r, _roles), label_visibility="collapsed",
-                    help="What this scene is for in the story. 🎬 Intro / 🏁 Outro: the start and end "
-                         "(the planner's 'Prefer Intro/Outro' toggle). 🌙 Slow: build-ups and breakdowns. "
-                         "💥 Action: the high points. Add your own under 🎭 Scene roles. Independent of Exclude.")
+                    format_func=lambda r: SR.label(r, _roles), label_visibility="collapsed")
         _hint = SR.motion_hint(motion_rank(scene))
         if _hint and _hint in _roles and _hint not in (st.session_state.get(_rk) or []):
             st.caption(f":gray[*💡 one of the {'calmest' if _hint == 'slow' else 'busiest'} scenes here — "
@@ -1235,14 +1228,11 @@ def scene_card(sid, trimmed_to) -> None:
             back_to(sid)
             st.session_state["rev_open_dialog"] = (selected, sid, False)
             st.rerun()
-        if "auto" in bc and bc["auto"].button("⚡ Auto split", key=f"auto_{selected}_{sid}", width="stretch",
-                                              help=f"Splits it straight away into parts of up to {split_part_sec:g}s "
-                                                   "(↩️ Undo split puts it back). ✂️ Split… lets you place cuts by hand."):
+        if "auto" in bc and bc["auto"].button("⚡ Auto split", key=f"auto_{selected}_{sid}", width="stretch"):
             back_to(sid)
             do_split(sid, SE.auto_split_points(scene_by_id[sid], split_part_sec, cap=True))
         if "merge" in bc and bc["merge"].button("🔗 Combine", key=f"merge_next_{selected}_{sid}",
-                                                width="stretch",
-                                                help=f"Join this scene and the next one (scene {nxt}) into one."):
+                                                width="stretch"):
             back_to(sid)
             do_merge([sid, nxt])
         if "undo" in bc:
@@ -1367,7 +1357,9 @@ def quick_role_grid(ids: list) -> None:
 
     top = st.columns([4, 2, 2], vertical_alignment="center")
     top[0].caption("Tap a role under a picture to add or remove it:  "
-                   + "  ·  ".join(SR.label(r, _roles) for r in _roles))
+                   + "  ·  ".join(SR.label(r, _roles) for r in _roles)
+                   + f"  \n✂️ split by hand · ⚡ auto split (scenes over {suggest_long_sec:g}s) · 🚫 exclude / include "
+                     "again — all unsaved until 💾 Save, except splits, which save straight away")
     if top[1].button(f"💾 Save {len(changed)} change(s)", type="primary", disabled=not changed,
                      width="stretch", key="rev_qr_save"):
         _qr_save(changed)
@@ -1435,20 +1427,12 @@ def quick_role_grid(ids: list) -> None:
                 # the parts keep this scene's roles and each gets its own motion score).
                 ec = st.columns(3)
                 ec[2].button("🚫", key=f"rev_qr_x_{selected}_{sid}", width="stretch",
-                             type="primary" if x_now else "secondary", on_click=_qr_toggle_exclude, args=(sid,),
-                             help="Include it again (unsaved until 💾 Save)." if x_now else
-                                  "Exclude this scene — never used by the planner. Counts as role marked. "
-                                  "Unsaved until 💾 Save.")
-                if ec[0].button("✂️", key=f"rev_qr_split_{selected}_{sid}", width="stretch",
-                                help="Split… — place the cuts by hand."):
+                             type="primary" if x_now else "secondary", on_click=_qr_toggle_exclude, args=(sid,))
+                if ec[0].button("✂️", key=f"rev_qr_split_{selected}_{sid}", width="stretch"):
                     st.session_state["rev_open_dialog"] = (selected, sid, False)
                     st.rerun(scope="app")
                 if ec[1].button("⚡", key=f"rev_qr_auto_{selected}_{sid}", width="stretch",
-                                disabled=sid not in auto_ids,
-                                help=(f"Auto split into parts no longer than {split_part_sec:g}s (↩️ undo on its "
-                                      "card outside quick marking)." if sid in auto_ids else
-                                      f"Auto split is offered on scenes over {suggest_long_sec:g}s "
-                                      "(sidebar → ✂️ Split & combine).")):
+                                disabled=sid not in auto_ids):
                     do_split(sid, SE.auto_split_points(scene_by_id[sid], split_part_sec, cap=True))
 
     # Bottom: save and page buttons, so there's no scrolling back up after each page.
