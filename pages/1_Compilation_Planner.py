@@ -53,6 +53,7 @@ import core.cut_edits as CED
 import core.matching as CMATCH
 import core.styles as CSTY
 import core.sequential as SEQ
+import settings_store as SSTORE
 from core.matching import prefer_role, widen_for_repeat_rule, cand_key, why_key, format_mmss
 from cut_editor import cut_editor as _cut_editor_widget, media_url as _media_url
 from core.shape import SHAPE_MATCH_POINTS, resample_curve, shape_score, get_block_audio_curve
@@ -1642,6 +1643,11 @@ AUDIO_SETTINGS_KEYS = [
 ]
 
 
+def _setting(key):
+    """A setting's current value (settings_store keeps every one in session_state)."""
+    return st.session_state.get(key, DIAL_DEFAULTS.get(key))
+
+
 def segmentation_settings() -> dict:
     """The current segmentation method plus exactly the settings it uses —
     the one place the preview chart, the matching and the export read them from."""
@@ -1711,10 +1717,6 @@ def _apply_cut_style() -> None:
     for k, v in settings.items():
         st.session_state[k] = v
     st.session_state["audio_style"] = AUDIO_STYLE_CUSTOM     # the style owns the dials — no pace re-tune over them
-    appscope = st.session_state.get("_audio_appscope", {})
-    appscope.update({k: st.session_state[k] for k in ["segmentation_method", "audio_style", "cut_style",
-                                                      "cut_style_pace", *settings] if k in AUDIO_SETTINGS_KEYS})
-    st.session_state["_audio_appscope"] = appscope
     st.session_state["style_report"] = {"track_id": st.session_state["track_id"], "notes": notes}
     st.session_state.pop("aim_report", None)
 
@@ -1722,17 +1724,16 @@ def _apply_cut_style() -> None:
 def _render_style_row(_v) -> None:
     """🎨 Cutting style + Pace — the quick way in; the method and dials below stay editable."""
     opts = ["custom"] + list(CSTY.STYLES)
-    cur = _v("cut_style") if _v("cut_style") in opts else "custom"
+    SSTORE.choose("cut_style", opts, "custom")
     with st.container(border=True):
         c = st.columns([3, 2])
         style = c[0].selectbox(
-            "🎨 Cutting style", opts, index=opts.index(cur), key="cut_style", on_change=_apply_cut_style,
+            "🎨 Cutting style", opts, key="cut_style", on_change=_apply_cut_style,
             format_func=lambda k: "✏️ My own settings" if k == "custom"
             else CSTY.STYLES[k]["label"],
             help="Pick the feel and the app sets the cutting method and all its dials for this track. You can "
                  "still change anything below (it then shows ✏️ My own settings).")
-        c[1].select_slider("Pace", options=[-2, -1, 0, 1, 2], value=int(_v("cut_style_pace") or 0),
-                           key="cut_style_pace", format_func=CSTY.PACE_LABELS.get, on_change=_apply_cut_style,
+        c[1].select_slider("Pace", options=[-2, -1, 0, 1, 2], key="cut_style_pace", format_func=CSTY.PACE_LABELS.get, on_change=_apply_cut_style,
                            disabled=style == "custom",
                            help="Each step halves or doubles how often the style cuts.")
         if style != "custom":
@@ -1756,10 +1757,11 @@ def _apply_cut_focus() -> None:
         st.session_state[k] = v   # the cutting pace doesn't touch these, so it stays as it is
 
 
-def _pace_row(_pc, _styles, _style_now) -> None:
+def _pace_row(_pc, _styles) -> None:
     """Cutting pace preset + Re-tune (every method except Smart)."""
+    SSTORE.choose("audio_style", _styles, AUDIO_STYLE_CUSTOM)
     _pc[0].selectbox(
-        "Cutting pace", _styles, index=_styles.index(_style_now), key="audio_style",
+        "Cutting pace", _styles, key="audio_style",
         on_change=_method_changed,
         format_func=lambda x: {"Calm": "🌊 Calm — a cut every ~4 bars",
                                "Balanced": "⚖️ Balanced — every ~2 bars",
@@ -1791,10 +1793,6 @@ def _aim_adaptive() -> None:
         st.session_state[k] = v
     st.session_state["audio_style"] = AUDIO_STYLE_CUSTOM      # your own settings now — don't re-tune over them
     st.session_state["cut_style"] = "custom"
-    appscope = st.session_state.get("_audio_appscope", {})
-    appscope.update({k: v for k, v in res["settings"].items() if k in AUDIO_SETTINGS_KEYS})
-    appscope["audio_style"] = AUDIO_STYLE_CUSTOM
-    st.session_state["_audio_appscope"] = appscope
     st.session_state["aim_report"] = {"track_id": st.session_state["track_id"], "exact": res["exact"],
                                       "notes": res["notes"]}
 
@@ -2110,29 +2108,29 @@ def _render_smart_cut_settings(track: dict, _v) -> None:
                 "extra analysis (bars, sections, drops, build-ups, drums, vocals) from **Media Library → Audio → "
                 "🔬 Audio analysis** for its full picture of the song.")
     c = st.columns(2)
-    c[0].select_slider("Pace", options=[-2, -1, 0, 1, 2], value=int(round(float(_v("sm_pace")))), key="sm_pace",
+    c[0].select_slider("Pace", options=[-2, -1, 0, 1, 2], key="sm_pace",
                        format_func=lambda x: _PACE_LABELS[x], **_custom,
                        help="Moves the whole edit one grid level calmer or busier than the pace Smart picked "
                             "for this song (e.g. every bar → every 2 bars).")
-    c[1].slider("Contrast", 0.0, 2.0, value=float(_v("sm_contrast")), step=0.25, key="sm_contrast", **_custom,
+    c[1].slider("Contrast", 0.0, 2.0, step=0.25, key="sm_contrast", **_custom,
                 help="How much the pace changes between quiet and intense sections. 1 = what this song's own "
                      "dynamics suggest; 0 = the same pace throughout; 2 = exaggerated.")
     t = st.columns(4)
-    _bld = t[0].toggle("Speed up into drops", value=bool(_v("sm_builds")), key="sm_builds", **_custom,
+    _bld = t[0].toggle("Speed up into drops", key="sm_builds", **_custom,
                        help="Through a build-up the cuts get quicker (e.g. every 2 bars → bar → half bar), "
                             "landing on the drop. How long the speed-up runs and how fast it gets follow how "
                             "big the rise into the drop is.")
-    c[1].slider("Speed-up strength", 0.0, 2.0, value=float(_v("sm_build_strength")), step=0.25,
+    c[1].slider("Speed-up strength", 0.0, 2.0, step=0.25,
                 key="sm_build_strength", disabled=not _bld, **_custom,
                 help="1 = follows the song: a small rise gets a short nudge (2 bars, a step or two quicker), a "
                      "huge rise a long, steep run (up to 16 bars). Lower = gentler and shorter; 2 = longer and "
                      "faster; 0 = no speed-up.")
-    t[1].toggle("Accents", value=bool(_v("sm_accents")), key="sm_accents", **_custom,
+    t[1].toggle("Accents", key="sm_accents", **_custom,
                 help="An extra cut on hits that stand out from the rest of the song, and on vocal entries — "
                      "only where the section's rhythm leaves room.")
-    t[2].toggle("Respect vocals", value=bool(_v("sm_vocals")), key="sm_vocals", **_custom,
+    t[2].toggle("Respect vocals", key="sm_vocals", **_custom,
                 help="Moves a cut that would land mid-line to the gap between sung lines (needs vocal analysis).")
-    t[3].toggle("Mirror repeats", value=bool(_v("sm_mirror")), key="sm_mirror", **_custom,
+    t[3].toggle("Mirror repeats", key="sm_mirror", **_custom,
                 help="Repeated sections (chorus 1 and 2) get the same cutting pattern.")
     _, rep = SM.plan_cuts(track, segmentation_settings())
     with st.expander("🧠 How Smart read this song", expanded=True):
@@ -2159,21 +2157,21 @@ def _render_scored_cut_settings(track: dict, _v) -> None:
     _custom = dict(on_change=_mark_audio_custom)
     col1, col2 = st.columns(2)
     with col1:
-        st.slider("Average bars per cut", 0.5, 8.0, value=float(_v("sc_bars_per_cut")), step=0.25,
+        st.slider("Average bars per cut", 0.5, 8.0, step=0.25,
                   key="sc_bars_per_cut", **_custom,
                   help="Overall cut rate: 1 = about one cut per bar, 4 = one per 4 bars.")
-        st.slider("Follow the energy", 0.0, 1.0, value=float(_v("sc_follow_energy")), step=0.05,
+        st.slider("Follow the energy", 0.0, 1.0, step=0.05,
                   key="sc_follow_energy", **_custom,
                   help="How much faster loud, busy passages cut than quiet ones. 0 = the same rate everywhere.")
     with col2:
-        st.slider("Shortest segment (s)", 0.3, 8.0, value=float(_v("sc_min_sec")), step=0.1, key="sc_min_sec",
+        st.slider("Shortest segment (s)", 0.3, 8.0, step=0.1, key="sc_min_sec",
                   **_custom, help="No two cuts closer than this.")
-        st.slider("Longest segment (s)", 0.0, 30.0, value=float(_v("sc_max_sec")), step=0.5, key="sc_max_sec",
+        st.slider("Longest segment (s)", 0.0, 30.0, step=0.5, key="sc_max_sec",
                   **_custom, help="No segment longer than this, if there's any reasonable cut in range. 0 = no limit.")
     with st.expander("What to cut on", expanded=False):
         _fl = list(CUT_FOCUS)
-        st.selectbox("Mix", _fl, index=_fl.index(_v("sc_focus")) if _v("sc_focus") in _fl else 0,
-                     key="sc_focus", on_change=_apply_cut_focus,
+        SSTORE.choose("sc_focus", _fl)
+        st.selectbox("Mix", _fl, key="sc_focus", on_change=_apply_cut_focus,
                      help="Sets the weights below: Song structure favours bar lines, phrases, sections and "
                           "drops; Drums & hits favours kicks, snares and big hits; Vocals cuts between sung "
                           "lines and avoids cutting through them.")
@@ -2194,7 +2192,7 @@ def _render_scored_cut_settings(track: dict, _v) -> None:
         }
         for i, (key, (label, hlp)) in enumerate(weight_help.items()):
             with wcols[i % 3]:
-                st.slider(label, 0.0, 5.0, value=float(_v(key)), step=0.1, key=key, help=hlp)
+                st.slider(label, 0.0, 5.0, step=0.1, key=key, help=hlp)
 
 
 CUT_KIND_STYLES = (
@@ -2275,32 +2273,17 @@ def render_audio_settings_section(track: dict) -> None:
     """Step 0: all segmentation dials plus a live audio chart — so you can
     tune the cuts while watching exactly where they land on the waveform.
     Runs as a fragment so adjusting any dial only reruns this section, not
-    the full page.
-
-    This section's widgets only ever run while THIS section is the active
-    one (the other sections use st.stop() before reaching here) — and
-    Streamlit discards session_state for widgets that weren't instantiated
-    on a given run. So every widget below is given an explicit value=/index=
-    sourced from a plain, non-widget "shadow" copy (audio_settings_shadow),
-    saved at the end of every call here — rather than relying on key= alone
-    to survive the round trip back from another section. key= still wins
-    whenever its own state DOES exist (i.e. on every normal interaction
-    while staying on this section), so nothing about dragging a slider
-    changes; value= only matters the moment this section is re-entered."""
+    the full page. Every dial keeps its value while other steps show — see
+    settings_store.py (widgets use key= only)."""
     autosave_now()
-    _shadow = st.session_state.get("audio_settings_shadow", {})
-
-    def _v(key):
-        return st.session_state.get(key, _shadow.get(key, DIAL_DEFAULTS.get(key)))
+    _v = _setting
 
     st.subheader("How the music is cut")
     _render_style_row(_v)
     _seg_options = [SEG_SMART, SEG_SCORED, SEG_ADAPTIVE, SEG_RHYTHM]
-    _seg_default = _v("segmentation_method")
+    SSTORE.choose("segmentation_method", _seg_options)
     segmentation_method = st.radio(
-        "Method", _seg_options,
-        index=_seg_options.index(_seg_default) if _seg_default in _seg_options else 0,
-        key="segmentation_method", format_func=lambda m: SEG_LABELS.get(m, m), horizontal=True,
+        "Method", _seg_options, key="segmentation_method", format_func=lambda m: SEG_LABELS.get(m, m), horizontal=True,
         on_change=_method_changed,
         help="🧠 Smart: reads the song's structure and intensity and sets its own cutting rhythm — a "
              "steady pace per section on the bar / beat grid, faster when the music is bigger, speeding up "
@@ -2312,16 +2295,15 @@ def render_audio_settings_section(track: dict) -> None:
     )
     _pc = st.columns([2, 2, 1])
     _styles = list(AUDIO_STYLES) + [AUDIO_STYLE_CUSTOM]
-    _style_now = _v("audio_style") if _v("audio_style") in _styles else AUDIO_STYLE_CUSTOM
     if segmentation_method == SEG_SMART:
         # Smart sets its own pace from the track; the Pace slider below dials it in.
         _pc[0].caption("🧠 Smart sets its pace from the track itself — dial it in with **Pace** below.")
         _pc[1].button("↺ Back to auto", on_click=_smart_reset, width="stretch",
                       help="Pace back to auto, contrast back to the song's own, all switches on.")
     else:
-        _pace_row(_pc, _styles, _style_now)
+        _pace_row(_pc, _styles)
     _pc[2].number_input(
-        "Beats per bar", min_value=2, max_value=12, value=int(_v("beats_per_bar")), key="beats_per_bar",
+        "Beats per bar", min_value=2, max_value=12, key="beats_per_bar",
         on_change=_beats_per_bar_changed,
         help="4 = common time (most pop/rock/EDM). Use 3 for a waltz, 6 for 6/8, etc.",
     )
@@ -2332,7 +2314,7 @@ def render_audio_settings_section(track: dict) -> None:
 
     _custom = dict(on_change=_mark_audio_custom)
     if segmentation_method in (SEG_SCORED, SEG_ADAPTIVE, SEG_RHYTHM):
-        st.toggle("🥁 Land every cut on the beat", value=bool(_v("on_beat")), key="on_beat", **_custom,
+        st.toggle("🥁 Land every cut on the beat", key="on_beat", **_custom,
                   help="Moves each cut onto the nearest beat — onto a bar line when one is within a beat, for "
                        "changes in the music (energy changes, sections, drops, bar styles). Off = cuts can fall "
                        "between beats, exactly on a hit or a loudness jump.")
@@ -2344,61 +2326,58 @@ def render_audio_settings_section(track: dict) -> None:
         _render_aim_adaptive(track, len(build_segments(track, segmentation_settings())))
         col1, col2 = st.columns(2)
         with col1:
-            st.slider("Cut at energy changes — threshold", 0.02, 0.5, value=float(_v("change_threshold")),
-                      step=0.01, key="change_threshold", **_custom,
+            st.slider("Cut at energy changes — threshold", 0.02, 0.5, step=0.01, key="change_threshold", **_custom,
                       help="How big a jump in loudness counts as a change worth cutting on. Lower = more cuts.")
-            react = st.toggle("Cut on big hits", value=bool(_v("react_to_hits")), key="react_to_hits", **_custom,
+            react = st.toggle("Cut on big hits", key="react_to_hits", **_custom,
                               help="Also cut on the strongest hits — exactly on the hit, or on its beat with 🥁 on.")
-            st.slider("Big-hit threshold", 0.5, 1.0, value=float(_v("hit_threshold")), step=0.01,
+            st.slider("Big-hit threshold", 0.5, 1.0, step=0.01,
                       key="hit_threshold", disabled=not react, **_custom,
                       help="How strong a hit must be (0–1) to become a cut. Lower = more cuts.")
         with col2:
-            st.slider("Shortest segment (s)", 0.3, 8.0, value=float(_v("min_segment_sec")), step=0.1,
+            st.slider("Shortest segment (s)", 0.3, 8.0, step=0.1,
                       key="min_segment_sec", **_custom, help="No two cuts closer than this.")
-            st.slider("Longest segment (s)", 0.0, 30.0, value=float(_v("max_segment_sec")), step=0.5,
+            st.slider("Longest segment (s)", 0.0, 30.0, step=0.5,
                       key="max_segment_sec", **_custom,
                       help="Longer segments are split at their strongest beat. 0 = no limit.")
         with st.expander("Advanced", expanded=False):
             ac = st.columns(2)
-            ac[0].slider("Energy-change window (s)", 0.5, 6.0, value=float(_v("change_window_secs")), step=0.1,
+            ac[0].slider("Energy-change window (s)", 0.5, 6.0, step=0.1,
                          key="change_window_secs", **_custom,
                          help="Compares the loudness this long after each moment with this long before it.")
-            ac[1].slider("Snap radius (s)", 0.0, 1.0, value=float(_v("snap_secs")), step=0.05, key="snap_secs",
+            ac[1].slider("Snap radius (s)", 0.0, 1.0, step=0.05, key="snap_secs",
                          **_custom, help="Energy-change cuts move onto the strongest hit within this distance "
                                         "(then onto the beat, with 🥁 on).")
     else:
         col1, col2 = st.columns(2)
         with col1:
-            st.slider("Fast-cutting threshold", 0.1, 1.0, value=float(_v("fast_energy_thresh")), step=0.01,
+            st.slider("Fast-cutting threshold", 0.1, 1.0, step=0.01,
                       key="fast_energy_thresh", **_custom,
                       help="Bars louder than this (0–1 of the loudest) cut every bar (FAST); quieter bars "
                            "are CINEMATIC. Lower = more fast cutting.")
             st.number_input("Cinematic segment length (bars)", min_value=1, max_value=8,
-                            value=int(_v("cinematic_bars")), key="cinematic_bars", **_custom,
+                            key="cinematic_bars", **_custom,
                             help="How many bars a CINEMATIC segment spans. 2, 4 or 8 follow musical phrases.")
         with col2:
-            dpo = st.toggle("Extra cuts at sudden jumps", value=bool(_v("dynamic_priority_override")),
-                            key="dynamic_priority_override", **_custom,
+            dpo = st.toggle("Extra cuts at sudden jumps", key="dynamic_priority_override", **_custom,
                             help="Adds a cut at a sudden mid-bar jump in loudness (a hit or drop) that the "
                                  "bar-by-bar styles would smooth away.")
-            st.slider("Sudden-jump sensitivity", 0.02, 1.0, value=float(_v("override_delta_thresh")), step=0.01,
+            st.slider("Sudden-jump sensitivity", 0.02, 1.0, step=0.01,
                       key="override_delta_thresh", disabled=not dpo, **_custom,
                       help="How large a jump triggers an extra cut. Lower = more extra cuts.")
         with st.expander("Advanced", expanded=False):
             ac = st.columns(2)
             with ac[0]:
                 st.number_input("FAST max run (bars)", min_value=0, max_value=64,
-                                value=int(_v("fast_max_bars")), key="fast_max_bars", **_custom,
+                                key="fast_max_bars", **_custom,
                                 help="After this many FAST bars in a row, FAST stops for a while. 0 = no limit.")
                 st.number_input("FAST pause after a run (bars)", min_value=0, max_value=32,
-                                value=int(_v("fast_cooldown_bars")), key="fast_cooldown_bars", **_custom,
+                                key="fast_cooldown_bars", **_custom,
                                 help="Bars that must pass after a FAST run before FAST can start again.")
             with ac[1]:
                 st.number_input("Hold a style for (bars)", min_value=1, max_value=8,
-                                value=int(_v("phrase_lock_bars")), key="phrase_lock_bars", **_custom,
+                                key="phrase_lock_bars", **_custom,
                                 help="FAST or CINEMATIC is kept this many bars before it's re-decided.")
-                st.slider("Clear zone around a jump cut (s)", 0.0, 4.0, value=float(_v("override_clear_secs")),
-                          step=0.1, key="override_clear_secs", disabled=not dpo, **_custom,
+                st.slider("Clear zone around a jump cut (s)", 0.0, 4.0, step=0.1, key="override_clear_secs", disabled=not dpo, **_custom,
                           help="Other cuts closer than this to a jump cut are removed.")
 
     st.divider()
@@ -2463,12 +2442,6 @@ def render_audio_settings_section(track: dict) -> None:
     st.plotly_chart(afig, width="stretch")
     st.caption(_audio_status(track, _segs)[0])
 
-    # Save the shadow copy every call — this is what actually survives the round trip to
-    # another section (plain session_state, not tied to any widget), and is what the explicit
-    # value=/index= above restore from on re-entry.
-    st.session_state["audio_settings_shadow"] = {
-        k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state
-    }
 
 
 def _audio_status(track: dict, segs: list) -> tuple:
@@ -2496,12 +2469,7 @@ def render_audio_simple(track: dict) -> None:
     """🎵 Step 0, Simple view: the cutting style + pace and where the cuts land. Every dial,
     split screen and the ✂️ cut editor are in the Advanced view; their settings still apply."""
     autosave_now()
-    _shadow = st.session_state.get("audio_settings_shadow", {})
-
-    def _v(key):
-        return st.session_state.get(key, _shadow.get(key, DIAL_DEFAULTS.get(key)))
-
-    _render_style_row(_v)
+    _render_style_row(_setting)
     segs = planned_segments(track, segmentation_settings())
     apply_segment_intensity(segs, track, st.session_state.get("density_contrast", 1.0))
     fig = go.Figure()
@@ -2531,9 +2499,6 @@ def render_audio_simple(track: dict) -> None:
     else:
         st.caption("🎭 No story map saved for this track — clips aren't steered by role. Make one in 🛠️ Advanced "
                    "→ 🎭 Story map, or in the Media Library.")
-    st.session_state["audio_settings_shadow"] = {
-        k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -3114,6 +3079,7 @@ DIAL_DEFAULTS = {
     **CS.DEFAULTS,
     # Segmentation — Smart
     **SM.DEFAULTS,
+    "sm_pace": int(SM.DEFAULTS["sm_pace"]),   # a step on the Pace slider (-2 … 2): kept as a whole number
     # Split screen & intensity
     "split_screen_enabled": False,
     "min_clips": 1,
@@ -3147,38 +3113,10 @@ DIAL_DEFAULTS = {
     "autofill_preset": "Balanced",
 }
 
-# Weight keys that live on the Matching & Export page — Streamlit can purge
-# these when the page reruns while that section isn't active (the widgets
-# don't render, so their session_state entries can disappear). We shadow them
-# exactly like audio_settings_shadow so they survive round-trips to other
-# sections and come back at the user's last-set values rather than defaults.
-WEIGHT_KEYS = [
-    "weight_shape", "weight_random", "avoid_repeat",
-    "weight_spread", "weight_motion", "weight_position", "autofill_seed",
-    "autofill_v2", "autofill_preset",
-]
-
-# Restore audio-settings keys from their shadow copy BEFORE the generic setdefault below
-# fills any gap with a static default. This matters because render_audio_settings_section's
-# own value=/index= restoration only runs while that section is the active one — by then it
-# would be too late, since the setdefault loop runs unconditionally, every rerun, regardless
-# of section, and setdefault only acts when the key is ABSENT. If a purged key were left
-# absent until here, this loop would correctly see the gap and fill it from the shadow; but
-# running it only AFTER the generic setdefault had already filled that same gap with the
-# static default would mean the key is no longer absent, so the shadow value would never be
-# reached — hence doing this restoration first.
-# Audio settings shadow — kept for backward compatibility with saved sessions
-_audio_shadow = st.session_state.get("audio_settings_shadow", {})
-_audio_shadow.update({k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state})
-st.session_state["audio_settings_shadow"] = _audio_shadow
-
-# Weight shadow
-_weight_shadow = st.session_state.get("weight_settings_shadow", {})
-_weight_shadow.update({k: st.session_state[k] for k in WEIGHT_KEYS if k in st.session_state})
-st.session_state["weight_settings_shadow"] = _weight_shadow
-
-for _k, _v in DIAL_DEFAULTS.items():
-    st.session_state.setdefault(_k, _v)
+# ⚙️ Every setting above keeps its value from run to run, whichever step is showing (its widget may
+# not be drawn) — see settings_store.py. Widgets for them use key= only; everything reads
+# st.session_state. role_clips_mode is set from story_reserve / intro_outro_exclusive below.
+SSTORE.keep(DIAL_DEFAULTS, extra_keys=("role_clips_mode",))
 
 
 # ---------------------------------------------------------------------------
@@ -3354,12 +3292,6 @@ def _apply_project_load_dict(data: dict) -> list:
     for k, v in data.get("chor_pick_state", {}).items():
         st.session_state[k] = v
 
-    # Re-seed the audio-settings shadow too, so render_audio_settings_section's own
-    # restoration (which reads from the shadow, not these keys directly) stays in sync
-    # the next time that section is visited.
-    st.session_state["audio_settings_shadow"] = {
-        k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state
-    }
 
     # One-shot, per-mode suppression so the Auto/Manual/Choreography "settings changed,
     # reset progress" guards don't immediately wipe out what was just loaded the first
@@ -3506,10 +3438,6 @@ def apply_audio_profile(track: dict, track_id: str, report: bool = False) -> Non
             st.session_state[k] = v
         except Exception:
             pass   # a widget already drawn this run keeps its value until the next run
-    appscope = st.session_state.get("_audio_appscope", {})
-    appscope.update({k: v for k, v in settings.items() if k in AUDIO_SETTINGS_KEYS})
-    appscope["audio_style"] = st.session_state.get("audio_style")
-    st.session_state["_audio_appscope"] = appscope
     st.session_state["_audio_profile_for"] = _audio_profile_key(track_id)
     if report:
         st.session_state["auto_tune_report"] = why
@@ -3632,9 +3560,6 @@ st.session_state["_before_reset"] = autosave_now   # used by the sidebar's 🧹 
 _restore = st.session_state.pop("_restore_autosave", None)
 if _restore:
     _restore_warnings = _apply_project_load_dict(_restore.get("state") or {})
-    _appscope = st.session_state.get("_audio_appscope", {})
-    _appscope.update({k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state})
-    st.session_state["_audio_appscope"] = _appscope
     if _restore.get("loaded_project"):
         st.session_state["_loaded_project"] = _restore["loaded_project"]
     if _restore.get("project_name"):
@@ -3676,10 +3601,6 @@ _reopen = st.session_state.pop("_reopen_project", None)
 if _reopen:
     _reopen_warnings = _apply_project_load_dict(_reopen["data"])
     st.session_state["_match_pressed"] = True      # you asked for this plan — build it without ▶️ Match
-    # Make the app-scope audio snapshot agree with what was just loaded.
-    _appscope = st.session_state.get("_audio_appscope", {})
-    _appscope.update({k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state})
-    st.session_state["_audio_appscope"] = _appscope
     st.session_state["_reopen_notice"] = {**{k: v for k, v in _reopen.items() if k != "data"},
                                           "warnings": _reopen_warnings}
     st.session_state.pop("_loaded_project", None)   # a render's state isn't that saved project's
@@ -3753,7 +3674,6 @@ def _open_recommended_plan(plan: dict) -> None:
         ss[k] = v
     ss["audio_style"] = AUDIO_STYLE_CUSTOM          # these settings exactly — don't re-tune over them
     ss["cut_style"] = "custom"                      # 🎨 style row shows Custom (the plan's own settings)
-    ss["_audio_appscope"] = {k: ss[k] for k in AUDIO_SETTINGS_KEYS if k in ss}
     ss["committed_selected_videos"] = list(plan["videos"])
     for vid in plan["videos"]:
         ss[f"select_video_{vid}"] = True
@@ -3863,7 +3783,7 @@ if _open_story in tracks:
     st.session_state["track_id"] = _open_story
     st.session_state["ui_section"] = "🎭 1. Story map"
 # The track is picked at the top of the 🎵 Audio step (render_track_picker); it's
-# kept like the other step settings (STEP_WIDGET_KEYS) so every step can use it.
+# kept like every other setting (settings_store.keep) so every step can use it.
 if tracks and st.session_state.get("track_id") not in tracks:
     st.session_state["track_id"] = tracks[0]
 st.session_state["track_id"] = st.session_state["track_id"]
@@ -3891,16 +3811,6 @@ else:
         "only" if st.session_state.get("intro_outro_exclusive") else
         "saved" if st.session_state.get("story_reserve", True) else "anywhere")
 
-STEP_WIDGET_KEYS = [
-    "role_clips_mode",
-    "matching_mode", "max_shape_matches", "max_chor_videos", "prefer_intro_outro", "intro_outro_exclusive",
-    "sequential_mode", "allow_same_video", "use_story_map", "story_reserve",
-    "split_screen_enabled", "min_clips", "max_clips", "clip_count_skip", "ramp_range", "density_contrast",
-    "vary_count", "count_seed", "min_clip_len_sec",
-]
-for _k in STEP_WIDGET_KEYS:
-    if _k in st.session_state:
-        st.session_state[_k] = st.session_state[_k]
 if st.session_state["max_clips"] < st.session_state["min_clips"]:
     st.session_state["max_clips"] = st.session_state["min_clips"]
 
@@ -4023,24 +3933,6 @@ def render_track_picker() -> None:
 # ---------------------------------------------------------------------------
 # App-scope audio settings preservation
 # ---------------------------------------------------------------------------
-# Streamlit @fragment has its own scoped session state — keys written inside
-# a fragment during a fragment rerun are NOT guaranteed to survive into the
-# next full app rerun. This means shadow dicts and plain keys set inside
-# render_audio_settings_section (a @fragment) can be wiped between reruns.
-#
-# _audio_appscope is written here — in the main script body, outside any
-# fragment — on every full rerun. If audio keys are currently present
-# (fragment ran this rerun), capture them. If absent (wiped by Streamlit),
-# restore from the last captured snapshot. This dict is never touched by
-# any fragment and survives all rerun types.
-_appscope = st.session_state.get("_audio_appscope", {})
-_captured = {k: st.session_state[k] for k in AUDIO_SETTINGS_KEYS if k in st.session_state}
-if _captured:
-    _appscope.update(_captured)
-    st.session_state["_audio_appscope"] = _appscope
-for _k in AUDIO_SETTINGS_KEYS:
-    if _k in _appscope:
-        st.session_state[_k] = _appscope[_k]
 
 # ---------------------------------------------------------------------------
 # Three free-navigation sections (not a locked wizard — jump between them
@@ -4362,11 +4254,6 @@ with _mt[1]:
                               help=f"A different Variety draw with the same settings — and matches straight away "
                                    f"(draw {int(st.session_state.get('autofill_seed', 42))}).")
 
-# Save weight values to their shadow copy every time this section renders —
-# mirrors audio_settings_shadow so values survive switching to another section.
-st.session_state["weight_settings_shadow"] = {
-    k: st.session_state[k] for k in WEIGHT_KEYS if k in st.session_state
-}
 
 # Always read weight values from session_state (widgets above have already written them)
 weight_shape = st.session_state.get("weight_shape", 2.0)
