@@ -301,7 +301,7 @@ def for_this_track(tracks: list) -> None:
     story_regions, story_source = RL.story_for(track_id, track)
     sig = RL.signature(track_id, n_videos, sequential, story_regions)
     data = RL.load_results(track_id, n_videos, sequential)
-    fresh = bool(data and data.get("sig") == sig)
+    fresh = RL.staleness(data, sig)[0] != "stale"      # other videos changing doesn't make it out of date
     go_btn = c[2].button("🔍 Find plans" if not data else "🔄 Search again", type="primary", width="stretch")
     if c[2].button("⏳ In the background", width="stretch", key="rec_bg_one",
                    help="Queue this search for the background worker instead — carry on using the app; the plans "
