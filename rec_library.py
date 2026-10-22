@@ -198,6 +198,41 @@ def scene_roles_lookup():
     return _lib_memo("scene_roles", build)
 
 
+def video_profiles() -> dict:
+    """{video_id: what a video offers the matcher} — for 🕳️ Gaps' "videos that rarely fit" reasons:
+    usable footage (library range, excluded scenes left out), share of very short scenes, motion
+    level / variation (similarity's video inputs), seconds marked with any role, and whether it has
+    motion data at all."""
+    def build():
+        from library_common import overlap_with_range
+        ranges = library_ranges()
+        sims = SIM.library_video_inputs(CStore.all_catalogues(), ranges, CATALOGUE_DIR)
+        roles = role_seconds()
+        out = {}
+        for stem, slim in CStore.video_index().items():
+            vid = slim["video_id"]
+            rng = ranges.get(vid)
+            lens, curves = [], 0
+            for sc in slim["scenes"]:
+                if sc["excluded"]:
+                    continue
+                a, b = overlap_with_range(sc["start"], sc["end"], rng) if rng else (sc["start"], sc["end"])
+                if a is None:
+                    continue
+                lens.append(b - a)
+                curves += bool(sc.get("has_curve"))
+            sim = sims.get(vid) or {}
+            level, dyn = sim.get("level"), sim.get("dynamics")
+            out[vid] = {"stem": stem, "usable_sec": round(sum(lens), 1), "scenes": len(lens),
+                        "short_share": (sum(1 for x in lens if x < 1.5) / len(lens)) if lens else 0.0,
+                        "level": level, "variation": (dyn / level) if level else None,
+                        "role_sec": round(sum((roles.get(vid) or {}).values()), 1),
+                        "has_motion": curves > 0, "excluded": sum(1 for sc in slim["scenes"] if sc["excluded"]),
+                        "total_scenes": len(slim["scenes"])}
+        return out
+    return _lib_memo("profiles", build)
+
+
 def actors_by_video() -> dict:
     return {vid: d["actors"] for vid, d in video_details().items() if d.get("actors")}
 

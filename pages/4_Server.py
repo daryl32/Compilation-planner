@@ -286,12 +286,15 @@ with st.container(border=True):
 # ---------------------------------------------------------------------------
 d = SG.disk_usage()
 with st.container(border=True):
-    c = st.columns([3, 1, 1, 1])
+    c = st.columns([3, 1, 1, 1, 1])
     c[0].markdown(f"**💽 Disk: {d['pct']:.0f}% used**")
     c[0].progress(min(d["pct"] / 100, 1.0))
     c[1].metric("Used", SG.fmt_bytes(d["used"]))
     c[2].metric("Free", SG.fmt_bytes(d["free"]))
-    c[3].metric("Size", SG.fmt_bytes(d["total"]))
+    c[3].metric("Reserved", SG.fmt_bytes(d.get("reserved", 0)),
+                help="Kept back by the filesystem for the system itself (about 5%), so the server can still work "
+                     "when the disk is full. Not used by anything — just not available for files.")
+    c[4].metric("Size", SG.fmt_bytes(d["total"]), help="Used + Free + Reserved. 1 GB = 1,000,000,000 bytes.")
     if d["pct"] >= 85:
         st.error("The disk is nearly full — renders and downloads may fail. Clear some space below.")
     elif d["pct"] >= 70:

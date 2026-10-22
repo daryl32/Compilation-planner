@@ -199,6 +199,28 @@ def test_feeds_hidden_gems_and_gaps():
     assert g2["measure"] == "depth" and g2["blocks"][0]["label"] == "Intense, short shots (under 1.5 s)"
 
 
+def test_feeds_weak_videos_with_reasons():
+    """🕳️ Gaps → 🎬 videos that rarely fit: fewest tracks where they're in the best quarter first,
+    with a reason from their own footage (and videos with no motion data at the very top)."""
+    import core.feeds as F
+    vids = {f"v{k}": 0.4 + 0.05 * k for k in range(8)}           # v0 weakest … v7 strongest everywhere
+    res = {f"t{i}": {"insights": {"videos": dict(vids)},
+                     "results": [{"plan": {"videos": ["v7", "v6"], "scores": {"overall": 70}}}]} for i in range(3)}
+    base = {"usable_sec": 300.0, "short_share": 0.1, "level": 1.0, "variation": 0.5, "role_sec": 20.0,
+            "has_motion": True, "excluded": 0, "scenes": 30, "total_scenes": 30}
+    profiles = {v: dict(base, stem=v, level=1.0 + 0.1 * k) for k, v in enumerate(vids)}
+    profiles["v0"].update(usable_sec=12.0, excluded=9)                   # little usable footage
+    profiles["v1"].update(short_share=0.8)                                # mostly tiny scenes
+    profiles["nomo"] = dict(base, stem="nomo", has_motion=False)          # never scored at all
+    weak = F.weak_videos(res, profiles, n=4)
+    assert [w["video_id"] for w in weak][:3] == ["nomo", "v0", "v1"]
+    assert "No motion data" in weak[0]["why"][0]
+    assert "Little usable footage" in weak[1]["why"][0] and weak[1]["good"] == 0 and weak[1]["tracks"] == 3
+    assert "short scenes" in weak[2]["why"][0]
+    strong = {w["video_id"] for w in F.weak_videos(res, profiles, n=20) if w["good"] == 3}
+    assert {"v6", "v7"} <= strong
+
+
 def test_feeds_vary_the_videos():
     """A feed doesn't show the same few videos in every plan."""
     import core.feeds as F
@@ -228,6 +250,7 @@ def test_page_feeds_and_open_from_top_plans(nightly):
     assert not errors(at), errors(at)
     assert [t.label for t in at.tabs] == ["🎵 For this track", "🏆 Top plans", "💥 Best action", "🆕 New videos",
                                          "🧩 Hidden gems", "🕳️ Gaps"]
+    assert any("fits well on" in m.value for m in at.markdown)            # 🕳️ Gaps → 🎬 videos that rarely fit
     # the nightly results show on 🎵 For this track straight away (default settings)
     assert sum(1 for b in at.button if (b.key or "").startswith("open_song_full_")) >= 4
     assert any("🆕 vid_f" in m.value for m in at.markdown)

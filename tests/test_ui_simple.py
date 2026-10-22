@@ -229,3 +229,36 @@ def test_old_project_settings_show_through():
     assert not errors(at), errors(at)
     keys = {w.key for w in at.toggle}
     assert "autofill_v2" in keys and "allow_same_video" in keys
+
+
+def test_project_panel_saves_and_opens():
+    """📁 Project bar: 💾 Save / 📂 Open and 🆕 New open a panel in the bar (not a pop-over — those jumped
+    around on a phone); saving and opening work from it and close it."""
+    import json
+    from config import PROJECTS_DIR
+    from tests.apptest_util import errors, page_app
+    at = page_app(PLANNER, advanced=False)
+    at.session_state["track_id"] = "song_full"
+    at.run()
+    assert not errors(at), errors(at)
+    assert not [w for w in at.text_input if w.key == "project_save_name"]          # closed to start with
+    at.button(key="project_panel_file").click().run()
+    at.text_input(key="project_save_name").set_value("panel-test").run()
+    [b for b in at.button if b.label.startswith("💾 Save Project")][0].click().run()
+    assert not errors(at), errors(at)
+    path = PROJECTS_DIR / "panel-test.json"
+    try:
+        assert path.exists() and json.loads(path.read_text())["track_id"] == "song_full"
+        assert not [w for w in at.text_input if w.key == "project_save_name"]      # closed after saving
+        at.button(key="project_panel_file").click().run()
+        at.selectbox(key="project_load_choice").set_value("panel-test").run()
+        [b for b in at.button if b.label == "📂 Open Project"][0].click().run()
+        assert not errors(at), errors(at)
+        assert any("Opened 'panel-test'" in s.value for s in at.success)
+        # 🆕 New: its panel, then the button starts a blank project
+        at.button(key="project_panel_new").click().run()
+        at.button(key="new_project_go").click().run()
+        assert not errors(at), errors(at)
+        assert not at.session_state["_loaded_project"] if "_loaded_project" in at.session_state else True
+    finally:
+        path.unlink(missing_ok=True)

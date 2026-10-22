@@ -74,11 +74,12 @@ def _inside(path: Path, folders) -> bool:
 
 
 def fmt_bytes(n) -> str:
+    """Decimal units (1 GB = 1,000,000,000 bytes) — how Hetzner sizes the disk, so its 40 GB shows as 40 GB."""
     n = float(n or 0)
     for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024 or unit == "TB":
+        if n < 1000 or unit == "TB":
             return f"{n:,.0f} {unit}" if unit in ("B", "KB") else f"{n:,.1f} {unit}"
-        n /= 1024
+        n /= 1000
 
 
 # ---------------------------------------------------------------------------
@@ -86,8 +87,11 @@ def fmt_bytes(n) -> str:
 # ---------------------------------------------------------------------------
 
 def disk_usage(path: Path = None) -> dict:
+    """total = used + free + reserved: the filesystem keeps a small slice (~5% on ext4) for the
+    system (root) when the disk fills up — not counted as used, and not free for ordinary use."""
     u = shutil.disk_usage(str(path or (ORIGINALS_ROOT if _exists(ORIGINALS_ROOT) else DATA_ROOT)))
-    return {"total": u.total, "used": u.used, "free": u.free, "pct": 100.0 * u.used / u.total}
+    return {"total": u.total, "used": u.used, "free": u.free, "reserved": max(0, u.total - u.used - u.free),
+            "pct": 100.0 * u.used / u.total}
 
 
 def du(path: Path) -> int | None:

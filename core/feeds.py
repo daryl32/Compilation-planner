@@ -7,6 +7,7 @@
   🧩 hidden_gems   — videos that fit many tracks well but you've rarely used lately
   🕳️ gaps          — story roles the library is short of, and kinds of block nothing
                      in the library matches well (what to film / find next)
+  🎬 weak_videos   — the videos that fit the fewest tracks well, each with a likely reason
   (🆕 the new-video spotlight is stored per video by rec_library.run_spotlight)
 
 Pure functions, no Streamlit.
@@ -162,4 +163,92 @@ def gaps(results: dict, role_supply: dict, role_names: dict = None) -> dict:
             "measure": measure}
 
 
-__all__ = ["top_plans", "best_action", "action_score", "video_fits", "hidden_gems", "gaps"]
+WEAK_SHOW = 8            # videos listed under "rarely fit"
+GOOD_FIT_Q = 0.75        # a video fits a track well when it's in that track's top quarter of the library
+
+
+def _pct(values: list, x: float) -> float:
+    """Share of `values` below x (0–1)."""
+    return sum(1 for v in values if v < x) / len(values) if values else 0.5
+
+
+def weak_reasons(prof: dict, everyone: dict) -> list:
+    """Likely reasons a video rarely fits (most telling first, at most two), each with what to do.
+    prof: rec_library.video_profiles()[video]; everyone: all videos' profiles (to compare against)."""
+    if not prof:
+        return ["Not in the library's catalogues any more."]
+    if not prof.get("has_motion"):
+        return ["**No motion data** — it can't be matched at all. Run the motion-curve backfill for it "
+                "(Colab / laptop), then 🔄 Sync now."]
+    others = [p for p in everyone.values() if p.get("has_motion")]
+    out = []
+    usable = [p["usable_sec"] for p in others]
+    med_usable = float(np.median(usable)) if usable else 0.0
+    if prof["usable_sec"] < max(30.0, 0.25 * med_usable):
+        out.append((3, f"**Little usable footage** — {prof['usable_sec']:.0f}s left after its library range and "
+                       f"{prof['excluded']} excluded scene(s) (a typical video has {med_usable:.0f}s). Widen its "
+                       "library range or include more scenes."))
+    shorts = [p["short_share"] for p in others]
+    if prof["short_share"] >= 0.5 and _pct(shorts, prof["short_share"]) >= 0.8:
+        out.append((2.5, f"**Mostly very short scenes** — {100 * prof['short_share']:.0f}% are under 1.5s, shorter "
+                         "than most blocks. Join them in the Reviewer (🔗 Auto combine)."))
+    levels = [p["level"] for p in others if p.get("level") is not None]
+    if prof.get("level") is not None and levels:
+        q = _pct(levels, prof["level"])
+        if q <= 0.15:
+            out.append((2, "**Much calmer than your other videos** — it only suits quiet parts. Mark its scenes "
+                           "🌙 Slow so story maps place it in the slow parts of a song."))
+        elif q >= 0.85:
+            out.append((2, "**Much busier than your other videos** — it only suits the biggest moments. Mark its "
+                           "best scenes 💥 Action so story maps place them on drops."))
+    variations = [p["variation"] for p in others if p.get("variation") is not None]
+    if prof.get("variation") is not None and variations and _pct(variations, prof["variation"]) <= 0.15:
+        out.append((1.5, "**Its motion hardly changes**, so it can't rise and fall with the music (low shape "
+                         "match). Trim its library range to the liveliest part, or split long, steady scenes."))
+    if prof.get("role_sec", 0) <= 0 and any(p.get("role_sec", 0) > 0 for p in others):
+        out.append((1, "**No scenes marked with a role** — story-map plans can't place it. Mark roles in the "
+                       "Reviewer (🎭 Quick role marking)."))
+    out.sort(key=lambda x: -x[0])
+    if not out:
+        return ["Nothing wrong with the footage — it's just out-ranked by similar videos on most tracks. "
+                "Try it with ✨ Similar videos in the planner, or give it a track of its own."]
+    return [t for _, t in out[:2]]
+
+
+def weak_videos(results: dict, profiles: dict = None, n: int = WEAK_SHOW) -> list:
+    """The videos that fit the fewest tracks well — "well" = in that track's top quarter of the library —
+    then the fewest stored plans, then the lowest average fit. Videos with no motion data come first
+    (they can't fit anything). [{"video_id", "stem", "good", "tracks", "plans", "avg", "best", "best_track",
+    "why": [..]}]"""
+    profiles = profiles or {}
+    fits = video_fits(results)
+    if not fits and not profiles:
+        return []
+    cut = {}
+    for tid, data in results.items():
+        vals = list(((data.get("insights") or {}).get("videos") or {}).values())
+        if vals:
+            cut[tid] = float(np.quantile(vals, GOOD_FIT_Q))
+    in_plans = {}
+    for tid, plan in _plans(results):
+        for v in plan.get("videos") or []:
+            in_plans.setdefault(v, set()).add(tid)
+    n_tracks = len(cut)
+    rows = []
+    for vid in set(fits) | set(profiles):
+        f = fits.get(vid) or {}
+        good = sum(1 for t, x in f.items() if t in cut and x >= cut[t])
+        best_t, best = max(f.items(), key=lambda x: x[1]) if f else (None, 0.0)
+        rows.append({"video_id": vid, "stem": (profiles.get(vid) or {}).get("stem", vid), "good": good,
+                     "tracks": n_tracks, "plans": len(in_plans.get(vid, ())),
+                     "avg": round(100 * float(np.mean(list(f.values()))), 1) if f else 0.0,
+                     "best": round(100 * best, 1), "best_track": best_t, "scored": bool(f)})
+    rows.sort(key=lambda r: (r["scored"], r["good"], r["plans"], r["avg"]))
+    out = rows[:n]
+    for r in out:
+        r["why"] = weak_reasons(profiles.get(r["video_id"]), profiles)
+    return out
+
+
+__all__ = ["top_plans", "best_action", "action_score", "video_fits", "hidden_gems", "gaps", "weak_videos",
+           "weak_reasons"]
