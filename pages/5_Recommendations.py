@@ -461,12 +461,44 @@ def feed_gems(results: dict) -> None:
             h[1].markdown("**Best tracks:** " + " · ".join(f"🎵 {t} ({f:.0f}%)" for t, f in g["tracks"]))
 
 
+def _weak_videos(results: dict) -> None:
+    """🎬 The videos with the fewest good matches, each with a likely reason and a link to fix it."""
+    profiles = RL.video_profiles()
+    weak = FEEDS.weak_videos(results, profiles)
+    st.markdown("**🎬 Videos that rarely fit**",
+                help="A video fits a track well when it's in that track's best quarter of your library (its fit on "
+                     "its own: shape + motion + story). Listed: the fewest such tracks first, then the fewest "
+                     "recommended plans. The reasons come from the video's own footage compared with your other "
+                     "videos.")
+    if not weak:
+        st.caption("Not enough searched tracks yet.")
+        return
+    for w in weak:
+        with st.container(border=True):
+            c = st.columns([5, 1], vertical_alignment="center")
+            if w["scored"]:
+                facts = (f"fits well on **{w['good']} of {w['tracks']}** tracks · in {w['plans']} recommended "
+                         f"plan(s) · average fit {w['avg']:.0f}%"
+                         + (f" · best {w['best']:.0f}% on *{w['best_track']}*" if w["best_track"] else ""))
+            else:
+                facts = "not scored against any track"
+            c[0].markdown(f"**{w['video_id']}** — {facts}")
+            for why in w["why"]:
+                c[0].caption("💡 " + why)
+            try:
+                c[1].page_link("pages/2_Reviewer.py", label="📝 Review", query_params={"video": w["stem"]},
+                               help="Open it in the Reviewer (library range, excluded scenes, roles, splits).")
+            except Exception:
+                c[1].markdown(f"[📝 Review](Reviewer?video={w['stem']})")
+
+
 def feed_gaps(results: dict) -> None:
     _intro("What your library is short of — ideas for what to film or find next.",
-           "The story roles your tracks need more footage for, and kinds of block nothing in the library matches "
-           "well.")
+           "The videos that rarely fit your tracks (and why), the story roles your tracks need more footage for, "
+           "and kinds of block nothing in the library matches well.")
     if not results:
         return _no_searches()
+    _weak_videos(results)
     supply = {}
     for roles in RL.role_seconds().values():
         for r, sec in roles.items():
