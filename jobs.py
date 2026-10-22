@@ -34,6 +34,14 @@ import time
 import traceback
 from pathlib import Path
 
+if __name__ == "__main__":
+    # ⚡ One maths-library (OpenBLAS) thread per search process. By default each process starts a
+    # thread per CPU, so 3–4 searches side by side ran 12–16 busy threads on the server's 4 CPUs
+    # and each search took 5–10× longer than on its own (measured 22 Oct 2026: 3 tracks at once
+    # 46 s with one thread each, still running after 4 min without). Must be set before numpy loads.
+    for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(_var, "1")
+
 import rec_library as RL
 
 JOBS_DIR = RL.BASE_DIR / "jobs"

@@ -236,12 +236,17 @@ def background_panel() -> None:
     queued = [v for v in status.values() if v.get("state") == "queued"]
     errors = [v for v in status.values() if v.get("state") == "error"]
     night = J.nightly_status()
+    done = [v for v in status.values() if v.get("state") == "done"]
     if running:
-        r = running[0]
-        head = (f"⏳ Background searches — {r['label']} {100 * r.get('progress', 0):.0f}%" if len(running) == 1
-                else f"⏳ Background searches — {len(running)} running at once")
-        if queued:
-            head += f" · {len(queued)} queued"
+        # Overall progress: finished / all, and the time left from how often searches have been finishing.
+        total = len(done) + len(running) + len(queued)
+        head = f"⏳ Background searches — {len(done)} of {total} done · {len(running)} running"
+        times = sorted(v.get("updated", 0) for v in done)
+        gaps = sorted(b - a for a, b in zip(times, times[1:]))
+        if gaps:
+            per = gaps[len(gaps) // 2]      # typical time between finishes (an older batch's gap doesn't skew it)
+            left_min = (len(running) + len(queued)) * per / 60
+            head += (f" · ~{left_min:.0f} min left" if left_min < 90 else f" · ~{left_min / 60:.1f} h left")
     elif queued:
         head = f"⏳ Background searches — {len(queued)} queued" + (" (paused)" if J.is_paused() else "")
     else:
@@ -261,8 +266,10 @@ def background_panel() -> None:
         if J.is_paused():
             b[1].button("▶️ Resume", on_click=J.resume, width="stretch", key="rec_bg_resume")
         else:
-            b[1].button("⏸️ Pause", on_click=J.pause, width="stretch", key="rec_bg_pause",
-                        disabled=not (running or queued), help="Finish the current search, then stop.")
+            b[1].button("⏸️ Pause after these", on_click=J.pause, width="stretch", key="rec_bg_pause",
+                        disabled=not (running or queued),
+                        help="Lets the searches running now finish (a minute or so each), then starts no more. "
+                             "⏹️ Stop now ends them at once.")
         b[2].button("⏹️ Stop now", on_click=J.stop_now, width="stretch", key="rec_bg_stop",
                     disabled=not running, help="Stop at once; the current search starts again on resume.")
         b[3].button("🗑️ Clear the queue", on_click=J.cancel_queued, width="stretch", key="rec_bg_clear",
@@ -276,6 +283,8 @@ def background_panel() -> None:
             icon = {"running": "⏳", "queued": "🕒", "done": "✅", "error": "⚠️"}.get(v.get("state"), "•")
             line = f"{icon} {v.get('label')} — {v.get('msg', '')}"
             if v.get("state") == "running":
+                if v.get("started"):
+                    line += f" · {(time.time() - v['started']) / 60:.0f} min so far"
                 st.progress(min(1.0, float(v.get("progress", 0))), text=line)
             else:
                 st.caption(line + (f" ({_ago(v.get('updated'))})" if v.get("state") in ("done", "error") else ""))
