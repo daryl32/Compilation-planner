@@ -14,6 +14,7 @@ from pathlib import Path
 import streamlit as st
 
 import config
+from track_files import track_file
 from config import CATALOGUE_DIR, AUDIO_DIR
 
 # Small 480p copies of the source videos, used by the range picker so scrubbing
@@ -327,7 +328,7 @@ def _pending_target(stem: str):
     """(local path, Drive folder) for a pending entry, or None for a render
     entry / a file that's gone."""
     if stem.startswith("audio:"):
-        path, folder = AUDIO_DIR / f"{stem[6:]}.json", "scene-labeling/audio_catalogue"
+        path, folder = track_file(stem[6:], AUDIO_DIR), "scene-labeling/audio_catalogue"
     elif stem.startswith("thumb:"):
         # "thumb:<video_id>/<file>" — a thumbnail the Reviewer made for a split scene.
         vid, _, name = stem[6:].partition("/")

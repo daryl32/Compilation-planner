@@ -23,6 +23,7 @@ import uuid
 from pathlib import Path
 
 import config
+from track_files import track_file
 from config import AUDIO_DIR, CATALOGUE_DIR
 
 AUDIO_LIBRARY_FOLDER = getattr(config, "AUDIO_LIBRARY_DRIVE_FOLDER", "Audio-Library")
@@ -99,7 +100,7 @@ def name_taken(name: str, mix_id: str = None) -> bool:
     if not tid:
         return True
     mine = ((get(mix_id) or {}).get("output") or {}).get("track_id") if mix_id else None
-    return tid != mine and (AUDIO_DIR / f"{tid}.json").exists()
+    return tid != mine and track_file(tid, AUDIO_DIR).exists()
 
 
 def output_paths(name: str) -> dict:

@@ -22,6 +22,7 @@ import numpy as np
 import streamlit as st
 
 from config import AUDIO_DIR
+from track_files import track_file
 from core import keys as K
 from core import mixing as MX
 from library_common import format_mmss
@@ -50,11 +51,11 @@ PALETTE = ["rgba(99,132,255,{a})", "rgba(255,140,60,{a})", "rgba(46,184,120,{a})
 
 @st.cache_data(max_entries=12, show_spinner=False)
 def _load_track(track_id: str, mtime: float) -> dict:
-    return json.loads((AUDIO_DIR / f"{track_id}.json").read_text())
+    return json.loads(track_file(track_id, AUDIO_DIR).read_text())
 
 
 def full_track(track_id: str) -> dict | None:
-    path = AUDIO_DIR / f"{track_id}.json"
+    path = track_file(track_id, AUDIO_DIR)
     try:
         return _load_track(track_id, path.stat().st_mtime)
     except (OSError, ValueError):

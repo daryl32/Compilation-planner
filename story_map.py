@@ -23,6 +23,7 @@ No Streamlit in here.
 from __future__ import annotations
 
 import json
+from track_files import track_file
 import os
 
 import numpy as np
@@ -408,7 +409,7 @@ def ensure_default(track_id: str, track: dict = None) -> bool:
     if track is None:
         from config import AUDIO_DIR
         try:
-            track = json.loads((AUDIO_DIR / f"{track_id}.json").read_text())
+            track = json.loads(track_file(track_id, AUDIO_DIR).read_text())
         except (OSError, ValueError):
             return False
     try:

@@ -34,6 +34,7 @@ No Streamlit in here.
 """
 
 import argparse
+from track_files import track_file
 import datetime
 import json
 import os
@@ -899,7 +900,7 @@ def _local_audio_path(source_path: str) -> Path:
 def _process(job: dict, say) -> None:
     from config import AUDIO_DIR
     tid = job["track_id"]
-    json_path = AUDIO_DIR / f"{tid}.json"
+    json_path = track_file(tid, AUDIO_DIR)
     existing = _read_json(json_path, None) if job["kind"] in ("extra", "key") else None
     source_path = (existing or {}).get("source_path") or f"/content/drive/MyDrive/{job['drive_rel']}"
     local = _local_audio_path(source_path)

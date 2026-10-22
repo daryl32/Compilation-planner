@@ -104,6 +104,7 @@ def rerun_full():
         st.rerun()
 
 from config import CATALOGUE_DIR, AUDIO_DIR, PLANS_DIR, PREVIEW_DIR, PROJECTS_DIR
+from track_files import track_file
 
 # Google Drive sync — graceful fallback if credentials not present
 try:
@@ -171,7 +172,7 @@ def list_tracks():
 
 @st.cache_data(max_entries=4)
 def _load_track_file(track_id: str, mtime: float) -> dict:
-    with open(AUDIO_DIR / f"{track_id}.json") as f:
+    with open(track_file(track_id, AUDIO_DIR)) as f:
         return json.load(f)
 
 
@@ -179,7 +180,7 @@ def load_track(track_id: str) -> dict:
     """The track's catalogue — re-read whenever the file changes (e.g. after the
     server adds its extra analysis)."""
     try:
-        mtime = (AUDIO_DIR / f"{track_id}.json").stat().st_mtime
+        mtime = track_file(track_id, AUDIO_DIR).stat().st_mtime
     except OSError:
         mtime = 0.0
     return _load_track_file(track_id, mtime)
@@ -2550,7 +2551,7 @@ SECTIONS = [SECTION_AUDIO, SECTION_STORY, SECTION_VIDEOS, SECTION_MATCH]
 
 def _track_mtime(track_id: str) -> float:
     try:
-        return (AUDIO_DIR / f"{track_id}.json").stat().st_mtime
+        return track_file(track_id, AUDIO_DIR).stat().st_mtime
     except OSError:
         return 0.0
 
