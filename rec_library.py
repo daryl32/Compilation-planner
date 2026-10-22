@@ -31,6 +31,7 @@ import scene_roles as SR
 import similarity as SIM
 import story_map as STM
 from config import AUDIO_DIR, CATALOGUE_DIR
+from track_files import track_file
 from library_common import library_ranges, video_details
 
 # One folder per copy of the app (live / test copy): the curve cache folder is already
@@ -59,7 +60,7 @@ def list_tracks() -> list:
 
 
 def load_track(track_id: str) -> dict:
-    return json.loads((AUDIO_DIR / f"{track_id}.json").read_text())
+    return json.loads(track_file(track_id, AUDIO_DIR).read_text())
 
 
 def _mtime(p: Path) -> float:
@@ -329,7 +330,7 @@ def video_sigs() -> dict:
 
 
 def track_hash(track_id: str) -> str:
-    return file_hash(AUDIO_DIR / f"{track_id}.json")
+    return file_hash(track_file(track_id, AUDIO_DIR))
 
 
 def library_state() -> list:

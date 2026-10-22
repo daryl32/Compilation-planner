@@ -26,6 +26,7 @@ from pathlib import Path
 import streamlit as st
 
 import config
+from track_files import track_file
 from config import CATALOGUE_DIR, AUDIO_DIR, PREVIEW_DIR
 from library_common import (
     safe_image, image_ok, video_details, all_actors, all_video_tags, matches_details,
@@ -554,9 +555,11 @@ def render_analysis_panel(tracks: dict) -> None:
             if drive_err:
                 st.error(f"Couldn't list {AUDIO_LIBRARY_FOLDER}: {drive_err}")
             else:
-                known_names = {Path(t["source_path"]).name for t in tracks.values() if t["source_path"]}
-                known_ids = set(tracks)
-                new = [f for f in files if f["name"] not in known_names and Path(f["name"]).stem not in known_ids]
+                import unicodedata as _ud
+                _n = lambda s: _ud.normalize("NFC", s)     # an accent stored either way is the same name
+                known_names = {_n(Path(t["source_path"]).name) for t in tracks.values() if t["source_path"]}
+                known_ids = {_n(t) for t in tracks}
+                new = [f for f in files if _n(f["name"]) not in known_names and _n(Path(f["name"]).stem) not in known_ids]
                 if not new:
                     st.success(f"Every track in {AUDIO_LIBRARY_FOLDER} ({len(files)}) is already analysed.")
                 else:
@@ -825,7 +828,7 @@ def _suggest_story_map(track_id: str) -> None:
     """✨ Suggest: the same suggestion as the planner's Story map step, lined up with
     the Smart method's default cuts, saved as the track's story map."""
     import story_map as STM
-    path = AUDIO_DIR / f"{track_id}.json"
+    path = track_file(track_id, AUDIO_DIR)
     try:
         track = _load_track(track_id, path.stat().st_mtime)
     except (OSError, ValueError) as e:
@@ -951,7 +954,7 @@ def render_story_editor() -> None:
     sm = _sm_state()
     tid = sm["track_id"]
     try:
-        track, segs, analysis = _sm_track_bits(tid, (AUDIO_DIR / f"{tid}.json").stat().st_mtime)
+        track, segs, analysis = _sm_track_bits(tid, track_file(tid, AUDIO_DIR).stat().st_mtime)
     except (OSError, ValueError) as e:
         st.error(f"Couldn't read {tid}: {e}")
         st.button("← Back to tracks", on_click=_close_story_editor, key="aud_sm_back_err")
@@ -1017,12 +1020,12 @@ def render_story_editor() -> None:
 
 @st.cache_data(max_entries=3, show_spinner=False)
 def _load_track(track_id: str, mtime: float) -> dict:
-    return json.loads((AUDIO_DIR / f"{track_id}.json").read_text())
+    return json.loads(track_file(track_id, AUDIO_DIR).read_text())
 
 
 def _render_analysis_detail(track_id: str) -> None:
     from audio_charts import track_figure
-    path = AUDIO_DIR / f"{track_id}.json"
+    path = track_file(track_id, AUDIO_DIR)
     try:
         track = _load_track(track_id, path.stat().st_mtime)
     except (OSError, ValueError) as e:
@@ -1496,7 +1499,7 @@ def _reopen_in_planner(r: dict) -> None:
         st.warning("This render has no saved plan, so it can't be reopened.")
         return
     track_id = data.get("track_id")
-    if track_id and not (AUDIO_DIR / f"{track_id}.json").exists():
+    if track_id and not track_file(track_id, AUDIO_DIR).exists():
         st.warning(f"Track **{track_id}** isn't in the audio library any more — the planner will "
                    f"open on its first track instead.")
     st.session_state["_reopen_project"] = {"data": data, "kind": kind, "label": Path(r["path"]).name,
