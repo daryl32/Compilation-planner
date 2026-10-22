@@ -200,8 +200,9 @@ _added = CS.added_times()   # {video_id: unix time added}
 
 
 def role_marked(scene: dict) -> bool:
-    """🎭 Role marked: the scene has a role, or was checked and left without one."""
-    return bool(scene.get("roles_reviewed")) or bool(SR.scene_roles(scene))
+    """🎭 Role marked: the scene has a role, was checked and left without one, or is excluded
+    (an excluded scene is never used, so it needs no role)."""
+    return bool(scene.get("roles_reviewed")) or bool(scene.get("excluded")) or bool(SR.scene_roles(scene))
 
 
 def video_facts(v: dict) -> dict:
@@ -209,7 +210,6 @@ def video_facts(v: dict) -> dict:
     scenes = in_range_scenes(v["scenes"], rng)
     sugg = (SE.suggest_edits(scenes, suggest_long_sec, suggest_short_sec, v["dismissed_edit_suggestions"])
             if show_suggestions else {"split": [], "merge": []})
-    usable = [s for s in scenes if not s["excluded"]]   # excluded scenes don't need a role
     return {
         "custom_thumb": v["video_id"] in masters,
         "n_split": len(sugg["split"]),
@@ -220,8 +220,7 @@ def video_facts(v: dict) -> dict:
         # Counted over the scenes the Reviewer shows (inside the library range when that's on).
         "tagged": sum(s["reviewed"] for s in scenes),
         "n": len(scenes),
-        "role_marked": sum(role_marked(s) for s in usable),
-        "n_usable": len(usable),
+        "role_marked": sum(role_marked(s) for s in scenes),   # excluded scenes count as done
         "added": _added.get(v["video_id"], v["added"]),
     }
 
@@ -280,7 +279,7 @@ with st.container(border=True, key="rev_wrap_find"):
             FIND_NO_OUTRO: not f["has_outro"],
             FIND_NO_INTRO: not f["has_intro"],
             FIND_UNTAGGED: f["tagged"] < f["n"],
-            FIND_UNROLED: f["role_marked"] < f["n_usable"],
+            FIND_UNROLED: f["role_marked"] < f["n"],
             FIND_3DAYS: CS.is_new_video(f["added"], days=3),
             FIND_NEW: CS.is_new_video(f["added"]),
             FIND_TODAY: f["added"] >= _today_start,
@@ -324,7 +323,7 @@ with st.container(border=True, key="rev_wrap_find"):
         if not f["has_outro"]:
             bits.append("no outro")
         bits.append(f"🏷️ {f['tagged']}/{f['n']} tagged")
-        bits.append(f"🎭 {f['role_marked']}/{f['n_usable']} role marked")
+        bits.append(f"🎭 {f['role_marked']}/{f['n']} role marked")
         return "  ·  ".join(bits)
 
     if not names:
@@ -361,8 +360,7 @@ thumbs_dir = OUTPUT_DIR / "thumbnails" / video_id
 sprite_path = OUTPUT_DIR / "timeline_sprites" / f"{video_id}.jpg"
 
 reviewed_count = sum(1 for s in data["scenes"] if s.get("reviewed"))
-_usable_all = [s for s in data["scenes"] if not s.get("excluded")]
-role_marked_count = sum(1 for s in _usable_all if role_marked(s))
+role_marked_count = sum(1 for s in data["scenes"] if role_marked(s))
 
 
 def video_paths() -> list:
@@ -394,7 +392,7 @@ with st.container(border=True):
         else:
             st.caption("🖼️ automatic picture")
     _bits = [f"**{len(data['scenes'])} scenes**", f"🏷️ {reviewed_count} tagged",
-             f"🎭 {role_marked_count}/{len(_usable_all)} role marked"]
+             f"🎭 {role_marked_count}/{len(data['scenes'])} role marked"]
     if lib_range:
         _outside = len(data["scenes"]) - len(in_range_scenes(data["scenes"], lib_range))
         _bits.append(f"library range {format_mmss(lib_range[0])}–{format_mmss(lib_range[1])}"
@@ -506,6 +504,11 @@ def _qr_key() -> str:
     return f"rev_qr_{selected}"
 
 
+def _qx_key() -> str:
+    """Quick role marking's unsaved 🚫 Exclude choices for this video: {scene_id: excluded?}."""
+    return f"rev_qx_{selected}"
+
+
 def apply_pending(mark_tagged_ids=(), mark_roles_ids=()) -> int:
     """Copy unsaved edits (cards and 🎭 quick marking) into `data`. Two review states:
     a tag / exclude change marks the scene 🏷️ tagged ("reviewed"), a role change marks
@@ -514,12 +517,16 @@ def apply_pending(mark_tagged_ids=(), mark_roles_ids=()) -> int:
     changed = 0
     mark_tagged_ids, mark_roles_ids = set(mark_tagged_ids), set(mark_roles_ids)
     quick = st.session_state.get(_qr_key()) or {}
+    quick_x = st.session_state.get(_qx_key()) or {}
     for scene in data["scenes"]:
         sid = scene["scene_id"]
         new = pending_fields(scene)
         tag_ch = new is not None and (new["tags"] != scene_tags(scene)
                                       or new["excluded"] != bool(scene.get("excluded", False)))
-        new_roles = new["roles"] if new is not None else None
+        if new is None and sid in quick_x and bool(quick_x[sid]) != bool(scene.get("excluded", False)):
+            new = {"tags": scene_tags(scene), "excluded": bool(quick_x[sid]), "roles": None}
+            tag_ch = True
+        new_roles = new["roles"] if new is not None and new["roles"] is not None else None
         if sid in quick and (new_roles is None or set(new_roles) == set(SR.scene_roles(scene))):
             new_roles = list(quick[sid])
         role_ch = new_roles is not None and set(new_roles) != set(SR.scene_roles(scene))
@@ -546,6 +553,7 @@ def forget_widgets() -> None:
               and any(k.startswith(f"{p}_{selected}_") for p in FIELD_PREFIXES)]:
         st.session_state.pop(k, None)
     st.session_state.pop(_qr_key(), None)
+    st.session_state.pop(_qx_key(), None)
 
 
 def write_catalogue(message: str, new_thumbs=()) -> None:
@@ -939,7 +947,7 @@ ONLY_SUGGESTED, ONLY_EXCLUDED = "Suggestions", "Excluded"
 _only = fc[2].pills("Only", [ONLY_UNTAGGED, ONLY_UNROLED, ONLY_SUGGESTED, ONLY_EXCLUDED], selection_mode="multi",
                     key="rev_only",
                     help="Show only scenes that are… (pick several to narrow it further). Not tagged: tags not "
-                         "checked yet. Not role marked: no role and not checked yet (excluded scenes left out).") or []
+                         "checked yet. Not role marked: no role and not checked yet (excluded scenes count as done).") or []
 _tools = _filters_box.columns([1.2, 1.8, 1.4, 1.1], vertical_alignment="center")
 hide_excluded = _tools[0].toggle("Hide excluded", key="rev_hide_excluded")
 show_only_excluded = ONLY_EXCLUDED in _only
@@ -1296,7 +1304,18 @@ def _qr_hints(ids: list) -> None:
 
 def _qr_discard() -> None:
     st.session_state.pop(_qr_key(), None)
+    st.session_state.pop(_qx_key(), None)
     _qr_bump()
+
+
+def _qr_excluded(sid) -> bool:
+    """A scene's 🚫 Exclude in quick marking: the unsaved choice, else what's saved."""
+    pend = st.session_state.get(_qx_key()) or {}
+    return bool(pend[sid]) if sid in pend else bool(scene_by_id[sid].get("excluded"))
+
+
+def _qr_toggle_exclude(sid) -> None:
+    st.session_state.setdefault(_qx_key(), {})[sid] = not _qr_excluded(sid)
 
 
 def _qr_goto(page: int) -> None:
@@ -1305,20 +1324,35 @@ def _qr_goto(page: int) -> None:
 
 
 def _qr_changed() -> list:
+    """Scenes with unsaved quick-marking changes (roles or 🚫 Exclude), in time order."""
     pend = st.session_state.get(_qr_key()) or {}
-    return [sid for sid, roles in pend.items()
-            if sid in scene_by_id and set(roles) != set(SR.scene_roles(scene_by_id[sid]))]
+    pend_x = st.session_state.get(_qx_key()) or {}
+    ids = {sid for sid, roles in pend.items()
+           if sid in scene_by_id and set(roles) != set(SR.scene_roles(scene_by_id[sid]))}
+    ids |= {sid for sid, x in pend_x.items()
+            if sid in scene_by_id and bool(x) != bool(scene_by_id[sid].get("excluded"))}
+    return [s["scene_id"] for s in ordered_all if s["scene_id"] in ids]
 
 
 def _qr_save(changed: list) -> None:
-    """Writes the quick-marking choices: each changed scene is marked 🎭 role marked
-    (its 🏷️ tagged state is left alone)."""
+    """Writes the quick-marking choices. A role change marks the scene 🎭 role marked; an
+    Exclude change marks it 🏷️ tagged, as on the cards (and an excluded scene counts as
+    role marked anyway — it's never used)."""
     for sid in changed:
         sc = scene_by_id[sid]
-        SR.set_scene_roles(sc, _qr_roles(sid))
-        sc["roles_reviewed"] = True
+        roles = _qr_roles(sid)
+        if set(roles) != set(SR.scene_roles(sc)):
+            SR.set_scene_roles(sc, roles)
+            sc["roles_reviewed"] = True
+        x = _qr_excluded(sid)
+        if x != bool(sc.get("excluded")):
+            sc["excluded"] = x
+            if "corrected_tags" not in sc:
+                sc["corrected_tags"] = scene_tags(sc)
+            sc["reviewed"] = True
     st.session_state.pop(_qr_key(), None)
-    write_catalogue(f"Saved roles for {len(changed)} scene(s).")
+    st.session_state.pop(_qx_key(), None)
+    write_catalogue(f"Saved quick-marking changes for {len(changed)} scene(s).")
 
 
 @st.fragment
@@ -1371,8 +1405,11 @@ def quick_role_grid(ids: list) -> None:
                 else:
                     st.caption("🖼️ no picture")
                 hint = SR.motion_hint(motion_rank(sc))
-                st.caption(f"**{SE.scene_label(sc)}** · {fmt_dur(SE.scene_duration(sc))}"
-                           + (" · 🚫" if sc.get("excluded") else ""))
+                x_now, x_saved = _qr_excluded(sid), bool(sc.get("excluded"))
+                st.caption(f"**{SE.scene_label(sc)}** · {fmt_dur(SE.scene_duration(sc))}")
+                if x_now or x_saved:
+                    st.markdown(":red-badge[🚫 Excluded]" if x_now and x_saved else
+                                ":orange-badge[✏️ 🚫 Excluded]" if x_now else ":orange-badge[✏️ Included again]")
                 # Motion score (re-measured for each part when a scene is split) and where it sits in
                 # this video. A split part with no curve of its own still has the pre-split score.
                 copied = sc.get("split_from") is not None and not (sc.get("motion_curve") or {}).get("values") \
@@ -1396,7 +1433,12 @@ def quick_role_grid(ids: list) -> None:
                          label_visibility="collapsed", on_change=_qr_pick, args=(sid, wk))
                 # ✂️ / ⚡ without leaving quick marking (unsaved role choices are saved with the split;
                 # the parts keep this scene's roles and each gets its own motion score).
-                ec = st.columns(2)
+                ec = st.columns(3)
+                ec[2].button("🚫", key=f"rev_qr_x_{selected}_{sid}", width="stretch",
+                             type="primary" if x_now else "secondary", on_click=_qr_toggle_exclude, args=(sid,),
+                             help="Include it again (unsaved until 💾 Save)." if x_now else
+                                  "Exclude this scene — never used by the planner. Counts as role marked. "
+                                  "Unsaved until 💾 Save.")
                 if ec[0].button("✂️", key=f"rev_qr_split_{selected}_{sid}", width="stretch",
                                 help="Split… — place the cuts by hand."):
                     st.session_state["rev_open_dialog"] = (selected, sid, False)
