@@ -159,3 +159,79 @@ def test_nightly_uses_every_cpu(monkeypatch):
         assert J.worker_count() == 3 or getattr(config, "REC_WORKERS", None)
     monkeypatch.setattr(config, "REC_NIGHT_WORKERS", 2, raising=False)
     assert J.nightly_worker_count() == 2
+
+
+def _tiny_shortlist(monkeypatch):
+    """A shortlist of ~2 videos, so the 6-video test library has videos outside it."""
+    import core.recommend as REC
+    for name, val in (("SHORT_OVERALL", 1), ("SHORT_STORY", 1), ("SHORT_SHAPE", 1), ("SHORT_ROLE", 1),
+                      ("SHORT_BLOCK", 0)):
+        monkeypatch.setattr(REC, name, val)
+    monkeypatch.setattr(REC, "VERSES_SEEDS_LOOKED_AT", 1)
+    monkeypatch.setattr(REC, "VERSES_POOL", 1)
+
+
+def _edit_video(CStore, vid, fn):
+    p = CStore.catalogue_path(vid)
+    before = p.read_text()
+    cat = json.loads(before)
+    fn(cat)
+    p.write_text(json.dumps(cat))
+    return lambda: p.write_text(before)
+
+
+def test_only_tracks_a_change_can_affect_are_searched_again(clean, monkeypatch):
+    """A new (or changed) video that wouldn't make a track's shortlist is checked quickly (no
+    matcher) and leaves its plans alone; a change to a video it depends on searches it again."""
+    import catalogue_store as CStore
+    import jobs as J
+    import rec_library as RL
+    import story_map as STM
+    from tests.fixtures import make_video
+    _tiny_shortlist(monkeypatch)
+    maps_before = STM._maps_file().read_text() if STM._maps_file().exists() else None
+    J.changed_jobs()                                    # (gives tracks their default story maps first)
+    RL.run_track("song_full", RL.DEFAULT_VIDEOS, False)
+    data = RL.load_results("song_full", RL.DEFAULT_VIDEOS, False)
+    plans_before = data["results"]
+
+    def jobs_for_song():
+        return [j for j in J.changed_jobs() if j.get("track_id") == "song_full"]
+
+    assert not jobs_for_song()
+    # A new video with flat, featureless motion: it can't make the shortlist.
+    new = make_video(77, "vid_flat", 6)
+    for sc in new["scenes"]:
+        sc["motion_curve"]["values"] = [0.01] * len(sc["motion_curve"]["values"])
+    newp = CStore.CATALOGUE_DIR / "vid_flat.json"
+    newp.write_text(json.dumps(new))
+    try:
+        js = jobs_for_song()
+        assert len(js) == 1 and js[0].get("check")
+        calls = _counting_matcher(monkeypatch)
+        assert J.run_job(js[0], lambda *a, **k: None) == "checked — the plans can't change"
+        assert calls[0] == 0
+        after = RL.load_results("song_full", RL.DEFAULT_VIDEOS, False)
+        assert after["results"] == plans_before
+        assert "vid_flat" in after["insights"]["videos"]            # the feeds know about it
+        assert not jobs_for_song()                                   # and it's up to date again
+    finally:
+        newp.unlink()
+    # It went again → only the feeds' numbers change.
+    js = jobs_for_song()
+    assert len(js) == 1 and js[0].get("check")
+    J.run_job(js[0], lambda *a, **k: None)
+    assert "vid_flat" not in RL.load_results("song_full", RL.DEFAULT_VIDEOS, False)["insights"]["videos"]
+
+    # A video in one of its plans changes → searched again.
+    vid = plans_before[0]["plan"]["videos"][0]
+    undo = _edit_video(CStore, vid, lambda cat: cat["scenes"][0].update(excluded=True))
+    try:
+        js = jobs_for_song()
+        assert len(js) == 1 and not js[0].get("check")
+    finally:
+        undo()
+        if maps_before is None:
+            STM._maps_file().unlink(missing_ok=True)
+        else:
+            STM._maps_file().write_text(maps_before)

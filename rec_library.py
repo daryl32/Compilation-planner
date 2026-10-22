@@ -379,15 +379,146 @@ def track_hash(track_id: str) -> str:
 
 
 def library_state() -> list:
-    """Everything about the library a search depends on (not the track)."""
+    """Everything about the library (not the track) — the 🆕 spotlights depend on all of it."""
     return [sorted(video_sigs().items()), sorted(library_ranges().items()), sorted(actors_by_video().items())]
 
 
-def signature(track_id: str, n_videos: int, sequential: bool, story, state: list = None) -> str:
+def video_sigs_full() -> dict:
+    """{video_id: everything a search sees of that video} — its content and range (video_sigs)
+    plus its actors (🥊 Verses)."""
+    actors = actors_by_video()
+    return {vid: hashlib.sha1(json.dumps([sig, sorted(actors.get(vid) or [])]).encode()).hexdigest()[:16]
+            for vid, sig in video_sigs().items()}
+
+
+def signature(track_id: str, n_videos: int, sequential: bool, story, state=None) -> str:
+    """The track's side of "has anything changed?": the track, its story map, the settings and the
+    search code — NOT the library. Which library changes matter is decided per video (staleness())."""
     return hashlib.sha1(json.dumps([RESULTS_VERSION, track_id, n_videos, bool(sequential),
-                                    track_hash(track_id), state or library_state(),
-                                    REC.SEARCH_VERSION, REC.DROP_WEIGHT, story],
+                                    track_hash(track_id), REC.SEARCH_VERSION, REC.DROP_WEIGHT, story],
                                    default=str).encode()).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# ⚡ Which library changes matter to a track
+# ---------------------------------------------------------------------------
+# A search stores the videos it depended on (its shortlist: the best on their own overall / for
+# the story / for shape, the best at each block, the most role footage, and every video in its
+# plans or looked at for Verses), what another video would have to beat to join that shortlist,
+# and every video's signature at the time. Then:
+#   • the track, its story map or the settings changed, or a shortlisted video changed or went
+#     → "stale": search again;
+#   • only other videos changed, appeared or went → "check": score just those videos against the
+#     track (one quick cut, no matcher). If one would make the shortlist, search again; if not,
+#     the plans can't change — only the feeds' numbers for those videos are updated.
+
+def staleness(data, sig: str, current: dict = None) -> tuple:
+    """("fresh" | "check" | "stale", changed or new video ids, removed video ids)."""
+    if not data or data.get("sig") != sig or "lib" not in data:
+        return "stale", [], []
+    current = video_sigs_full() if current is None else current
+    old = data["lib"]
+    relevant = set(((data.get("insights") or {}).get("shortlist") or {}).get("videos") or [])
+    if any(current.get(v) != old.get(v) for v in relevant):
+        return "stale", [], []
+    changed = sorted(v for v, s in current.items() if old.get(v) != s)
+    removed = sorted(v for v in old if v not in current)
+    return ("check" if changed or removed else "fresh"), changed, removed
+
+
+def _beats(th: dict, row: dict) -> bool:
+    """Would this video's scores put it on the track's shortlist?"""
+    for mode in ("overall", "story", "shape"):
+        if mode in th and mode in row and row[mode] > th[mode]:
+            return True
+    for name in ("block", "block_shape"):
+        if name in th and any(x > t for x, t in zip(row[name], th[name])):
+            return True
+    if any(row["role"].get(r, 0.0) > t for r, t in (th.get("role") or {}).items()):
+        return True
+    return bool(row.get("tagged")) and row["overall"] > th.get("verses", -1.0)
+
+
+def refresh_track(track_id: str, n_videos: int = DEFAULT_VIDEOS, sequential: bool = False, progress=None) -> str:
+    """Bring one track's stored results up to date the cheap way when possible.
+    Returns "fresh" (nothing to do), "checked" (only other videos changed and none of them
+    matters — feeds updated) or "searched" (a full search was needed)."""
+    progress = progress or (lambda f, t: None)
+    track = load_track(track_id)
+    story_regions, _ = story_for(track_id, track)
+    sig = signature(track_id, n_videos, sequential, story_regions)
+    data = load_results(track_id, n_videos, sequential)
+    current = video_sigs_full()
+    state, changed, removed = staleness(data, sig, current)
+    if state == "fresh":
+        return "fresh"
+    if state == "check":
+        progress(0.1, f"Checking {len(changed)} changed video(s) against this track…")
+        rows = score_videos(track, story_regions, changed)
+        th = (data["insights"].get("shortlist") or {}).get("thresholds") or {}
+        if not any(_beats(th, row) for row in rows.values()):
+            _patch_insights(data, rows, changed, removed)
+            data["lib"] = current
+            data["checked_at"] = _now()
+            save_results(data)
+            save_hashes()
+            progress(1.0, "No change to the plans")
+            return "checked"
+    run_track(track_id, n_videos, sequential, progress=progress)
+    return "searched"
+
+
+def score_videos(track: dict, story_regions, video_ids: list) -> dict:
+    """{video_id: its scores against the track's Smart cut} — the same numbers a full search
+    works out for it (each one on its own doesn't depend on the other videos)."""
+    cats = CStore.all_catalogues()
+    ranges, stems = library_ranges(), _stems()
+    prints = {}
+    for vid in video_ids:
+        if vid in cats:
+            vp = fingerprint(vid, _mtime(CStore.catalogue_path(stems.get(vid, vid))), tuple(ranges.get(vid) or ()))
+            if vp is not None:
+                prints[vid] = vp
+    if not prints:
+        return {}
+    v = REC.make_variant(track, *REC.TOP_STYLE, prints, story_regions)
+    role_all = role_seconds()
+    role_secs = [role_all.get(vid, {}) for vid in v.vids]
+    solos = REC.solo_values(v, role_secs)
+    actors = actors_by_video()
+    out = {}
+    for k, vid in enumerate(v.vids):
+        out[vid] = {mode: float(arr[k]) for mode, arr in solos.items()}
+        out[vid]["block"] = [float(x) for x in v.S[k]]
+        out[vid]["block_shape"] = [float(x) for x in v.SH[k]]
+        out[vid]["role"] = dict(role_secs[k])
+        out[vid]["tagged"] = bool(actors.get(vid))
+    return out
+
+
+def _patch_insights(data: dict, rows: dict, changed: list, removed: list) -> None:
+    """The feeds' numbers (🧩 Hidden gems / 🕳️ Gaps / 🆕 spotlight fits) for changed, new and
+    removed videos, without a new search."""
+    ins = data.setdefault("insights", {})
+    vids = ins.setdefault("videos", {})
+    gone = set(removed) | {v for v in changed if v not in rows}     # e.g. no motion data any more
+    for v in gone:
+        vids.pop(v, None)
+    for v, row in rows.items():
+        vids[v] = round(row["overall"], 4)
+    tops = ins.get("block_top")
+    blocks = ins.get("blocks") or []
+    if not tops or len(tops) != len(blocks):
+        return
+    for bi, top in enumerate(tops):
+        top = [e for e in top if e[0] not in gone and e[0] not in rows]
+        top += [[v, round(row["block"][bi], 4)] for v, row in rows.items() if bi < len(row["block"])]
+        top.sort(key=lambda e: -e[1])
+        tops[bi] = top[:REC.BLOCK_TOP]
+        if tops[bi]:
+            blocks[bi]["best"] = round(tops[bi][0][1], 3)
+        if len(tops[bi]) >= REC.DEPTH_RANK:
+            blocks[bi]["depth"] = round(tops[bi][REC.DEPTH_RANK - 1][1], 3)
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +684,8 @@ def run_track(track_id: str, n_videos: int = DEFAULT_VIDEOS, sequential: bool = 
     progress = progress or (lambda f, t: None)
     track = load_track(track_id)
     story_regions, story_source = story_for(track_id, track)
-    sig = signature(track_id, n_videos, sequential, story_regions, state)
+    sig = signature(track_id, n_videos, sequential, story_regions)
+    lib = video_sigs_full()          # every video as this search saw it (see staleness())
     prints = library_prints(lambda f, t: progress(0.2 * f, t))
     if len(prints) < 2:
         raise RuntimeError("Recommendations need at least two videos with motion data.")
@@ -570,7 +702,7 @@ def run_track(track_id: str, n_videos: int = DEFAULT_VIDEOS, sequential: bool = 
         progress=lambda f, t: progress(0.2 + 0.8 * min(f, 1.0), t))
     data = {"version": RESULTS_VERSION, "sig": sig, "track_id": track_id, "n_videos": int(n_videos),
             "sequential": bool(sequential), "seed": seed, "story_source": story_source, "finished_at": _now(),
-            "results": slim_results(results, story_regions), "insights": insights}
+            "results": slim_results(results, story_regions), "insights": insights, "lib": lib}
     save_results(data)
     save_checks(track_id, n_videos, sequential, runs)
     save_hashes()

@@ -21,9 +21,10 @@ How it works
      nearest length): shape = correlation, level = 1 − |motion level − block
      intensity|; story = how much of the song's need for each role the videos'
      role footage covers.
-  4. ⚡ Shortlist: the videos that can matter for this track (best on their own
-     overall / for the story / for shape, the most role footage) — the rest of
-     the search only looks at those. Pick video sets greedily for each mode.
+  4. Pick video sets greedily for each mode (every candidate scored in one go).
+     The shortlist — the videos that can matter for this track (best on their
+     own overall / story / shape, best at each block, most role footage) — is
+     stored, so a later change to any other video doesn't need a new search.
      🥊 Verses and 🎲 Wildcard pick their (random) cutting style FIRST and cut the
      track that one extra way, scoring only their own candidate videos.
   5. Run the REAL matcher (core.matching, Auto mode — story map on unless it's
@@ -281,16 +282,27 @@ def greedy_sets(vids: list, value_of, weights, n_videos: int, n_plans: int = 3, 
     pool = list(range(len(vids))) if allowed is None else list(allowed)
     used = np.zeros(len(vids))
     plans = []
+    every = getattr(value_of, "every", None)       # ⚡ all candidates in one go (see objective())
+    w64 = w.astype(np.float64)
     for _ in range(n_plans):
         chosen, base = [], 0.0
         for _ in range(min(n_videos, len(pool))):
             best_k, best_gain = None, 0.0
-            for k in pool:
-                if k in chosen:
-                    continue
-                gain = (float(value_of(chosen + [k]) @ w) / wsum - base) * (0.5 ** used[k])
-                if gain > best_gain + 1e-12:
-                    best_k, best_gain = k, gain
+            if every is not None:
+                totals = (every(chosen) @ w64) / wsum
+                for k in pool:
+                    if k in chosen:
+                        continue
+                    gain = (float(totals[k]) - base) * (0.5 ** used[k])
+                    if gain > best_gain + 1e-12:
+                        best_k, best_gain = k, gain
+            else:
+                for k in pool:
+                    if k in chosen:
+                        continue
+                    gain = (float(value_of(chosen + [k]) @ w) / wsum - base) * (0.5 ** used[k])
+                    if gain > best_gain + 1e-12:
+                        best_k, best_gain = k, gain
             if best_k is None:
                 break
             chosen.append(best_k)
@@ -316,15 +328,45 @@ def _story_cover(v: Variant, chosen: list, role_secs: list) -> dict:
     return {r: min(1.0, have.get(r, 0.0) / max(n, 1e-6)) for r, n in v.need().items()}
 
 
+def _with_every(value_of, every):
+    value_of.every = every
+    return value_of
+
+
+def _best_with_each(M: np.ndarray, ch: list) -> np.ndarray:
+    """[videos, blocks]: row k = the best of the chosen videos and video k, per block (float64)."""
+    M = M.astype(np.float64)
+    return np.maximum(M, np.max(M[ch], axis=0)[None, :]) if ch else M
+
+
 def objective(v: Variant, mode: str, role_secs: list):
-    """(value_of, weights) for greedy_sets. mode: "shape" | "overall" | "story"."""
+    """(value_of, weights) for greedy_sets. mode: "shape" | "overall" | "story".
+    value_of.every(chosen) gives value_of(chosen + [k]) for every video k at once (row k) — the
+    same numbers, worked out together, so picking from a big library stays quick."""
     nb = len(v.segments)
     if mode == "shape":
-        return (lambda ch: np.max(v.SH[ch], axis=0) if ch else np.zeros(nb)), np.ones(nb, dtype=np.float32)
+        return (_with_every(lambda ch: np.max(v.SH[ch], axis=0) if ch else np.zeros(nb),
+                            lambda ch: _best_with_each(v.SH, ch)), np.ones(nb, dtype=np.float32))
     w = np.asarray(v.weights, dtype=np.float32)
     role_idx = [i for i, r in enumerate(v.roles) if r]
     if not role_idx:
-        return (lambda ch: np.max(v.S[ch], axis=0) if ch else np.zeros(nb)), w
+        return (_with_every(lambda ch: np.max(v.S[ch], axis=0) if ch else np.zeros(nb),
+                            lambda ch: _best_with_each(v.S, ch)), w)
+    need = v.need()
+    roles = list(need)
+    R = np.array([[float(role_secs[k].get(r, 0.0)) for r in roles] for k in range(len(role_secs))],
+                 dtype=np.float64).reshape(len(role_secs), len(roles))
+    need_arr = np.array([max(need[r], 1e-6) for r in roles])
+    col_of = {r: j for j, r in enumerate(roles)}
+
+    def every(ch):
+        out = _best_with_each(v.S, ch)
+        have = R[ch].sum(axis=0) if ch else np.zeros(len(roles))
+        cover = np.minimum(1.0, (R + have[None, :]) / need_arr[None, :])     # [videos, roles]
+        for i in role_idx:
+            st = cover[:, col_of[v.roles[i]]]
+            out[:, i] = (2 * out[:, i] + st) / 3 if mode == "overall" else 0.3 * out[:, i] + 0.7 * st
+        return out
 
     def value_of(ch):
         if not ch:
@@ -339,7 +381,7 @@ def objective(v: Variant, mode: str, role_secs: list):
     if mode == "story":
         w = w.copy()
         w[role_idx] *= 2.0
-    return value_of, w
+    return _with_every(value_of, every), w
 
 
 # ---------------------------------------------------------------------------
@@ -432,8 +474,8 @@ MODES = [
      "The best balance of shape + motion + story — then fine-tuned by swapping videos while the real matcher "
      "keeps scoring it higher."),
     ("verses",   "🥊 Verses",
-     "Two similar videos with different actors, head to head — in a cutting style other than the top three's "
-     "🧠 Smart."),
+     "Two similar videos with different actors, head to head — in a random cutting style other than the top "
+     "three's 🧠 Smart."),
     ("wildcard", "🎲 Wildcard",
      "A random cutting style and random videos, matched as well as they can be (shape + motion + story)."),
 ]
@@ -451,7 +493,7 @@ SHORT_OVERALL = 24          # best on their own, as Best overall judges them
 SHORT_STORY = 12            # best on their own for the story fit
 SHORT_SHAPE = 12            # best on their own for shape
 SHORT_ROLE = 6              # most footage marked with each role the song needs
-SHORT_BLOCK = int(__import__("os").environ.get("REC_SHORT_BLOCK", 3))   # best at each block (shape, and shape + motion)
+SHORT_BLOCK = 3            # best at each block (shape, and shape + motion)
 SEARCH_VERSION = ("smart-first", SHORT_OVERALL, SHORT_STORY, SHORT_SHAPE, SHORT_ROLE, SHORT_BLOCK, 1)
 CHECKS = {"shape": 3, "story": 2, "overall": 3}   # ⚡ trimmed 21 Oct 2026 from 4/4/5 (shape kept at 3: at 2 it lost ~1.4 pts)
 DEPTH_RANK = 5                                    # 🕳️ Gaps: a block's depth = the 5th-best video's fit   # leading candidates run through the real matcher
@@ -469,7 +511,7 @@ def solo_values(v: Variant, role_secs: list) -> dict:
             continue
         value_of, w = objective(v, mode, role_secs)
         wsum = max(float(w.sum()), 1e-9)
-        out[mode] = np.array([float(value_of([k]) @ w) / wsum for k in range(len(v.vids))]) if nb else \
+        out[mode] = (value_of.every([]) @ w.astype(np.float64)) / wsum if nb and len(v.vids) else \
             np.zeros(len(v.vids))
     return out
 
@@ -500,14 +542,13 @@ def shortlist(v: Variant, role_secs: list, solos: dict = None) -> tuple:
         secs = np.array([float(role_secs[k].get(role, 0.0)) for k in range(n)])
         order = [int(k) for k in np.argsort(-secs, kind="stable")[:SHORT_ROLE] if secs[k] > 0]
         keep.update(order)
-        th["role"][role] = float(secs[order[-1]]) if n > SHORT_ROLE and order else 0.0
+        th["role"][role] = float(secs[order[-1]]) if len(order) == SHORT_ROLE else 0.0   # fewer: any footage joins
     return sorted(keep), th
 
 
 def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: int = 4, story_regions: list = None,
                     role_seconds: dict = None, roles_of=None, actors: dict = None, similar_of=None,
-                    sequential: bool = False, wildcard_seed: int = 0, progress=None, insights: dict = None,
-                    use_shortlist: bool = True) -> list:
+                    sequential: bool = False, wildcard_seed: int = 0, progress=None, insights: dict = None) -> list:
     """The five recommendations for `track`, in MODES order: [{"mode", "plan" (or None), "note"}].
 
     prints: {video_id: VideoPrint}. match(segments, video_ids, block_roles, sequential) runs the
@@ -519,14 +560,14 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
     actors: {video_id: [names]}; similar_of(video_id) → [(similarity, reason, video_id)] best first.
     Each plan: {"mode", "variant", "style", "pace", "method", "settings", "videos", "story",
     "sequential", "estimate", "scores", "timeline", "segments"} (+ "actors" for Verses).
-    insights: a dict to fill with what the feeds need (see library_insights) and the shortlist.
-    use_shortlist: False searches every video (for checking the shortlist changes nothing)."""
+    insights: a dict to fill with what the feeds need (see library_insights) and the shortlist
+    (the videos that can matter for this track — used to decide when it needs searching again)."""
     progress = progress or (lambda f, t: None)
     role_seconds = role_seconds or {}
     actors = actors or {}
     scale = {v: p.scale for v, p in prints.items()}
     n_videos = max(1, min(n_videos, len(prints)))
-    total_steps = 3 + sum(CHECKS.values()) + SWAP_BUDGET + VERSES_SEEDS + 2
+    total_steps = 2 + sum(CHECKS.values()) + SWAP_BUDGET + VERSES_SEEDS + 2
     step = [0]
 
     def tick(text):
@@ -539,10 +580,8 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
     vids = top_v.vids
     role_secs = [role_seconds.get(vid, {}) for vid in vids]
     story_on = top_v.story_active
-    tick("Shortlisting the videos that fit…")
     solos = solo_values(top_v, role_secs)
     short, thresholds = shortlist(top_v, role_secs, solos)
-    allowed = short if use_shortlist else None
 
     checked = {}
 
@@ -566,7 +605,7 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
         """The top three modes all use the one Smart cut (TOP_STYLE)."""
         out = []
         value_of, w = objective(top_v, mode, role_secs)
-        for plan in greedy_sets(vids, value_of, w, n_videos, max(CHECKS.values()) + 1, allowed=allowed):
+        for plan in greedy_sets(vids, value_of, w, n_videos, max(CHECKS.values()) + 1):
             out.append((plan["estimate"], top_v, plan["videos"]))
         out.sort(key=lambda c: -c[0])
         return out
@@ -610,7 +649,8 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
         best = max(free, key=lambda p: p["scores"]["overall"])
         bv = best["_variant"]
         value_of, w = objective(bv, "overall", role_secs)
-        alone = sorted(allowed if allowed is not None else range(len(vids)), key=lambda k: -float(value_of([k]) @ w))
+        solo_now = value_of.every([]) @ w.astype(np.float64)
+        alone = sorted(range(len(vids)), key=lambda k: -float(solo_now[k]))
         pool = [vids[k] for k in alone if vids[k] not in best["videos"]]
         done, improved = 0, True
         while improved and done < SWAP_BUDGET and pool:
@@ -688,7 +728,8 @@ def library_insights(v: Variant, role_secs: list) -> dict:
     judges it), and each block's best fit anywhere in the library."""
     value_of, w = objective(v, "overall", role_secs)
     wsum = max(float(w.sum()), 1e-9)
-    solo = {vid: round(float(value_of([k]) @ w) / wsum, 4) for k, vid in enumerate(v.vids)}
+    solo_all = (value_of.every([]) @ w.astype(np.float64)) / wsum if len(v.vids) and len(v.segments) else []
+    solo = {vid: round(float(solo_all[k]), 4) for k, vid in enumerate(v.vids)}
     best = np.max(v.S, axis=0) if len(v.vids) else np.zeros(len(v.segments))
     # depth: how well the DEPTH_RANK-th best video fits — high when many videos suit the block, low when
     # only one or two do (so the same clips keep coming back there). The best fit alone is nearly always high.
