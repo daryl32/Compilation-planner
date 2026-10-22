@@ -105,8 +105,28 @@ def load_page(path, session_state: dict | None = None) -> dict:
         exec(code, ns)
 
     imports = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom, ast.Try))]
+
+    def is_planner(node):
+        return isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "planner"
+
     for node in imports:
-        run(node)
+        if not is_planner(node):
+            run(node)
+    # The page's helpers live in planner/ (imported by the page). Give this namespace its own
+    # copies of those modules, built against the fake Streamlit — as if they were still in the
+    # page — then put back whatever the real app had loaded.
+    saved = {m: sys.modules.pop(m) for m in list(sys.modules) if m == "planner" or m.startswith("planner.")}
+    real_st = sys.modules.get("streamlit")
+    sys.modules["streamlit"] = fake
+    try:
+        for node in imports:
+            if is_planner(node):
+                run(node)
+    finally:
+        sys.modules["streamlit"] = real_st
+        for m in [m for m in sys.modules if m == "planner" or m.startswith("planner.")]:
+            sys.modules.pop(m)
+        sys.modules.update(saved)
     ns["st"] = fake
     ns["fragment"] = _decorator
     for node in tree.body:
