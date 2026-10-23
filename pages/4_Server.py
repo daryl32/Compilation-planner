@@ -175,6 +175,62 @@ def render_parity_check() -> None:
 if LC.IS_TEST:
     render_parity_check()
 
+
+# ---------------------------------------------------------------------------
+# 🔄 Refresh the test copy's data (live app only) — deploy/refresh_dev_data.sh, run for you
+# ---------------------------------------------------------------------------
+
+REFRESH_UNIT = "mediaplanner-refresh-dev"
+
+
+def _refresh_running() -> bool:
+    import subprocess
+    try:
+        r = subprocess.run(["systemctl", "is-active", REFRESH_UNIT], capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() in ("active", "activating")
+    except Exception:
+        return False
+
+
+def render_refresh_dev() -> None:
+    import subprocess
+    from pathlib import Path
+    import app_switch as SW
+    here = Path(__file__).resolve().parents[1]
+    script = here / "deploy" / "refresh_dev_data.sh"
+    log = LC.CATALOGUE_DIR.parent / "logs" / "refresh_dev.log"
+    st.subheader("🔄 Refresh the test copy's data")
+    with st.container(border=True):
+        st.caption("Replaces the test copy's data with a fresh copy of the live app's: video catalogues, library "
+                   "ranges, labels, audio catalogues and projects (videos, audio, stems and preview copies are "
+                   "shared already). The live app's data is only read. Anything you changed on the test copy is "
+                   "replaced. **☁️ Sync from Google Drive here first** so new videos and tracks come across.")
+        if not SW.available() or not script.exists():
+            st.caption("Only on the server (the copy switch must be set up).")
+            return
+        if _refresh_running():
+            st.info("⏳ Refreshing — about a minute. Press 🔄 to check.")
+            if st.button("🔄 Check again", key="srv_refresh_check"):
+                st.rerun()
+        else:
+            if st.button("🔄 Refresh the test copy's data now", key="srv_refresh_go", type="primary"):
+                log.parent.mkdir(parents=True, exist_ok=True)
+                cmd = ["systemd-run", f"--unit={REFRESH_UNIT}", "--collect", "--quiet", "/bin/bash", "-c",
+                       f"bash '{script}' > '{log}' 2>&1"]
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode != 0:
+                    st.error(f"Couldn't start it: {(r.stderr or r.stdout).strip()}")
+                else:
+                    st.rerun()
+        if log.exists() and log.stat().st_size:
+            when = datetime.datetime.fromtimestamp(log.stat().st_mtime).strftime("%d %b %H:%M")
+            st.caption(f"Last run ({when}):")
+            st.code(log.read_text()[-3000:], language=None)
+
+
+if not LC.IS_TEST:
+    render_refresh_dev()
+
 # ---------------------------------------------------------------------------
 # Memory
 # ---------------------------------------------------------------------------
