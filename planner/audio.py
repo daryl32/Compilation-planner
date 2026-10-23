@@ -18,6 +18,7 @@ import core.targets as CTGT
 import core.cut_edits as CED
 import core.styles as CSTY
 import core.story_cuts as STC
+import planner.tune as TUNE
 import settings_store as SSTORE
 from core.matching import format_mmss
 from cut_editor import cut_editor as _cut_editor_widget, media_url as _media_url
@@ -57,9 +58,10 @@ def segmentation_settings() -> dict:
 def style_parts() -> list:
     """🚀 The Build-up ramp's own parts (build-ups faster, Hyper from drops) for this track, or []."""
     tid = st.session_state.get("track_id")
-    if not tid or st.session_state.get("cut_style") != "ramp":
+    style, pace = TUNE.effective()
+    if not tid or style != "ramp":
         return []
-    key = (tid, int(st.session_state.get("cut_style_pace", 0)), int(st.session_state.get("beats_per_bar", 4)))
+    key = (tid, int(pace), int(st.session_state.get("beats_per_bar", 4)))
     cache = st.session_state.setdefault("_ramp_parts_cache", {})
     if key not in cache:
         cache.clear()
@@ -69,7 +71,7 @@ def style_parts() -> list:
 
 def story_parts_on() -> bool:
     """🎭 Story-led, or a named style with "Pace per story part" on — and the story map in use."""
-    style = st.session_state.get("cut_style", "custom")
+    style = TUNE.effective()[0]
     if style not in CSTY.STYLES or not st.session_state.get("use_story_map", True):
         return False
     return style == STC.STORY_STYLE or bool(st.session_state.get("story_part_pace"))
@@ -87,8 +89,7 @@ def story_parts() -> list:
     import json
     import scene_roles as SR
     rc = SR.role_cuts()
-    style, pace, bpb = st.session_state["cut_style"], int(st.session_state.get("cut_style_pace", 0)), \
-        int(st.session_state.get("beats_per_bar", 4))
+    (style, pace), bpb = TUNE.effective(), int(st.session_state.get("beats_per_bar", 4))
     key = json.dumps([tid, regions, rc, style, pace, bpb], sort_keys=True, default=str)
     cache = st.session_state.setdefault("_story_parts_cache", {})
     if key not in cache:
@@ -134,7 +135,7 @@ def _method_changed() -> None:
 
 def _beats_per_bar_changed() -> None:
     """A style's recipe depends on the bar length, so it's worked out again; otherwise as before."""
-    if st.session_state.get("cut_style") in CSTY.STYLES:
+    if st.session_state.get("cut_style") in CSTY.STYLES or st.session_state.get("cut_style") == TUNE.TUNE_STYLE:
         _apply_cut_style()
     else:
         _audio_retune_if_paced()
@@ -144,12 +145,17 @@ def _apply_cut_style() -> None:
     """🎨 Style or its pace changed: set the method and every dial from the style's recipe
     for this track (core/styles.py)."""
     style = st.session_state.get("cut_style", "custom")
-    if style not in CSTY.STYLES:
+    if style not in CSTY.STYLES and style != TUNE.TUNE_STYLE:
         st.session_state.pop("style_report", None)
         return
     track = load_track(st.session_state["track_id"])
-    method, settings, notes = CSTY.style_settings(track, style, int(st.session_state.get("cut_style_pace", 0)),
+    eff_style, eff_pace = TUNE.effective()          # 🎛️ the tuned style (Smart until tuned); else the style itself
+    method, settings, notes = CSTY.style_settings(track, eff_style, eff_pace,
                                                   int(st.session_state.get("beats_per_bar", 4)))
+    if style == TUNE.TUNE_STYLE:
+        notes = [("🎛️ Tuned for your videos: " + notes[0]) if TUNE.choice() else
+                 "🎛️ Not tuned yet — 🧠 Smart for now. Pick your videos in step 2 and press 🔒 Lock in & tune."] \
+            + notes[1:]
     st.session_state["segmentation_method"] = method
     for k, v in settings.items():
         if k != "parts":                 # 🚀 the ramp's parts are worked out per run (style_parts)
@@ -161,73 +167,37 @@ def _apply_cut_style() -> None:
 
 def _render_style_row(_v) -> None:
     """🎨 Cutting style + Pace — the quick way in; the method and dials below stay editable."""
-    opts = ["custom"] + list(CSTY.STYLES)
+    opts = ["custom"] + list(CSTY.STYLES) + [TUNE.TUNE_STYLE]
     SSTORE.choose("cut_style", opts, "custom")
     with st.container(border=True):
         c = st.columns([3, 2])
         style = c[0].selectbox(
             "🎨 Cutting style", opts, key="cut_style", on_change=_apply_cut_style,
             format_func=lambda k: "✏️ My own settings" if k == "custom"
-            else CSTY.STYLES[k]["label"],
+            else TUNE.TUNE_LABEL if k == TUNE.TUNE_STYLE else CSTY.STYLES[k]["label"],
             help="Pick the feel and the app sets the cutting method and all its dials for this track. You can "
                  "still change anything below (it then shows ✏️ My own settings).")
         c[1].select_slider("Pace", options=[-2, -1, 0, 1, 2], key="cut_style_pace", format_func=CSTY.PACE_LABELS.get, on_change=_apply_cut_style,
-                           disabled=style == "custom",
+                           disabled=style in ("custom", TUNE.TUNE_STYLE),
                            help="Each step halves or doubles how often the style cuts.")
-        if style != "custom":
+        if style == TUNE.TUNE_STYLE:
+            st.caption("Tries every cutting style and pace with the videos you pick, and uses the cut that matches "
+                       "them best. It runs when you press 🔒 Lock in & tune in step 2; Matching then starts with "
+                       "the settings it was scored with.")
+            rep = st.session_state.get("style_report")
+            if rep and rep.get("track_id") == st.session_state.get("track_id"):
+                for n in rep["notes"][:1]:
+                    st.caption(n)
+            if TUNE.stale():
+                st.caption(":orange[⚠️ Your videos changed since the tune — 🔒 Lock in & tune again in step 2.]")
+            _render_story_pace(TUNE.effective()[0])
+        elif style != "custom":
             st.caption(CSTY.STYLES[style]["help"])
             rep = st.session_state.get("style_report")
             if rep and rep.get("track_id") == st.session_state.get("track_id"):
                 for n in rep["notes"][1:]:
                     st.caption("• " + n)
             _render_story_pace(style)
-        _render_tune()
-
-
-def _use_tuned(style: str, pace: int) -> None:
-    st.session_state["cut_style"] = style
-    st.session_state["cut_style_pace"] = int(pace)
-    _apply_cut_style()
-
-
-def _render_tune() -> None:
-    """🎛️ Tune for my videos — every style × pace tried with the videos picked in step 2."""
-    tid = st.session_state.get("track_id")
-    vids = list(st.session_state.get("committed_selected_videos") or [])
-    with st.expander("🎛️ Tune the cutting for my videos", expanded=False):
-        if not vids:
-            st.caption("Pick your videos in step 2 first — then this tries every cutting style and pace with them "
-                       "and shows which cut matches them best.")
-            return
-        st.caption(f"Tries every style and pace with your {len(vids)} video(s), checks the best with the matcher "
-                   "(Auto mode, your story map if it's on) and ranks them. About a minute.")
-        key = f"pl_tune_{tid}_{'_'.join(sorted(vids))}"
-        if st.button("🎛️ Tune", key="pl_tune_go", type="primary"):
-            import rec_library as RL
-            bar = st.progress(0.0, "Tuning…")
-            try:
-                st.session_state[key] = RL.tune_settings(
-                    tid, vids, bool(st.session_state.get("sequential_mode")),
-                    use_story=bool(st.session_state.get("use_story_map", True)),
-                    progress=lambda f, t: bar.progress(min(f, 1.0), t))
-            except Exception as e:
-                st.error(f"Couldn't tune: {e}")
-            bar.empty()
-        res = st.session_state.get(key)
-        if not res:
-            return
-        st.caption(f"{res['tried']} ways tried — the best {len(res['results'])} checked:")
-        for i, r in enumerate(res["results"][:6]):
-            c = st.columns([4, 1], vertical_alignment="center")
-            rk = r["ranked"]
-            parts = [f"Overall {rk.get('overall'):.0f}%", f"shape {rk.get('shape'):.0f}%",
-                     f"motion {rk.get('intensity'):.0f}%"] + (
-                [f"story {rk['story']:.0f}%"] if rk.get("story") is not None else [])
-            c[0].markdown(f"{'⭐ ' if i == 0 else ''}**{r['label']}** · " + " · ".join(parts))
-            current = (st.session_state.get("cut_style"), int(st.session_state.get("cut_style_pace", 0)))
-            c[1].button("✓ In use" if current == (r["style"], r["pace"]) else "Use", key=f"pl_tune_use_{i}",
-                        width="stretch", disabled=current == (r["style"], r["pace"]),
-                        on_click=_use_tuned, args=(r["style"], r["pace"]))
 
 
 def _render_story_pace(style: str) -> None:

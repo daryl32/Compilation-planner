@@ -294,3 +294,39 @@ def test_build_up_ramp_speeds_up_through_builds_and_is_story_led_action_default(
     dur = lambda segs, x, y: np.mean([g["end"] - g["start"] for g in segs if x <= g["start"] < y] or [np.nan])  # noqa: E731
     d = min(parts, key=lambda p: p["start"] if p["style"] == "hyper" and p["pace"] == 0 else 1e9)
     assert dur(ramp, d["start"], d["end"]) < dur(ramp, 0, parts[0]["start"]) or parts[0]["start"] < 1
+
+
+def test_tune_mode_step0_to_step2_to_matching():
+    """🎛️ Tune for my videos: step 0 cuts Smart until tuned; step 2 🔒 Lock in & tune picks the cut;
+    Matching starts with the tuned settings (and ↩️ puts them back after a change)."""
+    from tests.apptest_util import errors, page_app
+    at = page_app("pages/1_Compilation_Planner.py", timeout=300)
+    at.run()
+    at.session_state["track_id"] = "song_full"
+    at.run()
+    at.selectbox(key="cut_style").set_value("tune").run()
+    assert not errors(at), errors(at)
+    assert any("Not tuned yet" in c.value for c in at.caption)
+    for v in ("vid_a", "vid_b", "vid_c"):
+        at.session_state[f"select_video_{v}"] = True
+    at.session_state["ui_section"] = "📼 2. Videos & Time Ranges"
+    at.run()
+    assert not errors(at), errors(at)
+    at.button(key="pl_tune_go").click().run()
+    assert not errors(at), errors(at)
+    res = at.session_state["tune_result"]
+    assert res["videos"] == ["vid_a", "vid_b", "vid_c"] and res["results"]
+    best = res["results"][0]
+    assert at.session_state["cut_style"] == "tune"
+    assert at.session_state["segmentation_method"] == best["method"]          # the tuned cut is in use
+    assert at.session_state["weight_shape"] == 2.0 and at.session_state["split_screen_enabled"] is False
+    at.session_state["ui_section"] = "🎬 3. Matching & Export"
+    at.run()
+    assert not errors(at), errors(at)
+    assert any("Tuned settings in use" in c.value for c in at.caption)
+    at.session_state["weight_shape"] = 4.0
+    at.run()
+    assert any("changed 1 of the tuned" in c.value for c in at.caption)
+    at.button(key="pl_tune_restore").click().run()
+    assert not errors(at), errors(at)
+    assert at.session_state["weight_shape"] == 2.0

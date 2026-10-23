@@ -318,4 +318,38 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
                    "the dropdown.")
     else:
         st.caption(f"✅ **{len(selected_now)} video(s) selected** — next: 🎬 Matching & Export.")
+    _tune_panel(selected_now)
+
+
+def _tune_panel(selected: list) -> None:
+    """🎛️ Tune mode (step 0): lock in these videos and tune the cutting for them."""
+    import planner.tune as TUNE
+    if st.session_state.get("cut_style") != TUNE.TUNE_STYLE:
+        return
+    with st.container(border=True):
+        res = TUNE.result()
+        if res and not TUNE.stale():
+            st.markdown(f"🎛️ **Tuned for these {len(res['videos'])} videos:** "
+                        f"{TUNE.label(res['results'][res.get('pick', 0)])}")
+            others = res["results"][:5]
+            c = st.columns([3, 1])
+            pick = c[0].selectbox("Other ways it found", range(len(others)), index=min(res.get("pick", 0), len(others) - 1),
+                                  format_func=lambda i: ("⭐ " if i == 0 else "") + TUNE.label(others[i]),
+                                  key="pl_tune_pick", label_visibility="collapsed")
+            c[1].button("Use", key="pl_tune_use", width="stretch", disabled=pick == res.get("pick", 0),
+                        on_click=TUNE.pick, args=(pick,))
+        elif res:
+            st.warning("🎛️ Your videos changed since the tune — lock them in again to re-tune.")
+        else:
+            st.caption("🎛️ Cutting is set to **Tune for my videos**: once these are the videos you want, lock "
+                       "them in and it finds the cut that matches them best (about a minute).")
+        if st.button(f"🔒 Lock in & tune for {len(selected)} video(s)", key="pl_tune_go", type="primary",
+                     disabled=not selected):
+            bar = st.progress(0.0, "Tuning…")
+            err = TUNE.run(progress=lambda f, t: bar.progress(min(float(f), 1.0), t))
+            bar.empty()
+            if err:
+                st.error(f"Couldn't tune: {err}")
+            else:
+                st.rerun(scope="app")
 
