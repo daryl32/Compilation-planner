@@ -64,7 +64,11 @@ SEG_METHOD_KEYS = {
 
 
 def build_segments(track: dict, cfg: dict) -> list:
-    """Segments for this track with the settings from segmentation_settings()."""
+    """Segments for this track with the settings from segmentation_settings(). With cfg["parts"]
+    (🎭 story-map parts cut their own way — core/story_cuts.py) each part's cuts are spliced into
+    the base cuts."""
+    if cfg.get("parts"):
+        return _build_with_parts(track, cfg)
     bpb = int(cfg.get("beats_per_bar", 4))
     if cfg["method"] == SEG_SMART:
         return SM.build_smart_segments(track, cfg)
@@ -80,6 +84,24 @@ def build_segments(track: dict, cfg: dict) -> list:
         track, float(cfg["change_window_secs"]), float(cfg["change_threshold"]),
         float(cfg["min_segment_sec"]), bool(cfg["react_to_hits"]), float(cfg["hit_threshold"]),
         float(cfg["snap_secs"]), float(cfg["max_segment_sec"]), bpb, on_beat=bool(cfg.get("on_beat", True)))
+
+
+def _build_with_parts(track: dict, cfg: dict) -> list:
+    import core.cut_edits as CED
+    import core.story_cuts as STC
+    parts = cfg["parts"]
+    bpb = int(cfg.get("beats_per_bar", 4))
+    base = build_segments(track, {k: v for k, v in cfg.items() if k != "parts"})
+    part_segs, memo = [], {}
+    for p in parts:
+        key = (p["method"], CED.settings_signature(p["settings"]))
+        if key not in memo:
+            memo[key] = build_segments(track, {"method": p["method"], "beats_per_bar": bpb, **p["settings"]})
+        part_segs.append(memo[key])
+    cuts = STC.splice(track, base, part_segs, parts)
+    # Every segment the cuts came from, so each kept cut keeps its kind (bar, drop, hit…).
+    lookup = sorted([*base, *(s for segs in memo.values() for s in segs)], key=lambda s: float(s["start"]))
+    return CED.segments_from_cuts(track, cuts, lookup)
 
 
 # ---------------------------------------------------------------------------

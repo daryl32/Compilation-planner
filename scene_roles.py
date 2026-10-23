@@ -334,3 +334,44 @@ def describe_rule(rule: dict) -> str:
     if hi is None:
         return f"{lo:g} and over"
     return f"{lo:g} to under {hi:g}"
+
+
+# ---------------------------------------------------------------------------
+# ✂️ Cutting per role — how a story-map part with this role is cut (core/story_cuts.py)
+# ---------------------------------------------------------------------------
+# Kept in scene_roles.json under "role_cuts": {role id: {"pace": -2…2, "style": style id or None}}.
+#   pace  — added to the planner's Pace for that role's parts ("Pace per story part" / 🎭 Story-led)
+#   style — the style 🎭 Story-led cuts that role's parts in (None = 🧠 Smart)
+
+ROLE_CUT_DEFAULTS = {
+    "intro":  {"pace": 0, "style": "cinematic"},
+    "slow":   {"pace": -1, "style": "cinematic"},
+    "action": {"pace": 1, "style": "hyper"},
+    "outro":  {"pace": 0, "style": "cinematic"},
+}
+
+
+def _norm_cut(c, default: dict) -> dict:
+    c = c if isinstance(c, dict) else {}
+    try:
+        pace = int(c.get("pace", default["pace"]))
+    except (TypeError, ValueError):
+        pace = default["pace"]
+    style = c.get("style", default["style"])
+    return {"pace": max(-2, min(2, pace)), "style": style if isinstance(style, str) and style else None}
+
+
+def role_cuts() -> dict:
+    """{role id: {"pace", "style"}} for every role (saved values over the defaults)."""
+    saved = _read_file().get("role_cuts")
+    saved = saved if isinstance(saved, dict) else {}
+    return {r["id"]: _norm_cut(saved.get(r["id"]), ROLE_CUT_DEFAULTS.get(r["id"], {"pace": 0, "style": None}))
+            for r in all_roles()}
+
+
+def set_role_cut(role_id: str, pace: int, style) -> None:
+    saved = _read_file().get("role_cuts")
+    saved = dict(saved) if isinstance(saved, dict) else {}
+    saved[role_id] = _norm_cut({"pace": pace, "style": style},
+                               ROLE_CUT_DEFAULTS.get(role_id, {"pace": 0, "style": None}))
+    _write_file(role_cuts=saved)

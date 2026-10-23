@@ -850,7 +850,8 @@ def _infos(summaries: dict) -> list:
     for tid, t in _mixable(summaries).items():
         e = t.get("energy") or []
         out.append({"track_id": tid, "bpm": t.get("bpm"), "key": t.get("key"),
-                    "energy": float(np.mean(e)) if e else 0.5, "stems": bool(t.get("stems"))})
+                    "energy": float(np.mean(e)) if e else 0.5, "stems": bool(t.get("stems")),
+                    "builds": int(t.get("builds") or 0), "drops": len(t.get("drops") or [])})
     return out
 
 
@@ -891,6 +892,45 @@ def _start_suggestion(a: str, b: str, vocal_swap: bool) -> None:
     st.session_state["mx_mode"] = MODES[1]
 
 
+def _start_drop_swap(a: str, b: str) -> None:
+    """Fill the 🧩 Mashup editor with "a's build-up → b's drop" (core/mixing.drop_swap_plan) and switch
+    to it: a's tempo, b's key fitted to a's, a 1-beat swap on the drop's downbeat with 🎛️ bass swap."""
+    ta, tb = full_track(a), full_track(b)
+    if ta is None or tb is None:
+        return
+    plan = MX.drop_swap_plan(ta, tb)
+    if not plan:
+        st.session_state["mx_drop_msg"] = f"Couldn't find a build-up in {a} and a drop in {b} to join."
+        return
+    _clear("mxm")
+    t0 = f"{time.time():.6f}"
+    parts = [{"track": a, "start": plan["a"][0], "end": plan["a"][1], "gain_db": 0.0, "uid": f"S{t0}",
+              "part": "full", "label": "build-up"},
+             {"track": b, "start": plan["b"][0], "end": plan["b"][1], "gain_db": 0.0, "uid": f"S{t0}b",
+              "part": "full", "label": "drop",
+              "xfade": {"beats": float(MX.DROP_XFADE_BEATS), "where": "centre", "shape": "smooth", "bass_swap": True}}]
+    st.session_state["mxm_parts"] = parts
+    st.session_state["mxm_layers"] = []
+    for p in parts:
+        st.session_state[f"mxm_part_{p['uid']}"] = p["part"]
+    st.session_state["mxm_bpm"] = round(float(ta.get("bpm") or 120.0), 1)
+    st.session_state["mxm_match"] = True
+    st.session_state[f"mxm_shift_{b}"] = K.best_shift(ta.get("key"), tb.get("key"))
+    st.session_state["mx_mode"] = MODES[1]
+
+
+def _drop_swap_row(r: dict, i: int) -> None:
+    with st.container(border=True, key=f"mx_sug_d_{i}"):
+        c = st.columns([5, 1.6], vertical_alignment="center")
+        badge = "green" if r["score"] >= 0.75 else "orange" if r["score"] >= 0.55 else "gray"
+        c[0].markdown(f":{badge}-badge[fits {r['score'] * 100:.0f} %] 💥 **{r['a']}** build-up → **{r['b']}** drop")
+        bits = [r["key_label"] + (f" (shift {r['shift']:+d} st)" if r["shift"] else ""),
+                f"tempo {(r['speed'] - 1) * 100:+.1f} %"]
+        c[0].caption(" · ".join(bits))
+        c[1].button("🧩 Start it", key=f"mx_sug_go_d_{i}", width="stretch", on_click=_start_drop_swap,
+                    args=(r["a"], r["b"]))
+
+
 def _suggestions(summaries: dict) -> None:
     infos = _infos(summaries)
     if len(infos) < 2:
@@ -901,7 +941,7 @@ def _suggestions(summaries: dict) -> None:
                "shift if that helps), tempos within a few percent, similar energy. Tap one to start it in 🧩 Mashup.",
                help=None if n_keys == len(infos) else f"{len(infos) - n_keys} track(s) have no key yet — "
                                                          "🎵 Audio → 🔬 Audio analysis → 🎹 Find the key.")
-    tabs = st.tabs(["🤝 Pairs", "🎤 Vocal swaps"])
+    tabs = st.tabs(["🤝 Pairs", "🎤 Vocal swaps", "💥 Drop swaps"])
     with tabs[0]:
         for i, r in enumerate(MX.suggest_pairs(infos, top=12)):
             _suggestion_row(r, i, vocal_swap=False)
@@ -913,6 +953,20 @@ def _suggestions(summaries: dict) -> None:
                     f"laptop (it makes stems on the GPU along with the analysis and saves them to Google Drive). {n} track(s) have stems.")
         for i, r in enumerate(swaps):
             _suggestion_row(r, i, vocal_swap=True)
+    with tabs[2]:
+        msg = st.session_state.pop("mx_drop_msg", None)
+        if msg:
+            st.warning(msg)
+        drops = MX.suggest_drop_swaps(infos, top=12)
+        if not drops:
+            st.info("Drop swaps need tracks with the extra analysis (build-ups and drops) — 🎵 Audio → 🔬 Audio "
+                    "analysis.")
+        else:
+            st.caption(f"One track's build-up crashing into another's drop: {MX.DROP_LEAD_BARS} bars before the "
+                       f"build-up, then {MX.DROP_AFTER_BARS} bars from the drop — beat-matched, key-fitted, with "
+                       "🎛️ bass swap on the drop.")
+        for i, r in enumerate(drops):
+            _drop_swap_row(r, i)
 
 
 def _suggestion_row(r: dict, i: int, vocal_swap: bool) -> None:

@@ -14,6 +14,7 @@ everything stays editable afterwards, and the ✂️ cut editor works on top.
     💥 Drop hunter      calm through the verses, speeding up into drops, fast at the drop
     🎤 Vocal-led        cuts between sung lines, never through one
     🕺 Hyper            dance-edit pace: every beat or two, on kicks and snares
+    🎭 Story-led        each story-map part in its role's style and pace (core/story_cuts.py)
 
 style_settings() is pure (no Streamlit): (method, settings, notes) for a track.
 """
@@ -31,6 +32,7 @@ STYLES = {
     "drop":      {"label": "💥 Drop hunter",   "help": "Calm through verses and breakdowns, speeding up through build-ups and fast at the drop."},
     "vocal":     {"label": "🎤 Vocal-led",     "help": "Cuts between sung lines and never through one (needs the vocal analysis)."},
     "hyper":     {"label": "🕺 Hyper",         "help": "Dance-edit pace: a cut every beat or two, on kicks and snares."},
+    "story":     {"label": "🎭 Story-led",     "help": "Each story-map part in its role's own style and pace (set on each role in the Reviewer → Roles…): e.g. 💥 Action as 🕺 Hyper, busier; 🌙 Slow as 🎬 Cinematic, calmer. Parts without a role — or no story map — are 🧠 Smart."},
 }
 PACE_LABELS = {-2: "much calmer", -1: "calmer", 0: "normal", 1: "busier", 2: "much busier"}
 
@@ -80,9 +82,12 @@ def style_settings(track: dict, style: str, pace: int = 0, beats_per_bar: int = 
     a = track.get("analysis") or {}
     notes = [f"{STYLES[style]['label']} · pace {PACE_LABELS[pace]} · 1 bar = {bar:.2f}s"]
 
-    if style == "smart":
+    if style in ("smart", "story"):
         s = {k: SEG_DEFAULTS[k] for k in SEG_METHOD_KEYS[SEG_SMART]}
         s["sm_pace"] = pace
+        if style == "story":
+            # The base the story-map parts are spliced into (core/story_cuts.py) — 🧠 Smart.
+            notes.append("Parts with a role are cut in that role's style and pace; the rest are 🧠 Smart.")
         return SEG_SMART, s, notes
 
     if style == "drop":

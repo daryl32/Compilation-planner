@@ -877,3 +877,180 @@ def video_usage() -> dict:
     except ImportError:
         return {}
     return VR.combined_usage(PROJECTS_DIR, PREVIEW_DIR)
+
+
+# ---------------------------------------------------------------------------
+# 📏 Calibrated match % (core/calibrate.py) — the reference is every plan scored so far
+# ---------------------------------------------------------------------------
+
+_CAL_CACHE: dict = {}
+_SCORE_KEYS = ("overall", "shape", "intensity", "story", "action", "action_story")
+
+
+def _results_files() -> list:
+    try:
+        return [f for f in RESULTS_DIR.glob("*.json") if f.name != SEEN_FILE.name]
+    except OSError:
+        return []
+
+
+def reference_scores() -> list:
+    """Raw scores of every plan the stored searches checked (older searches: their five plans)."""
+    out = []
+    for f in _results_files():
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+            continue
+        scored = (data.get("insights") or {}).get("scored")
+        if scored:
+            out += [s for s in scored if isinstance(s, dict)]
+        else:
+            out += [r["plan"]["scores"] for r in data["results"]
+                    if isinstance(r, dict) and r.get("plan") and isinstance(r["plan"].get("scores"), dict)]
+    return out
+
+
+def score_plan_timeline(track_id: str, timeline: list, story_regions=None, beats_per_bar: int = 4) -> dict:
+    """The recommendation scores (shape / motion / story / overall) of any plan's timeline — e.g. a
+    render's — on the library as it is now."""
+    track = load_track(track_id)
+    segs = []
+    for e in timeline:
+        a, b = (e.get("track_time") or [None, None])[:2]
+        if a is None or b is None:
+            raise ValueError("plan without block times")
+        segs.append({"start": float(a), "end": float(b), "intensity": float(e.get("segment_intensity", 0.5))})
+    prints = library_prints()
+    scale = {v: p.scale for v, p in prints.items()}
+    weights = REC.block_weights(track, segs, story_regions, beats_per_bar)
+    roles = STM.block_roles(story_regions, segs) if story_regions else None
+    sc = REC.score_timeline(track, segs, timeline, weights, scale, search_curves(), roles, scene_roles_lookup())
+    return {k: sc.get(k) for k in _SCORE_KEYS}
+
+
+def score_render(meta: dict):
+    """Scores for a render from its stored plan (None if it can't be scored)."""
+    plan = meta.get("plan") or {}
+    tid = (meta.get("track") or {}).get("track_id") or plan.get("track_id")
+    timeline = plan.get("timeline")
+    if not tid or not timeline:
+        return None
+    project = meta.get("project") or {}
+    story = None
+    if project.get("use_story_map", True):
+        sm = project.get("story_map")
+        story = sm.get("regions") if isinstance(sm, dict) and sm.get("track_id") in (None, tid) else None
+    try:
+        return score_plan_timeline(tid, timeline, story, int(project.get("beats_per_bar") or 4))
+    except Exception:   # a track or video that's gone, an old plan format — just leave it out
+        return None
+
+
+def rated_scores(rescore: bool = False) -> list:
+    """[(scores, ⭐)] for every rated render — scoring (and storing) any that lack scores when rescore."""
+    import renders as RND
+    out = []
+    for meta in RND.list_renders():
+        rating = int((meta.get("user") or {}).get("rating") or 0)
+        sc = meta.get("scores")
+        if not isinstance(sc, dict) and rescore and rating > 0 and meta.get("plan"):
+            sc = score_render(meta)
+            if sc:
+                try:
+                    RND.set_scores(meta["path"], sc)
+                except OSError:
+                    pass
+        if isinstance(sc, dict) and rating > 0:
+            out.append((sc, rating))
+    return out
+
+
+def calibration(rescore: bool = False) -> dict:
+    """The current calibration (rebuilt when stored searches or renders change)."""
+    import core.calibrate as CAL
+    import renders as RND
+    files = _results_files()
+    sides = [RND.sidecar_path(m) for m in RND.render_files()]
+    key = (len(files), max((f.stat().st_mtime for f in files), default=0.0), len(sides),
+           max((p.stat().st_mtime for p in sides if p.exists()), default=0.0))
+    if rescore or _CAL_CACHE.get("key") != key:
+        rated = rated_scores(rescore)
+        ref = reference_scores() + [s for s, _ in rated]
+        _CAL_CACHE.update(key=key, cal=CAL.build(ref, rated))
+    return _CAL_CACHE["cal"]
+
+
+# ---------------------------------------------------------------------------
+# 🎛️ Tune the cutting — "use these settings": for a track and a chosen set of videos, the cutting
+# style and pace that match them best
+# ---------------------------------------------------------------------------
+
+TUNE_PACES = (-2, -1, 0, 1, 2)
+TUNE_CHECKS = 8          # ways of cutting checked with the real matcher (the best estimates)
+
+
+def _tune_estimate(v) -> float:
+    """Quick guess from the search's window scores: each block's best video (drops / action count more)."""
+    if v.S is None or not len(v.vids):
+        return 0.0
+    best = v.S.max(axis=0)
+    w = np.asarray(v.weights, dtype=float)
+    return float((best * w).sum() / w.sum()) if w.sum() else float(best.mean())
+
+
+def tune_settings(track_id: str, videos: list, sequential: bool = False, use_story: bool = True,
+                  checks: int = TUNE_CHECKS, progress=None) -> dict:
+    """Every cutting style × pace (🎭 Story-led too when the track has a story map) estimated for
+    these videos, the best `checks` of them run through the real matcher (Auto mode) and scored.
+    → {"track_id", "videos", "sequential", "story_regions", "tried", "results": [best first]}; each
+    result {"style", "pace", "label", "method", "settings", "scores", "ranked"} (ranked = calibrated %)."""
+    import core.calibrate as CAL
+    from core.styles import STYLES
+    progress = progress or (lambda f, t: None)
+    track = load_track(track_id)
+    story_regions = story_for(track_id, track)[0] if use_story else None
+    all_prints = library_prints(lambda f, t: progress(0.1 * f, t))
+    prints = {v: all_prints[v] for v in videos if v in all_prints}
+    if not prints:
+        raise RuntimeError("None of these videos has motion data yet.")
+    rc = SR.role_cuts()
+    combos = [(s, p) for s in STYLES for p in TUNE_PACES if s != "story" or story_regions]
+    cands, seen = [], set()
+    for i, (style, pace) in enumerate(combos):
+        progress(0.1 + 0.3 * i / len(combos), f"Cutting {REC.variant_label(style, pace)}…")
+        try:
+            v = REC.make_variant(track, style, pace, prints, story_regions, role_cuts=rc)
+        except Exception:
+            continue
+        cut_sig = tuple(round(float(s["start"]), 2) for s in v.segments)
+        if cut_sig in seen:             # the same cuts as a pace already tried (e.g. at a style's limit)
+            continue
+        seen.add(cut_sig)
+        cands.append((_tune_estimate(v), v))
+    cands.sort(key=lambda c: -c[0])
+    top = cands[:max(1, checks)]
+    best_story = next((c for c in cands if c[1].style == "story"), None)
+    if best_story and best_story not in top:      # 🎭 Story-led is always in the running
+        top.append(best_story)
+    curves_of = search_curves()
+    match = make_matcher(track, curves_of)
+    scale = {v: p.scale for v, p in all_prints.items()}
+    roles_of = scene_roles_lookup()
+    cal = calibration()
+    out = []
+    for i, (est, v) in enumerate(top):
+        progress(0.4 + 0.6 * i / len(top), f"Checking {v.label} with the matcher…")
+        roles = list(v.roles) if v.story_active else None
+        timeline = match(v.segments, list(prints), roles, sequential)
+        sc = REC.score_timeline(track, v.segments, timeline, v.weights, scale, curves_of, v.roles, roles_of)
+        sc = {k: sc.get(k) for k in _SCORE_KEYS}
+        out.append({"style": v.style, "pace": v.pace, "label": v.label, "method": v.method,
+                    "settings": v.settings, "segments": len(v.segments), "estimate": round(est, 3),
+                    "story": bool(roles), "scores": sc, "ranked": CAL.ranked(sc, cal)})
+    out.sort(key=lambda r: -(r["ranked"].get("overall") or 0.0))
+    progress(1.0, "Done")
+    return {"track_id": track_id, "videos": list(prints), "sequential": bool(sequential),
+            "story_regions": story_regions, "tried": len(cands), "results": out}

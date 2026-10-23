@@ -461,6 +461,7 @@ def load_audio_library(signature: tuple) -> dict:
             "sections": [{"start": x["start"], "end": x["end"], "label": x["label"]}
                          for x in (t.get("analysis") or {}).get("sections") or []],
             "drops": list((t.get("analysis") or {}).get("drops") or []),
+            "builds": len((t.get("analysis") or {}).get("builds") or []),
             "key": t.get("key"),
             "mix": t.get("mix"),
             "stems": all((t.get("stems") or {}).get(p) for p in ("vocals", "instrumental")),
