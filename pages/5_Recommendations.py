@@ -54,7 +54,7 @@ def open_plan(track_id: str, plan: dict, rank: int) -> None:
     st.session_state["_open_recommended_plan"] = {
         "track_id": track_id, "settings": settings, "videos": list(plan["videos"]),
         "story": bool(plan.get("story")), "story_regions": plan.get("story_regions"),
-        "sequential": bool(plan.get("sequential")),
+        "sequential": bool(plan.get("sequential")), "style": plan.get("style"), "pace": plan.get("pace", 0),
         "label": f"Recommended plan {rank} for {track_id} ({_mode_label(plan['mode'])}) — {plan['variant']}, "
                  f"{plan['scores']['overall']:.0f}% overall"}
     if plan.get("tuned"):

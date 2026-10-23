@@ -346,7 +346,7 @@ def describe_rule(rule: dict) -> str:
 ROLE_CUT_DEFAULTS = {
     "intro":  {"pace": 0, "style": "cinematic"},
     "slow":   {"pace": -1, "style": "cinematic"},
-    "action": {"pace": 1, "style": "hyper"},
+    "action": {"pace": 0, "style": "ramp"},
     "outro":  {"pace": 0, "style": "cinematic"},
 }
 

@@ -692,6 +692,14 @@ def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocal
     elif model_db is not None and len(model_db) >= 2 and len(beat_times):
         downbeats = _snap_to_beats(model_db, beat_times) or list(model_db)
         db_method = "beat_this"
+        # 📏 Bar lines that missed the beats were dropped above, leaving holes (or the model marked
+        # every other bar): rebuild every bar from the beats, beat 1 voted by the model (core/bars.py).
+        from core import bars as BARS
+        if BARS.irregular(downbeats, beats_per_bar * 60.0 / max(float(bpm), 1.0)):
+            fixed = BARS.regular_bars(beat_times, model_db, beats_per_bar)
+            if fixed:
+                downbeats = fixed
+                db_method = "beat_this+grid"
     else:
         phase = estimate_downbeat_phase(beat_times, kick30, harmony30, energy_jump, beats_per_bar)
         downbeats = [float(t) for t in beat_times[phase::beats_per_bar]]

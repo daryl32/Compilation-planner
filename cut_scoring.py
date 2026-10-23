@@ -15,6 +15,8 @@ No Streamlit in here.
 
 import numpy as np
 
+import core.bars as BARS
+
 # Weight keys (settings) → short reason names shown on the chart
 REASONS = {
     "sc_w_hit": "hit", "sc_w_kick": "kick", "sc_w_snare": "snare", "sc_w_harmony": "harmony",
@@ -149,11 +151,18 @@ def bar_lines(track: dict, beats_per_bar: int) -> list:
     correction and they match beats_per_bar; otherwise every beats_per_bar-th
     beat of the corrected grid, starting on whichever beat hits hardest
     (kick drum / onsets) — that's where a bar starts in nearly all music."""
-    beats, _, how = beat_grid(track)
+    beats, bpm, how = beat_grid(track)
     a = track.get("analysis") or {}
     db = a.get("downbeats") or []
-    if how is None and db and int(a.get("beats_per_bar", 4)) == int(beats_per_bar):
-        return [float(t) for t in _extend(np.asarray(db, dtype=float), float(track.get("duration_sec") or db[-1]))]
+    matches = bool(db) and int(a.get("beats_per_bar", 4)) == int(beats_per_bar)
+    if how is None and matches:
+        bar = int(beats_per_bar) * 60.0 / max(bpm, 1.0)
+        if not BARS.irregular(db, bar):
+            return [float(t) for t in _extend(np.asarray(db, dtype=float), float(track.get("duration_sec") or db[-1]))]
+        # 📏 Patchy bar lines (holes, every other bar): every bar from the beats, beat 1 voted by them.
+        fixed = BARS.regular_bars(beats, db, int(beats_per_bar))
+        if fixed:
+            return fixed
     if len(beats) < beats_per_bar:
         return []
     bpb = int(beats_per_bar)

@@ -760,3 +760,55 @@ def test_mix_page_drop_swap_is_a_neural_bass_drop_with_stems(mixlib, monkeypatch
     assert not errors(at), errors(at)
     xf = at.session_state["mxm_parts"][1]["xfade"]
     assert xf["neural"]["profile"] == "bass_drop" and xf["neural"]["bars"] in (4, 8, 16)
+
+
+def test_transition_suggestions(mixlib):
+    """🎯 core/transitions.suggest: phrase-aligned, room for the blend, scored, at most 3, different."""
+    from core import transitions as TR
+    t = mixlib["tracks"]
+    ta, tb = t["mix_song_c"], t["mix_song_a"]
+    ga, gb = MX.grid(ta), MX.grid(tb)
+    sug = TR.suggest(ta, tb)
+    assert 1 <= len(sug) <= 3
+    assert [s["score"] for s in sug] == sorted([s["score"] for s in sug], reverse=True)
+    for s in sug:
+        assert s["profile"] in ("smooth", "vocal_swap", "drums_first", "bass_drop")
+        assert s["bars"] in TR.BARS_CHOICES
+        assert s["a_end"] <= ga["duration"] + 1e-3 and s["b_in"] >= 0
+        assert min(abs(s["b_full"] - x) for x in gb["bars"]) < 0.01            # on a bar line
+        assert s["a_end"] - s["a_blend"] == pytest.approx(s["bars"] * ga["bar_len"], abs=0.05)
+    pieces = TR.recipe_pieces("mix_song_c", "mix_song_a", sug[0])
+    assert pieces[0]["end"] == sug[0]["a_end"] and pieces[1]["start"] == sug[0]["b_full"]
+    assert pieces[1]["xfade"]["neural"]["bars"] == sug[0]["bars"]
+
+
+def test_mix_page_transition_mode(mixlib):
+    """🎚️ Transition: suggestions load, the deck editor draws, a drag moves B, ▶️ Preview renders just the
+    transition, and 🧩 Start a mashup carries it over."""
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎚️ Mix"
+    at.session_state["mx_mode"] = "🎚️ Transition"
+    at.session_state["mxt_a"] = "mix_song_c"
+    at.session_state["mxt_b"] = "mix_song_a"
+    at.run()
+    assert not errors(at), errors(at)
+    key = "mxt_state::mix_song_c::mix_song_a"
+    s0 = dict(at.session_state[key])
+    assert any("Suggested transitions" in m.value for m in at.markdown)
+    # a drag in the editor comes back as a value
+    b_bars = MX.grid(mixlib["tracks"]["mix_song_a"])["bars"]
+    new_b = float(b_bars[min(12, len(b_bars) - 1)])
+    at.session_state["mxt_deck"] = {"a_end": s0["a_end"], "b_full": new_b, "bars": 4, "nonce": 123}
+    at.run()
+    assert not errors(at), errors(at)
+    assert at.session_state[key]["b_full"] == new_b and at.session_state[key]["bars"] == 4
+    at.button(key="mxt_preview").click().run()
+    assert not errors(at), errors(at)
+    assert at.session_state["mxt_pv"]["path"]
+    at.button(key="mxt_new").click().run()
+    assert not errors(at), errors(at)
+    assert at.session_state["mx_mode"] == "🧩 Mashup"
+    parts = at.session_state["mxm_parts"]
+    assert [p["track"] for p in parts] == ["mix_song_c", "mix_song_a"]
+    assert parts[1]["start"] == new_b and parts[1]["xfade"]["neural"]["bars"] == 4

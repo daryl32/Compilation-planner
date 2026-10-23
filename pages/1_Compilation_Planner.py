@@ -726,6 +726,20 @@ def _reroll_and_match() -> None:
     _press_match()
 
 
+# 🎛️ Tune mode: Matching starts with the settings the tune was scored with (planner/tune.py).
+import planner.tune as TUNE
+if st.session_state.get("cut_style") == TUNE.TUNE_STYLE and TUNE.result() and not TUNE.stale():
+    _tchanged = TUNE.changed_keys()
+    _tc = st.columns([4, 1.4], vertical_alignment="center")
+    if not _tchanged:
+        _tc[0].caption("🎛️ **Tuned settings in use** — the ones the tune was scored with (Balanced weights, one "
+                       "clip a block). Change anything in ⚙️ Matching settings to override.")
+    else:
+        _tc[0].caption(f"🎛️ ✏️ You've changed {len(_tchanged)} of the tuned settings.")
+        _tc[1].button("↩️ Back to tuned", key="pl_tune_restore", width="stretch",
+                      help="Puts back every matching setting the tune was scored with.",
+                      on_click=lambda: (TUNE.apply_matching(), st.session_state.__setitem__("_match_pressed", True)))
+
 _has_plan = bool(st.session_state.get("_match_confirmed_setup"))
 with st.form("match_settings", border=False):
     with st.expander(f"⚙️ Matching settings  ·  {_summary}", expanded=False):

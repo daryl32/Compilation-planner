@@ -79,13 +79,19 @@ def grid(track: dict) -> dict:
     catalogue track, cleaned up. Bar lines fall back to every 4th beat."""
     a = track.get("analysis") or {}
     duration = float(track.get("duration_sec") or 0.0)
-    beats = np.asarray(track.get("beat_times") or [], dtype=float)
-    bpm = float(track.get("bpm") or 0.0)
+    bpb = int(a.get("beats_per_bar") or 4)
+    # 📏 The planner's corrected beat grid (half / double time fixed, carried to both ends) and its
+    # complete bar lines (core/bars.py fills a patchy analysis) — so every bar can be picked.
+    import cut_scoring as CS
+    raw_beats = np.asarray(track.get("beat_times") or [], dtype=float)
+    beats, _, how = CS.beat_grid(track) if len(raw_beats) >= 4 else (raw_beats, 0.0, None)
+    beats = np.asarray(beats, dtype=float)
+    # The stored tempo is the precise one (a fit over every beat); only half / double time changes it.
+    bpm = float(track.get("bpm") or 0.0) * {"doubled": 2.0, "halved": 0.5}.get(how, 1.0)
     if not bpm and len(beats) > 1:
         bpm = 60.0 / float(np.median(np.diff(beats)))
     bpm = bpm or 120.0
-    bpb = int(a.get("beats_per_bar") or 4)
-    db = np.asarray(a.get("downbeats") or [], dtype=float)
+    db = np.asarray(CS.bar_lines(track, bpb) if len(beats) >= bpb else (a.get("downbeats") or []), dtype=float)
     if len(db) < 2 and len(beats) >= bpb:
         db = beats[::bpb]
     if len(db) < 2:

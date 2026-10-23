@@ -508,6 +508,8 @@ def _open_recommended_plan(plan: dict) -> None:
             ss[k] = v
     ss["audio_style"] = AUDIO_STYLE_CUSTOM          # these settings exactly — don't re-tune over them
     ss["cut_style"] = "custom"                      # 🎨 style row shows Custom (the plan's own settings)
+    if not plan.get("cut_style") and "parts" in (plan.get("settings") or {}) and plan.get("style"):
+        plan = {**plan, "cut_style": plan["style"], "cut_style_pace": plan.get("pace", 0)}   # 🚀 / 🎭 need their style
     if plan.get("cut_style"):                       # 🎛️ a tuned plan: its style + pace (🎭 Story-led needs it)
         ss["cut_style"] = plan["cut_style"]
         ss["cut_style_pace"] = int(plan.get("cut_style_pace", 0))
