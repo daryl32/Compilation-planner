@@ -300,6 +300,10 @@ def carve_span(queues: dict, video_id: str, scene_id: int, window_offset_sec: fl
     earlier confirmed block since the candidate was generated, which the
     caller should treat as "re-search this block", not silently paper over."""
     spans = queues.get(video_id, [])
+    # Set before the loop: when no span of this scene is left at all (an earlier block used the
+    # whole scene), the ValueError below still needs them (was an UnboundLocalError, 23 Oct 2026).
+    win_start = window_offset_sec
+    win_end = window_offset_sec + window_duration_sec
 
     for i, span in enumerate(spans):
         if span["scene_id"] != scene_id:
