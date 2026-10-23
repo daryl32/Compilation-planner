@@ -31,7 +31,7 @@ from config import CATALOGUE_DIR, AUDIO_DIR, PREVIEW_DIR
 from library_common import (
     safe_image, image_ok, video_details, all_actors, all_video_tags, matches_details,
     scene_tags, tc_to_seconds, format_mmss, overlap_with_range,
-    library_ranges, set_library_range, master_thumbnail_scenes,
+    library_ranges, set_library_range, set_library_ranges, master_thumbnail_scenes,
     render_range_picker, show_render_player, file_download_button,
 )
 
@@ -72,6 +72,40 @@ def trim_excluded_range(video: dict) -> tuple:
     if first > last:
         return 0.0, video["duration"]
     return scenes[first]["start"], scenes[last]["end"]
+
+
+def auto_trim_ranges(videos: list) -> dict:
+    """{video_id: (start, end) or None} — what ✂️ Auto trim sets each video's library range to
+    (None = no range: nothing excluded at either end)."""
+    out = {}
+    for video in videos:
+        start, end = trim_excluded_range(video)
+        full = start <= 0 and end >= video["duration"] - 0.5
+        out[video["video_id"]] = None if full else (start, end)
+    return out
+
+
+def _auto_trim(videos: list) -> None:
+    """✂️ Auto trim every video shown, in one save; the old ranges are kept for ↩️ Undo."""
+    current = library_ranges()
+    new = auto_trim_ranges(videos)
+    set_library_ranges(new)
+    changed = sum(1 for vid, rng in new.items() if (tuple(rng) if rng else None) != current.get(vid))
+    trimmed = sum(1 for rng in new.values() if rng)
+    st.session_state["lib_autotrim_undo"] = {vid: current.get(vid) for vid in new}
+    for vid in new:
+        st.session_state.pop(f"lib_slider_{vid}", None)
+    st.session_state["lib_autotrim_msg"] = (
+        f"✂️ Auto trimmed {len(new)} video(s): {trimmed} with a range, {len(new) - trimmed} whole video "
+        f"(nothing excluded at the ends) — {changed} changed.")
+
+
+def _undo_auto_trim() -> None:
+    old = st.session_state.pop("lib_autotrim_undo", None) or {}
+    set_library_ranges(old)
+    for vid in old:
+        st.session_state.pop(f"lib_slider_{vid}", None)
+    st.session_state["lib_autotrim_msg"] = f"↩️ Put back the ranges of {len(old)} video(s)."
 
 
 def scene_matches(scene: dict, wanted: set, match_all: bool) -> bool:
@@ -146,26 +180,28 @@ def render_videos():
     # Find + sort on one row in the page (filters apply straight away); the less-used
     # filters sit in "More filters", whose label counts the ones in use.
     with st.container(border=True, key="ml_wrap_vfind"):
-        fc = st.columns([3, 2.4, 1.6], vertical_alignment="bottom")
+        fc = st.columns([3, 2.4, 2.4, 1.6], vertical_alignment="bottom")
         name_query = fc[0].text_input("Find a video", placeholder="part of a video name", key="lib_name_query")
+        # 👤 Actors up here — the most used filter (Must have all of these stays in More filters).
+        actor_filter = fc[2].multiselect("👤 Actors", all_actors(), key="lib_actors", placeholder="anyone",
+                                         help="Set on each video in the Reviewer (🎬 Video details).")
         added_choice = fc[1].selectbox(
             "Added", list(ADDED_CHOICES), key="lib_added",
             format_func=lambda k: ADDED_CHOICES[k][0] + (f" · {len(new_ids)}" if k == "new" else ""),
             help="When the video was added — the date its catalogue first appeared in Google Drive.",
         )
-        _more_keys = ("lib_actors", "lib_vtags", "lib_tags", "lib_range_filter", "lib_review_filter")
+        _more_keys = ("lib_vtags", "lib_tags", "lib_range_filter", "lib_review_filter")
         _n_more = sum(bool(st.session_state.get(k)) and st.session_state.get(k) != "Any" for k in _more_keys)
         _dur = st.session_state.get("lib_duration")
         if _dur and tuple(_dur) != (0, max_minutes):
             _n_more += 1
-        with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", width="stretch"):
-            actor_filter = st.multiselect("👤 Actors", all_actors(), key="lib_actors", placeholder="anyone",
-                                          help="Set on each video in the Reviewer (🎬 Video details).")
+        with fc[3].popover(f"More filters ({_n_more})" if _n_more else "More filters", width="stretch"):
             vtag_filter = st.multiselect("🏷️ Video tags", all_video_tags(), key="lib_vtags", placeholder="any",
                                          help="Tags for the whole video, set in the Reviewer (🎬 Video details).")
             details_all = st.toggle("Must have all of these", key="lib_details_all",
                                     disabled=not (actor_filter or vtag_filter),
-                                    help="Off: any of the picked actors / video tags. On: every one of them.")
+                                    help="Off: any of the picked 👤 actors (top row) / video tags. "
+                                         "On: every one of them.")
             tag_filter = st.multiselect("Clip tags", all_tags, key="lib_tags", placeholder="any")
             match_all = st.radio(
                 "Scenes must have", ["Any of these tags", "All of these tags"], horizontal=True,
@@ -175,8 +211,9 @@ def render_videos():
             review_filter = st.selectbox("Review status", ["Any", "Fully reviewed", "Not fully reviewed"],
                                          key="lib_review_filter")
             duration_filter = st.slider("Duration (minutes)", 0, max_minutes, (0, max_minutes), key="lib_duration")
-        rc = st.columns([3, 2.4, 1.6] if added_choice != "since" else [2, 2, 2.4, 1.6],
+        rc = st.columns([3, 2.4, 1.6, 1.6] if added_choice != "since" else [2, 2, 2.4, 1.6, 1.6],
                         vertical_alignment="bottom")
+        trim_slot = rc.pop()   # ✂️ Auto trim — drawn once the filtered list is known
         added_since = None
         if added_choice == "since":
             since_day = rc.pop(0).date_input("Added on or after",
@@ -254,6 +291,23 @@ def render_videos():
     else:
         _status.append(f"{sum(1 for r in rows if r['range'])} with a library range")
     status_slot.markdown(" · ".join(_status))
+    with trim_slot.popover("✂️ Auto trim", width="stretch", disabled=not rows,
+                           help="Trim excluded ends on every video shown, in one go."):
+        st.markdown(f"Sets the library range of the **{len(rows)}** video(s) shown (your filters apply) "
+                    "the same way as **✂️ Trim excluded ends** on one video: it drops the excluded "
+                    "scenes at the start and end.")
+        st.caption("Every range is replaced — ones trimmed before (so changes in the Reviewer are picked "
+                   "up) and ones set by hand. A video with no excluded scenes at either end ends up with "
+                   "no range (the whole video).")
+        st.button(f"✂️ Auto trim {len(rows)} video(s)", type="primary", width="stretch", key="lib_autotrim",
+                  on_click=_auto_trim, args=([r["video"] for r in rows],))
+        _undo = st.session_state.get("lib_autotrim_undo")
+        if _undo:
+            st.button(f"↩️ Undo the last auto trim ({len(_undo)} video(s))", width="stretch",
+                      key="lib_autotrim_undo_btn", on_click=_undo_auto_trim)
+    _done = st.session_state.pop("lib_autotrim_msg", None)
+    if _done:
+        st.success(_done)
     if new_ids and added_choice == "any":
         with st.container(key="ml_wrap_vnew"):
             _nc = st.columns([5, 1.6], vertical_alignment="center")
