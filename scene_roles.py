@@ -59,12 +59,9 @@ PALETTE = ["#f28e2b", "#59a14f", "#edc948", "#ff9da7", "#9c755f", "#bab0ac", "#8
 # ---------------------------------------------------------------------------
 
 def _load_custom() -> list:
-    try:
-        data = json.loads(ROLES_FILE.read_text())
-    except (FileNotFoundError, ValueError, OSError):
-        return []
+    data = _read_file()
     out = []
-    for r in (data.get("roles") if isinstance(data, dict) else None) or []:
+    for r in data.get("roles") or []:
         if isinstance(r, dict) and r.get("id") and r["id"] not in BUILTIN_IDS:
             out.append(_normalise(r))
     return out
@@ -102,13 +99,29 @@ def label(role_id: str, roles: dict | None = None) -> str:
     return f"{r['emoji']} {r['name']}" if r else f"🏷️ {role_id} (deleted)"
 
 
-def _save_custom(custom: list) -> None:
+def _read_file() -> dict:
+    try:
+        data = json.loads(ROLES_FILE.read_text())
+    except (FileNotFoundError, ValueError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_file(**changes) -> None:
+    """Change some top-level keys of scene_roles.json ("roles", "motion_map"), keeping the rest."""
+    data = _read_file()
+    data.update(changes)
     ROLES_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = ROLES_FILE.with_name(ROLES_FILE.name + ".tmp")
-    tmp.write_text(json.dumps({"roles": custom}, indent=2))
+    tmp.write_text(json.dumps(data, indent=2))
     os.replace(tmp, ROLES_FILE)
+    _MAP_CACHE.clear()
     from library_common import mark_pending   # here, so reading roles never needs Streamlit
     mark_pending(ROLES_STEM)
+
+
+def _save_custom(custom: list) -> None:
+    _write_file(roles=custom)
 
 
 def _slug(name: str) -> str:
@@ -216,3 +229,108 @@ def motion_hint(rank: float | None) -> str | None:
     if rank >= 0.8:
         return "action"
     return None
+
+
+# ---------------------------------------------------------------------------
+# 🗺️ Role mapping — your own motion → roles rules for the 💡 motion hints
+# ---------------------------------------------------------------------------
+# Kept in scene_roles.json under "motion_map" (synced to Drive with the roles):
+#   enabled    — off: the built-in hints above (calmest fifth → Slow, busiest fifth → Action)
+#   mode       — "tags": by the scene's motion tag (calm / medium / busy — relative to its own
+#                video, as shown on each card); "thresholds": by its motion number (the same
+#                scale for every video)
+#   tags       — {"calm": [role ids], "medium": [...], "busy": [...]}
+#   thresholds — [{"min": 0.0 or None, "max": 10.0 or None, "roles": [role ids]}, ...]
+#                from min (included) up to max (not included); None = no limit. Ranges may
+#                overlap — a scene gets the roles of every range it falls in.
+# When mapping is on it replaces the built-in hints.
+
+MOTION_TAGS = {"calm": "😌 Calm", "medium": "🙂 Medium", "busy": "🔥 Busy"}
+MAP_MODES = {"tags": "By motion tag (calm / medium / busy)", "thresholds": "By motion number (ranges)"}
+_MAP_CACHE: dict = {}
+
+
+def motion_tag(rank: float | None) -> str | None:
+    """calm / medium / busy from where a scene's motion sits in its own video (0 = calmest,
+    1 = busiest) — the same thirds the cards show."""
+    if rank is None:
+        return None
+    return "calm" if rank < 0.34 else "busy" if rank > 0.66 else "medium"
+
+
+def _num(v):
+    try:
+        return None if v is None or v == "" else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ids(v) -> list:
+    return list(dict.fromkeys(str(r) for r in (v if isinstance(v, list) else []) if r))
+
+
+def normalise_motion_map(m) -> dict:
+    m = m if isinstance(m, dict) else {}
+    tags = m.get("tags") if isinstance(m.get("tags"), dict) else {}
+    rules = []
+    for r in m.get("thresholds") if isinstance(m.get("thresholds"), list) else []:
+        if isinstance(r, dict):
+            rules.append({"min": _num(r.get("min")), "max": _num(r.get("max")), "roles": _ids(r.get("roles"))})
+    return {
+        "enabled": bool(m.get("enabled", False)),
+        "mode": m.get("mode") if m.get("mode") in MAP_MODES else "tags",
+        "tags": {t: _ids(tags.get(t)) for t in MOTION_TAGS},
+        "thresholds": rules,
+    }
+
+
+def load_motion_map() -> dict:
+    """The saved role mapping (re-read only when scene_roles.json changes)."""
+    try:
+        stamp = ROLES_FILE.stat().st_mtime_ns
+    except OSError:
+        stamp = None
+    if _MAP_CACHE.get("stamp") != stamp or "map" not in _MAP_CACHE:
+        _MAP_CACHE["stamp"] = stamp
+        _MAP_CACHE["map"] = normalise_motion_map(_read_file().get("motion_map"))
+    return dict(_MAP_CACHE["map"])
+
+
+def save_motion_map(m: dict) -> None:
+    _write_file(motion_map=normalise_motion_map(m))
+
+
+def in_range(motion: float, rule: dict) -> bool:
+    lo, hi = rule.get("min"), rule.get("max")
+    return (lo is None or motion >= lo) and (hi is None or motion < hi)
+
+
+def motion_hints(motion, rank: float | None, mmap: dict | None = None) -> list:
+    """Every role hinted for a scene, from its motion number and where that sits in its video.
+    With role mapping on: the mapped roles (all of them — a tag or range can map to several);
+    off: the built-in hint, if any."""
+    mmap = load_motion_map() if mmap is None else mmap
+    if not mmap.get("enabled"):
+        h = motion_hint(rank)
+        return [h] if h else []
+    if mmap.get("mode") == "thresholds":
+        if not isinstance(motion, (int, float)):
+            return []
+        out = []
+        for rule in mmap.get("thresholds") or []:
+            if in_range(float(motion), rule):
+                out += rule.get("roles") or []
+        return list(dict.fromkeys(out))
+    tag = motion_tag(rank)
+    return list((mmap.get("tags") or {}).get(tag) or []) if tag else []
+
+
+def describe_rule(rule: dict) -> str:
+    lo, hi = rule.get("min"), rule.get("max")
+    if lo is None and hi is None:
+        return "any motion"
+    if lo is None:
+        return f"under {hi:g}"
+    if hi is None:
+        return f"{lo:g} and over"
+    return f"{lo:g} to under {hi:g}"

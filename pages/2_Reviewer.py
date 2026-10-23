@@ -99,6 +99,84 @@ with st.sidebar.expander("✂️ Split & combine", expanded=False):
                + ".  \n"
                f"🔗 Combine suggestions and Auto combine: runs of clips under {suggest_short_sec:g} s.")
 
+# 🗺️ Role mapping — your own motion → roles rules for the 💡 motion hints (scene_roles.py).
+# Each widget saves its own piece as you change it; keys carry a version so adding or removing
+# a range starts the range widgets afresh from the saved rules.
+def _map_set(field: str, wkey: str, idx=None) -> None:
+    m = SR.load_motion_map()
+    val = st.session_state.get(wkey)
+    if field in ("enabled", "mode"):
+        m[field] = val
+    elif field == "tag":
+        m["tags"][idx[0]] = list(val or [])
+    elif idx is not None and idx < len(m["thresholds"]):
+        m["thresholds"][idx][field] = list(val or []) if field == "roles" else val
+    SR.save_motion_map(m)
+
+
+def _map_rules(change: str, idx=None) -> None:
+    m = SR.load_motion_map()
+    if change == "add":
+        last = m["thresholds"][-1]["max"] if m["thresholds"] else None
+        m["thresholds"].append({"min": last if last is not None else 0.0, "max": None, "roles": []})
+    elif change == "remove" and idx is not None and idx < len(m["thresholds"]):
+        m["thresholds"].pop(idx)
+    SR.save_motion_map(m)
+    st.session_state["rev_map_ver"] = st.session_state.get("rev_map_ver", 0) + 1
+
+
+with st.sidebar.expander("🗺️ Role mapping", expanded=False):
+    _mm = SR.load_motion_map()
+    _mroles = SR.roles_by_id()
+    _mv = st.session_state.get("rev_map_ver", 0)
+    st.toggle("Use role mapping for 💡 motion hints", value=_mm["enabled"], key=f"rev_map_on_{_mv}",
+              on_change=_map_set, args=("enabled", f"rev_map_on_{_mv}"),
+              help="On: 💡 motion hints (and 💡 Accept motion hints) give the roles you map below — "
+                   "several per tag or range if you like. Off: the built-in hints (calmest fifth of a "
+                   "video's scenes → 🌙 Slow, busiest fifth → 💥 Action).")
+    st.radio("Map", list(SR.MAP_MODES), index=list(SR.MAP_MODES).index(_mm["mode"]),
+             format_func=SR.MAP_MODES.get, key=f"rev_map_mode_{_mv}", disabled=not _mm["enabled"],
+             on_change=_map_set, args=("mode", f"rev_map_mode_{_mv}"))
+    _rfmt = lambda r: SR.label(r, _mroles)
+    if _mm["mode"] == "tags":
+        st.caption("Calm / medium / busy is the tag on each card: the calmest, middle and busiest "
+                   "third of that video's scenes.")
+        for _t, _tname in SR.MOTION_TAGS.items():
+            _k = f"rev_map_tag_{_t}_{_mv}"
+            st.multiselect(f"{_tname} →", list(_mroles), default=[r for r in _mm["tags"][_t] if r in _mroles],
+                           format_func=_rfmt, key=_k, placeholder="no roles", disabled=not _mm["enabled"],
+                           on_change=_map_set, args=("tag", _k, (_t,)))
+    else:
+        st.caption("By the motion number on each card — the same scale for every video. A range runs "
+                   "from its first number up to (not including) its second; leave one empty for no "
+                   "limit. Ranges can overlap: a scene gets the roles of every range it's in.")
+        _range_slot = st.empty()   # this video's motion spread — filled in once a video is open
+        for _i, _rule in enumerate(_mm["thresholds"]):
+            with st.container(border=True):
+                _c = st.columns(2)
+                _c[0].number_input("From", min_value=0.0, value=_rule["min"], step=0.5, format="%.1f",
+                                   placeholder="no limit", key=f"rev_map_lo_{_i}_{_mv}", disabled=not _mm["enabled"],
+                                   on_change=_map_set, args=("min", f"rev_map_lo_{_i}_{_mv}", _i))
+                _c[1].number_input("Up to", min_value=0.0, value=_rule["max"], step=0.5, format="%.1f",
+                                   placeholder="no limit", key=f"rev_map_hi_{_i}_{_mv}", disabled=not _mm["enabled"],
+                                   on_change=_map_set, args=("max", f"rev_map_hi_{_i}_{_mv}", _i))
+                st.multiselect("Roles", list(_mroles), default=[r for r in _rule["roles"] if r in _mroles],
+                               format_func=_rfmt, key=f"rev_map_roles_{_i}_{_mv}", placeholder="no roles",
+                               disabled=not _mm["enabled"], label_visibility="collapsed",
+                               on_change=_map_set, args=("roles", f"rev_map_roles_{_i}_{_mv}", _i))
+                _rc = st.columns([3, 2], vertical_alignment="center")
+                _bad = _rule["min"] is not None and _rule["max"] is not None and _rule["min"] >= _rule["max"]
+                _rc[0].caption(":orange[⚠️ From must be below Up to]" if _bad else SR.describe_rule(_rule))
+                _rc[1].button("🗑️ Remove", key=f"rev_map_del_{_i}_{_mv}", width="stretch",
+                              on_click=_map_rules, args=("remove", _i), disabled=not _mm["enabled"])
+        st.button("➕ Add a range", width="stretch", on_click=_map_rules, args=("add",),
+                  disabled=not _mm["enabled"], key="rev_map_add")
+    if _mm["enabled"]:
+        _unmapped = (not any(_mm["tags"].values())) if _mm["mode"] == "tags" else \
+            not any(r["roles"] for r in _mm["thresholds"])
+        if _unmapped:
+            st.caption(":orange[Nothing mapped yet — no 💡 hints until you pick some roles.]")
+
 _labels_box = st.sidebar.expander("🏷️ Labels & training data", expanded=False)
 with _labels_box:
     new_label = st.text_input("Add new label", placeholder="e.g. slow-motion")
@@ -1009,6 +1087,36 @@ def motion_text(scene: dict) -> str:
     return f"🏃 motion {m:.1f} ({level})"
 
 
+_motion_map = SR.load_motion_map()
+
+
+def scene_hints(scene: dict) -> list:
+    """The 💡 roles hinted for a scene — your 🗺️ role mapping when it's on, else the built-in
+    calmest → Slow / busiest → Action. Only roles that still exist."""
+    return [r for r in SR.motion_hints(scene.get("motion_intensity"), motion_rank(scene), _motion_map)
+            if r in _roles]
+
+
+def hint_caption(hints: list, roles: dict, scene: dict) -> str:
+    names = ", ".join(SR.label(r, roles) for r in hints)
+    if _motion_map["enabled"]:
+        return f"💡 your role mapping suggests {names}"
+    return f"💡 one of the {'calmest' if hints == ['slow'] else 'busiest'} scenes here — maybe {names}?"
+
+
+HINTS_HELP = ("Adds the roles your 🗺️ Role mapping (sidebar) gives each scene — never removes any. Check them over."
+              if _motion_map["enabled"] else
+              "Calmest fifth of this video's scenes → 🌙 Slow, busiest fifth → 💥 Action. "
+              "Set up your own in the sidebar's 🗺️ Role mapping.")
+
+# This video's motion spread, to help pick ranges in 🗺️ Role mapping.
+if _motions and "_range_slot" in globals():
+    _lo_third = _motions[max(0, math.ceil(len(_motions) * 0.34) - 1)]
+    _hi_third = _motions[min(len(_motions) - 1, int(len(_motions) * 0.66))]
+    _range_slot.caption(f"This video: motion {_motions[0]:.1f} to {_motions[-1]:.1f} "
+                        f"(middle third about {_lo_third:.1f}–{_hi_third:.1f}).")
+
+
 # ---------------------------------------------------------------------------
 # Roles: mark every shown scene, and your own roles
 # ---------------------------------------------------------------------------
@@ -1031,9 +1139,21 @@ def _bulk_role(role_id, add: bool, ids: list) -> None:
 def _bulk_hints(ids: list) -> None:
     """Accept every 💡 motion hint among the shown scenes."""
     for sid in ids:
-        hint = SR.motion_hint(motion_rank(scene_by_id[sid]))
-        if hint in _roles:
+        for hint in scene_hints(scene_by_id[sid]):
             _bulk_role(hint, True, [sid])
+
+
+# Tap-to-pick emojis for your own roles (the Emoji box still takes any other).
+ROLE_EMOJIS = ["🏷️", "⭐", "🔥", "⚡", "💥", "🌙", "😌", "🙂", "😍", "😎", "🥰", "😈", "💃", "🕺", "🎉",
+               "💋", "❤️", "💔", "👀", "👄", "🍑", "🦵", "🙌", "🤸", "🏃", "🧘", "🌊", "🌅", "🌃", "✨",
+               "🎬", "🎥", "📸", "🔍", "🎯", "🚀", "🏁", "👑", "💎", "🎭"]
+
+
+def _pick_emoji(p: str) -> None:
+    pick = st.session_state.get(f"{p}_emoji_pick")
+    if pick:
+        st.session_state[f"{p}_emoji"] = pick
+    st.session_state[f"{p}_emoji_pick"] = None
 
 
 def _role_fit_inputs(prefix: str, fit: dict) -> dict:
@@ -1070,8 +1190,11 @@ def role_manager() -> None:
     p = f"rev_role_{pick}"
     c = st.columns([3, 1, 1])
     name = c[0].text_input("Name", value=r["name"], key=f"{p}_name", placeholder="e.g. Reveal")
-    emoji = c[1].text_input("Emoji", value=r["emoji"], key=f"{p}_emoji", max_chars=4)
+    st.session_state.setdefault(f"{p}_emoji", r["emoji"])
+    emoji = c[1].text_input("Emoji", key=f"{p}_emoji", max_chars=8,
+                            help="Tap one below, or type your own (on an iPad: the 🙂 key on the keyboard).")
     colour = c[2].color_picker("Colour", value=r["colour"], key=f"{p}_colour")
+    st.pills("Pick an emoji", ROLE_EMOJIS, key=f"{p}_emoji_pick", on_change=_pick_emoji, args=(p,))
     help_text = st.text_input("What it's for (optional)", value=r["help"], key=f"{p}_help")
     st.caption("**Music fit** — where in a track this role belongs. The story map wizard uses it to "
                "suggest that role's parts of the track.")
@@ -1112,10 +1235,10 @@ with rc_[0].popover(f"🎭 Mark all {len(_shown_ids)}…", width="stretch",
     _bc[0].button("➕ Add to all", width="stretch", on_click=_bulk_role, args=(None, True, _shown_ids))
     _bc[1].button("➖ Remove from all", width="stretch", on_click=_bulk_role,
                   args=(None, False, _shown_ids))
-    _n_hints = sum(1 for i in _shown_ids if SR.motion_hint(motion_rank(scene_by_id[i])) in _roles)
+    _n_hints = sum(1 for i in _shown_ids if scene_hints(scene_by_id[i]))
     st.button(f"💡 Accept the {_n_hints} motion hint(s)", width="stretch", disabled=not _n_hints,
               on_click=_bulk_hints, args=(_shown_ids,),
-              help="Calmest fifth of this video's scenes → 🌙 Slow, busiest fifth → 💥 Action. Check them over.")
+              help=HINTS_HELP)
     st.caption("Unsaved until you 💾 save, like ticking each card.")
 with rc_[1].popover("Roles…", width="stretch"):
     role_manager()
@@ -1206,10 +1329,9 @@ def scene_card(sid, trimmed_to) -> None:
         st.pills("Roles", _opts, selection_mode="multi", key=_rk,
                     default=None if _rk in st.session_state else _cur,
                     format_func=lambda r: SR.label(r, _roles), label_visibility="collapsed")
-        _hint = SR.motion_hint(motion_rank(scene))
-        if _hint and _hint in _roles and _hint not in (st.session_state.get(_rk) or []):
-            st.caption(f":gray[*💡 one of the {'calmest' if _hint == 'slow' else 'busiest'} scenes here — "
-                       f"maybe {SR.label(_hint, _roles)}?*]")
+        _hints = [h for h in scene_hints(scene) if h not in (st.session_state.get(_rk) or [])]
+        if _hints:
+            st.caption(f":gray[*{hint_caption(_hints, _roles, scene)}*]")
         new = pending_fields(scene)
         if new is not None and is_changed(scene, new):
             st.caption("✏️ Unsaved changes")
@@ -1298,9 +1420,9 @@ def _qr_all(ids: list, add: bool) -> None:
 
 def _qr_hints(ids: list) -> None:
     for sid in ids:
-        hint = SR.motion_hint(motion_rank(scene_by_id[sid]))
-        if hint in _roles and hint not in _qr_roles(sid):
-            st.session_state.setdefault(_qr_key(), {})[sid] = _qr_roles(sid) + [hint]
+        new = [h for h in scene_hints(scene_by_id[sid]) if h not in _qr_roles(sid)]
+        if new:
+            st.session_state.setdefault(_qr_key(), {})[sid] = _qr_roles(sid) + new
     _qr_bump()
 
 
@@ -1392,7 +1514,7 @@ def quick_role_grid(ids: list) -> None:
                  width="stretch", key="rev_qr_all_off")
     bc[3].button("💡 Accept motion hints", on_click=_qr_hints, args=(page_ids,), width="stretch",
                  key="rev_qr_hints",
-                 help="Calmest fifth of this video's scenes → 🌙 Slow, busiest fifth → 💥 Action.")
+                 help=HINTS_HELP)
 
     ver = _qr_ver()
     # One grid of cards (not rows of st.columns) so CSS sets how many fit a row: 6 with a mouse /
@@ -1408,7 +1530,7 @@ def quick_role_grid(ids: list) -> None:
                     safe_image(str(tp), width="stretch")
                 else:
                     st.caption("🖼️ no picture")
-                hint = SR.motion_hint(motion_rank(sc))
+                hints = scene_hints(sc)
                 x_now, x_saved = _qr_excluded(sid), bool(sc.get("excluded"))
                 st.caption(f"**{SE.scene_label(sc)}** · {fmt_dur(SE.scene_duration(sc))}")
                 if x_now or x_saved:
@@ -1426,8 +1548,9 @@ def quick_role_grid(ids: list) -> None:
                     st.markdown(" ".join(
                         (":green-badge[✅ " if r in saved else ":orange-badge[✏️ ")
                         + (SR.label(r, _roles) if r in _roles else f"🏷️ {r}") + "]" for r in cur))
-                if hint in _roles and hint not in cur:
-                    st.caption(f":gray[*💡 suggests {SR.label(hint, _roles)}*]")
+                _new_hints = [h for h in hints if h not in cur]
+                if _new_hints:
+                    st.caption(f":gray[*💡 suggests {', '.join(SR.label(h, _roles) for h in _new_hints)}*]")
                 # Every role as a button (emoji — the names are in the line at the top).
                 wk = f"rev_qr_p_{selected}_{sid}_{ver}"
                 opts = list(_roles) + [r for r in cur if r not in _roles]
