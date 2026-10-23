@@ -44,6 +44,7 @@ def test_find_and_remove_leftovers(tmp_path):
 def test_media_library_tidy_popover(monkeypatch):
     import audio_tidy as AT
     import library_common as LC
+    import page_setup  # noqa: F401  (loaded first: it copies IS_TEST when imported — keep later tests on test)
     monkeypatch.setattr(LC, "IS_TEST", False)          # the live app only
     from tests.apptest_util import errors, page_app
     monkeypatch.setattr(AT, "drive_listing", lambda: ({"nothing.json"}, [], None))
@@ -63,6 +64,7 @@ def test_media_library_tidy_popover(monkeypatch):
 def test_server_page_refresh_panel(monkeypatch):
     import library_common as LC
     from tests.apptest_util import errors, page_app
+    import page_setup  # noqa: F401  (loaded first: it copies IS_TEST when imported — keep later tests on test)
     monkeypatch.setattr(LC, "IS_TEST", False)          # the live app only
     at = page_app("pages/4_Server.py", timeout=120)
     at.run()
