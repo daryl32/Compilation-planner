@@ -14,6 +14,7 @@ everything stays editable afterwards, and the ✂️ cut editor works on top.
     💥 Drop hunter      calm through the verses, speeding up into drops, fast at the drop
     🎤 Vocal-led        cuts between sung lines, never through one
     🕺 Hyper            dance-edit pace: every beat or two, on kicks and snares
+    🚀 Build-up ramp    long shots, faster through each build-up, Hyper from the drop (ramp_parts)
     🎭 Story-led        each story-map part in its role's style and pace (core/story_cuts.py)
 
 style_settings() is pure (no Streamlit): (method, settings, notes) for a track.
@@ -32,6 +33,7 @@ STYLES = {
     "drop":      {"label": "💥 Drop hunter",   "help": "Calm through verses and breakdowns, speeding up through build-ups and fast at the drop."},
     "vocal":     {"label": "🎤 Vocal-led",     "help": "Cuts between sung lines and never through one (needs the vocal analysis)."},
     "hyper":     {"label": "🕺 Hyper",         "help": "Dance-edit pace: a cut every beat or two, on kicks and snares."},
+    "ramp":      {"label": "🚀 Build-up ramp", "help": "Longer shots until the music builds, cuts speeding up through each build-up, full 🕺 Hyper pace from the drop for a few bars, then easing back — fast cuts only where the song earns them."},
     "story":     {"label": "🎭 Story-led",     "help": "Each story-map part in its role's own style and pace (set on each role in the Reviewer → Roles…): e.g. 💥 Action as 🕺 Hyper, busier; 🌙 Slow as 🎬 Cinematic, calmer. Parts without a role — or no story map — are 🧠 Smart."},
 }
 PACE_LABELS = {-2: "much calmer", -1: "calmer", 0: "normal", 1: "busier", 2: "much busier"}
@@ -82,6 +84,16 @@ def style_settings(track: dict, style: str, pace: int = 0, beats_per_bar: int = 
     a = track.get("analysis") or {}
     notes = [f"{STYLES[style]['label']} · pace {PACE_LABELS[pace]} · 1 bar = {bar:.2f}s"]
 
+    if style == "ramp":
+        s = {k: SEG_DEFAULTS[k] for k in SEG_METHOD_KEYS[SEG_SMART]}
+        s["sm_pace"] = int(_clamp(pace - 1, -2, 2))           # between build-ups: longer shots
+        parts = ramp_parts(track, pace, beats_per_bar)
+        if parts:
+            s["parts"] = parts
+        else:
+            notes.append("No build-ups or drops found in this track's analysis — it's 🧠 Smart, a little calmer.")
+        return SEG_SMART, s, notes
+
     if style in ("smart", "story"):
         s = {k: SEG_DEFAULTS[k] for k in SEG_METHOD_KEYS[SEG_SMART]}
         s["sm_pace"] = pace
@@ -121,3 +133,46 @@ def style_settings(track: dict, style: str, pace: int = 0, beats_per_bar: int = 
         notes.append("Already at the fastest the cut scoring allows (half a bar on average) — shortest "
                      "segments lowered instead.")
     return SEG_SCORED, s, notes
+
+
+# ---------------------------------------------------------------------------
+# 🚀 Build-up ramp
+# ---------------------------------------------------------------------------
+
+RAMP_STEPS = (("beat", -1), ("beat", 0), ("hyper", -1))   # through a build-up, a third each
+RAMP_DROP_BARS = 8                                         # Hyper from a drop for this many bars
+
+
+def ramp_parts(track: dict, pace: int = 0, beats_per_bar: int = 4) -> list:
+    """The 🚀 ramp's parts ({start, end, style, pace, method, settings}, as core/story_cuts makes):
+    each build-up in three steps getting faster, then Hyper from each drop for RAMP_DROP_BARS bars
+    (or until the next build-up). Outside them the base (Smart, calmer) cuts. [] without any."""
+    a = track.get("analysis") or {}
+    duration = float(track.get("duration_sec") or 0.0)
+    bar = CS.bar_sec(track, beats_per_bar)
+    builds = sorted((float(b["start"]), float(b["end"])) for b in a.get("builds") or []
+                    if isinstance(b, dict) and float(b.get("end", 0)) > float(b.get("start", 0)))
+    drops = sorted(float(d) for d in a.get("drops") or [])
+    spans = []
+    for bs, be in builds:
+        third = (be - bs) / 3
+        for k, (st, off) in enumerate(RAMP_STEPS):
+            spans.append((bs + k * third, bs + (k + 1) * third, st, off))
+    for d in drops:
+        nxt = min([bs for bs, _ in builds if bs > d + 1e-3] + [duration, d + RAMP_DROP_BARS * bar])
+        if nxt - d > 0.5 * bar:
+            spans.append((d, nxt, "hyper", 0))
+    spans.sort()
+    out, recipes = [], {}
+    for s0, s1, st, off in spans:
+        s0 = max(s0, out[-1]["end"] if out else 0.0)          # overlapping spans: the earlier wins
+        if s1 - s0 < 0.25 * bar:
+            continue
+        p = int(_clamp(pace + off, -2, 2))
+        if (st, p) not in recipes:
+            method, settings, _ = style_settings(track, st, p, beats_per_bar)
+            recipes[(st, p)] = (method, settings)
+        method, settings = recipes[(st, p)]
+        out.append({"start": round(s0, 3), "end": round(min(s1, duration), 3), "role": None, "style": st,
+                    "pace": p, "method": method, "settings": dict(settings)})
+    return out

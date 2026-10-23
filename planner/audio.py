@@ -48,10 +48,23 @@ def segmentation_settings() -> dict:
     out = {"method": method, "beats_per_bar": int(st.session_state.get("beats_per_bar", 4))}
     for k in SEG_METHOD_KEYS[method]:
         out[k] = st.session_state.get(k, DIAL_DEFAULTS.get(k))
-    parts = story_parts()
+    parts = style_parts() + story_parts()     # story parts are spliced in after (they win)
     if parts:
         out["parts"] = parts
     return out
+
+
+def style_parts() -> list:
+    """🚀 The Build-up ramp's own parts (build-ups faster, Hyper from drops) for this track, or []."""
+    tid = st.session_state.get("track_id")
+    if not tid or st.session_state.get("cut_style") != "ramp":
+        return []
+    key = (tid, int(st.session_state.get("cut_style_pace", 0)), int(st.session_state.get("beats_per_bar", 4)))
+    cache = st.session_state.setdefault("_ramp_parts_cache", {})
+    if key not in cache:
+        cache.clear()
+        cache[key] = CSTY.ramp_parts(load_track(tid), key[1], key[2])
+    return cache[key]
 
 
 def story_parts_on() -> bool:
@@ -139,7 +152,8 @@ def _apply_cut_style() -> None:
                                                   int(st.session_state.get("beats_per_bar", 4)))
     st.session_state["segmentation_method"] = method
     for k, v in settings.items():
-        st.session_state[k] = v
+        if k != "parts":                 # 🚀 the ramp's parts are worked out per run (style_parts)
+            st.session_state[k] = v
     st.session_state["audio_style"] = AUDIO_STYLE_CUSTOM     # the style owns the dials — no pace re-tune over them
     st.session_state["style_report"] = {"track_id": st.session_state["track_id"], "notes": notes}
     st.session_state.pop("aim_report", None)
