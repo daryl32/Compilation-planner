@@ -44,7 +44,7 @@ for d in thumbnails timeline_sprites; do
 done
 
 echo "Audio:       $PROD_AUDIO  →  $DEV_DATA/audio_catalogue"
-rsync -a --delete "$PROD_AUDIO"/ "$DEV_DATA/audio_catalogue/"
+rsync -a --delete --exclude '.removed' "$PROD_AUDIO"/ "$DEV_DATA/audio_catalogue/"
 
 echo "Projects:    $PROD_PROJECTS  →  $DEV_DATA/projects"
 if [[ -n "$PROD_PROJECTS" && "$PROD_PROJECTS" != "/" && -d "$PROD_PROJECTS" ]]; then
