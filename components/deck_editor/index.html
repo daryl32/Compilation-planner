@@ -1,0 +1,235 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#ffffff; --fg:#262730; --muted:#8a8f98; --line:#d9dce1; --accent:#ff4b4b; --panel:#f3f4f7;
+          --wave:rgba(70,110,200,0.55); --vox:rgba(230,80,160,0.75); --drums:rgba(240,140,40,0.85);
+          --blend:rgba(128,90,220,0.16); --dim:rgba(120,120,120,0.55); --cursor:#ff4b4b; }
+  html, body { margin:0; padding:0; background:transparent; color:var(--fg);
+               font-family: "Source Sans Pro", -apple-system, system-ui, sans-serif; font-size:15px;
+               -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color: transparent; }
+  .bar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:4px 0; }
+  button { min-height:44px; min-width:44px; padding:0 12px; border-radius:8px; border:1px solid var(--line);
+           background:var(--panel); color:var(--fg); font-size:15px; cursor:pointer; touch-action:manipulation; }
+  button:active { transform: scale(0.97); }
+  button.on { outline:2px solid var(--accent); background:var(--accent); color:#fff; }
+  button:disabled { opacity:.4; cursor:default; }
+  .time { font-variant-numeric: tabular-nums; min-width:110px; text-align:center; font-weight:600; }
+  .grow { flex:1; }
+  canvas { display:block; width:100%; touch-action:none; border-radius:8px; background:var(--panel); }
+  #deck { height:250px; }
+  .hint { color:var(--muted); font-size:13px; margin-top:4px; min-height:18px; }
+  .key span { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 3px 0 10px; vertical-align:middle; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <button id="pa" title="Play track A from where you last tapped its lane">▶ A</button>
+  <button id="pb" title="Play track B from where you last tapped its lane">▶ B</button>
+  <button id="pm" title="Play the rendered transition (press ▶️ Preview below first)">▶ Mix</button>
+  <span class="time" id="time">—</span>
+  <span class="grow"></span>
+  <button id="zout" title="Zoom out">−</button>
+  <button id="zin" title="Zoom in">+</button>
+  <button id="fitb" title="Show the blend">⤢ Blend</button>
+</div>
+<canvas id="deck"></canvas>
+<div class="hint" id="hint"></div>
+<div class="hint key"><span style="background:var(--wave)"></span>level<span style="background:var(--vox)"></span>vocals<span style="background:var(--drums)"></span>drums<span style="background:var(--blend)"></span>the blend</div>
+
+<script>
+function post(type, extra) { window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra || {}), "*"); }
+function setHeight() { post("streamlit:setFrameHeight", {height: document.body.scrollHeight + 4}); }
+function sendValue(v) { post("streamlit:setComponentValue", {value: v, dataType: "json"}); }
+const $ = id => document.getElementById(id);
+const deck = $("deck");
+const HINT = "Drag lane B to choose where it comes in · drag the ◆ mix point to where A hands over · drag the blend's " +
+             "left edge for 4 / 8 / 16 bars · tap a lane to set where ▶ A / ▶ B play from · drag the ruler to scroll";
+
+let D = null, S = null;             // args, editable state {a_end, b_full, bars}
+let view = {start: 0, span: 60};
+let audio = new Audio(); audio.preload = "auto";
+let playing = null;                 // "A" | "B" | "M"
+let cue = {A: 0, B: 0};
+let drag = null;
+
+function fmt(t) { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = t - m * 60; return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1); }
+function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+function nearest(arr, t) { let best = null, d = 1e9; for (const x of arr) { const e = Math.abs(x - t); if (e < d) { d = e; best = x; } } return best; }
+function fit(c) {
+  const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  if (c.width !== Math.round(r.width * d) || c.height !== Math.round(r.height * d)) { c.width = Math.round(r.width * d); c.height = Math.round(r.height * d); }
+  const g = c.getContext("2d"); g.setTransform(d, 0, 0, d, 0, 0); return [g, r.width, r.height];
+}
+// The axis is mix time on A's clock: A's own seconds; B's second tb sits at out(tb).
+function outB(tb) { return S.a_end + (tb - S.b_full) / D.speed_b; }
+function inB(x) { return S.b_full + (x - S.a_end) * D.speed_b; }
+function blendStart() { return S.a_end - S.bars * D.bar_a; }
+function bIn() { return S.b_full - S.bars * D.bar_b; }
+function fitBlend() { const pad = 6 * D.bar_a; view.start = blendStart() - pad; view.span = (S.a_end - blendStart()) + 2 * pad + 4 * D.bar_a; }
+
+function lane(g, w, X, y, h, trk, toLane, from, keep0, keep1) {
+  // waveform of one track over the view: level (mirrored), vocals on top, drums at the bottom
+  const t0 = view.start, t1 = view.start + view.span, mid = y + h / 2, amp = h / 2 - 3;
+  const rate = trk.rate, env = trk.env, vox = trk.vox, drums = trk.drums;
+  for (let px = 0; px < w; px++) {
+    const xa = t0 + (t1 - t0) * px / w, xb = t0 + (t1 - t0) * (px + 1) / w;
+    const ta = toLane(xa), tb = toLane(xb);
+    if (tb < 0 || ta > trk.duration) continue;
+    let e = 0, v = 0, k = 0;
+    for (let i = Math.floor(Math.min(ta, tb) * rate); i <= Math.floor(Math.max(ta, tb) * rate); i++) {
+      e = Math.max(e, env[i] || 0); v = Math.max(v, vox ? (vox[i] || 0) : 0); k = Math.max(k, drums ? (drums[i] || 0) : 0); }
+    const kept = ta >= keep0 - 1e-3 && ta <= keep1 + 1e-3;
+    if (!kept) {                        // not played in the mix: plain grey, faint
+      g.globalAlpha = 0.35; g.fillStyle = css("--dim"); g.fillRect(px, mid - e * amp, 1, 2 * e * amp); continue; }
+    g.globalAlpha = 1;
+    g.fillStyle = css("--wave"); g.fillRect(px, mid - e * amp, 1, 2 * e * amp);
+    if (v > 0.05) { g.fillStyle = css("--vox"); g.fillRect(px, mid - v * amp, 1, v * amp * 0.9); }
+    if (k > 0.05) { g.fillStyle = css("--drums"); g.fillRect(px, mid + (1 - k) * amp, 1, k * amp); }
+  }
+  g.globalAlpha = 1;
+  // bar lines (this lane's own)
+  g.strokeStyle = css("--line"); g.lineWidth = 1;
+  if (view.span < 160) for (const b of trk.bars) { const x = X(from(b)); if (x >= 0 && x <= w) { g.beginPath(); g.moveTo(x, y); g.lineTo(x, y + h); g.stroke(); } }
+}
+
+function draw() {
+  if (!D) return;
+  const [g, w, h] = fit(deck);
+  g.clearRect(0, 0, w, h);
+  const t0 = view.start, t1 = view.start + view.span, X = t => (t - t0) / (t1 - t0) * w, T = x => t0 + x / w * (t1 - t0);
+  const ruler = 22, gap = 8, laneH = (h - ruler - gap - 18) / 2, yA = ruler, yB = ruler + laneH + gap;
+  // ruler
+  g.fillStyle = css("--muted"); g.font = "11px sans-serif";
+  const step = view.span > 120 ? 30 : view.span > 40 ? 10 : view.span > 15 ? 5 : 1;
+  for (let t = Math.ceil(t0 / step) * step; t < t1; t += step) { const x = X(t); g.fillRect(x, ruler - 6, 1, 6); g.fillText(fmt(t).replace(".0", ""), x + 2, 11); }
+  // blend
+  const xb0 = X(blendStart()), xb1 = X(S.a_end);
+  g.fillStyle = css("--blend"); g.fillRect(xb0, yA, xb1 - xb0, yB + laneH - yA);
+  // lanes
+  lane(g, w, X, yA, laneH, D.a, x => x, t => t, 0, S.a_end);
+  lane(g, w, X, yB, laneH, D.b, inB, outB, bIn(), D.b.duration);
+  g.fillStyle = css("--fg"); g.font = "bold 12px sans-serif";
+  g.fillText("A  " + D.a.label, 6, yA + 14); g.fillText("B  " + D.b.label, 6, yB + 14);
+  // mix point ◆ and blend edge
+  g.strokeStyle = css("--accent"); g.lineWidth = 2;
+  g.beginPath(); g.moveTo(xb1, ruler); g.lineTo(xb1, yB + laneH); g.stroke();
+  g.fillStyle = css("--accent"); g.beginPath(); g.moveTo(xb1, ruler - 2); g.lineTo(xb1 + 7, ruler + 6); g.lineTo(xb1, ruler + 14); g.lineTo(xb1 - 7, ruler + 6); g.closePath(); g.fill();
+  g.strokeStyle = css("--muted"); g.setLineDash([4, 3]);
+  g.beginPath(); g.moveTo(xb0, ruler); g.lineTo(xb0, yB + laneH); g.stroke(); g.setLineDash([]);
+  g.fillStyle = css("--muted"); g.fillRect(xb0 - 3, yA + laneH / 2 - 14, 6, 28);
+  // labels under the lanes
+  g.fillStyle = css("--fg"); g.font = "12px sans-serif";
+  const lbl = `blend ${S.bars} bars · A hands over at ${fmt(S.a_end)} · B in from ${fmt(bIn())}, fully in at ${fmt(S.b_full)}`;
+  g.fillText(lbl, 6, h - 4);
+  // cursor
+  let c = null;
+  if (playing === "A") c = {x: X(audio.currentTime), y0: yA, y1: yA + laneH};
+  else if (playing === "B") c = {x: X(outB(audio.currentTime)), y0: yB, y1: yB + laneH};
+  else if (playing === "M" && D.preview) c = {x: X(D.preview.out_start + audio.currentTime), y0: yA, y1: yB + laneH};
+  else { c = {x: X(cue.A), y0: yA, y1: yA + laneH, idle: true}; }
+  if (c) { g.strokeStyle = css("--cursor"); g.globalAlpha = c.idle ? 0.45 : 1; g.lineWidth = 2;
+           g.beginPath(); g.moveTo(c.x, c.y0); g.lineTo(c.x, c.y1); g.stroke();
+           { const xbq = X(outB(cue.B)); g.globalAlpha = playing === "B" ? 0 : 0.45; g.beginPath(); g.moveTo(xbq, yB); g.lineTo(xbq, yB + laneH); g.stroke(); }
+           g.globalAlpha = 1; }
+  deck._geo = {ruler, yA, yB, laneH, X, T, xb0, xb1};
+}
+
+function updateTime() {
+  if (!playing) { $("time").textContent = "A " + fmt(cue.A) + " · B " + fmt(cue.B); return; }
+  $("time").textContent = (playing === "M" ? "Mix " : playing + " ") + fmt(audio.currentTime);
+}
+function loop() { if (playing && D) {
+    // keep the cursor in view
+    const g = deck._geo; if (g) { let x = playing === "A" ? audio.currentTime : playing === "B" ? outB(audio.currentTime)
+                                         : (D.preview ? D.preview.out_start + audio.currentTime : 0);
+      if (x > view.start + view.span * 0.92) view.start = x - view.span * 0.1; }
+    draw(); }
+  updateTime(); requestAnimationFrame(loop); }
+
+function play(which) {
+  if (playing === which) { audio.pause(); playing = null; setButtons(); draw(); return; }
+  const url = which === "A" ? D.a.url : which === "B" ? D.b.url : (D.preview ? D.preview.url : "");
+  if (!url) return;
+  audio.pause();
+  if (audio.dataset.src !== url) { audio.src = url; audio.dataset.src = url; }
+  const go = () => { try { audio.currentTime = which === "M" ? 0 : cue[which]; } catch (e) {}
+                     audio.play().then(() => { playing = which; setButtons(); }).catch(() => {}); };
+  if (audio.readyState >= 1) go(); else audio.addEventListener("loadedmetadata", go, {once: true});
+}
+audio.addEventListener("ended", () => { playing = null; setButtons(); draw(); });
+function setButtons() {
+  for (const [id, w] of [["pa", "A"], ["pb", "B"], ["pm", "M"]]) { $(id).classList.toggle("on", playing === w);
+    $(id).textContent = (playing === w ? "⏸ " : "▶ ") + (w === "M" ? "Mix" : w); }
+  $("pa").disabled = !D.a.url; $("pb").disabled = !D.b.url; $("pm").disabled = !(D.preview && D.preview.url);
+}
+$("pa").onclick = () => play("A"); $("pb").onclick = () => play("B"); $("pm").onclick = () => play("M");
+$("zin").onclick = () => { const c = view.start + view.span / 2; view.span = Math.max(4, view.span / 1.6); view.start = c - view.span / 2; draw(); };
+$("zout").onclick = () => { const c = view.start + view.span / 2; view.span = Math.min(900, view.span * 1.6); view.start = c - view.span / 2; draw(); };
+$("fitb").onclick = () => { fitBlend(); draw(); };
+
+function pos(ev) { const r = deck.getBoundingClientRect(); return {x: ev.clientX - r.left, y: ev.clientY - r.top}; }
+deck.addEventListener("pointerdown", ev => {
+  if (!D || !deck._geo) return;
+  const g = deck._geo, p = pos(ev); deck.setPointerCapture(ev.pointerId);
+  let kind;
+  if (p.y < g.ruler) kind = "pan";
+  else if (Math.abs(p.x - g.xb1) < 16) kind = "mix";
+  else if (Math.abs(p.x - g.xb0) < 16) kind = "edge";
+  else if (p.y >= g.yB) kind = "laneB";
+  else kind = "laneA";
+  drag = {kind, x0: p.x, moved: false, s0: Object.assign({}, S), v0: view.start};
+});
+deck.addEventListener("pointermove", ev => {
+  if (!drag) return;
+  const g = deck._geo, p = pos(ev), dx = p.x - drag.x0, dt = dx / deck.getBoundingClientRect().width * view.span;
+  if (Math.abs(dx) > 6) drag.moved = true;
+  if (!drag.moved) return;
+  if (drag.kind === "pan") view.start = drag.v0 - dt;
+  else if (drag.kind === "mix") { S.a_end = nearest(D.a.bars.concat([D.a.duration]), drag.s0.a_end + dt); }
+  else if (drag.kind === "edge") { const bars = (S.a_end - (drag.s0.a_end - drag.s0.bars * D.bar_a + dt)) / D.bar_a;
+                                   S.bars = [4, 8, 16].reduce((a, b) => Math.abs(b - bars) < Math.abs(a - bars) ? b : a); }
+  else if (drag.kind === "laneB") { S.b_full = nearest(D.b.bars, drag.s0.b_full - dt * D.speed_b); }
+  else if (drag.kind === "laneA") view.start = drag.v0 - dt;
+  draw();
+});
+deck.addEventListener("pointerup", ev => {
+  if (!drag) return;
+  const g = deck._geo, p = pos(ev);
+  if (!drag.moved) {                         // a tap: where ▶ A / ▶ B play from
+    const t = g.T(p.x);
+    if (drag.kind === "laneB") cue.B = Math.max(0, Math.min(D.b.duration, inB(t)));
+    else if (drag.kind === "laneA" || drag.kind === "mix" || drag.kind === "edge") cue.A = Math.max(0, Math.min(D.a.duration, t));
+    draw();
+  } else if (["mix", "edge", "laneB"].includes(drag.kind)) {
+    sendValue({a_end: S.a_end, b_full: S.b_full, bars: S.bars, nonce: Date.now()});
+  }
+  drag = null;
+});
+
+function applyTheme(th) {
+  if (!th) return; const r = document.documentElement.style;
+  if (th.base === "dark") { r.setProperty("--panel", "#1f2129"); r.setProperty("--line", "#3a3d47"); r.setProperty("--muted", "#9aa0aa");
+                            r.setProperty("--wave", "rgba(120,160,255,0.6)"); r.setProperty("--blend", "rgba(160,120,255,0.18)"); }
+  if (th.textColor) r.setProperty("--fg", th.textColor);
+  if (th.primaryColor) { r.setProperty("--accent", th.primaryColor); r.setProperty("--cursor", th.primaryColor); }
+}
+window.addEventListener("message", ev => {
+  const d = ev.data; if (!d || d.type !== "streamlit:render") return;
+  applyTheme(d.theme);
+  const args = d.args, first = !D, pairChanged = !D || D.a.id !== args.a.id || D.b.id !== args.b.id || D.state_key !== args.state_key;
+  D = args;
+  if (!drag) S = Object.assign({}, args.state);
+  if (pairChanged) { fitBlend(); cue.A = blendStart() - 4 * D.bar_a; cue.B = Math.max(0, bIn() - 2 * D.bar_b);
+                     $("hint").textContent = HINT; }
+  if (playing === "M" && !(D.preview && D.preview.url)) { audio.pause(); playing = null; }
+  setButtons(); draw(); setHeight();
+});
+window.addEventListener("resize", () => { draw(); setHeight(); });
+post("streamlit:componentReady", {apiVersion: 1});
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
