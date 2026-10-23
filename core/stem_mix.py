@@ -1,6 +1,6 @@
 """🧠 Semi-automatic multi-stem transitions (in the spirit of djay's Neural Mix).
 
-Two decks, each split into stems — vocals, drums and other (harmonics / everything else). Instead
+Two decks, each split into stems — vocals, drums, bass and other (harmonics / everything else). Instead
 of one volume crossfade, a transition is planned from the music's structure and then runs itself:
 
 1. **Blueprint** (TransitionPlan / plan_transition): where the mix starts in deck A (a phrase line
@@ -17,6 +17,8 @@ of one volume crossfade, a transition is planned from the music's structure and 
                a tiny one-pole smoother (a few ms) so the swap can't click;
      drums   — linear in for the incoming deck, a faster (squared) fade out for the outgoing one, so
                two kick drums never stack up into a muddy, clipping low end;
+     bass    — a hard swap on a beat (over BASS_SWAP_BEATS): only one deck's low end at a time,
+               the DJ bass-swap trick — a muddy double bass line is the first thing to give a blend away;
      other   — constant power (sin / cos): the harmonic bed stays at an even level throughout.
    A profile shifts *when* each stem moves (e.g. Drums first brings B's drums in during the first
    half; Bass drop holds A's drums and harmonics until the drop and swaps them on its downbeat).
@@ -39,7 +41,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.signal import lfilter
 
-STEMS = ("vocals", "drums", "other")
+STEMS = ("vocals", "drums", "bass", "other")
 PROFILES = {
     "smooth":      "Smooth — every stem blends across the whole transition.",
     "vocal_swap":  "Vocal swap — the beds blend, the vocals swap sharply in the middle.",
@@ -50,6 +52,7 @@ SOFT_KNEE = 0.80          # output level where the limiter starts to bend
 VOCAL_STEEPNESS = 18.0    # sigmoid slope — higher = a sharper vocal swap
 VOCAL_SMOOTH_MS = 4.0     # one-pole smoother on the vocal gains (anti-click)
 DRUM_OUT_POWER = 2.0      # outgoing drums fade as (1 − t)^p — faster than the incoming ones rise
+BASS_SWAP_BEATS = 0.25    # how long the bass hand-over takes (a quarter beat — no click, no overlap)
 
 
 # ---------------------------------------------------------------------------
@@ -92,30 +95,39 @@ def _bars(track: dict) -> tuple:
 
 
 def plan_transition(track_a: dict, track_b: dict, bars: int = 8, profile: str = "smooth",
-                    sync_bar: int = 0) -> TransitionPlan:
+                    sync_bar: int = 0, a_from: float = 0.0, a_until: float | None = None,
+                    b_at: float | None = None) -> TransitionPlan:
     """The blueprint for mixing catalogue track A into B.
     Start (A): the last strong phrase line (a section start or an 8/16-bar phrase) that still leaves
-    `bars` bars before A ends — else simply `bars` bars before the end, on a bar line.
-    Sync (B): its bar line number `sync_bar` (0 = the first downbeat). Tempo: A's (B is assumed to be
-    stretched to it, as the Mix tab does)."""
+    `bars` bars before a_until (default: A's end) and is after a_from — else simply `bars` bars before
+    a_until, on a bar line.
+    Sync (B): its bar line number `sync_bar` (0 = the first downbeat), or — with b_at, the point B's
+    part should be fully in by (e.g. its drop) — `bars` bars before b_at, on a bar line.
+    Tempo: A's (B is stretched to it, as the Mix tab does)."""
     bars_a, bar_a, bpm_a, bpb, ga = _bars(track_a)
-    bars_b, _, _, _, _ = _bars(track_b)
+    bars_b, bar_b, _, _, _ = _bars(track_b)
     length = bars * bar_a
-    latest = float(ga["duration"]) - length
-    if latest <= 0:
-        raise ValueError(f"track A is shorter than a {bars}-bar transition")
+    until = float(ga["duration"]) if a_until is None else min(float(a_until), float(ga["duration"]))
+    latest = until - length
+    if latest < max(0.0, a_from) - 1e-6:
+        raise ValueError(f"not enough of track A for a {bars}-bar transition")
     phrase_lines = sorted({float(s["start"]) for s in ga["sections"]}
                           | {float(bars_a[i]) for i, lvl in ga["levels"].items() if lvl >= 8 and i < len(bars_a)})
-    cands = [t for t in phrase_lines if 0 < t <= latest + 1e-6]
+    cands = [t for t in phrase_lines if max(0.0, a_from) < t <= latest + 1e-6]
     notes = []
     if cands:
         start = cands[-1]
         notes.append(f"Starts on the phrase line at {start:.2f}s in A.")
     else:
-        on_bar = bars_a[bars_a <= latest + 1e-6]
+        on_bar = bars_a[(bars_a <= latest + 1e-6) & (bars_a >= max(0.0, a_from) - 1e-6)]
         start = float(on_bar[-1]) if len(on_bar) else max(0.0, latest)
-        notes.append(f"No phrase line in reach — starts {bars} bars before A's end, on a bar line.")
-    sync = float(bars_b[min(max(0, sync_bar), len(bars_b) - 1)]) if len(bars_b) else 0.0
+        notes.append(f"No phrase line in reach — starts {bars} bars before the end, on a bar line.")
+    if b_at is not None:
+        want = float(b_at) - bars * bar_b
+        sync = float(bars_b[int(np.argmin(np.abs(bars_b - want)))]) if len(bars_b) else max(0.0, want)
+        sync = max(0.0, sync)
+    else:
+        sync = float(bars_b[min(max(0, sync_bar), len(bars_b) - 1)]) if len(bars_b) else 0.0
     return TransitionPlan(start, sync, bars, profile, bpm_a, bpb, notes)
 
 
@@ -161,10 +173,10 @@ def _window(t: np.ndarray, a: float, b: float) -> np.ndarray:
 
 # When each stem moves within the transition, per profile: (start, end) as fractions of t.
 _TIMING = {
-    "smooth":      {"vocals": (0.0, 1.0), "drums": (0.0, 1.0), "other": (0.0, 1.0)},
-    "vocal_swap":  {"vocals": (0.0, 1.0), "drums": (0.0, 1.0), "other": (0.0, 1.0)},
-    "drums_first": {"vocals": (0.4, 1.0), "drums": (0.0, 0.5), "other": (0.25, 1.0)},
-    "bass_drop":   {"vocals": (0.0, 0.85), "drums": (0.92, 1.0), "other": (0.88, 1.0)},
+    "smooth":      {"vocals": (0.0, 1.0), "drums": (0.0, 1.0), "bass": (0.0, 1.0), "other": (0.0, 1.0)},
+    "vocal_swap":  {"vocals": (0.0, 1.0), "drums": (0.0, 1.0), "bass": (0.0, 1.0), "other": (0.0, 1.0)},
+    "drums_first": {"vocals": (0.4, 1.0), "drums": (0.0, 0.5), "bass": (0.0, 0.5), "other": (0.25, 1.0)},
+    "bass_drop":   {"vocals": (0.0, 0.85), "drums": (0.92, 1.0), "bass": (1.0, 1.0), "other": (0.88, 1.0)},
 }
 
 
@@ -175,16 +187,34 @@ def sigmoid_swap(t: np.ndarray, steepness: float = VOCAL_STEEPNESS) -> np.ndarra
     return (s - lo) / (hi - lo)
 
 
-def stem_gains(t: np.ndarray, profile: str = "smooth") -> dict:
-    """{stem: (gain out for deck A, gain in for deck B)} — arrays the shape of t (before smoothing)."""
+def bass_swap(t: np.ndarray, window: tuple, total_beats: float | None) -> np.ndarray:
+    """Incoming bass gain: 0 until the swap beat, then 1, handed over in BASS_SWAP_BEATS. The swap
+    beat is the beat nearest the middle of the stem's window (its end for a window ending at 1,
+    e.g. 🥁 Bass drop: the drop's downbeat). total_beats = the transition's length in beats (None:
+    a short ramp around the middle)."""
+    a, b = window
+    centre = 1.0 if b - a < 1e-9 else (a + b) / 2
+    if total_beats and total_beats > 0:
+        centre = round(centre * total_beats) / total_beats
+        width = BASS_SWAP_BEATS / total_beats
+    else:
+        width = 0.01
+    lo = min(centre, 1.0 - width) if centre >= 1.0 - 1e-9 else centre - width / 2
+    return np.clip((t - lo) / width, 0.0, 1.0)
+
+
+def stem_gains(t: np.ndarray, profile: str = "smooth", total_beats: float | None = None) -> dict:
+    """{stem: (gain out for deck A, gain in for deck B)} — arrays the shape of t (before smoothing).
+    total_beats (the transition's length in beats) puts the bass swap on a beat."""
     tm = _TIMING[profile]
-    tv, td, to = (_window(t, *tm[s]) for s in STEMS)
+    tv, td, to = (_window(t, *tm[s]) for s in ("vocals", "drums", "other"))
     v_in = sigmoid_swap(tv) if profile != "smooth" else np.sin(0.5 * np.pi * tv)
     v_out = 1.0 - v_in if profile != "smooth" else np.cos(0.5 * np.pi * tv)
     d_in = td
     d_out = (1.0 - td) ** DRUM_OUT_POWER
     o_in, o_out = np.sin(0.5 * np.pi * to), np.cos(0.5 * np.pi * to)
-    return {"vocals": (v_out, v_in), "drums": (d_out, d_in), "other": (o_out, o_in)}
+    b_in = bass_swap(np.asarray(t, dtype=float), tm["bass"], total_beats)
+    return {"vocals": (v_out, v_in), "drums": (d_out, d_in), "bass": (1.0 - b_in, b_in), "other": (o_out, o_in)}
 
 
 class OnePole:
@@ -259,7 +289,7 @@ class StemMixer:
 
     def gains(self, t: np.ndarray) -> np.ndarray:
         """The gain matrix [lanes, frames] for this block's t (vocals smoothed)."""
-        g = stem_gains(t, self.plan.mix_profile)
+        g = stem_gains(t, self.plan.mix_profile, self.plan.transition_duration_bars * self.plan.beats_per_bar)
         rows = []
         for deck, stem, _ in self.lanes:
             row = g[stem][0 if deck == "A" else 1]
@@ -284,7 +314,8 @@ class StemMixer:
 # ---------------------------------------------------------------------------
 
 def _synth_deck(sr: int, seconds: float, bpm: float, root_hz: float, seed: int) -> dict:
-    """Vocals (a wobbling tone), drums (a kick on every beat), other (a chord pad). One deck alone
+    """Vocals (a wobbling tone), drums (a kick on every beat), bass (a pulsing low note), other (a
+    chord pad). One deck alone
     stays under 1.0; two summed in the middle of the blend go past it, so the limiter has work to do."""
     rng = np.random.default_rng(seed)
     n = int(sr * seconds)
@@ -292,12 +323,13 @@ def _synth_deck(sr: int, seconds: float, bpm: float, root_hz: float, seed: int) 
     beat = 60.0 / bpm
     phase = (tt % beat) / beat
     kick = 0.45 * np.sin(2 * np.pi * 55 * tt) * np.exp(-phase * 12)
+    bass = 0.25 * np.sin(2 * np.pi * root_hz / 4 * tt) * (0.5 + 0.5 * (phase < 0.5))
     pad = 0.12 * sum(np.sin(2 * np.pi * root_hz * r * tt) for r in (1.0, 1.25, 1.5))
     vox = 0.25 * np.sin(2 * np.pi * root_hz * 2 * tt + 3 * np.sin(2 * np.pi * 5 * tt)) \
         * (0.6 + 0.4 * np.sin(2 * np.pi * tt / (4 * beat)))
     noise = 0.02 * rng.standard_normal(n)
     st = lambda x: np.stack([x, x], axis=1).astype(np.float32)   # noqa: E731
-    return {"vocals": st(vox + noise), "drums": st(kick), "other": st(pad)}
+    return {"vocals": st(vox + noise), "drums": st(kick), "bass": st(bass), "other": st(pad)}
 
 
 def demo(profile: str = "vocal_swap", block: int = 512, sr: int = 44100, verbose: bool = True) -> dict:
@@ -318,7 +350,7 @@ def demo(profile: str = "vocal_swap", block: int = 512, sr: int = 44100, verbose
             last = state
         if verbose and state == Progressor.RUNNING and (mixer.a_pos // block) % 86 == 0:
             t = float(mixer.prog.t_block(mixer.a_pos, 1)[0])
-            g = stem_gains(np.array([t]), profile)
+            g = stem_gains(np.array([t]), profile, plan.transition_duration_bars * plan.beats_per_bar)
             print(f"           t={t:4.2f} x={Progressor.crossfader(t):+5.2f}  " + "  ".join(
                 f"{s} A{g[s][0][0]:.2f}/B{g[s][1][0]:.2f}" for s in STEMS))
         out.append(mixer.process(block))
@@ -333,3 +365,31 @@ def demo(profile: str = "vocal_swap", block: int = 512, sr: int = 44100, verbose
 if __name__ == "__main__":
     import sys
     demo(sys.argv[1] if len(sys.argv) > 1 else "vocal_swap")
+
+
+# ---------------------------------------------------------------------------
+# Offline: one join of a rendered mix (mixer.render)
+# ---------------------------------------------------------------------------
+
+def render_region(a: dict, b: dict, profile: str, total_beats: float, sample_rate: int,
+                  smooth_ms: float = VOCAL_SMOOTH_MS) -> np.ndarray:
+    """The blend itself, offline: a / b = {stem: float32 [n, channels]} — each deck's stems over the
+    transition, already lined up (same length, at the mix's tempo). t runs 0 → 1 over the region;
+    returns the summed stems (no limiter — the mixer applies soft_knee to the whole mix).
+    Any stem a deck lacks is silence."""
+    n = max(len(x) for x in [*a.values(), *b.values()])
+    ch = next(iter(a.values())).shape[1]
+    t = (np.arange(n, dtype=np.float64) + 0.5) / n
+    g = stem_gains(t, profile, total_beats)
+    out = np.zeros((n, ch), dtype=np.float64)
+    for deck, side, start in ((a, 0, 1.0), (b, 1, 0.0)):
+        for stem in STEMS:
+            x = deck.get(stem)
+            if x is None:
+                continue
+            gain = g[stem][side]
+            if stem == "vocals":
+                gain = OnePole(sample_rate, smooth_ms, start=start)(gain)
+            m = min(len(x), n)
+            out[:m] += gain[:m, None] * x[:m]
+    return out.astype(np.float32)

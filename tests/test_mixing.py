@@ -465,8 +465,9 @@ def test_local_analysis_does_only_what_each_track_is_missing(mixlib, monkeypatch
     def fake_sep(path):
         calls.append(Path(path).name)
         y = AA.decode_audio(path, sr=44100, channels=2)
-        return (0.3 * y).astype(np_.float32), (0.7 * y).astype(np_.float32), 44100
-    monkeypatch.setattr(AA, "separate_stems", fake_sep)
+        return {k: (g * y).astype(np_.float32) for k, g in (("vocals", 0.3), ("drums", 0.3), ("bass", 0.2),
+                                                             ("other", 0.2))}, 44100
+    monkeypatch.setattr(AA, "separate_all", fake_sep)
     monkeypatch.setattr(AA, "beat_this_available", lambda: False)
 
     js = audio_dir / "mix_song_c.json"
@@ -479,8 +480,9 @@ def test_local_analysis_does_only_what_each_track_is_missing(mixlib, monkeypatch
         kw = dict(demucs=True, stems=True)
         assert AL.missing_parts(track, **kw) == {"vocals", "stems"}
         assert AL.missing_parts(None, **kw) == {"new", "key", "vocals", "stems"}
-        assert AL.missing_parts({**track, "stems": {"vocals": "v", "instrumental": "i"},
-                                 "analysis": {**track["analysis"], "vocals": [0.1]}}, **kw) == set()
+        _done = {**track, "analysis": {**track["analysis"], "vocals": [0.1]}}
+        assert AL.missing_parts({**_done, "stems": {"vocals": "v", "instrumental": "i"}}, **kw) == {"stems"}
+        assert AL.missing_parts({**_done, "stems": {k: k for k in AL.ALL_STEMS}}, **kw) == set()
         jobs = {tid: parts for _, tid, parts in AL.plan_jobs(lib, None, **kw)}
         assert jobs == {"mix_song_c": {"vocals", "stems"}, "brand_new": {"new", "key", "vocals", "stems"}}
 
@@ -488,7 +490,9 @@ def test_local_analysis_does_only_what_each_track_is_missing(mixlib, monkeypatch
         AL.run_job(f, "mix_song_c", jobs["mix_song_c"], "Audio-Library/mix_song_c.m4a", True)
         made = json.loads(js.read_text())
         assert made["stems"]["vocals"] == "/content/drive/MyDrive/scene-labeling/stems/mix_song_c/vocals.m4a"
-        assert (tmp_path / "scene-labeling" / "stems" / "mix_song_c" / "instrumental.m4a").exists()
+        for part in AL.ALL_STEMS:            # 🧠 drums / bass / other kept too
+            assert (tmp_path / "scene-labeling" / "stems" / "mix_song_c" / f"{part}.m4a").exists(), part
+            assert made["stems"][part].endswith(f"/mix_song_c/{part}.m4a")
         assert made["analysis"]["vocals"] and made["analysis"]["methods"]["vocals"] == "demucs"
         assert made["beat_times"] == track["beat_times"]          # beats untouched
         assert calls == ["mix_song_c.m4a"]                         # one Demucs pass
@@ -664,3 +668,95 @@ def test_timeline_drag_sets_the_join(monkeypatch):
     state["mxm_tl"] = {"uid": "b", "pre_beats": 0, "post_beats": 5, "nonce": 2}
     mix_ui._apply_timeline_drag(parts)
     assert parts[1]["xfade"]["where"] == "after" and state["mxm_xfl_b"] == "🖐 5 beats"
+
+
+def test_render_neural_join_from_stems(mixlib):
+    """🧠 A neural join: both sides' four stems blended with their own curves (core/stem_mix.py) over
+    `bars` bars before the join; without stems, an ordinary crossfade and a warning."""
+    import mixer
+    t = mixlib["tracks"]
+    gc, ga = MX.grid(t["mix_song_c"]), MX.grid(t["mix_song_a"])
+    rec = {"bpm": 120.0, "level_match": False, "fade_out": 0.0,
+           "pieces": [{"track": "mix_song_c", "start": 0.0, "end": MX.snap_to_bar(gc, 32.0), "uid": "p1"},
+                      {"track": "mix_song_a", "start": MX.snap_to_bar(ga, 16.0), "end": MX.snap_to_bar(ga, 40.0),
+                       "uid": "p2", "xfade": {"neural": {"profile": "vocal_swap", "bars": 4}}}]}
+    tracks = {k: t[k] for k in ("mix_song_c", "mix_song_a")}
+    need = mixer.parts_needed(rec, tracks)
+    assert need["mix_song_a"] >= set(mixer.FOUR_STEMS) and "full" in need["mix_song_c"]
+    info = mixer.render(rec, tracks, mixlib["root"] / "neural.m4a")
+    jn = info["layout"]["joins"][0]
+    bar = 4 * 60 / 120
+    assert jn["neural"]["profile"] == "vocal_swap" and jn["pre"] == pytest.approx(4 * bar, abs=0.01)
+    assert jn["post"] == pytest.approx(0.0, abs=1e-6) and not jn["bass_swap"]
+    assert not any("🧠" in w for w in info["warnings"])
+    assert info["duration"] > 0
+    y = mixer.decode(mixlib["root"] / "neural.m4a")
+    at = int(jn["at"] * mixer.SR)
+    mid = y[at - int(2 * bar * mixer.SR):at]
+    assert np.abs(mid).max() > 0.01                             # the blend isn't silent
+    assert np.abs(y).max() <= 1.05                               # (AAC can overshoot its input a little)
+    # A track without drums / bass / other: an ordinary crossfade, said so.
+    bare = {k: {**v, "stems": {s: v["stems"][s] for s in ("vocals", "instrumental")}} for k, v in tracks.items()}
+    assert "drums" not in mixer.parts_needed(rec, bare)["mix_song_a"]
+    info2 = mixer.render(rec, bare, mixlib["root"] / "neural_fallback.m4a")
+    assert any("🧠" in w and "ordinary crossfade" in w for w in info2["warnings"])
+
+
+def test_mix_page_neural_join_place_and_preview(mixlib):
+    """🧩 Mashup → a join set to 🧠 Neural: profile, bars, 📍 Place, then ▶️ Preview renders the stem blend."""
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎚️ Mix"
+    at.session_state["mx_mode"] = "🧩 Mashup"
+    at.session_state["mxm_add_track"] = "mix_song_c"
+    at.run()
+    at.button(key="mxm_add").click().run()
+    at.selectbox(key="mxm_add_track").set_value("mix_song_a").run()
+    at.button(key="mxm_add").click().run()
+    assert not errors(at), errors(at)
+    uid2 = at.session_state["mxm_parts"][1]["uid"]
+    at.selectbox(key=f"mxm_xfl_{uid2}").set_value("🧠 Neural").run()
+    assert not errors(at), errors(at)
+    at.selectbox(key=f"mxm_nnp_{uid2}").set_value("drums_first").run()
+    at.selectbox(key=f"mxm_nnb_{uid2}").set_value(4).run()
+    assert at.session_state["mxm_parts"][1]["xfade"] == {"neural": {"profile": "drums_first", "bars": 4}}
+    parts = [dict(p) for p in at.session_state["mxm_parts"]]
+    parts[0]["end"], parts[1]["start"], parts[1]["end"] = 40.0, 16.0, 40.0   # long enough for the blend
+    at.session_state["mxm_parts"] = parts
+    before = dict(at.session_state["mxm_parts"][0])
+    at.button(key=f"mxm_nnplace_{uid2}").click().run()
+    assert not errors(at), errors(at)
+    assert any("Placed: the 4-bar blend" in i.value for i in at.info), [i.value for i in at.info]
+    a = at.session_state["mxm_parts"][0]
+    assert a["start"] == before["start"] and a["end"] <= before["end"] + 1e-6
+    at.button(key="mxm_preview").click().run()
+    assert not errors(at), errors(at)
+    assert at.get("audio")
+
+
+def test_mix_page_drop_swap_is_a_neural_bass_drop_with_stems(mixlib, monkeypatch):
+    import mix_ui
+    from tests.apptest_util import page_app, errors
+    real_full = mix_ui.full_track
+
+    def full(tid):
+        t = real_full(tid)
+        if t is None:
+            return None
+        dur = float(t["duration_sec"])
+        return {**t, "analysis": {**(t.get("analysis") or {}), "builds": [{"start": dur * 0.3, "end": dur * 0.5}],
+                                  "drops": [dur * 0.5]}}
+    monkeypatch.setattr(mix_ui, "full_track", full)
+    real_infos = mix_ui._infos
+    monkeypatch.setattr(mix_ui, "_infos", lambda s: [dict(i, builds=1, drops=1) for i in real_infos(s)
+                                                     if i["track_id"] in ("mix_song_a", "mix_song_c")])
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎚️ Mix"
+    at.session_state["mx_mode"] = "💡 Suggestions"
+    at.run()
+    go = [b for b in at.button if (b.key or "").startswith("mx_sug_go_d_")]
+    assert go
+    go[0].click().run()
+    assert not errors(at), errors(at)
+    xf = at.session_state["mxm_parts"][1]["xfade"]
+    assert xf["neural"]["profile"] == "bass_drop" and xf["neural"]["bars"] in (4, 8, 16)

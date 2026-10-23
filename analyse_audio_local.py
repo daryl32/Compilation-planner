@@ -9,14 +9,15 @@ that track is still missing:
       duration_sec, bpm, beat_times, energy_envelope, hires{rate, rms, onset}
       PLUS track["analysis"]: downbeats, kick/snare/hat, harmony, brightness,
       novelty, sections, phrases, builds, drops and vocals; the 🎹 key; and
-      🎤 stems (vocals + instrumental) for mashups in the Media Library's Mix tab.
+      🎤 stems (vocals + instrumental, and drums / bass / other for 🧠 neural
+      transitions) for the Media Library's Mix tab.
   • Older track — only the missing parts:
       no extra analysis yet (or an older version) → added, keeping its beats and
                                                     energy exactly (plans still line up)
       no vocals            → the vocal curve and sung phrases
       no key               → the key
-      no stems             → vocals.m4a + instrumental.m4a in
-                             <Drive>/scene-labeling/stems/<track>/ (track["stems"])
+      no stems (or only     → vocals, instrumental, drums, bass and other .m4a in
+      vocals + instrumental)  <Drive>/scene-labeling/stems/<track>/ (track["stems"])
   • Track that has everything — skipped.
 
 Demucs runs once per track and gives both the vocals for the analysis and the
@@ -121,6 +122,8 @@ def write_json(path: Path, data: dict) -> None:
 
 STEMS_FOLDER = "scene-labeling/stems"      # under My Drive — kept out of Audio-Library
 STEM_PARTS = ("vocals", "instrumental")
+FOUR_STEMS = ("vocals", "drums", "bass", "other")     # 🧠 neural transitions (core/stem_mix.py)
+ALL_STEMS = ("vocals", "instrumental", "drums", "bass", "other")
 
 
 def track_status(track: dict) -> dict:
@@ -135,6 +138,7 @@ def track_status(track: dict) -> dict:
         "vocals": a.get("vocals") is not None,
         "key": bool(track.get("key")),
         "stems": all(st.get(p) for p in STEM_PARTS),
+        "stems4": all(st.get(p) for p in FOUR_STEMS),
         "by": track.get("analysed_by") or ("colab" if track.get("beat_times") else "?"),
         "when": (a.get("analysed_at") or "")[:10],
     }
@@ -154,8 +158,8 @@ def missing_parts(track: dict | None, *, demucs: bool, stems: bool, beat_this: b
         need.add("vocals")
     if not st["key"]:
         need.add("key")
-    if demucs and stems and not st["stems"]:
-        need.add("stems")
+    if demucs and stems and not (st["stems"] and st["stems4"]):
+        need.add("stems")            # tracks with only vocals + instrumental get drums / bass / other too
     return need
 
 
@@ -176,17 +180,17 @@ def report() -> None:
     print("-" * (w + 54))
     for tid, st in rows:
         bars = "model" if st["bars_model"] else ("estimated" if st["analysed"] else "—")
-        print(f"{tid[:w]:<{w}}  {bars:<10} {yn(st['vocals']):<7} {yn(st['key']):<4} {yn(st['stems']):<6} "
+        print(f"{tid[:w]:<{w}}  {bars:<10} {yn(st['vocals']):<7} {yn(st['key']):<4} {('4' if st['stems4'] else 'yes') if st['stems'] else 'no':<6} "
               f"{st['by']:<10} {st['when']}")
     n = len(rows)
     est = sum(1 for _, st in rows if st["analysed"] and not st["bars_model"])
     none = sum(1 for _, st in rows if not st["analysed"])
     novoc = sum(1 for _, st in rows if not st["vocals"])
     nokey = sum(1 for _, st in rows if not st["key"])
-    nostem = sum(1 for _, st in rows if not st["stems"])
+    nostem = sum(1 for _, st in rows if not (st["stems"] and st["stems4"]))
     print(f"\n{n} track(s): {n - est - none} with model bar lines, {est} estimated, "
           f"{none} without the extra analysis; {novoc} without vocals, {nokey} without a key, "
-          f"{nostem} without stems.")
+          f"{nostem} without all the stems (vocals, instrumental, drums, bass, other).")
     if none or novoc or nokey or nostem:
         print("run_audio_analysis.bat fills in whatever is missing.")
     if est:
@@ -263,9 +267,10 @@ def run_job(audio_file: Path, tid: str, parts: set, rel: str, with_vocals: bool)
         analysis = new or "analysis" in parts
         sep = None
         if with_vocals and ("stems" in parts or "vocals" in parts or analysis):
-            say("separating vocals and instrumental (Demucs)")
-            vocals, inst, sr = AA.separate_stems(local)
-            sep = (vocals, inst, sr)
+            say("separating vocals, drums, bass and other (Demucs)")
+            four, sr = AA.separate_all(local)
+            inst = sum(four[k] for k in four if k != "vocals").astype("float32")
+            sep = (four["vocals"], inst, sr, four)
         existing = None if new else read_json(json_path)
         result = None
         if analysis:
@@ -278,10 +283,12 @@ def run_job(audio_file: Path, tid: str, parts: set, rel: str, with_vocals: bool)
             done.append("key")
         stems = None
         if sep is not None and "stems" in parts:
-            for part, y in (("vocals", sep[0]), ("instrumental", sep[1])):
+            for part, y in (("vocals", sep[0]), ("instrumental", sep[1]),
+                            *((k, sep[3][k]) for k in ("drums", "bass", "other") if k in sep[3])):
                 say(f"saving the {part} stem")
                 save_stem(y, sep[2], stems_dir(tid) / f"{part}.m4a")
-            stems = {**{p: stem_ref(tid, p) for p in STEM_PARTS}, "model": "htdemucs",
+            stems = {**{p: stem_ref(tid, p) for p in ALL_STEMS if p in STEM_PARTS or p in sep[3]},
+                     "model": "htdemucs",
                      "made_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
             done.append("stems")
     finally:

@@ -538,8 +538,17 @@ def vocal_curve_from(vocals: np.ndarray, sr: int, n_out: int) -> np.ndarray:
 def separate_stems(path) -> tuple:
     """🎤 Split a song into (vocals, instrumental, sample rate) with Demucs (htdemucs):
     float32 arrays (n, 2); instrumental = drums + bass + other. For 🎚️ mashups that put one
-    track's vocals over another's instrumental. Slow on CPU — analyse_audio_local.py runs it on
-    the laptop's GPU. Raises RuntimeError when Demucs isn't installed."""
+    track's vocals over another's instrumental."""
+    parts, sr = separate_all(path)
+    inst = sum(parts[k] for k in parts if k != "vocals")
+    return parts["vocals"], inst.astype(np.float32), sr
+
+
+def separate_all(path) -> tuple:
+    """🎤 Split a song into every Demucs (htdemucs) source — ({"vocals", "drums", "bass", "other"}:
+    float32 (n, 2)), sample rate. The four lanes of a 🧠 neural transition (core/stem_mix.py).
+    Slow on CPU — analyse_audio_local.py runs it on the laptop's GPU. Raises RuntimeError when Demucs
+    isn't installed."""
     try:
         import torch  # type: ignore
         from demucs.apply import apply_model  # type: ignore
@@ -558,10 +567,7 @@ def separate_stems(path) -> tuple:
         sources = apply_model(model, ((wav - mean) / std)[None], device=TORCH_DEVICE, split=True, overlap=0.25,
                               progress=False)[0]
     sources = (sources.cpu() * std + mean).numpy()          # back to the original level
-    vi = model.sources.index("vocals")
-    vocals = sources[vi]
-    inst = sum(sources[i] for i in range(len(model.sources)) if i != vi)
-    return vocals.T.astype(np.float32), inst.T.astype(np.float32), sr
+    return {name: sources[i].T.astype(np.float32) for i, name in enumerate(model.sources)}, sr
 
 
 def vocal_phrases(v: np.ndarray, rate: float = OUT_RATE, on: float = 0.18, off: float = 0.10,

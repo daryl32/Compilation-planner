@@ -101,6 +101,11 @@ def install(audio_dir: Path, files_dir: Path) -> dict:
         inst = files_dir / "stems" / tid / "instrumental.m4a"
         inst.write_bytes(path.read_bytes())
         track["stems"] = {"vocals": str(voc), "instrumental": str(inst), "model": "test"}
+        # 🧠 drums / bass / other: the song stands in for each (the plumbing is what's tested)
+        for part in ("drums", "bass", "other"):
+            f = files_dir / "stems" / tid / f"{part}.m4a"
+            f.write_bytes(path.read_bytes())
+            track["stems"][part] = str(f)
         js.write_text(json.dumps(track))
         out[tid] = track
     return out

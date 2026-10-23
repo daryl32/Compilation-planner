@@ -144,3 +144,29 @@ def test_demo_lifecycle():
     states = [s for _, s in r["log"]]
     assert states == ["idle", "running", "done"]
     assert r["peak_after"] < 1.0
+
+
+def test_bass_swaps_hard_on_a_beat():
+    t = np.linspace(0, 1, 32001)
+    beats = 32                                             # 8 bars of 4
+    g = S.stem_gains(t, "smooth", beats)
+    b_out, b_in = g["bass"]
+    assert np.allclose(b_out + b_in, 1.0)                  # only ever one low end in total
+    moving = t[(b_in > 0.001) & (b_in < 0.999)]
+    assert moving.max() - moving.min() <= S.BASS_SWAP_BEATS / beats + 1e-3
+    mid = (moving.min() + moving.max()) / 2
+    assert abs(mid * beats - round(mid * beats)) < 0.01    # centred on a beat
+    bd = S.stem_gains(t, "bass_drop", beats)["bass"][1]
+    assert bd[-1] == 1.0 and bd[int(0.98 * 32000)] == 0.0  # bass drop: on the last beat (the drop)
+
+
+def test_render_region_matches_the_curves():
+    n = 4000
+    ones = {s: np.ones((n, 2), dtype=np.float32) for s in S.STEMS}
+    zeros = {s: np.zeros((n, 2), dtype=np.float32) for s in S.STEMS}
+    a_only = S.render_region(ones, zeros, "vocal_swap", 16, SR)
+    t = (np.arange(n) + 0.5) / n
+    g = S.stem_gains(t, "vocal_swap", 16)
+    expect = sum(g[s][0] for s in S.STEMS if s != "vocals")
+    assert np.allclose(a_only[:, 0] - S.OnePole(SR, start=1.0)(g["vocals"][0]), expect, atol=1e-5)
+    assert a_only[0, 0] == pytest.approx(4.0, abs=0.05) and abs(a_only[-1, 0]) < 0.05

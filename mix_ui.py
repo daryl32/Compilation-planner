@@ -25,6 +25,7 @@ from config import AUDIO_DIR
 from track_files import track_file
 from core import keys as K
 from core import mixing as MX
+from core import stem_mix as SM
 from library_common import format_mmss
 
 MODES = ["📏 Extend / shorten", "🧩 Mashup", "💡 Suggestions", "📂 Saved mixes"]
@@ -229,6 +230,12 @@ def _apply_timeline_drag(parts: list, ns: str = "mxm") -> None:
     pre, post = max(0.0, float(v.get("pre_beats") or 0)), max(0.0, float(v.get("post_beats") or 0))
     beats = round(pre + post, 3)
     own = dict(b.get("xfade") or {})
+    if isinstance(own.get("neural"), dict):          # 🧠 stays neural: the drag picks its length (4 / 8 / 16 bars)
+        bars = min(NEURAL_BARS, key=lambda n: abs(n * 4 - beats))
+        own["neural"] = {**own["neural"], "bars": bars}
+        b["xfade"] = own
+        st.session_state[f"mxm_nnb_{b['uid']}"] = bars
+        return
     own["beats"] = beats
     own["where"] = MX.where_from_frac(pre / beats) if beats > 0 else "centre"
     b["xfade"] = own
@@ -285,7 +292,7 @@ def _preview_and_save(recipe: dict, tracks: dict, sims: dict, default_name: str,
         status.append(f"⚠️ {len(weak)} rough join(s)")
     st.caption("  ·  ".join(status))
 
-    if not _audio_ready(mixer.parts_needed(recipe), ns):
+    if not _audio_ready(mixer.parts_needed(recipe, tracks), ns):
         return
     c = st.columns([1, 3])
     if c[0].button("▶️ Preview", key=f"{ns}_preview", type="primary", width="stretch",
@@ -668,6 +675,69 @@ def _add_layer_form(p: dict, host: dict, others: list, tracks_all: dict, summari
         st.rerun()
 
 
+NEURAL = "🧠 Neural"
+NEURAL_BARS = (4, 8, 16)
+
+
+def _neural_autoplace(a_uid: str, b_uid: str) -> None:
+    """📍 Place a 🧠 neural join (core/stem_mix.plan_transition): the outgoing part ends a blend's length
+    after the last phrase line in it; the incoming part keeps its start (its bars before it play
+    under the blend) — moved later only when there isn't room for the blend before it."""
+    parts = st.session_state.get("mxm_parts") or []
+    a = next((p for p in parts if p["uid"] == a_uid), None)
+    b = next((p for p in parts if p["uid"] == b_uid), None)
+    if a is None or b is None:
+        return
+    ta, tb = full_track(a["track"]), full_track(b["track"])
+    if ta is None or tb is None:
+        return
+    nn = (b.get("xfade") or {}).get("neural") or {}
+    bars, profile = int(nn.get("bars") or 8), nn.get("profile") or "smooth"
+    gb = MX.grid(tb)
+    room = bars * gb["bar_len"]
+    first = float(gb["bars"][0]) if len(gb["bars"]) else 0.0
+    b_at = max(float(b["start"]), MX.snap_to_bar(gb, first + room))
+    try:
+        plan = SM.plan_transition(ta, tb, bars, profile, a_from=float(a["start"]), a_until=float(a["end"]), b_at=b_at)
+    except ValueError as e:
+        st.session_state["mxm_neural_msg"] = f"📍 Couldn't place it: {e} — make part {parts.index(a) + 1} longer."
+        return
+    a["end"] = round(plan.mix_start_point + plan.duration_sec, 3)
+    b["start"] = round(b_at, 3)
+    where = "on a phrase line" if plan.notes and plan.notes[0].startswith("Starts on") else "on a bar line"
+    st.session_state["mxm_neural_msg"] = (f"📍 Placed: the {bars}-bar blend starts at {format_mmss(plan.mix_start_point)} "
+                                          f"in {a['track']} ({where}); {b['track']} is fully in at "
+                                          f"{format_mmss(b_at)}.")
+
+
+def _neural_join(b: dict, uid: str, c, a: dict) -> None:
+    """🧠 The neural join's own controls: profile, bars, 📍 auto-place."""
+    import mixer
+    own = (b.get("xfade") or {}).get("neural") or {}
+    pk, bk = f"mxm_nnp_{uid}", f"mxm_nnb_{uid}"
+    st.session_state.setdefault(pk, own.get("profile") or "smooth")
+    st.session_state.setdefault(bk, int(own.get("bars") or 8))
+    profile = c[2].selectbox("Profile", list(SM.PROFILES), key=pk, label_visibility="collapsed",
+                             format_func=lambda k: SM.PROFILES[k].split(" — ")[0],
+                             help="  \n".join(SM.PROFILES.values()))
+    bars = c[3].selectbox("Bars", NEURAL_BARS, key=bk, label_visibility="collapsed",
+                          format_func=lambda n: f"{n} bars", help="How long the blend lasts.")
+    b["xfade"] = {"neural": {"profile": profile, "bars": int(bars)}}
+    c[4].button("📍 Place", key=f"mxm_nnplace_{uid}", width="stretch", on_click=_neural_autoplace,
+                args=(a["uid"], uid),
+                help="Sets where the blend starts in this part (the last phrase line with room for it) and "
+                     "makes sure the next part has its bars before it to blend in with.")
+    ta, tb = full_track(a["track"]), full_track(b["track"])
+    missing = [x["track"] for x, t in ((a, ta), (b, tb)) if t is not None and not mixer.has_four_stems(t)]
+    if missing:
+        st.caption(f":orange[🧠 {', '.join(dict.fromkeys(missing))} not split into drums / bass / other yet — "
+                   "run run_audio_analysis.bat on the laptop. Until then this join is an ordinary crossfade.]")
+    else:
+        st.caption(f":gray[🧠 {SM.PROFILES[profile]} The next part comes in {bars} bars early; each stem gets its "
+                   "own curve — vocals swap sharply, drums fade out fast, bass swaps on a beat, the rest blends "
+                   "evenly.]")
+
+
 def _join_row(a: dict, b: dict, i: int) -> None:
     """🔀 The join from part i to part i + 1: its own crossfade length, where it sits around the
     bar line, its shape and 🎛️ bass swap (stored on the incoming part as "xfade"; "Default" = ⚙️'s
@@ -682,7 +752,11 @@ def _join_row(a: dict, b: dict, i: int) -> None:
     st.session_state.setdefault(wk, own.get("where") if own.get("where") is not None else "centre")
     st.session_state.setdefault(sk, own.get("shape") or ("linear" if same else "smooth"))
     st.session_state.setdefault(bk, bool(own.get("bass_swap")))
-    len_opts = [default, *XF_JOIN]
+    if (own.get("neural") and st.session_state.get(lk) != NEURAL
+            and f"mxm_xfl_seen_{uid}" not in st.session_state):
+        st.session_state[lk] = NEURAL                         # a saved / suggested 🧠 join
+    st.session_state[f"mxm_xfl_seen_{uid}"] = True
+    len_opts = [default, *XF_JOIN] + ([] if same else [NEURAL])
     if st.session_state[lk] not in len_opts:
         len_opts.append(st.session_state[lk])
     where_opts = list(XF_WHERE_LABELS)
@@ -697,6 +771,9 @@ def _join_row(a: dict, b: dict, i: int) -> None:
                                 help="How long both parts play together while one fades into the other. "
                                      "Long ones (4–16 bars) blend the two songs over each other, DJ style. "
                                      "Or drag the crossfade's ◆ edges on the timeline below.")
+        if length == NEURAL:
+            _neural_join(b, uid, c, a)
+            return
         cut = length == "Cut"
         where = c[2].selectbox("Where", where_opts, key=wk, format_func=_where_label,
                                label_visibility="collapsed", disabled=cut,
@@ -787,6 +864,9 @@ def _mashup(summaries: dict) -> None:
     grids = {tid: MX.grid(t) for tid, t in tracks.items()}
 
     _apply_timeline_drag(parts)
+    _nmsg = st.session_state.pop("mxm_neural_msg", None)
+    if _nmsg:
+        st.info(_nmsg)
     st.markdown("**Parts**")
     prev = None
     for i, p in enumerate(parts):
@@ -904,11 +984,16 @@ def _start_drop_swap(a: str, b: str) -> None:
         return
     _clear("mxm")
     t0 = f"{time.time():.6f}"
+    import mixer
+    xf = {"beats": float(MX.DROP_XFADE_BEATS), "where": "centre", "shape": "smooth", "bass_swap": True}
+    if mixer.has_four_stems(ta) and mixer.has_four_stems(tb):
+        # 🧠 B's own build-up blends in under A's from the stems, then drums, bass and harmonics swap on the drop
+        bars = max([n for n in NEURAL_BARS if n <= max(4.0, float(plan["build_bars"]))] or [4])
+        xf = {"neural": {"profile": "bass_drop", "bars": bars}}
     parts = [{"track": a, "start": plan["a"][0], "end": plan["a"][1], "gain_db": 0.0, "uid": f"S{t0}",
               "part": "full", "label": "build-up"},
              {"track": b, "start": plan["b"][0], "end": plan["b"][1], "gain_db": 0.0, "uid": f"S{t0}b",
-              "part": "full", "label": "drop",
-              "xfade": {"beats": float(MX.DROP_XFADE_BEATS), "where": "centre", "shape": "smooth", "bass_swap": True}}]
+              "part": "full", "label": "drop", "xfade": xf}]
     st.session_state["mxm_parts"] = parts
     st.session_state["mxm_layers"] = []
     for p in parts:
@@ -963,8 +1048,10 @@ def _suggestions(summaries: dict) -> None:
                     "analysis.")
         else:
             st.caption(f"One track's build-up crashing into another's drop: {MX.DROP_LEAD_BARS} bars before the "
-                       f"build-up, then {MX.DROP_AFTER_BARS} bars from the drop — beat-matched, key-fitted, with "
-                       "🎛️ bass swap on the drop.")
+                       f"build-up, then {MX.DROP_AFTER_BARS} bars from the drop — beat-matched and key-fitted. With "
+                       "both tracks split into stems it's a 🧠 Bass drop blend (the drop's own build-up comes in "
+                       "under A's, then drums, bass and harmonics swap on the drop); otherwise a quick crossfade "
+                       "with 🎛️ bass swap.")
         for i, r in enumerate(drops):
             _drop_swap_row(r, i)
 

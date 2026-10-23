@@ -268,6 +268,7 @@ def test_mix_page_drop_swap(tmp_path):
         assert at.session_state["mx_mode"] == "🧩 Mashup"
         parts = at.session_state["mxm_parts"]
         assert len(parts) == 2 and parts[0]["track"] != parts[1]["track"]
-        assert parts[1]["xfade"]["bass_swap"] is True
+        xf = parts[1]["xfade"]
+        assert xf.get("bass_swap") is True or xf.get("neural", {}).get("profile") == "bass_drop"
     finally:
         mp.undo()
