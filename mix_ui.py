@@ -270,6 +270,61 @@ def _where_label(w) -> str:
 # Preview + save (shared by Extend and Mashup)
 # ---------------------------------------------------------------------------
 
+def _mashup_lanes(recipe: dict, tracks: dict, mix_url: str) -> None:
+    """🎚️ One lane per part (mix_lanes.py) — trims come back here."""
+    import mixer
+    import deck_editor as DE
+    import mix_lanes as ML
+    from cut_editor import media_url
+    grids = {tid: MX.grid(t) for tid, t in tracks.items()}
+    lay = MX.layout(recipe, grids)
+    if not lay["pieces"]:
+        return
+    joins = lay["joins"]
+    data, urls = {}, {}
+    for tid, t in tracks.items():
+        path = mixer.local_path(t, "full")
+        urls[tid] = media_url(path, "audio/mp4" if path.suffix == ".m4a" else "audio/mpeg", f"mxm_lane_{tid}") \
+            if path.exists() else ""
+        data[tid] = DE.lane_data(t, tid, grids[tid], urls[tid])
+    lanes = []
+    for k, p in enumerate(lay["pieces"]):
+        lanes.append({"uid": p.get("uid"), "idx": k, "label": p["track"], "colour": PALETTE[k % len(PALETTE)].format(a=0.8),
+                      "trk": data[p["track"]], "start": p["start"], "end": p["end"], "speed": p["speed"],
+                      "out_start": p["out_start"], "out_end": p["out_end"],
+                      "head": joins[k - 1]["pre"] if k > 0 else 0.0, "tail": joins[k]["post"] if k < len(joins) else 0.0})
+    val = ML.mix_lanes(duration=lay["duration"], lanes=lanes,
+                       joins=[{"at": j["at"], "pre": j["pre"], "post": j["post"]} for j in joins],
+                       mix_url=mix_url, key="mxm_lanes")
+    if isinstance(val, dict) and val.get("nonce") and val["nonce"] != st.session_state.get("_mxm_lanes_nonce"):
+        st.session_state["_mxm_lanes_nonce"] = val["nonce"]
+        for p in st.session_state.get("mxm_parts") or []:
+            if p.get("uid") == val.get("uid"):
+                p["start"], p["end"] = round(float(val["start"]), 3), round(float(val["end"]), 3)
+        st.rerun()
+
+
+def _trim_part(uid: str, key: str) -> None:
+    rng = st.session_state.get(key)
+    for p in st.session_state.get("mxm_parts") or []:
+        if p.get("uid") == uid and rng:
+            p["start"], p["end"] = round(float(rng[0]), 3), round(float(rng[1]), 3)
+
+
+def _part_trim(p: dict, g: dict, col) -> None:
+    """✂️ Trim a part on its card — on bar lines or beats (the ➕ Add a part snap setting)."""
+    snap = st.session_state.get("mxm_snap") or "Bars"
+    marks = g["bars"] if snap == "Bars" else g["beats"]
+    lines = sorted({0.0, round(float(p["start"]), 3), round(float(p["end"]), 3),
+                    *[round(float(x), 3) for x in marks if 0 < x < g["duration"]], round(g["duration"], 3)})
+    key = f"mxm_trim_{p['uid']}_{p['start']:.3f}_{p['end']:.3f}_{snap}"
+    with col.popover("✂️", help="Trim this part's start and end"):
+        st.select_slider(f"{p['track']} — start and end ({snap.lower()})", options=lines,
+                         value=(round(float(p["start"]), 3), round(float(p["end"]), 3)), key=key,
+                         format_func=format_mmss, on_change=_trim_part, args=(p["uid"], key))
+        st.caption("Snap to bars or beats with **Snap to** in ➕ Add a part. Or drag the part's handles in the lanes above.")
+
+
 def _preview_and_save(recipe: dict, tracks: dict, sims: dict, default_name: str, ns: str) -> None:
     import mixer
     import mixes as MS
@@ -279,8 +334,14 @@ def _preview_and_save(recipe: dict, tracks: dict, sims: dict, default_name: str,
     fresh = pv.get("path") == str(pv_path) and pv_path.exists()
     url = media_url(pv_path, "audio/mpeg" if pv_path.suffix == ".mp3" else "audio/mp4", f"{ns}_mix_audio") \
         if fresh else ""
-    lay = _timeline(recipe, tracks, sims, energy=pv.get("energy") if fresh else None, audio_url=url, ns=ns,
-                    editable=ns == "mxm")
+    if ns == "mxm":
+        _mashup_lanes(recipe, tracks, url)
+        with st.expander("📈 Whole-mix waveform — crossfade handles, layers, the preview's level", expanded=False):
+            lay = _timeline(recipe, tracks, sims, energy=pv.get("energy") if fresh else None, audio_url=url, ns=ns,
+                            editable=True)
+    else:
+        lay = _timeline(recipe, tracks, sims, energy=pv.get("energy") if fresh else None, audio_url=url, ns=ns,
+                        editable=False)
     if lay is None:
         st.info("Nothing to play yet.")
         return
@@ -885,7 +946,7 @@ def _mashup(summaries: dict) -> None:
         if prev is not None:
             _join_row(prev, p, i)
         with st.container(border=True):
-            c = st.columns([5, 2, 1, 1, 1])
+            c = st.columns([5, 2, 1, 1, 1, 1])
             c[0].markdown(f"**{i + 1}. {p['track']}** — {format_mmss(p['start'])}–{format_mmss(p['end'])} "
                           f"({format_mmss((p['end'] - p['start']) / speed)})"
                           + ("" if p.get("part", "full") == "full" else f" · {PART_LABELS[p['part']].lower()}"))
@@ -903,7 +964,8 @@ def _mashup(summaries: dict) -> None:
                                              label_visibility="collapsed", help="Level of this part (dB)")
             c[2].button("↑", key=f"mxm_up_{p['uid']}", on_click=_move, args=(i, -1), disabled=i == 0)
             c[3].button("↓", key=f"mxm_dn_{p['uid']}", on_click=_move, args=(i, 1), disabled=i == len(parts) - 1)
-            c[4].button("🗑", key=f"mxm_rm_{p['uid']}", on_click=_remove, args=(i,))
+            _part_trim(p, g, c[4])
+            c[5].button("🗑", key=f"mxm_rm_{p['uid']}", on_click=_remove, args=(i,))
             _part_stems_row(p, t, tracks_all, summaries)
         prev = p
 
