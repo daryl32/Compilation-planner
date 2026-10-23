@@ -26,6 +26,7 @@ from pathlib import Path
 import streamlit as st
 
 import config
+import library_common as LC
 from track_files import track_file
 from config import CATALOGUE_DIR, AUDIO_DIR, PREVIEW_DIR
 from library_common import (
@@ -703,6 +704,47 @@ def _render_upgrade(aa, tracks: dict) -> None:
         st.caption("beat_this isn't installed on the server, so bar lines can't be upgraded here.")
 
 
+def _audio_tidy() -> None:
+    """🧹 The server's leftover track files (audio_tidy.py) — tick and move them out of the app."""
+    import audio_tidy as AT
+    msg = st.session_state.pop("aud_tidy_msg", None)
+    if msg:
+        st.success(msg)
+    if st.button("🔍 Check against Google Drive", key="aud_tidy_check", width="stretch"):
+        with st.spinner("Listing Google Drive…"):
+            names, songs, err = AT.drive_listing()
+        if err or not names:
+            st.session_state["aud_tidy"] = {"error": err or "Drive's audio_catalogue folder looks empty."}
+        else:
+            st.session_state["aud_tidy"] = {"found": AT.find_leftovers(AUDIO_DIR, names, songs, LC.read_pending(),
+                                                                         AUDIO_LIBRARY_FOLDER),
+                                            "n_drive": len(names)}
+    res = st.session_state.get("aud_tidy")
+    if not res:
+        st.caption("☁️ Sync never removes anything, so tracks renamed or deleted on Drive stay listed here.")
+        return
+    if res.get("error"):
+        st.error(f"Couldn't check: {res['error']}")
+        return
+    found = res["found"]
+    if not found:
+        st.caption(f"✅ Nothing to tidy — every track here is one of the {res['n_drive']} on Google Drive.")
+        return
+    st.caption(f"{len(found)} leftover(s). They're moved to a `.removed` folder on the server (not deleted, "
+               "nothing on Google Drive changes) — ticked ones only.")
+    picked = []
+    for i, f in enumerate(found):
+        if st.checkbox(f"**{f['track_id']}** — {f['reason']}", value=True, key=f"aud_tidy_{i}_{f['file']}"):
+            picked.append(f["file"])
+    if st.button(f"🧹 Remove {len(picked)} from the app", key="aud_tidy_go", type="primary", width="stretch",
+                 disabled=not picked):
+        dest = AT.remove(AUDIO_DIR, picked)
+        st.session_state.pop("aud_tidy", None)
+        st.session_state["aud_tidy_msg"] = (f"Moved {len(picked)} track file(s) to {dest.relative_to(AUDIO_DIR)} "
+                                            "on the server — move one back to restore it.")
+        st.rerun()                       # the track list is keyed on the folder's files, so it refreshes itself
+
+
 def render_audio():
     if st.session_state.get(SM_EDIT):
         render_story_editor()
@@ -751,6 +793,11 @@ def render_audio():
         rc = st.columns([3, 2.4, 1.6], vertical_alignment="center")
         descending = rc[2].toggle("Descending", value=(sort_by != "Name"), key="aud_desc")
         status_slot = rc[0]
+        if not LC.IS_TEST:
+            with rc[1].popover("🧹 Tidy the list", width="stretch",
+                               help="Find track files the server still has but Google Drive doesn't — "
+                                    "duplicates left by renamed or deleted tracks."):
+                _audio_tidy()
 
     if not tracks:
         st.info("No audio catalogues yet — use **Check for new tracks** above, or sync from Google Drive.")
