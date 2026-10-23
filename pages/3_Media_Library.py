@@ -457,7 +457,7 @@ def load_audio_library(signature: tuple) -> dict:
             "added": mtime,
             "extra": int((t.get("analysis") or {}).get("version", 0)) >= EXTRA_ANALYSIS_VERSION,
             "extra_info": _extra_summary(t.get("analysis")),
-            "bars_model": ((t.get("analysis") or {}).get("methods") or {}).get("downbeats") == "beat_this",
+            "bars_model": str(((t.get("analysis") or {}).get("methods") or {}).get("downbeats") or "").startswith("beat_this"),
             "has_vocals": (t.get("analysis") or {}).get("vocals") is not None,
             "sections": [{"start": x["start"], "end": x["end"], "label": x["label"]}
                          for x in (t.get("analysis") or {}).get("sections") or []],

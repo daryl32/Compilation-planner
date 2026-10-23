@@ -134,7 +134,7 @@ def track_status(track: dict) -> dict:
     st = track.get("stems") or {}
     return {
         "analysed": bool(a),
-        "bars_model": m.get("downbeats") == "beat_this",
+        "bars_model": str(m.get("downbeats") or "").startswith("beat_this"),
         "vocals": a.get("vocals") is not None,
         "key": bool(track.get("key")),
         "stems": all(st.get(p) for p in STEM_PARTS),

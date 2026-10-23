@@ -562,10 +562,15 @@ def _add_part(tracks: dict, summaries: dict) -> None:
     a = c[0].selectbox("From section", range(len(secs)), key=f"mxm_from_{tid}", format_func=lambda k: sec_labels[k])
     b = c[1].selectbox("To section", range(a, len(secs)), key=f"mxm_to_{tid}_{a}",
                        format_func=lambda k: sec_labels[k])
-    lines = sorted({0.0, *[float(x) for x in g["bars"]], g["duration"]})
-    lo, hi = MX.snap_to_bar(g, secs[a]["start"]), MX.snap_to_bar(g, secs[b]["end"])
-    rng = st.select_slider("Fine-tune (bar lines)", options=lines, value=(lo, hi), key=f"mxm_rng_{tid}_{a}_{b}",
-                           format_func=format_mmss)
+    st.session_state.setdefault("mxm_snap", "Bars")
+    snap = st.segmented_control("Snap to", ["Bars", "Beats"], key="mxm_snap",
+                                help="Where the part can start and end: on bar lines, or on any beat.") or "Bars"
+    marks = g["bars"] if snap == "Bars" else g["beats"]
+    lines = sorted({0.0, *[round(float(x), 3) for x in marks if 0 < x < g["duration"]], round(g["duration"], 3)})
+    near = lambda t: min(lines, key=lambda x: abs(x - t))      # noqa: E731
+    lo, hi = near(secs[a]["start"]), near(secs[b]["end"])
+    rng = st.select_slider(f"Fine-tune ({'bar lines' if snap == 'Bars' else 'beats'})", options=lines,
+                           value=(lo, hi), key=f"mxm_rng_{tid}_{a}_{b}_{snap}", format_func=format_mmss)
     if rng[1] - rng[0] < 1.0:
         st.caption("Pick at least a bar.")
         return
