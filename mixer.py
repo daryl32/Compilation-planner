@@ -424,7 +424,8 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
                     part[lo - src0:hi - src0] = y[lo:hi] * g
                 stems[stem] = part
             sides.append(stems)
-        blend = SM.render_region(sides[0], sides[1], jn["neural"]["profile"], jn["neural"]["beats"], SR)
+        blend = SM.render_region(sides[0], sides[1], jn["neural"]["profile"], jn["neural"]["beats"], SR,
+                                 curves=jn["neural"].get("curves"))
         at = int(round(w0 * SR))
         lo, hi = max(at, 0), min(n_out, at + n)
         if hi > lo:

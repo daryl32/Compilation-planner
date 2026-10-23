@@ -682,7 +682,7 @@ def _add_layer_form(p: dict, host: dict, others: list, tracks_all: dict, summari
 
 
 NEURAL = "🧠 Neural"
-NEURAL_BARS = (4, 8, 16)
+NEURAL_BARS = (1, 2, 4, 8, 16)
 
 
 def _neural_autoplace(a_uid: str, b_uid: str) -> None:
@@ -728,7 +728,8 @@ def _neural_join(b: dict, uid: str, c, a: dict) -> None:
                              help="  \n".join(SM.PROFILES.values()))
     bars = c[3].selectbox("Bars", NEURAL_BARS, key=bk, label_visibility="collapsed",
                           format_func=lambda n: f"{n} bars", help="How long the blend lasts.")
-    b["xfade"] = {"neural": {"profile": profile, "bars": int(bars)}}
+    b["xfade"] = {"neural": {"profile": profile, "bars": int(bars),
+                             **({"curves": own["curves"]} if own.get("curves") else {})}}
     c[4].button("📍 Place", key=f"mxm_nnplace_{uid}", width="stretch", on_click=_neural_autoplace,
                 args=(a["uid"], uid),
                 help="Sets where the blend starts in this part (the last phrase line with room for it) and "
@@ -756,15 +757,15 @@ def _join_row(a: dict, b: dict, i: int) -> None:
     same = a["track"] == b["track"]
     lk, wk, sk, bk = f"mxm_xfl_{uid}", f"mxm_xfw_{uid}", f"mxm_xfs_{uid}", f"mxm_xfb_{uid}"
     default = "Default"
+    # The part's own "xfade" is the truth. Streamlit forgets a widget's value whenever it isn't drawn (another
+    # Mix mode, the 🎚️ Transition editor…), so each box is rebuilt from it then — a 🧠 join stays 🧠
+    # (it used to come back as "Default" and overwrite the join — 23 Oct 2026).
     if lk not in st.session_state:
-        st.session_state[lk] = _len_label(float(own["beats"])) if own.get("beats") is not None else default
+        st.session_state[lk] = NEURAL if own.get("neural") else \
+            _len_label(float(own["beats"])) if own.get("beats") is not None else default
     st.session_state.setdefault(wk, own.get("where") if own.get("where") is not None else "centre")
     st.session_state.setdefault(sk, own.get("shape") or ("linear" if same else "smooth"))
     st.session_state.setdefault(bk, bool(own.get("bass_swap")))
-    if (own.get("neural") and st.session_state.get(lk) != NEURAL
-            and f"mxm_xfl_seen_{uid}" not in st.session_state):
-        st.session_state[lk] = NEURAL                         # a saved / suggested 🧠 join
-    st.session_state[f"mxm_xfl_seen_{uid}"] = True
     len_opts = [default, *XF_JOIN] + ([] if same else [NEURAL])
     if st.session_state[lk] not in len_opts:
         len_opts.append(st.session_state[lk])
@@ -940,7 +941,7 @@ def _tx_state_key(a: str, b: str) -> str:
 
 def _tx_use(a: str, b: str, sug: dict) -> None:
     st.session_state[_tx_state_key(a, b)] = {"a_end": sug["a_end"], "b_full": sug["b_full"], "bars": int(sug["bars"]),
-                                             "profile": sug["profile"], "from": "suggestion"}
+                                             "profile": sug["profile"], "curves": None, "from": "suggestion"}
     st.session_state["mxt_profile"] = sug["profile"]
     st.session_state.pop("mxt_pv", None)
 
@@ -957,7 +958,8 @@ def _tx_recipe(a: str, b: str, ta: dict, tb: dict, s: dict, *, short: bool) -> d
                         "gain_db": 0.0, "part": "full", "uid": "T1"},
                        {"track": b, "start": round(s["b_full"], 3), "end": round(min(b_end, gb["duration"]), 3),
                         "gain_db": 0.0, "part": "full", "uid": "T2",
-                        "xfade": {"neural": {"profile": s.get("profile") or "smooth", "bars": int(s["bars"])}}}]}
+                        "xfade": {"neural": {"profile": s.get("profile") or "smooth", "bars": int(s["bars"]),
+                                             **({"curves": s["curves"]} if s.get("curves") else {})}}}]}
 
 
 def _tx_to_mashup(a: str, b: str, ta: dict, tb: dict, s: dict, append: bool) -> None:
@@ -990,7 +992,8 @@ def _tx_apply_join(a_uid: str, b_uid: str, s: dict) -> None:
     pb = next((p for p in parts if p["uid"] == b_uid), None)
     if pa and pb:
         pa["end"], pb["start"] = round(s["a_end"], 3), round(s["b_full"], 3)
-        pb["xfade"] = {"neural": {"profile": s.get("profile") or "smooth", "bars": int(s["bars"])}}
+        pb["xfade"] = {"neural": {"profile": s.get("profile") or "smooth", "bars": int(s["bars"]),
+                                  **({"curves": s["curves"]} if s.get("curves") else {})}}
         st.session_state[f"mxm_xfl_{b_uid}"] = NEURAL
         st.session_state[f"mxm_nnp_{b_uid}"] = pb["xfade"]["neural"]["profile"]
         st.session_state[f"mxm_nnb_{b_uid}"] = pb["xfade"]["neural"]["bars"]
@@ -1004,7 +1007,7 @@ def _open_join_in_transition(a: dict, b: dict) -> None:
     st.session_state["mxt_a"], st.session_state["mxt_b"] = a["track"], b["track"]
     st.session_state[_tx_state_key(a["track"], b["track"])] = {
         "a_end": float(a["end"]), "b_full": float(b["start"]), "bars": int(nn.get("bars") or 8),
-        "profile": nn.get("profile") or "smooth", "from": "mashup"}
+        "profile": nn.get("profile") or "smooth", "curves": nn.get("curves"), "from": "mashup"}
     st.session_state["mxt_profile"] = nn.get("profile") or "smooth"
     st.session_state["mxt_join"] = (a["uid"], b["uid"])
     st.session_state.pop("mxt_pv", None)
@@ -1087,7 +1090,8 @@ def _transition(summaries: dict) -> None:
                          state_key=f"{a}|{b}|{s.get('from')}", key="mxt_deck")
     if isinstance(val, dict) and val.get("nonce") and val["nonce"] != st.session_state.get("_mxt_nonce"):
         st.session_state["_mxt_nonce"] = val["nonce"]
-        s.update(a_end=float(val["a_end"]), b_full=float(val["b_full"]), bars=int(val["bars"]), **{"from": "drag"})
+        s.update(a_end=float(val["a_end"]), b_full=float(val["b_full"]), bars=int(val["bars"]),
+                 curves=SM.norm_curves(val.get("curves")) if val.get("curves") else s.get("curves"), **{"from": "drag"})
         st.rerun()
     missing = [x for x in (a, b) if urls[x] == ""]
     if missing:
@@ -1100,7 +1104,7 @@ def _transition(summaries: dict) -> None:
     prof = pc[0].selectbox("Profile", list(SM.PROFILES), key="mxt_profile",
                            format_func=lambda k: SM.PROFILES[k].split(" — ")[0], help="  \n".join(SM.PROFILES.values()))
     s["profile"] = prof
-    bars = pc[1].selectbox("Blend", (4, 8, 16), index=(4, 8, 16).index(int(s["bars"])) if int(s["bars"]) in (4, 8, 16) else 1,
+    bars = pc[1].selectbox("Blend", NEURAL_BARS, index=NEURAL_BARS.index(int(s["bars"])) if int(s["bars"]) in NEURAL_BARS else 3,
                            format_func=lambda n: f"{n} bars", key=f"mxt_bars_{a}_{b}_{s['bars']}")
     if bars != s["bars"]:
         s["bars"] = int(bars)

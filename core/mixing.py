@@ -223,6 +223,7 @@ def layout(recipe: dict, grids: dict) -> dict:
                       "bass_swap": bool(own.get("bass_swap")) and not neural and pre + post >= beat_len(out_bpm) - 1e-6,
                       **({"neural": {"profile": neural.get("profile") or "smooth",
                                      "bars": int(neural.get("bars") or 8),
+                                     "curves": neural.get("curves"),
                                      "beats": (pre + post) / beat_len(out_bpm)}} if neural else {})})
     layers = []
     by_uid = {p.get("uid"): p for p in out if p.get("uid")}

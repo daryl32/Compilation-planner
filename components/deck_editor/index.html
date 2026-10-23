@@ -46,13 +46,13 @@ function sendValue(v) { post("streamlit:setComponentValue", {value: v, dataType:
 const $ = id => document.getElementById(id);
 const deck = $("deck");
 const HINT = "Drag lane B to choose where it comes in · drag the ◆ mix point to where A hands over · drag the blend's " +
-             "left edge for 4 / 8 / 16 bars · tap a lane to set where ▶ A / ▶ B play from · drag the ruler to scroll";
+             "left edge for 1 – 16 bars · tap a lane to set where ▶ A / ▶ B play from · drag the ruler to scroll";
 
 let D = null, S = null;             // args, editable state {a_end, b_full, bars}
 let view = {start: 0, span: 60};
 let audio = new Audio(); audio.preload = "auto";
 let playing = null;                 // "A" | "B" | "M"
-let cue = {A: 0, B: 0};
+let cue = {A: 0, B: 0, M: 0};       // M: where ▶ Mix plays from (mix time, A's clock)
 let drag = null;
 
 function fmt(t) { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = t - m * 60; return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1); }
@@ -155,7 +155,8 @@ function play(which) {
   if (!url) return;
   audio.pause();
   if (audio.dataset.src !== url) { audio.src = url; audio.dataset.src = url; }
-  const go = () => { try { audio.currentTime = which === "M" ? 0 : cue[which]; } catch (e) {}
+  const from = which === "M" ? Math.max(0, cue.M - (D.preview ? D.preview.out_start : 0)) : cue[which];
+  const go = () => { try { audio.currentTime = from; } catch (e) {}
                      audio.play().then(() => { playing = which; setButtons(); }).catch(() => {}); };
   if (audio.readyState >= 1) go(); else audio.addEventListener("loadedmetadata", go, {once: true});
 }
@@ -190,7 +191,7 @@ deck.addEventListener("pointermove", ev => {
   if (drag.kind === "pan") view.start = drag.v0 - dt;
   else if (drag.kind === "mix") { S.a_end = nearest(D.a.bars.concat([D.a.duration]), drag.s0.a_end + dt); }
   else if (drag.kind === "edge") { const bars = (S.a_end - (drag.s0.a_end - drag.s0.bars * D.bar_a + dt)) / D.bar_a;
-                                   S.bars = [4, 8, 16].reduce((a, b) => Math.abs(b - bars) < Math.abs(a - bars) ? b : a); }
+                                   S.bars = [1, 2, 4, 8, 16].reduce((a, b) => Math.abs(b - bars) < Math.abs(a - bars) ? b : a); }
   else if (drag.kind === "laneB") { S.b_full = nearest(D.b.bars, drag.s0.b_full - dt * D.speed_b); }
   else if (drag.kind === "laneA") view.start = drag.v0 - dt;
   draw();
@@ -200,6 +201,7 @@ deck.addEventListener("pointerup", ev => {
   const g = deck._geo, p = pos(ev);
   if (!drag.moved) {                         // a tap: where ▶ A / ▶ B play from
     const t = g.T(p.x);
+    cue.M = t;
     if (drag.kind === "laneB") cue.B = Math.max(0, Math.min(D.b.duration, inB(t)));
     else if (drag.kind === "laneA" || drag.kind === "mix" || drag.kind === "edge") cue.A = Math.max(0, Math.min(D.a.duration, t));
     draw();
@@ -222,7 +224,7 @@ window.addEventListener("message", ev => {
   const args = d.args, first = !D, pairChanged = !D || D.a.id !== args.a.id || D.b.id !== args.b.id || D.state_key !== args.state_key;
   D = args;
   if (!drag) S = Object.assign({}, args.state);
-  if (pairChanged) { fitBlend(); cue.A = blendStart() - 4 * D.bar_a; cue.B = Math.max(0, bIn() - 2 * D.bar_b);
+  if (pairChanged) { fitBlend(); cue.A = cue.M = blendStart() - 4 * D.bar_a; cue.B = Math.max(0, bIn() - 2 * D.bar_b);
                      $("hint").textContent = HINT; }
   if (playing === "M" && !(D.preview && D.preview.url)) { audio.pause(); playing = null; }
   setButtons(); draw(); setHeight();
