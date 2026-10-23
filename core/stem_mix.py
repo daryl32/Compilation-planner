@@ -203,9 +203,49 @@ def bass_swap(t: np.ndarray, window: tuple, total_beats: float | None) -> np.nda
     return np.clip((t - lo) / width, 0.0, 1.0)
 
 
-def stem_gains(t: np.ndarray, profile: str = "smooth", total_beats: float | None = None) -> dict:
+# ---------------------------------------------------------------------------
+# ✍️ Shaping each side's curve — when it crosses half way, and how suddenly
+# ---------------------------------------------------------------------------
+# curves = {"out": {"mid", "steep"}, "in": {"mid", "steep"}}: mid (0.05–0.95) is where in the blend that side's
+# stems are half way (0.5 = as the profile has it), steep (0.25–4) how sudden (1 = as the profile has it). Each side
+# gets its own warped t, so A can drop away early while B comes in late, or the reverse.
+
+CURVE_DEFAULT = {"mid": 0.5, "steep": 1.0}
+
+
+def norm_curves(curves) -> dict:
+    out = {}
+    for side in ("out", "in"):
+        c = (curves or {}).get(side) or {}
+        try:
+            mid = float(c.get("mid", 0.5))
+            steep = float(c.get("steep", 1.0))
+        except (TypeError, ValueError):
+            mid, steep = 0.5, 1.0
+        out[side] = {"mid": float(np.clip(mid, 0.05, 0.95)), "steep": float(np.clip(steep, 0.25, 4.0))}
+    return out
+
+
+def warp(t: np.ndarray, mid: float = 0.5, steep: float = 1.0) -> np.ndarray:
+    """t re-timed so the half-way point lands at `mid` and the change round it is `steep` times as sudden
+    (0 and 1 stay put; monotonic)."""
+    t = np.clip(np.asarray(t, dtype=float), 0.0, 1.0)
+    u = np.where(t < mid, 0.5 * t / mid, 0.5 + 0.5 * (t - mid) / (1.0 - mid))
+    if abs(steep - 1.0) < 1e-9:
+        return u
+    d = 2.0 * u - 1.0
+    return 0.5 + 0.5 * np.sign(d) * np.abs(d) ** (1.0 / steep)
+
+
+def stem_gains(t: np.ndarray, profile: str = "smooth", total_beats: float | None = None, curves: dict = None) -> dict:
     """{stem: (gain out for deck A, gain in for deck B)} — arrays the shape of t (before smoothing).
-    total_beats (the transition's length in beats) puts the bass swap on a beat."""
+    total_beats (the transition's length in beats) puts the bass swap on a beat; curves (norm_curves) shape each side."""
+    if curves:
+        c = norm_curves(curves)
+        if any(c[s] != CURVE_DEFAULT for s in c):
+            g_out = stem_gains(warp(t, **c["out"]), profile, total_beats)
+            g_in = stem_gains(warp(t, **c["in"]), profile, total_beats)
+            return {s: (g_out[s][0], g_in[s][1]) for s in STEMS}
     tm = _TIMING[profile]
     tv, td, to = (_window(t, *tm[s]) for s in ("vocals", "drums", "other"))
     v_in = sigmoid_swap(tv) if profile != "smooth" else np.sin(0.5 * np.pi * tv)
@@ -372,7 +412,7 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 
 def render_region(a: dict, b: dict, profile: str, total_beats: float, sample_rate: int,
-                  smooth_ms: float = VOCAL_SMOOTH_MS) -> np.ndarray:
+                  smooth_ms: float = VOCAL_SMOOTH_MS, curves: dict = None) -> np.ndarray:
     """The blend itself, offline: a / b = {stem: float32 [n, channels]} — each deck's stems over the
     transition, already lined up (same length, at the mix's tempo). t runs 0 → 1 over the region;
     returns the summed stems (no limiter — the mixer applies soft_knee to the whole mix).
@@ -380,7 +420,7 @@ def render_region(a: dict, b: dict, profile: str, total_beats: float, sample_rat
     n = max(len(x) for x in [*a.values(), *b.values()])
     ch = next(iter(a.values())).shape[1]
     t = (np.arange(n, dtype=np.float64) + 0.5) / n
-    g = stem_gains(t, profile, total_beats)
+    g = stem_gains(t, profile, total_beats, curves)
     out = np.zeros((n, ch), dtype=np.float64)
     for deck, side, start in ((a, 0, 1.0), (b, 1, 0.0)):
         for stem in STEMS:

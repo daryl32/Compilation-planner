@@ -812,3 +812,55 @@ def test_mix_page_transition_mode(mixlib):
     parts = at.session_state["mxm_parts"]
     assert [p["track"] for p in parts] == ["mix_song_c", "mix_song_a"]
     assert parts[1]["start"] == new_b and parts[1]["xfade"]["neural"]["bars"] == 4
+
+
+def test_mashup_neural_joins_survive_leaving_the_screen(mixlib):
+    """3 parts, both joins 🧠: going to 🎚️ Transition and back keeps every join (Streamlit forgets the join
+    boxes when they aren't drawn — they used to come back as Default and overwrite the joins, 23 Oct 2026)."""
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎚️ Mix"
+    at.session_state["mx_mode"] = "🧩 Mashup"
+    nn = {"neural": {"profile": "vocal_swap", "bars": 4, "curves": {"out": {"mid": 0.3, "steep": 2.0}}}}
+    at.session_state["mxm_parts"] = [
+        {"track": "mix_song_c", "start": 0.0, "end": 40.0, "gain_db": 0.0, "part": "full", "uid": "P1"},
+        {"track": "mix_song_a", "start": 16.0, "end": 40.0, "gain_db": 0.0, "part": "full", "uid": "P2", "xfade": dict(nn)},
+        {"track": "mix_song_c", "start": 30.0, "end": 60.0, "gain_db": 0.0, "part": "full", "uid": "P3", "xfade": dict(nn)}]
+    at.run()
+    assert not errors(at), errors(at)
+    for mode in ("🎚️ Transition", "🧩 Mashup", "💡 Suggestions", "🧩 Mashup"):
+        at.session_state["mx_mode"] = mode
+        at.run()
+        assert not errors(at), (mode, errors(at))
+    xf = [p.get("xfade") for p in at.session_state["mxm_parts"]]
+    assert xf[1] == nn and xf[2] == nn
+    assert {at.selectbox(key=f"mxm_xfl_{u}").value for u in ("P2", "P3")} == {"🧠 Neural"}
+
+
+def test_mashup_lanes_and_card_trim(mixlib):
+    """🎚️ Lanes view above the cards: a trim dragged on a lane comes back to the part; ✂️ on a card trims too;
+    the whole-mix waveform is in a fold-out."""
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎚️ Mix"
+    at.session_state["mx_mode"] = "🧩 Mashup"
+    gc = MX.grid(mixlib["tracks"]["mix_song_c"])
+    at.session_state["mxm_parts"] = [
+        {"track": "mix_song_c", "start": 0.0, "end": 40.0, "gain_db": 0.0, "part": "full", "uid": "P1"},
+        {"track": "mix_song_a", "start": 16.0, "end": 40.0, "gain_db": 0.0, "part": "full", "uid": "P2"}]
+    at.run()
+    assert not errors(at), errors(at)
+    assert any("Whole-mix waveform" in e.label for e in at.expander)
+    new_end = float(gc["bars"][12])
+    at.session_state["mxm_lanes"] = {"uid": "P1", "start": 0.0, "end": new_end, "nonce": 7}
+    at.run()
+    assert not errors(at), errors(at)
+    assert at.session_state["mxm_parts"][0]["end"] == round(new_end, 3)
+    trims = [s for s in at.select_slider if (s.key or "").startswith("mxm_trim_P2_")]
+    assert trims
+    lo, hi = trims[0].value
+    ga = MX.grid(mixlib["tracks"]["mix_song_a"])
+    later = min(float(round(b, 3)) for b in ga["bars"] if b > lo + 1)
+    trims[0].set_value((later, hi)).run()
+    assert not errors(at), errors(at)
+    assert at.session_state["mxm_parts"][1]["start"] == later

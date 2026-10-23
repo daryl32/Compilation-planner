@@ -2,11 +2,12 @@
 coloured by level, vocals and drums (from the analysis — no decoding), with the blend shaded.
 
 Drag lane B to choose where it comes in, the ◆ mix point to where A hands over, the blend's left edge
-for 4 / 8 / 16 bars; tap a lane to set where ▶ A / ▶ B play from; ▶ Mix plays the rendered transition
-with the cursor across both lanes.
+for 1 – 16 bars, and the ● handles to shape each side's fade; tap to set where ▶ plays from. ▶ Live mix
+plays the transition in the browser (Web Audio) from stems the server prepared (live_preview.py), with
+the same curves as core/stem_mix.py — every change is heard straight away.
 
 The front end is components/deck_editor/index.html (plain HTML/JS, touch friendly). It returns
-{"a_end", "b_full", "bars", "nonce"} after a drag, or None; Streamlit keeps returning the last value,
+{"a_end", "b_full", "bars", "curves", "nonce"} after a drag, or None; Streamlit keeps returning the last value,
 so the caller compares nonces (see mix_ui._transition)."""
 
 from __future__ import annotations
@@ -60,8 +61,10 @@ def lane_data(track: dict, track_id: str, g: dict, url: str = "", label: str = N
 
 
 def deck_editor(*, a: dict, b: dict, state: dict, bar_a: float, bar_b: float, speed_b: float,
-                preview: dict = None, state_key: str = "", key: str = "deck_editor"):
-    return _COMPONENT(a=a, b=b, state={k: float(v) if k != "bars" else int(v) for k, v in state.items()
-                                      if k in ("a_end", "b_full", "bars")},
-                      bar_a=float(bar_a), bar_b=float(bar_b), speed_b=float(speed_b), preview=preview,
-                      state_key=state_key, key=key, default=None)
+                live: dict = None, beats_per_bar: int = 4, state_key: str = "", key: str = "deck_editor"):
+    """live: the ⚡ live preview ({"a": {"w", "urls", "gain_db"}, "b": {…}, "mode"} — live_preview.prepare with
+    its files as URLs), or None while it's being prepared."""
+    st_ = {"a_end": float(state["a_end"]), "b_full": float(state["b_full"]), "bars": int(state["bars"]),
+           "profile": state.get("profile") or "smooth", "curves": state.get("curves") or None}
+    return _COMPONENT(a=a, b=b, state=st_, bar_a=float(bar_a), bar_b=float(bar_b), speed_b=float(speed_b),
+                      live=live, bpb=int(beats_per_bar), state_key=state_key, key=key, default=None)

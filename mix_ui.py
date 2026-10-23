@@ -270,6 +270,61 @@ def _where_label(w) -> str:
 # Preview + save (shared by Extend and Mashup)
 # ---------------------------------------------------------------------------
 
+def _mashup_lanes(recipe: dict, tracks: dict, mix_url: str) -> None:
+    """🎚️ One lane per part (mix_lanes.py) — trims come back here."""
+    import mixer
+    import deck_editor as DE
+    import mix_lanes as ML
+    from cut_editor import media_url
+    grids = {tid: MX.grid(t) for tid, t in tracks.items()}
+    lay = MX.layout(recipe, grids)
+    if not lay["pieces"]:
+        return
+    joins = lay["joins"]
+    data, urls = {}, {}
+    for tid, t in tracks.items():
+        path = mixer.local_path(t, "full")
+        urls[tid] = media_url(path, "audio/mp4" if path.suffix == ".m4a" else "audio/mpeg", f"mxm_lane_{tid}") \
+            if path.exists() else ""
+        data[tid] = DE.lane_data(t, tid, grids[tid], urls[tid])
+    lanes = []
+    for k, p in enumerate(lay["pieces"]):
+        lanes.append({"uid": p.get("uid"), "idx": k, "label": p["track"], "colour": PALETTE[k % len(PALETTE)].format(a=0.8),
+                      "trk": data[p["track"]], "start": p["start"], "end": p["end"], "speed": p["speed"],
+                      "out_start": p["out_start"], "out_end": p["out_end"],
+                      "head": joins[k - 1]["pre"] if k > 0 else 0.0, "tail": joins[k]["post"] if k < len(joins) else 0.0})
+    val = ML.mix_lanes(duration=lay["duration"], lanes=lanes,
+                       joins=[{"at": j["at"], "pre": j["pre"], "post": j["post"]} for j in joins],
+                       mix_url=mix_url, key="mxm_lanes")
+    if isinstance(val, dict) and val.get("nonce") and val["nonce"] != st.session_state.get("_mxm_lanes_nonce"):
+        st.session_state["_mxm_lanes_nonce"] = val["nonce"]
+        for p in st.session_state.get("mxm_parts") or []:
+            if p.get("uid") == val.get("uid"):
+                p["start"], p["end"] = round(float(val["start"]), 3), round(float(val["end"]), 3)
+        st.rerun()
+
+
+def _trim_part(uid: str, key: str) -> None:
+    rng = st.session_state.get(key)
+    for p in st.session_state.get("mxm_parts") or []:
+        if p.get("uid") == uid and rng:
+            p["start"], p["end"] = round(float(rng[0]), 3), round(float(rng[1]), 3)
+
+
+def _part_trim(p: dict, g: dict, col) -> None:
+    """✂️ Trim a part on its card — on bar lines or beats (the ➕ Add a part snap setting)."""
+    snap = st.session_state.get("mxm_snap") or "Bars"
+    marks = g["bars"] if snap == "Bars" else g["beats"]
+    lines = sorted({0.0, round(float(p["start"]), 3), round(float(p["end"]), 3),
+                    *[round(float(x), 3) for x in marks if 0 < x < g["duration"]], round(g["duration"], 3)})
+    key = f"mxm_trim_{p['uid']}_{p['start']:.3f}_{p['end']:.3f}_{snap}"
+    with col.popover("✂️", help="Trim this part's start and end"):
+        st.select_slider(f"{p['track']} — start and end ({snap.lower()})", options=lines,
+                         value=(round(float(p["start"]), 3), round(float(p["end"]), 3)), key=key,
+                         format_func=format_mmss, on_change=_trim_part, args=(p["uid"], key))
+        st.caption("Snap to bars or beats with **Snap to** in ➕ Add a part. Or drag the part's handles in the lanes above.")
+
+
 def _preview_and_save(recipe: dict, tracks: dict, sims: dict, default_name: str, ns: str) -> None:
     import mixer
     import mixes as MS
@@ -279,8 +334,14 @@ def _preview_and_save(recipe: dict, tracks: dict, sims: dict, default_name: str,
     fresh = pv.get("path") == str(pv_path) and pv_path.exists()
     url = media_url(pv_path, "audio/mpeg" if pv_path.suffix == ".mp3" else "audio/mp4", f"{ns}_mix_audio") \
         if fresh else ""
-    lay = _timeline(recipe, tracks, sims, energy=pv.get("energy") if fresh else None, audio_url=url, ns=ns,
-                    editable=ns == "mxm")
+    if ns == "mxm":
+        _mashup_lanes(recipe, tracks, url)
+        with st.expander("📈 Whole-mix waveform — crossfade handles, layers, the preview's level", expanded=False):
+            lay = _timeline(recipe, tracks, sims, energy=pv.get("energy") if fresh else None, audio_url=url, ns=ns,
+                            editable=True)
+    else:
+        lay = _timeline(recipe, tracks, sims, energy=pv.get("energy") if fresh else None, audio_url=url, ns=ns,
+                        editable=False)
     if lay is None:
         st.info("Nothing to play yet.")
         return
@@ -682,7 +743,7 @@ def _add_layer_form(p: dict, host: dict, others: list, tracks_all: dict, summari
 
 
 NEURAL = "🧠 Neural"
-NEURAL_BARS = (4, 8, 16)
+NEURAL_BARS = (1, 2, 4, 8, 16)
 
 
 def _neural_autoplace(a_uid: str, b_uid: str) -> None:
@@ -728,7 +789,8 @@ def _neural_join(b: dict, uid: str, c, a: dict) -> None:
                              help="  \n".join(SM.PROFILES.values()))
     bars = c[3].selectbox("Bars", NEURAL_BARS, key=bk, label_visibility="collapsed",
                           format_func=lambda n: f"{n} bars", help="How long the blend lasts.")
-    b["xfade"] = {"neural": {"profile": profile, "bars": int(bars)}}
+    b["xfade"] = {"neural": {"profile": profile, "bars": int(bars),
+                             **({"curves": own["curves"]} if own.get("curves") else {})}}
     c[4].button("📍 Place", key=f"mxm_nnplace_{uid}", width="stretch", on_click=_neural_autoplace,
                 args=(a["uid"], uid),
                 help="Sets where the blend starts in this part (the last phrase line with room for it) and "
@@ -756,15 +818,15 @@ def _join_row(a: dict, b: dict, i: int) -> None:
     same = a["track"] == b["track"]
     lk, wk, sk, bk = f"mxm_xfl_{uid}", f"mxm_xfw_{uid}", f"mxm_xfs_{uid}", f"mxm_xfb_{uid}"
     default = "Default"
+    # The part's own "xfade" is the truth. Streamlit forgets a widget's value whenever it isn't drawn (another
+    # Mix mode, the 🎚️ Transition editor…), so each box is rebuilt from it then — a 🧠 join stays 🧠
+    # (it used to come back as "Default" and overwrite the join — 23 Oct 2026).
     if lk not in st.session_state:
-        st.session_state[lk] = _len_label(float(own["beats"])) if own.get("beats") is not None else default
+        st.session_state[lk] = NEURAL if own.get("neural") else \
+            _len_label(float(own["beats"])) if own.get("beats") is not None else default
     st.session_state.setdefault(wk, own.get("where") if own.get("where") is not None else "centre")
     st.session_state.setdefault(sk, own.get("shape") or ("linear" if same else "smooth"))
     st.session_state.setdefault(bk, bool(own.get("bass_swap")))
-    if (own.get("neural") and st.session_state.get(lk) != NEURAL
-            and f"mxm_xfl_seen_{uid}" not in st.session_state):
-        st.session_state[lk] = NEURAL                         # a saved / suggested 🧠 join
-    st.session_state[f"mxm_xfl_seen_{uid}"] = True
     len_opts = [default, *XF_JOIN] + ([] if same else [NEURAL])
     if st.session_state[lk] not in len_opts:
         len_opts.append(st.session_state[lk])
@@ -884,7 +946,7 @@ def _mashup(summaries: dict) -> None:
         if prev is not None:
             _join_row(prev, p, i)
         with st.container(border=True):
-            c = st.columns([5, 2, 1, 1, 1])
+            c = st.columns([5, 2, 1, 1, 1, 1])
             c[0].markdown(f"**{i + 1}. {p['track']}** — {format_mmss(p['start'])}–{format_mmss(p['end'])} "
                           f"({format_mmss((p['end'] - p['start']) / speed)})"
                           + ("" if p.get("part", "full") == "full" else f" · {PART_LABELS[p['part']].lower()}"))
@@ -902,7 +964,8 @@ def _mashup(summaries: dict) -> None:
                                              label_visibility="collapsed", help="Level of this part (dB)")
             c[2].button("↑", key=f"mxm_up_{p['uid']}", on_click=_move, args=(i, -1), disabled=i == 0)
             c[3].button("↓", key=f"mxm_dn_{p['uid']}", on_click=_move, args=(i, 1), disabled=i == len(parts) - 1)
-            c[4].button("🗑", key=f"mxm_rm_{p['uid']}", on_click=_remove, args=(i,))
+            _part_trim(p, g, c[4])
+            c[5].button("🗑", key=f"mxm_rm_{p['uid']}", on_click=_remove, args=(i,))
             _part_stems_row(p, t, tracks_all, summaries)
         prev = p
 
@@ -940,7 +1003,7 @@ def _tx_state_key(a: str, b: str) -> str:
 
 def _tx_use(a: str, b: str, sug: dict) -> None:
     st.session_state[_tx_state_key(a, b)] = {"a_end": sug["a_end"], "b_full": sug["b_full"], "bars": int(sug["bars"]),
-                                             "profile": sug["profile"], "from": "suggestion"}
+                                             "profile": sug["profile"], "curves": None, "from": "suggestion"}
     st.session_state["mxt_profile"] = sug["profile"]
     st.session_state.pop("mxt_pv", None)
 
@@ -957,7 +1020,8 @@ def _tx_recipe(a: str, b: str, ta: dict, tb: dict, s: dict, *, short: bool) -> d
                         "gain_db": 0.0, "part": "full", "uid": "T1"},
                        {"track": b, "start": round(s["b_full"], 3), "end": round(min(b_end, gb["duration"]), 3),
                         "gain_db": 0.0, "part": "full", "uid": "T2",
-                        "xfade": {"neural": {"profile": s.get("profile") or "smooth", "bars": int(s["bars"])}}}]}
+                        "xfade": {"neural": {"profile": s.get("profile") or "smooth", "bars": int(s["bars"]),
+                                             **({"curves": s["curves"]} if s.get("curves") else {})}}}]}
 
 
 def _tx_to_mashup(a: str, b: str, ta: dict, tb: dict, s: dict, append: bool) -> None:
@@ -990,7 +1054,8 @@ def _tx_apply_join(a_uid: str, b_uid: str, s: dict) -> None:
     pb = next((p for p in parts if p["uid"] == b_uid), None)
     if pa and pb:
         pa["end"], pb["start"] = round(s["a_end"], 3), round(s["b_full"], 3)
-        pb["xfade"] = {"neural": {"profile": s.get("profile") or "smooth", "bars": int(s["bars"])}}
+        pb["xfade"] = {"neural": {"profile": s.get("profile") or "smooth", "bars": int(s["bars"]),
+                                  **({"curves": s["curves"]} if s.get("curves") else {})}}
         st.session_state[f"mxm_xfl_{b_uid}"] = NEURAL
         st.session_state[f"mxm_nnp_{b_uid}"] = pb["xfade"]["neural"]["profile"]
         st.session_state[f"mxm_nnb_{b_uid}"] = pb["xfade"]["neural"]["bars"]
@@ -1004,11 +1069,36 @@ def _open_join_in_transition(a: dict, b: dict) -> None:
     st.session_state["mxt_a"], st.session_state["mxt_b"] = a["track"], b["track"]
     st.session_state[_tx_state_key(a["track"], b["track"])] = {
         "a_end": float(a["end"]), "b_full": float(b["start"]), "bars": int(nn.get("bars") or 8),
-        "profile": nn.get("profile") or "smooth", "from": "mashup"}
+        "profile": nn.get("profile") or "smooth", "curves": nn.get("curves"), "from": "mashup"}
     st.session_state["mxt_profile"] = nn.get("profile") or "smooth"
     st.session_state["mxt_join"] = (a["uid"], b["uid"])
     st.session_state.pop("mxt_pv", None)
     st.session_state["mx_mode"] = TRANSITION
+
+
+def _tx_live(a: str, b: str, ta: dict, tb: dict, s: dict):
+    """⚡ The live preview's stems for this transition (prepared when they don't cover it yet), as URLs —
+    or None (audio not on the server yet / couldn't prepare)."""
+    import live_preview as LP
+    import mixer
+    from cut_editor import media_url
+    have = st.session_state.get("mxt_live")
+    if not LP.still_fits(have, a, b, ta, tb, s):
+        need = LP.needed_files(ta, tb)
+        if any(not mixer.local_path(t, part).exists() for t in (ta, tb) for part in need[t.get("track_id")]):
+            return None
+        with st.spinner("⚡ Getting the live preview ready (tempo-matching the stems)…"):
+            try:
+                have = LP.prepare(a, b, ta, tb, s, have=have)
+            except Exception as e:
+                st.caption(f":orange[⚡ Live preview unavailable: {e}]")
+                return None
+        st.session_state["mxt_live"] = have
+    out = {"mode": have["mode"], "speed_b": have["speed_b"]}
+    for d in ("a", "b"):
+        out[d] = {"w": have[d]["w"], "gain_db": have[d]["gain_db"],
+                  "urls": {p: media_url(Path(f), "audio/flac", f"mxt_live_{d}_{p}") for p, f in have[d]["files"].items()}}
+    return out
 
 
 def _transition(summaries: dict) -> None:
@@ -1080,14 +1170,15 @@ def _transition(summaries: dict) -> None:
     pv = st.session_state.get("mxt_pv")
     rec_short = _tx_recipe(a, b, ta, tb, s, short=True)
     pv_ok = pv and pv.get("sig") == json.dumps(rec_short, sort_keys=True) and Path(pv["path"]).exists()
-    preview = {"url": media_url(Path(pv["path"]), "audio/mpeg" if pv["path"].endswith(".mp3") else "audio/mp4",
-                                "mxt_pv_audio"), "out_start": rec_short["pieces"][0]["start"]} if pv_ok else None
+    s.setdefault("profile", st.session_state.get("mxt_profile") or "smooth")
+    live = _tx_live(a, b, ta, tb, s)
     val = DE.deck_editor(a=DE.lane_data(ta, a, ga, urls[a]), b=DE.lane_data(tb, b, gb, urls[b]), state=s,
-                         bar_a=ga["bar_len"], bar_b=gb["bar_len"], speed_b=speed_b, preview=preview,
-                         state_key=f"{a}|{b}|{s.get('from')}", key="mxt_deck")
+                         bar_a=ga["bar_len"], bar_b=gb["bar_len"], speed_b=speed_b, live=live,
+                         beats_per_bar=int(ga["beats_per_bar"]), state_key=f"{a}|{b}|{s.get('from')}", key="mxt_deck")
     if isinstance(val, dict) and val.get("nonce") and val["nonce"] != st.session_state.get("_mxt_nonce"):
         st.session_state["_mxt_nonce"] = val["nonce"]
-        s.update(a_end=float(val["a_end"]), b_full=float(val["b_full"]), bars=int(val["bars"]), **{"from": "drag"})
+        s.update(a_end=float(val["a_end"]), b_full=float(val["b_full"]), bars=int(val["bars"]),
+                 curves=SM.norm_curves(val.get("curves")) if val.get("curves") else s.get("curves"), **{"from": "drag"})
         st.rerun()
     missing = [x for x in (a, b) if urls[x] == ""]
     if missing:
@@ -1100,7 +1191,7 @@ def _transition(summaries: dict) -> None:
     prof = pc[0].selectbox("Profile", list(SM.PROFILES), key="mxt_profile",
                            format_func=lambda k: SM.PROFILES[k].split(" — ")[0], help="  \n".join(SM.PROFILES.values()))
     s["profile"] = prof
-    bars = pc[1].selectbox("Blend", (4, 8, 16), index=(4, 8, 16).index(int(s["bars"])) if int(s["bars"]) in (4, 8, 16) else 1,
+    bars = pc[1].selectbox("Blend", NEURAL_BARS, index=NEURAL_BARS.index(int(s["bars"])) if int(s["bars"]) in NEURAL_BARS else 3,
                            format_func=lambda n: f"{n} bars", key=f"mxt_bars_{a}_{b}_{s['bars']}")
     if bars != s["bars"]:
         s["bars"] = int(bars)
@@ -1112,8 +1203,9 @@ def _transition(summaries: dict) -> None:
     tracks_full = {a: ta, b: tb}
     with pc[2]:
         ready = _audio_ready(mixer.parts_needed(rec_short, tracks_full), "mxt")
-    if ready and st.button("▶️ Preview the transition", key="mxt_preview", type="primary",
-                           help="Renders just the transition (8 bars either side) — then ▶ Mix plays it with the cursor."):
+    if ready and st.button("🎧 Render it exactly", key="mxt_preview",
+                           help="▶ Live mix above is the quick way to listen. This renders the transition (8 bars "
+                                "either side) exactly as a saved mix will sound — studio-quality tempo matching."):
         out = mixer.preview_path(rec_short)
         with st.spinner("Mixing the transition…"):
             try:
@@ -1124,9 +1216,9 @@ def _transition(summaries: dict) -> None:
         st.session_state["mxt_pv"] = {"path": str(out), "sig": json.dumps(rec_short, sort_keys=True)}
         st.rerun()
     if pv_ok:
-        st.caption("✅ Preview ready — press **▶ Mix** in the editor.")
+        st.audio(str(pv["path"]))
     elif pv:
-        st.caption("The preview is out of date — press ▶️ Preview again.")
+        st.caption("The exact render is out of date — render it again to hear the changes.")
 
     # Where it goes next
     st.divider()

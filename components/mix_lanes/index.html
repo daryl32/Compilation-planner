@@ -1,0 +1,213 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --fg:#262730; --muted:#8a8f98; --line:#d9dce1; --accent:#ff4b4b; --panel:#f3f4f7;
+          --vox:rgba(230,80,160,0.75); --drums:rgba(240,140,40,0.85); --dim:rgba(120,120,120,0.55);
+          --join:rgba(128,90,220,0.16); --cursor:#ff4b4b; }
+  html, body { margin:0; padding:0; background:transparent; color:var(--fg);
+               font-family: "Source Sans Pro", -apple-system, system-ui, sans-serif; font-size:15px;
+               -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color: transparent; }
+  .bar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:4px 0; }
+  button { min-height:44px; min-width:44px; padding:0 12px; border-radius:8px; border:1px solid var(--line);
+           background:var(--panel); color:var(--fg); font-size:15px; cursor:pointer; touch-action:manipulation; }
+  button:active { transform: scale(0.97); }
+  button.on { outline:2px solid var(--accent); background:var(--accent); color:#fff; }
+  button:disabled { opacity:.4; cursor:default; }
+  .time { font-variant-numeric: tabular-nums; min-width:96px; text-align:center; font-weight:600; }
+  .grow { flex:1; }
+  canvas { display:block; width:100%; touch-action:none; border-radius:8px; background:var(--panel); }
+  .hint { color:var(--muted); font-size:13px; margin-top:4px; min-height:18px; }
+</style>
+</head>
+<body>
+<div class="bar" id="btns">
+  <button id="pm" title="Play the previewed mix from where you last tapped">▶ Mix</button>
+  <span id="parts"></span>
+  <span class="time" id="time">—</span>
+  <span class="grow"></span>
+  <button id="zout" title="Zoom out">−</button>
+  <button id="zin" title="Zoom in">+</button>
+  <button id="all" title="Show the whole mix">⤢ All</button>
+</div>
+<canvas id="cv"></canvas>
+<div class="hint" id="hint">Each part on its own lane, where it plays in the mix · drag a part's ▌ start or end ▐ handle to trim it
+(on its bar lines) · tap a lane to set where its ▶ plays from · ▶ Mix plays the preview · drag the ruler to scroll</div>
+
+<script>
+function post(type, extra) { window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra || {}), "*"); }
+function setHeight() { post("streamlit:setFrameHeight", {height: document.body.scrollHeight + 4}); }
+function sendValue(v) { post("streamlit:setComponentValue", {value: v, dataType: "json"}); }
+const $ = id => document.getElementById(id);
+const cv = $("cv");
+let D = null, view = {start: 0, span: 60}, drag = null, playing = null, cue = {M: 0}, edits = {};
+let audio = new Audio(); audio.preload = "auto";
+const LANE_H = 58, RULER = 22;
+
+function fmt(t) { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = t - m * 60; return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1); }
+function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+function clip(x, a, b) { return Math.max(a, Math.min(b, x)); }
+function nearest(arr, t) { let best = t, d = 1e9; for (const x of arr) { const e = Math.abs(x - t); if (e < d) { d = e; best = x; } } return best; }
+function fit(c) {
+  const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  if (c.width !== Math.round(r.width * d) || c.height !== Math.round(r.height * d)) { c.width = Math.round(r.width * d); c.height = Math.round(r.height * d); }
+  const g = c.getContext("2d"); g.setTransform(d, 0, 0, d, 0, 0); return [g, r.width, r.height];
+}
+function P(i) { const L = D.lanes[i], e = edits[L.uid]; return e ? Object.assign({}, L, e) : L; }   // with a drag applied
+// a part's source second ↔ mix time (its source starts at out_start; stretched by speed)
+function toMix(L, src) { return L.out_start + (src - L.start) / L.speed; }
+function toSrc(L, x) { return L.start + (x - L.out_start) * L.speed; }
+
+function drawLane(g, w, X, L, y, h) {
+  const t0 = view.start, t1 = view.start + view.span, mid = y + h / 2, amp = h / 2 - 3, trk = L.trk;
+  const play0 = L.out_start - (L.head || 0), play1 = L.out_end + (L.tail || 0);
+  for (let px = 0; px < w; px++) {
+    const xa = t0 + (t1 - t0) * px / w, xb = t0 + (t1 - t0) * (px + 1) / w;
+    const sa = toSrc(L, xa), sb = toSrc(L, xb);
+    if (sb < 0 || sa > trk.duration) continue;
+    let e = 0, v = 0, k = 0;
+    for (let i = Math.floor(Math.min(sa, sb) * trk.rate); i <= Math.floor(Math.max(sa, sb) * trk.rate); i++) {
+      e = Math.max(e, trk.env[i] || 0); v = Math.max(v, trk.vox ? (trk.vox[i] || 0) : 0); k = Math.max(k, trk.drums ? (trk.drums[i] || 0) : 0); }
+    const inPart = xa >= L.out_start - 1e-3 && xa <= L.out_end + 1e-3, inJoin = !inPart && xa >= play0 && xa <= play1;
+    if (!inPart && !inJoin) { g.globalAlpha = 0.25; g.fillStyle = css("--dim"); g.fillRect(px, mid - e * amp, 1, 2 * e * amp); continue; }
+    g.globalAlpha = inJoin ? 0.55 : 1;
+    g.fillStyle = L.colour; g.fillRect(px, mid - e * amp, 1, 2 * e * amp);
+    if (v > 0.05) { g.fillStyle = css("--vox"); g.fillRect(px, mid - v * amp, 1, v * amp * 0.9); }
+    if (k > 0.05) { g.fillStyle = css("--drums"); g.fillRect(px, mid + (1 - k) * amp, 1, k * amp); }
+  }
+  g.globalAlpha = 1;
+  // handles
+  for (const [x, side] of [[L.out_start, "s"], [L.out_end, "e"]]) {
+    const xx = X(x); g.fillStyle = css("--fg"); g.globalAlpha = 0.85;
+    g.fillRect(side === "s" ? xx : xx - 6, y + 4, 6, h - 8); g.globalAlpha = 1; }
+  g.fillStyle = css("--fg"); g.font = "bold 12px sans-serif";
+  g.fillText(`${L.idx + 1}. ${L.label}  ${fmt(L.start)}–${fmt(L.end)}`, Math.max(4, X(L.out_start) + 8), y + 14);
+}
+
+function draw() {
+  if (!D) return;
+  const n = D.lanes.length;
+  cv.style.height = (RULER + n * (LANE_H + 6) + 6) + "px";
+  const [g, w, h] = fit(cv);
+  g.clearRect(0, 0, w, h);
+  const t0 = view.start, t1 = view.start + view.span, X = t => (t - t0) / (t1 - t0) * w, T = x => t0 + x / w * (t1 - t0);
+  g.fillStyle = css("--muted"); g.font = "11px sans-serif";
+  const step = view.span > 240 ? 60 : view.span > 120 ? 30 : view.span > 40 ? 10 : 5;
+  for (let t = Math.ceil(t0 / step) * step; t < t1; t += step) { const x = X(t); g.fillRect(x, RULER - 6, 1, 6); g.fillText(fmt(t).replace(".0", ""), x + 2, 11); }
+  for (const j of D.joins) { g.fillStyle = css("--join"); g.fillRect(X(j.at - j.pre), RULER, X(j.at + j.post) - X(j.at - j.pre), h - RULER); }
+  const geo = [];
+  for (let i = 0; i < n; i++) { const L = P(i), y = RULER + 4 + i * (LANE_H + 6); drawLane(g, w, X, L, y, LANE_H); geo.push({y, L}); }
+  // cursor / cue
+  const c = curX();
+  g.strokeStyle = css("--cursor"); g.lineWidth = 2;
+  if (c) { const [y0, y1] = c.lane === null ? [RULER, h] : [geo[c.lane].y, geo[c.lane].y + LANE_H];
+           g.beginPath(); g.moveTo(X(c.x), y0); g.lineTo(X(c.x), y1); g.stroke(); }
+  else { g.globalAlpha = 0.5; g.beginPath(); g.moveTo(X(cue.M), RULER); g.lineTo(X(cue.M), h); g.stroke(); g.globalAlpha = 1; }
+  cv._geo = {X, T, geo, w};
+}
+
+function curX() {
+  if (playing === "M") return {x: audio.currentTime, lane: null};
+  if (typeof playing === "number") { const L = D.lanes[playing]; return {x: toMix(L, audio.currentTime), lane: playing}; }
+  return null;
+}
+function stop() { audio.pause(); playing = null; }
+function play(which) {
+  const was = playing; stop();
+  if (was === which) { setButtons(); draw(); return; }
+  let url, from;
+  if (which === "M") { url = D.mix_url; from = cue.M; }
+  else { const L = D.lanes[which]; url = L.trk.url; from = cue[L.uid] ?? L.start; }
+  if (!url) return;
+  if (audio.dataset.src !== url) { audio.src = url; audio.dataset.src = url; }
+  const go = () => { try { audio.currentTime = Math.max(0, from); } catch (e) {}
+                     audio.play().then(() => { playing = which; setButtons(); }).catch(() => {}); };
+  if (audio.readyState >= 1) go(); else audio.addEventListener("loadedmetadata", go, {once: true});
+}
+audio.addEventListener("ended", () => { stop(); setButtons(); draw(); });
+audio.addEventListener("timeupdate", () => {           // a part plays only its own stretch
+  if (typeof playing === "number") { const L = D.lanes[playing]; if (audio.currentTime > L.end + 0.05) { stop(); setButtons(); draw(); } } });
+function setButtons() {
+  $("pm").disabled = !D.mix_url; $("pm").classList.toggle("on", playing === "M"); $("pm").textContent = playing === "M" ? "⏸ Mix" : "▶ Mix";
+  $("pm").title = D.mix_url ? "Play the previewed mix from where you last tapped" : "Press ▶️ Preview below first";
+  const box = $("parts"); box.innerHTML = "";
+  D.lanes.forEach((L, i) => { const b = document.createElement("button");
+    b.textContent = (playing === i ? "⏸ " : "▶ ") + (i + 1); b.disabled = !L.trk.url; b.title = `Play part ${i + 1} (${L.label}) on its own`;
+    b.style.borderColor = L.colour; if (playing === i) b.classList.add("on"); b.onclick = () => play(i); box.appendChild(b); box.appendChild(document.createTextNode(" ")); });
+}
+function updateTime() { const c = curX(); $("time").textContent = c ? fmt(c.x) : "from " + fmt(cue.M); }
+function loop() { if (playing !== null && D) { const c = curX(); if (c && c.x > view.start + view.span * 0.92) view.start = c.x - view.span * 0.1; draw(); }
+  updateTime(); requestAnimationFrame(loop); }
+$("zin").onclick = () => { const c = view.start + view.span / 2; view.span = Math.max(4, view.span / 1.6); view.start = c - view.span / 2; draw(); };
+$("zout").onclick = () => { const c = view.start + view.span / 2; view.span = Math.min(3600, view.span * 1.6); view.start = c - view.span / 2; draw(); };
+$("all").onclick = () => { view.start = 0; view.span = Math.max(D.duration, 4); draw(); };
+$("pm").onclick = () => play("M");
+
+function pos(ev) { const r = cv.getBoundingClientRect(); return {x: ev.clientX - r.left, y: ev.clientY - r.top}; }
+cv.addEventListener("pointerdown", ev => {
+  if (!D || !cv._geo) return;
+  const G = cv._geo, p = pos(ev); cv.setPointerCapture(ev.pointerId);
+  let kind = "pan", lane = null;
+  if (p.y >= RULER) {
+    lane = G.geo.findIndex(o => p.y >= o.y && p.y <= o.y + LANE_H);
+    if (lane >= 0) { const L = P(lane);
+      if (Math.abs(p.x - G.X(L.out_start)) < 18) kind = "s"; else if (Math.abs(p.x - G.X(L.out_end)) < 18) kind = "e"; else kind = "lane"; }
+    else lane = null;
+  }
+  drag = {kind, lane, x0: p.x, moved: false, v0: view.start};
+});
+cv.addEventListener("pointermove", ev => {
+  if (!drag) return;
+  const p = pos(ev), dx = p.x - drag.x0, dt = dx / cv.getBoundingClientRect().width * view.span;
+  if (Math.abs(dx) > 6) drag.moved = true;
+  if (!drag.moved) return;
+  if (drag.kind === "pan" || drag.kind === "lane") view.start = drag.v0 - dt;
+  else {
+    const L = D.lanes[drag.lane], bars = L.trk.bars.concat([0, L.trk.duration]);
+    if (drag.kind === "s") { const s = nearest(bars, clip(L.start + dt * L.speed, 0, L.end - 1));
+      edits[L.uid] = {start: s, out_start: L.out_start + 0 }; }          // start moves under a fixed position
+    else { const e = nearest(bars, clip(L.end + dt * L.speed, L.start + 1, L.trk.duration));
+      edits[L.uid] = {end: e, out_end: L.out_start + (e - L.start) / L.speed}; }
+  }
+  draw();
+});
+cv.addEventListener("pointerup", ev => {
+  if (!drag) return;
+  const G = cv._geo, p = pos(ev);
+  if (!drag.moved) {
+    const x = G.T(p.x); cue.M = x;
+    if (drag.lane !== null) { const L = D.lanes[drag.lane]; cue[L.uid] = clip(toSrc(L, x), L.start, L.end); }
+    if (playing !== null) play(playing === "M" ? "M" : drag.lane ?? "M");
+    draw();
+  } else if ((drag.kind === "s" || drag.kind === "e") && edits[D.lanes[drag.lane].uid]) {
+    const L = D.lanes[drag.lane], e = edits[L.uid];
+    sendValue({uid: L.uid, start: e.start ?? L.start, end: e.end ?? L.end, nonce: Date.now()});
+  }
+  drag = null;
+});
+
+function applyTheme(th) {
+  if (!th) return; const r = document.documentElement.style;
+  if (th.base === "dark") { r.setProperty("--panel", "#1f2129"); r.setProperty("--line", "#3a3d47"); r.setProperty("--muted", "#9aa0aa");
+                            r.setProperty("--join", "rgba(160,120,255,0.18)"); }
+  if (th.textColor) r.setProperty("--fg", th.textColor);
+  if (th.primaryColor) { r.setProperty("--accent", th.primaryColor); r.setProperty("--cursor", th.primaryColor); }
+}
+window.addEventListener("message", ev => {
+  const d = ev.data; if (!d || d.type !== "streamlit:render") return;
+  applyTheme(d.theme);
+  const first = !D, lenChanged = D && Math.abs(D.duration - d.args.duration) > 0.5;
+  D = d.args; edits = {};
+  if (first) { view.start = 0; view.span = Math.max(D.duration, 4); }
+  else if (lenChanged) view.span = Math.max(view.span, 4);
+  if (playing === "M" && !D.mix_url) stop();
+  setButtons(); draw(); setHeight();
+});
+window.addEventListener("resize", () => { draw(); setHeight(); });
+post("streamlit:componentReady", {apiVersion: 1});
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
