@@ -1014,6 +1014,31 @@ def _open_join_in_transition(a: dict, b: dict) -> None:
     st.session_state["mx_mode"] = TRANSITION
 
 
+def _tx_live(a: str, b: str, ta: dict, tb: dict, s: dict):
+    """⚡ The live preview's stems for this transition (prepared when they don't cover it yet), as URLs —
+    or None (audio not on the server yet / couldn't prepare)."""
+    import live_preview as LP
+    import mixer
+    from cut_editor import media_url
+    have = st.session_state.get("mxt_live")
+    if not LP.still_fits(have, a, b, ta, tb, s):
+        need = LP.needed_files(ta, tb)
+        if any(not mixer.local_path(t, part).exists() for t in (ta, tb) for part in need[t.get("track_id")]):
+            return None
+        with st.spinner("⚡ Getting the live preview ready (tempo-matching the stems)…"):
+            try:
+                have = LP.prepare(a, b, ta, tb, s, have=have)
+            except Exception as e:
+                st.caption(f":orange[⚡ Live preview unavailable: {e}]")
+                return None
+        st.session_state["mxt_live"] = have
+    out = {"mode": have["mode"], "speed_b": have["speed_b"]}
+    for d in ("a", "b"):
+        out[d] = {"w": have[d]["w"], "gain_db": have[d]["gain_db"],
+                  "urls": {p: media_url(Path(f), "audio/flac", f"mxt_live_{d}_{p}") for p, f in have[d]["files"].items()}}
+    return out
+
+
 def _transition(summaries: dict) -> None:
     import mixer
     from cut_editor import media_url
@@ -1083,11 +1108,11 @@ def _transition(summaries: dict) -> None:
     pv = st.session_state.get("mxt_pv")
     rec_short = _tx_recipe(a, b, ta, tb, s, short=True)
     pv_ok = pv and pv.get("sig") == json.dumps(rec_short, sort_keys=True) and Path(pv["path"]).exists()
-    preview = {"url": media_url(Path(pv["path"]), "audio/mpeg" if pv["path"].endswith(".mp3") else "audio/mp4",
-                                "mxt_pv_audio"), "out_start": rec_short["pieces"][0]["start"]} if pv_ok else None
+    s.setdefault("profile", st.session_state.get("mxt_profile") or "smooth")
+    live = _tx_live(a, b, ta, tb, s)
     val = DE.deck_editor(a=DE.lane_data(ta, a, ga, urls[a]), b=DE.lane_data(tb, b, gb, urls[b]), state=s,
-                         bar_a=ga["bar_len"], bar_b=gb["bar_len"], speed_b=speed_b, preview=preview,
-                         state_key=f"{a}|{b}|{s.get('from')}", key="mxt_deck")
+                         bar_a=ga["bar_len"], bar_b=gb["bar_len"], speed_b=speed_b, live=live,
+                         beats_per_bar=int(ga["beats_per_bar"]), state_key=f"{a}|{b}|{s.get('from')}", key="mxt_deck")
     if isinstance(val, dict) and val.get("nonce") and val["nonce"] != st.session_state.get("_mxt_nonce"):
         st.session_state["_mxt_nonce"] = val["nonce"]
         s.update(a_end=float(val["a_end"]), b_full=float(val["b_full"]), bars=int(val["bars"]),
@@ -1116,8 +1141,9 @@ def _transition(summaries: dict) -> None:
     tracks_full = {a: ta, b: tb}
     with pc[2]:
         ready = _audio_ready(mixer.parts_needed(rec_short, tracks_full), "mxt")
-    if ready and st.button("▶️ Preview the transition", key="mxt_preview", type="primary",
-                           help="Renders just the transition (8 bars either side) — then ▶ Mix plays it with the cursor."):
+    if ready and st.button("🎧 Render it exactly", key="mxt_preview",
+                           help="▶ Live mix above is the quick way to listen. This renders the transition (8 bars "
+                                "either side) exactly as a saved mix will sound — studio-quality tempo matching."):
         out = mixer.preview_path(rec_short)
         with st.spinner("Mixing the transition…"):
             try:
@@ -1128,9 +1154,9 @@ def _transition(summaries: dict) -> None:
         st.session_state["mxt_pv"] = {"path": str(out), "sig": json.dumps(rec_short, sort_keys=True)}
         st.rerun()
     if pv_ok:
-        st.caption("✅ Preview ready — press **▶ Mix** in the editor.")
+        st.audio(str(pv["path"]))
     elif pv:
-        st.caption("The preview is out of date — press ▶️ Preview again.")
+        st.caption("The exact render is out of date — render it again to hear the changes.")
 
     # Where it goes next
     st.divider()

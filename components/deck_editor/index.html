@@ -6,7 +6,8 @@
 <style>
   :root { --bg:#ffffff; --fg:#262730; --muted:#8a8f98; --line:#d9dce1; --accent:#ff4b4b; --panel:#f3f4f7;
           --wave:rgba(70,110,200,0.55); --vox:rgba(230,80,160,0.75); --drums:rgba(240,140,40,0.85);
-          --blend:rgba(128,90,220,0.16); --dim:rgba(120,120,120,0.55); --cursor:#ff4b4b; }
+          --blend:rgba(128,90,220,0.16); --dim:rgba(120,120,120,0.55); --cursor:#ff4b4b;
+          --curveA:#ffb000; --curveB:#21c7a8; }
   html, body { margin:0; padding:0; background:transparent; color:var(--fg);
                font-family: "Source Sans Pro", -apple-system, system-ui, sans-serif; font-size:15px;
                -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color: transparent; }
@@ -19,25 +20,26 @@
   .time { font-variant-numeric: tabular-nums; min-width:110px; text-align:center; font-weight:600; }
   .grow { flex:1; }
   canvas { display:block; width:100%; touch-action:none; border-radius:8px; background:var(--panel); }
-  #deck { height:250px; }
+  #deck { height:270px; }
   .hint { color:var(--muted); font-size:13px; margin-top:4px; min-height:18px; }
   .key span { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 3px 0 10px; vertical-align:middle; }
 </style>
 </head>
 <body>
 <div class="bar">
-  <button id="pa" title="Play track A from where you last tapped its lane">▶ A</button>
-  <button id="pb" title="Play track B from where you last tapped its lane">▶ B</button>
-  <button id="pm" title="Play the rendered transition (press ▶️ Preview below first)">▶ Mix</button>
+  <button id="pm" title="Play the transition live, from where you last tapped (changes are heard straight away)">▶ Live mix</button>
+  <button id="pa" title="Play track A on its own from where you last tapped its lane">▶ A</button>
+  <button id="pb" title="Play track B on its own from where you last tapped its lane">▶ B</button>
   <span class="time" id="time">—</span>
   <span class="grow"></span>
+  <button id="rc" title="Put both curves back to the profile's own">↺ Curves</button>
   <button id="zout" title="Zoom out">−</button>
   <button id="zin" title="Zoom in">+</button>
   <button id="fitb" title="Show the blend">⤢ Blend</button>
 </div>
 <canvas id="deck"></canvas>
 <div class="hint" id="hint"></div>
-<div class="hint key"><span style="background:var(--wave)"></span>level<span style="background:var(--vox)"></span>vocals<span style="background:var(--drums)"></span>drums<span style="background:var(--blend)"></span>the blend</div>
+<div class="hint key"><span style="background:var(--wave)"></span>level<span style="background:var(--vox)"></span>vocals<span style="background:var(--drums)"></span>drums<span style="background:var(--blend)"></span>the blend<span style="background:var(--curveA)"></span>A fades out<span style="background:var(--curveB)"></span>B comes in</div>
 
 <script>
 function post(type, extra) { window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra || {}), "*"); }
@@ -45,33 +47,87 @@ function setHeight() { post("streamlit:setFrameHeight", {height: document.body.s
 function sendValue(v) { post("streamlit:setComponentValue", {value: v, dataType: "json"}); }
 const $ = id => document.getElementById(id);
 const deck = $("deck");
-const HINT = "Drag lane B to choose where it comes in · drag the ◆ mix point to where A hands over · drag the blend's " +
-             "left edge for 1 – 16 bars · tap a lane to set where ▶ A / ▶ B play from · drag the ruler to scroll";
+const HINT = "Drag lane B to where it comes in · the ◆ mix point to where A hands over · the blend's left edge for " +
+             "1 – 16 bars · the ● handles to shape each fade (sideways: earlier / later, up / down: sudden / gentle) · " +
+             "tap to set where ▶ plays from · drag the ruler to scroll";
 
-let D = null, S = null;             // args, editable state {a_end, b_full, bars}
+let D = null, S = null;             // args, editable state {a_end, b_full, bars, profile, curves}
 let view = {start: 0, span: 60};
 let audio = new Audio(); audio.preload = "auto";
-let playing = null;                 // "A" | "B" | "M"
-let cue = {A: 0, B: 0, M: 0};       // M: where ▶ Mix plays from (mix time, A's clock)
+let playing = null;                 // "A" | "B" (an <audio>) or "L" (the live mix, Web Audio)
+let cue = {A: 0, B: 0, M: 0};       // M: where ▶ Live mix plays from (mix time, A's clock)
 let drag = null;
 
 function fmt(t) { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = t - m * 60; return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1); }
 function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
 function nearest(arr, t) { let best = null, d = 1e9; for (const x of arr) { const e = Math.abs(x - t); if (e < d) { d = e; best = x; } } return best; }
+function clip(x, a, b) { return Math.max(a, Math.min(b, x)); }
 function fit(c) {
   const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
   if (c.width !== Math.round(r.width * d) || c.height !== Math.round(r.height * d)) { c.width = Math.round(r.width * d); c.height = Math.round(r.height * d); }
   const g = c.getContext("2d"); g.setTransform(d, 0, 0, d, 0, 0); return [g, r.width, r.height];
 }
-// The axis is mix time on A's clock: A's own seconds; B's second tb sits at out(tb).
+// The axis is mix time on A's clock: A's own seconds; B's second tb sits at outB(tb).
 function outB(tb) { return S.a_end + (tb - S.b_full) / D.speed_b; }
 function inB(x) { return S.b_full + (x - S.a_end) * D.speed_b; }
 function blendStart() { return S.a_end - S.bars * D.bar_a; }
 function bIn() { return S.b_full - S.bars * D.bar_b; }
 function fitBlend() { const pad = 6 * D.bar_a; view.start = blendStart() - pad; view.span = (S.a_end - blendStart()) + 2 * pad + 4 * D.bar_a; }
 
+// ---------------------------------------------------------------------------------------------
+// The stem curves — the same as core/stem_mix.py (stem_gains, warp, bass_swap)
+// ---------------------------------------------------------------------------------------------
+const TIMING = {
+  smooth:      {vocals: [0, 1], drums: [0, 1], bass: [0, 1], other: [0, 1]},
+  vocal_swap:  {vocals: [0, 1], drums: [0, 1], bass: [0, 1], other: [0, 1]},
+  drums_first: {vocals: [0.4, 1], drums: [0, 0.5], bass: [0, 0.5], other: [0.25, 1]},
+  bass_drop:   {vocals: [0, 0.85], drums: [0.92, 1], bass: [1, 1], other: [0.88, 1]},
+};
+const STEMS = ["vocals", "drums", "bass", "other"];
+function win(t, w) { return clip((t - w[0]) / Math.max(w[1] - w[0], 1e-9), 0, 1); }
+function sigmoidSwap(t, k) { k = k || 18; const s = 1 / (1 + Math.exp(-k * (t - 0.5))), lo = 1 / (1 + Math.exp(k * 0.5)), hi = 1 / (1 + Math.exp(-k * 0.5)); return (s - lo) / (hi - lo); }
+function bassSwap(t, w, totalBeats) {
+  let centre = (w[1] - w[0] < 1e-9) ? 1 : (w[0] + w[1]) / 2, width = 0.01;
+  if (totalBeats > 0) { centre = Math.round(centre * totalBeats) / totalBeats; width = 0.25 / totalBeats; }
+  const lo = centre >= 1 - 1e-9 ? Math.min(centre, 1 - width) : centre - width / 2;
+  return clip((t - lo) / width, 0, 1);
+}
+function warp(t, mid, steep) {
+  t = clip(t, 0, 1); let u = t < mid ? 0.5 * t / mid : 0.5 + 0.5 * (t - mid) / (1 - mid);
+  if (Math.abs(steep - 1) < 1e-9) return u;
+  const d = 2 * u - 1; return 0.5 + 0.5 * Math.sign(d) * Math.pow(Math.abs(d), 1 / steep);
+}
+function baseGains(t, profile, totalBeats) {
+  const tm = TIMING[profile] || TIMING.smooth;
+  const tv = win(t, tm.vocals), td = win(t, tm.drums), to = win(t, tm.other);
+  const smooth = profile === "smooth";
+  const vIn = smooth ? Math.sin(Math.PI / 2 * tv) : sigmoidSwap(tv), vOut = smooth ? Math.cos(Math.PI / 2 * tv) : 1 - vIn;
+  const bIn = bassSwap(t, tm.bass, totalBeats);
+  return {vocals: [vOut, vIn], drums: [Math.pow(1 - td, 2), td], bass: [1 - bIn, bIn],
+          other: [Math.cos(Math.PI / 2 * to), Math.sin(Math.PI / 2 * to)]};
+}
+function curvesOf() {
+  const c = (S && S.curves) || {};
+  const one = s => ({mid: clip(+((c[s] || {}).mid ?? 0.5), 0.05, 0.95), steep: clip(+((c[s] || {}).steep ?? 1), 0.25, 4)});
+  return {out: one("out"), in: one("in")};
+}
+function stemGains(t, profile, totalBeats) {
+  const c = curvesOf();
+  const go = baseGains(warp(t, c.out.mid, c.out.steep), profile, totalBeats), gi = baseGains(warp(t, c.in.mid, c.in.steep), profile, totalBeats);
+  const out = {}; for (const s of STEMS) out[s] = [go[s][0], gi[s][1]]; return out;
+}
+window.__stemGains = (t, profile, tb, curves) => { const keep = S; S = Object.assign({}, S || {}, {curves}); const r = stemGains(t, profile, tb); S = keep; return r; };
+function gainsAt(x) {
+  const b0 = blendStart(), t = (x - b0) / Math.max(S.a_end - b0, 1e-6);
+  const g = {}; if (t <= 0) { for (const s of STEMS) g[s] = [1, 0]; return g; }
+  if (t >= 1) { for (const s of STEMS) g[s] = [0, 1]; return g; }
+  return stemGains(t, S.profile || "smooth", S.bars * (D.bpb || 4));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------------------------
 function lane(g, w, X, y, h, trk, toLane, from, keep0, keep1) {
-  // waveform of one track over the view: level (mirrored), vocals on top, drums at the bottom
   const t0 = view.start, t1 = view.start + view.span, mid = y + h / 2, amp = h / 2 - 3;
   const rate = trk.rate, env = trk.env, vox = trk.vox, drums = trk.drums;
   for (let px = 0; px < w; px++) {
@@ -82,17 +138,22 @@ function lane(g, w, X, y, h, trk, toLane, from, keep0, keep1) {
     for (let i = Math.floor(Math.min(ta, tb) * rate); i <= Math.floor(Math.max(ta, tb) * rate); i++) {
       e = Math.max(e, env[i] || 0); v = Math.max(v, vox ? (vox[i] || 0) : 0); k = Math.max(k, drums ? (drums[i] || 0) : 0); }
     const kept = ta >= keep0 - 1e-3 && ta <= keep1 + 1e-3;
-    if (!kept) {                        // not played in the mix: plain grey, faint
-      g.globalAlpha = 0.35; g.fillStyle = css("--dim"); g.fillRect(px, mid - e * amp, 1, 2 * e * amp); continue; }
+    if (!kept) { g.globalAlpha = 0.35; g.fillStyle = css("--dim"); g.fillRect(px, mid - e * amp, 1, 2 * e * amp); continue; }
     g.globalAlpha = 1;
     g.fillStyle = css("--wave"); g.fillRect(px, mid - e * amp, 1, 2 * e * amp);
     if (v > 0.05) { g.fillStyle = css("--vox"); g.fillRect(px, mid - v * amp, 1, v * amp * 0.9); }
     if (k > 0.05) { g.fillStyle = css("--drums"); g.fillRect(px, mid + (1 - k) * amp, 1, k * amp); }
   }
   g.globalAlpha = 1;
-  // bar lines (this lane's own)
   g.strokeStyle = css("--line"); g.lineWidth = 1;
   if (view.span < 160) for (const b of trk.bars) { const x = X(from(b)); if (x >= 0 && x <= w) { g.beginPath(); g.moveTo(x, y); g.lineTo(x, y + h); g.stroke(); } }
+}
+
+function curveHandle(side, X, top, H) {
+  // the handle sits on the 'other' stem's curve at the side's half-way point
+  const c = curvesOf()[side], b0 = blendStart(), len = S.a_end - b0;
+  const x = b0 + c.mid * len, gg = stemGains(c.mid, S.profile || "smooth", S.bars * (D.bpb || 4)).other[side === "out" ? 0 : 1];
+  return {x: X(x), y: top + (1 - gg) * H};
 }
 
 function draw() {
@@ -101,18 +162,29 @@ function draw() {
   g.clearRect(0, 0, w, h);
   const t0 = view.start, t1 = view.start + view.span, X = t => (t - t0) / (t1 - t0) * w, T = x => t0 + x / w * (t1 - t0);
   const ruler = 22, gap = 8, laneH = (h - ruler - gap - 18) / 2, yA = ruler, yB = ruler + laneH + gap;
-  // ruler
   g.fillStyle = css("--muted"); g.font = "11px sans-serif";
   const step = view.span > 120 ? 30 : view.span > 40 ? 10 : view.span > 15 ? 5 : 1;
   for (let t = Math.ceil(t0 / step) * step; t < t1; t += step) { const x = X(t); g.fillRect(x, ruler - 6, 1, 6); g.fillText(fmt(t).replace(".0", ""), x + 2, 11); }
-  // blend
+  // the live window (what's prepared for ▶ Live mix)
+  if (D.live && D.live.a) { const lw0 = Math.max(D.live.a.w[0], outB(D.live.b.w[0])), lw1 = Math.min(D.live.a.w[1], outB(D.live.b.w[1]));
+    g.fillStyle = css("--line"); g.fillRect(X(lw0), ruler - 3, X(lw1) - X(lw0), 3); }
   const xb0 = X(blendStart()), xb1 = X(S.a_end);
   g.fillStyle = css("--blend"); g.fillRect(xb0, yA, xb1 - xb0, yB + laneH - yA);
-  // lanes
   lane(g, w, X, yA, laneH, D.a, x => x, t => t, 0, S.a_end);
   lane(g, w, X, yB, laneH, D.b, inB, outB, bIn(), D.b.duration);
   g.fillStyle = css("--fg"); g.font = "bold 12px sans-serif";
   g.fillText("A  " + D.a.label, 6, yA + 14); g.fillText("B  " + D.b.label, 6, yB + 14);
+  // the fade curves over the blend (the 'other' stem — the overall level), with their handles
+  const top = yA + 6, H = yB + laneH - 12 - top, prof = S.profile || "smooth", tb = S.bars * (D.bpb || 4);
+  for (const [side, col] of [["out", "--curveA"], ["in", "--curveB"]]) {
+    g.strokeStyle = css(col); g.lineWidth = 2.5; g.beginPath();
+    for (let i = 0; i <= 80; i++) { const tt = i / 80, gg = stemGains(tt, prof, tb).other[side === "out" ? 0 : 1];
+      const x = xb0 + (xb1 - xb0) * tt, y = top + (1 - gg) * H; if (i) g.lineTo(x, y); else g.moveTo(x, y); }
+    g.stroke();
+    const hd = curveHandle(side, X, top, H);
+    g.fillStyle = css(col); g.beginPath(); g.arc(hd.x, hd.y, 9, 0, 2 * Math.PI); g.fill();
+    g.strokeStyle = css("--panel"); g.lineWidth = 2; g.stroke();
+  }
   // mix point ◆ and blend edge
   g.strokeStyle = css("--accent"); g.lineWidth = 2;
   g.beginPath(); g.moveTo(xb1, ruler); g.lineTo(xb1, yB + laneH); g.stroke();
@@ -120,93 +192,165 @@ function draw() {
   g.strokeStyle = css("--muted"); g.setLineDash([4, 3]);
   g.beginPath(); g.moveTo(xb0, ruler); g.lineTo(xb0, yB + laneH); g.stroke(); g.setLineDash([]);
   g.fillStyle = css("--muted"); g.fillRect(xb0 - 3, yA + laneH / 2 - 14, 6, 28);
-  // labels under the lanes
   g.fillStyle = css("--fg"); g.font = "12px sans-serif";
-  const lbl = `blend ${S.bars} bars · A hands over at ${fmt(S.a_end)} · B in from ${fmt(bIn())}, fully in at ${fmt(S.b_full)}`;
-  g.fillText(lbl, 6, h - 4);
-  // cursor
-  let c = null;
-  if (playing === "A") c = {x: X(audio.currentTime), y0: yA, y1: yA + laneH};
-  else if (playing === "B") c = {x: X(outB(audio.currentTime)), y0: yB, y1: yB + laneH};
-  else if (playing === "M" && D.preview) c = {x: X(D.preview.out_start + audio.currentTime), y0: yA, y1: yB + laneH};
-  else { c = {x: X(cue.A), y0: yA, y1: yA + laneH, idle: true}; }
-  if (c) { g.strokeStyle = css("--cursor"); g.globalAlpha = c.idle ? 0.45 : 1; g.lineWidth = 2;
-           g.beginPath(); g.moveTo(c.x, c.y0); g.lineTo(c.x, c.y1); g.stroke();
-           { const xbq = X(outB(cue.B)); g.globalAlpha = playing === "B" ? 0 : 0.45; g.beginPath(); g.moveTo(xbq, yB); g.lineTo(xbq, yB + laneH); g.stroke(); }
-           g.globalAlpha = 1; }
-  deck._geo = {ruler, yA, yB, laneH, X, T, xb0, xb1};
+  g.fillText(`blend ${S.bars} bar${S.bars === 1 ? "" : "s"} · A hands over at ${fmt(S.a_end)} · B in from ${fmt(bIn())}, fully in at ${fmt(S.b_full)}`, 6, h - 4);
+  // cursors
+  const cx = curX();
+  g.strokeStyle = css("--cursor"); g.lineWidth = 2;
+  if (cx !== null) { g.globalAlpha = 1; const [y0, y1] = playing === "A" ? [yA, yA + laneH] : playing === "B" ? [yB, yB + laneH] : [yA, yB + laneH];
+    g.beginPath(); g.moveTo(X(cx), y0); g.lineTo(X(cx), y1); g.stroke(); }
+  else { g.globalAlpha = 0.5; g.beginPath(); g.moveTo(X(cue.M), yA); g.lineTo(X(cue.M), yB + laneH); g.stroke(); }
+  g.globalAlpha = 1;
+  deck._geo = {ruler, yA, yB, laneH, X, T, xb0, xb1, top, H};
 }
 
-function updateTime() {
-  if (!playing) { $("time").textContent = "A " + fmt(cue.A) + " · B " + fmt(cue.B); return; }
-  $("time").textContent = (playing === "M" ? "Mix " : playing + " ") + fmt(audio.currentTime);
+// ---------------------------------------------------------------------------------------------
+// Playback: ▶ A / ▶ B (the songs themselves), ▶ Live mix (Web Audio, the prepared stems)
+// ---------------------------------------------------------------------------------------------
+let ctx = null, bufs = {}, liveNodes = [], liveT = null, loading = false;
+function curX() {
+  if (playing === "A") return audio.currentTime;
+  if (playing === "B") return outB(audio.currentTime);
+  if (playing === "L" && liveT) return liveT.x0 + (ctx.currentTime - liveT.c0);
+  return null;
 }
-function loop() { if (playing && D) {
-    // keep the cursor in view
-    const g = deck._geo; if (g) { let x = playing === "A" ? audio.currentTime : playing === "B" ? outB(audio.currentTime)
-                                         : (D.preview ? D.preview.out_start + audio.currentTime : 0);
-      if (x > view.start + view.span * 0.92) view.start = x - view.span * 0.1; }
-    draw(); }
-  updateTime(); requestAnimationFrame(loop); }
-
-function play(which) {
-  if (playing === which) { audio.pause(); playing = null; setButtons(); draw(); return; }
-  const url = which === "A" ? D.a.url : which === "B" ? D.b.url : (D.preview ? D.preview.url : "");
-  if (!url) return;
+function stopAll() {
   audio.pause();
+  for (const n of liveNodes) { try { n.stop(); } catch (e) {} }
+  liveNodes = []; liveT = null; playing = null;
+}
+function playSong(which) {
+  const was = playing; stopAll();
+  if (was === which) { setButtons(); draw(); return; }
+  const url = which === "A" ? D.a.url : D.b.url; if (!url) return;
   if (audio.dataset.src !== url) { audio.src = url; audio.dataset.src = url; }
-  const from = which === "M" ? Math.max(0, cue.M - (D.preview ? D.preview.out_start : 0)) : cue[which];
+  const from = cue[which];
   const go = () => { try { audio.currentTime = from; } catch (e) {}
                      audio.play().then(() => { playing = which; setButtons(); }).catch(() => {}); };
   if (audio.readyState >= 1) go(); else audio.addEventListener("loadedmetadata", go, {once: true});
 }
-audio.addEventListener("ended", () => { playing = null; setButtons(); draw(); });
-function setButtons() {
-  for (const [id, w] of [["pa", "A"], ["pb", "B"], ["pm", "M"]]) { $(id).classList.toggle("on", playing === w);
-    $(id).textContent = (playing === w ? "⏸ " : "▶ ") + (w === "M" ? "Mix" : w); }
-  $("pa").disabled = !D.a.url; $("pb").disabled = !D.b.url; $("pm").disabled = !(D.preview && D.preview.url);
+audio.addEventListener("ended", () => { if (playing !== "L") { playing = null; setButtons(); draw(); } });
+
+async function loadBuf(url) {
+  if (!bufs[url]) bufs[url] = fetch(url).then(r => r.arrayBuffer()).then(b => new Promise((ok, bad) => ctx.decodeAudioData(b, ok, bad)));
+  return bufs[url];
 }
-$("pa").onclick = () => play("A"); $("pb").onclick = () => play("B"); $("pm").onclick = () => play("M");
+function softKneeCurve() {          // the same as core/stem_mix.soft_knee: flat to 0.8, then tanh towards 1
+  const n = 4096, k = 0.8, room = 0.2, c = new Float32Array(n);
+  for (let i = 0; i < n; i++) { const x = (i / (n - 1)) * 4 - 2, m = Math.abs(x);
+    c[i] = m <= k ? x : Math.sign(x) * (k + room * Math.tanh((m - k) / room)) ; }
+  return c;
+}
+async function playLive(fromX) {
+  stopAll();
+  const L = D.live; if (!L || !L.a) return;
+  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === "suspended") await ctx.resume();
+  loading = true; setButtons(); updateTime();
+  const parts = Object.keys(L.a.urls);
+  let decoded;
+  try { decoded = await Promise.all(parts.flatMap(p => [loadBuf(L.a.urls[p]), loadBuf(L.b.urls[p])])); }
+  catch (e) { loading = false; $("hint").textContent = "Couldn't load the live preview: " + e; setButtons(); return; }
+  loading = false;
+  const x0 = fromX, end = Math.min(L.a.w[1], outB(L.b.w[1])), dur = end - x0;
+  if (dur <= 0.2) { setButtons(); return; }
+  const pre = ctx.createGain(), shaper = ctx.createWaveShaper();
+  pre.gain.value = 0.5; shaper.curve = softKneeCurve(); shaper.oversample = "2x";
+  pre.connect(shaper); shaper.connect(ctx.destination);
+  const now = ctx.currentTime + 0.08, rate = 100, n = Math.max(2, Math.ceil(dur * rate));
+  const ga = Math.pow(10, (L.a.gain_db || 0) / 20), gb = Math.pow(10, (L.b.gain_db || 0) / 20);
+  const curves = {}; for (const p of parts) curves[p] = [new Float32Array(n), new Float32Array(n)];
+  for (let i = 0; i < n; i++) { const g = gainsAt(x0 + i / rate);
+    for (const p of parts) { const s = p === "full" ? "other" : p; curves[p][0][i] = g[s][0] * ga; curves[p][1][i] = g[s][1] * gb; } }
+  parts.forEach((p, k) => {
+    for (const [side, deck, buf] of [[0, "a", decoded[2 * k]], [1, "b", decoded[2 * k + 1]]]) {
+      const src = ctx.createBufferSource(), gn = ctx.createGain();
+      src.buffer = buf; src.connect(gn); gn.connect(pre);
+      gn.gain.setValueAtTime(curves[p][side][0], now); gn.gain.setValueCurveAtTime(curves[p][side], now, dur);
+      // where in the buffer mix time x0 is (A's buffer is on A's clock; B's is stretched to it)
+      const off = deck === "a" ? x0 - L.a.w[0] : (inB(x0) - L.b.w[0]) / D.speed_b;
+      if (off >= 0) src.start(now, off, Math.max(0.01, dur)); else src.start(now - off, 0, Math.max(0.01, dur + off));
+      liveNodes.push(src);
+    }
+  });
+  liveT = {x0, c0: now}; playing = "L"; setButtons();
+  setTimeout(() => { if (playing === "L" && liveT && liveT.c0 === now) { stopAll(); setButtons(); draw(); } }, (dur + 0.2) * 1000);
+}
+function restartLiveIfPlaying() { if (playing === "L") { const x = curX(); playLive(x); } }
+
+function updateTime() {
+  if (loading) { $("time").textContent = "Loading…"; return; }
+  if (!playing) { $("time").textContent = "from " + fmt(cue.M); return; }
+  $("time").textContent = (playing === "L" ? "Mix " : playing + " ") + fmt(curX());
+}
+function loop() { if (playing && D) {
+    const x = curX(); if (x !== null && x > view.start + view.span * 0.92) view.start = x - view.span * 0.1;
+    draw(); }
+  updateTime(); requestAnimationFrame(loop); }
+function setButtons() {
+  const live = D && D.live && D.live.a;
+  $("pm").classList.toggle("on", playing === "L"); $("pm").textContent = playing === "L" ? "⏸ Live mix" : "▶ Live mix";
+  $("pa").classList.toggle("on", playing === "A"); $("pa").textContent = playing === "A" ? "⏸ A" : "▶ A";
+  $("pb").classList.toggle("on", playing === "B"); $("pb").textContent = playing === "B" ? "⏸ B" : "▶ B";
+  $("pa").disabled = !D.a.url; $("pb").disabled = !D.b.url; $("pm").disabled = !live || loading;
+  $("pm").title = live ? "Play the transition live, from where you last tapped" : "Getting the live preview ready…";
+}
+$("pm").onclick = () => { if (playing === "L") { stopAll(); setButtons(); draw(); } else playLive(cue.M); };
+$("pa").onclick = () => playSong("A"); $("pb").onclick = () => playSong("B");
 $("zin").onclick = () => { const c = view.start + view.span / 2; view.span = Math.max(4, view.span / 1.6); view.start = c - view.span / 2; draw(); };
 $("zout").onclick = () => { const c = view.start + view.span / 2; view.span = Math.min(900, view.span * 1.6); view.start = c - view.span / 2; draw(); };
 $("fitb").onclick = () => { fitBlend(); draw(); };
+$("rc").onclick = () => { S.curves = null; draw(); send(); restartLiveIfPlaying(); };
+function send() { sendValue({a_end: S.a_end, b_full: S.b_full, bars: S.bars, curves: S.curves || null, nonce: Date.now()}); }
 
+// ---------------------------------------------------------------------------------------------
+// Dragging and tapping
+// ---------------------------------------------------------------------------------------------
 function pos(ev) { const r = deck.getBoundingClientRect(); return {x: ev.clientX - r.left, y: ev.clientY - r.top}; }
 deck.addEventListener("pointerdown", ev => {
   if (!D || !deck._geo) return;
   const g = deck._geo, p = pos(ev); deck.setPointerCapture(ev.pointerId);
+  const ha = curveHandle("out", g.X, g.top, g.H), hb = curveHandle("in", g.X, g.top, g.H);
   let kind;
   if (p.y < g.ruler) kind = "pan";
+  else if (Math.hypot(p.x - ha.x, p.y - ha.y) < 20) kind = "curve_out";
+  else if (Math.hypot(p.x - hb.x, p.y - hb.y) < 20) kind = "curve_in";
   else if (Math.abs(p.x - g.xb1) < 16) kind = "mix";
   else if (Math.abs(p.x - g.xb0) < 16) kind = "edge";
   else if (p.y >= g.yB) kind = "laneB";
   else kind = "laneA";
-  drag = {kind, x0: p.x, moved: false, s0: Object.assign({}, S), v0: view.start};
+  drag = {kind, x0: p.x, y0: p.y, moved: false, s0: JSON.parse(JSON.stringify(S)), v0: view.start};
 });
 deck.addEventListener("pointermove", ev => {
   if (!drag) return;
-  const g = deck._geo, p = pos(ev), dx = p.x - drag.x0, dt = dx / deck.getBoundingClientRect().width * view.span;
-  if (Math.abs(dx) > 6) drag.moved = true;
+  const g = deck._geo, p = pos(ev), dx = p.x - drag.x0, dy = p.y - drag.y0, dt = dx / deck.getBoundingClientRect().width * view.span;
+  if (Math.abs(dx) > 6 || Math.abs(dy) > 6) drag.moved = true;
   if (!drag.moved) return;
-  if (drag.kind === "pan") view.start = drag.v0 - dt;
-  else if (drag.kind === "mix") { S.a_end = nearest(D.a.bars.concat([D.a.duration]), drag.s0.a_end + dt); }
+  if (drag.kind === "pan" || drag.kind === "laneA") view.start = drag.v0 - dt;
+  else if (drag.kind === "mix") S.a_end = nearest(D.a.bars.concat([D.a.duration]), drag.s0.a_end + dt);
   else if (drag.kind === "edge") { const bars = (S.a_end - (drag.s0.a_end - drag.s0.bars * D.bar_a + dt)) / D.bar_a;
                                    S.bars = [1, 2, 4, 8, 16].reduce((a, b) => Math.abs(b - bars) < Math.abs(a - bars) ? b : a); }
-  else if (drag.kind === "laneB") { S.b_full = nearest(D.b.bars, drag.s0.b_full - dt * D.speed_b); }
-  else if (drag.kind === "laneA") view.start = drag.v0 - dt;
+  else if (drag.kind === "laneB") S.b_full = nearest(D.b.bars, drag.s0.b_full - dt * D.speed_b);
+  else if (drag.kind.startsWith("curve")) {
+    const side = drag.kind === "curve_out" ? "out" : "in", c0 = ((drag.s0.curves || {})[side]) || {mid: 0.5, steep: 1};
+    const len = (g.xb1 - g.xb0) || 1;
+    const mid = clip((c0.mid ?? 0.5) + dx / len, 0.05, 0.95), steep = clip((c0.steep ?? 1) * Math.pow(2, -dy / 60), 0.25, 4);
+    S.curves = Object.assign({}, S.curves || {}, {[side]: {mid: Math.round(mid * 100) / 100, steep: Math.round(steep * 100) / 100}});
+  }
   draw();
 });
 deck.addEventListener("pointerup", ev => {
   if (!drag) return;
   const g = deck._geo, p = pos(ev);
-  if (!drag.moved) {                         // a tap: where ▶ A / ▶ B play from
+  if (!drag.moved) {
     const t = g.T(p.x);
     cue.M = t;
-    if (drag.kind === "laneB") cue.B = Math.max(0, Math.min(D.b.duration, inB(t)));
-    else if (drag.kind === "laneA" || drag.kind === "mix" || drag.kind === "edge") cue.A = Math.max(0, Math.min(D.a.duration, t));
+    if (drag.kind === "laneB") cue.B = clip(inB(t), 0, D.b.duration);
+    else cue.A = clip(t, 0, D.a.duration);
+    if (playing === "L") playLive(t);
     draw();
-  } else if (["mix", "edge", "laneB"].includes(drag.kind)) {
-    sendValue({a_end: S.a_end, b_full: S.b_full, bars: S.bars, nonce: Date.now()});
+  } else if (["mix", "edge", "laneB", "curve_out", "curve_in"].includes(drag.kind)) {
+    send(); restartLiveIfPlaying();
   }
   drag = null;
 });
@@ -221,12 +365,15 @@ function applyTheme(th) {
 window.addEventListener("message", ev => {
   const d = ev.data; if (!d || d.type !== "streamlit:render") return;
   applyTheme(d.theme);
-  const args = d.args, first = !D, pairChanged = !D || D.a.id !== args.a.id || D.b.id !== args.b.id || D.state_key !== args.state_key;
+  const args = d.args, pairChanged = !D || D.a.id !== args.a.id || D.b.id !== args.b.id || D.state_key !== args.state_key;
+  const liveChanged = !D || JSON.stringify(D.live) !== JSON.stringify(args.live) ||
+                      JSON.stringify(D.state) !== JSON.stringify(args.state);      // new stems, or profile / bars changed
+  const wasLive = playing === "L", x = wasLive ? curX() : null;
   D = args;
-  if (!drag) S = Object.assign({}, args.state);
+  if (!drag) S = JSON.parse(JSON.stringify(args.state));
   if (pairChanged) { fitBlend(); cue.A = cue.M = blendStart() - 4 * D.bar_a; cue.B = Math.max(0, bIn() - 2 * D.bar_b);
-                     $("hint").textContent = HINT; }
-  if (playing === "M" && !(D.preview && D.preview.url)) { audio.pause(); playing = null; }
+                     $("hint").textContent = HINT; if (playing) stopAll(); }
+  else if (wasLive && liveChanged) playLive(x);              // new stems prepared — carry on from here
   setButtons(); draw(); setHeight();
 });
 window.addEventListener("resize", () => { draw(); setHeight(); });
