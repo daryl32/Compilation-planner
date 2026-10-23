@@ -183,3 +183,16 @@ def test_media_library_auto_trim_and_actor_filter():
         assert set(at.session_state["lib_autotrim_undo"]) == {"vid_b"}
     finally:
         LC.save_library_meta(meta_before)
+
+
+def test_role_editor_emoji_picker():
+    from tests.apptest_util import errors, page_app
+    at = page_app("pages/2_Reviewer.py", timeout=120)
+    at.run()
+    p = "rev_role_➕ New role"
+    assert at.text_input(key=f"{p}_emoji").value == "🏷️"
+    at.button_group(key=f"{p}_emoji_pick").set_value("🔥").run()
+    assert not errors(at), errors(at)
+    assert at.text_input(key=f"{p}_emoji").value == "🔥"
+    at.text_input(key=f"{p}_emoji").set_value("🦸‍♀️").run()          # several-part emoji fits too
+    assert at.text_input(key=f"{p}_emoji").value == "🦸‍♀️"
