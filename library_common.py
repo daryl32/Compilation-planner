@@ -157,6 +157,22 @@ def set_library_range(video_id: str, time_range) -> None:
     save_library_meta(meta)
 
 
+def set_library_ranges(changes: dict) -> None:
+    """Several videos at once, in one save: {video_id: (start, end) or None to remove}."""
+    meta = load_library_meta()
+    for video_id, time_range in changes.items():
+        entry = meta.get(video_id) if isinstance(meta.get(video_id), dict) else {}
+        if time_range is None:
+            entry.pop("range", None)
+        else:
+            entry["range"] = [round(float(time_range[0]), 3), round(float(time_range[1]), 3)]
+        if entry:
+            meta[video_id] = entry
+        else:
+            meta.pop(video_id, None)
+    save_library_meta(meta)
+
+
 def master_thumbnail_scenes() -> dict:
     """{video_id: scene_id} for every video with a chosen master thumbnail."""
     out = {}
