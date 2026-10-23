@@ -1143,6 +1143,19 @@ def _bulk_hints(ids: list) -> None:
             _bulk_role(hint, True, [sid])
 
 
+# Tap-to-pick emojis for your own roles (the Emoji box still takes any other).
+ROLE_EMOJIS = ["🏷️", "⭐", "🔥", "⚡", "💥", "🌙", "😌", "🙂", "😍", "😎", "🥰", "😈", "💃", "🕺", "🎉",
+               "💋", "❤️", "💔", "👀", "👄", "🍑", "🦵", "🙌", "🤸", "🏃", "🧘", "🌊", "🌅", "🌃", "✨",
+               "🎬", "🎥", "📸", "🔍", "🎯", "🚀", "🏁", "👑", "💎", "🎭"]
+
+
+def _pick_emoji(p: str) -> None:
+    pick = st.session_state.get(f"{p}_emoji_pick")
+    if pick:
+        st.session_state[f"{p}_emoji"] = pick
+    st.session_state[f"{p}_emoji_pick"] = None
+
+
 def _role_fit_inputs(prefix: str, fit: dict) -> dict:
     c = st.columns(2)
     energy = c[0].selectbox("Energy in the music", list(SR.ENERGY), index=list(SR.ENERGY).index(fit["energy"]),
@@ -1177,8 +1190,11 @@ def role_manager() -> None:
     p = f"rev_role_{pick}"
     c = st.columns([3, 1, 1])
     name = c[0].text_input("Name", value=r["name"], key=f"{p}_name", placeholder="e.g. Reveal")
-    emoji = c[1].text_input("Emoji", value=r["emoji"], key=f"{p}_emoji", max_chars=4)
+    st.session_state.setdefault(f"{p}_emoji", r["emoji"])
+    emoji = c[1].text_input("Emoji", key=f"{p}_emoji", max_chars=8,
+                            help="Tap one below, or type your own (on an iPad: the 🙂 key on the keyboard).")
     colour = c[2].color_picker("Colour", value=r["colour"], key=f"{p}_colour")
+    st.pills("Pick an emoji", ROLE_EMOJIS, key=f"{p}_emoji_pick", on_change=_pick_emoji, args=(p,))
     help_text = st.text_input("What it's for (optional)", value=r["help"], key=f"{p}_help")
     st.caption("**Music fit** — where in a track this role belongs. The story map wizard uses it to "
                "suggest that role's parts of the track.")
