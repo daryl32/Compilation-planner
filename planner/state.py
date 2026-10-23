@@ -66,6 +66,7 @@ def sanitize_filename(name: str) -> str:
 
 AUDIO_SETTINGS_KEYS = [
     "segmentation_method", "beats_per_bar", "audio_style", "sc_focus", "cut_style", "cut_style_pace",
+    "story_part_pace",
     "change_window_secs", "change_threshold", "min_segment_sec", "max_segment_sec",
     "react_to_hits", "hit_threshold", "snap_secs",
     "fast_energy_thresh", "fast_max_bars", "fast_cooldown_bars",
@@ -105,6 +106,7 @@ DIAL_DEFAULTS = {
     "audio_style": "Balanced",    # cutting pace preset; dials follow the track unless Custom
     "cut_style": "custom",        # 🎨 cutting style (core/styles.py); "custom" = choose the method yourself
     "cut_style_pace": 0,
+    "story_part_pace": False,     # 🎭 each story-map part at its role's pace (core/story_cuts.py)
     "sc_focus": "Balanced",       # Scored cuts: "What to cut on" mix
     "beats_per_bar": 4,
     "change_window_secs": 2.0,

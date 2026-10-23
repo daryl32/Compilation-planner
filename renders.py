@@ -255,6 +255,15 @@ def update_user_fields(mp4: Path, **fields) -> None:
     _save_meta(mp4, meta)
 
 
+def set_scores(mp4: Path, scores: dict) -> None:
+    """📏 Store the plan's match scores (shape / motion / story / overall…) on a render's sidecar."""
+    meta = load_render(mp4)
+    if meta is None:
+        return
+    meta["scores"] = scores
+    _save_meta(mp4, meta)
+
+
 # ---------------------------------------------------------------------------
 # Google Drive
 # ---------------------------------------------------------------------------

@@ -579,6 +579,11 @@ def run_nightly() -> dict:
     _write_json(p["nightly"], info)
     if not is_paused():
         run_worker(workers=nightly_worker_count())
+    try:   # 📏 score any newly rated renders for the calibrated % (core/calibrate.py)
+        import rec_library as RL
+        info["calibration"] = {k: RL.calibration(rescore=True).get(k) for k in ("n", "n_rated")}
+    except Exception as e:   # never fail the nightly run over it
+        info["calibration_error"] = str(e)[:200]
     info["finished"] = time.time()
     _write_json(p["nightly"], info)
     return info

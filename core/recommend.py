@@ -214,10 +214,17 @@ class Variant:
 
 
 def make_variant(track: dict, style: str, pace: int, prints: dict, story_regions: list = None,
-                 beats_per_bar: int = 4) -> Variant:
+                 beats_per_bar: int = 4, role_cuts: dict = None) -> Variant:
+    """role_cuts (scene_roles.role_cuts()): with 🎭 Story-led, each story-map part is cut in its
+    role's style and pace (core/story_cuts.py) — kept in settings["parts"]."""
     from core.styles import style_settings
     from story_map import block_roles as _block_roles
+    import core.story_cuts as STC
     method, settings, _ = style_settings(track, style, pace, beats_per_bar)
+    if style == STC.STORY_STYLE and role_cuts is not None and story_regions:
+        parts = STC.part_plans(track, story_regions, role_cuts, style, pace, beats_per_bar)
+        if parts:
+            settings = {**settings, "parts": parts}
     segs = build_segments(track, {"method": method, "beats_per_bar": beats_per_bar, **settings})
     apply_segment_intensity(segs, track, 1.0)
     v = Variant(style, int(pace), variant_label(style, pace), method, settings, segs,
@@ -699,6 +706,10 @@ def recommend_modes(track: dict, prints: dict, *, match, curves_of, n_videos: in
                                                   | set(verses_info.get("pool", []))),
                                  "thresholds": dict(thresholds, verses=verses_info.get("threshold", -1.0))}
         insights["block_top"] = block_top(top_v)
+        # 📏 Every plan this search checked, for the calibrated % (core/calibrate.py).
+        insights["scored"] = [{m: c["scores"].get(m) for m in ("overall", "shape", "intensity", "story",
+                                                               "action", "action_story")}
+                              for c in checked.values()]
 
     progress(1.0, "Done")
     for r in out:
@@ -794,6 +805,7 @@ def _verses(track, prints, story_regions, top_v, role_seconds, solos, actors, si
                 "note": "Verses needs videos tagged with at least two different actors — add them in the Reviewer "
                         "(🎬 Video details)."}
     used_styles = {p["style"] for p in top3 if p} | {TOP_STYLE[0]}
+    STYLES = [k for k in STYLES if k != "story"]   # 🎭 Story-led is the planner's per-part choice, not a random pick
     options = [st for st in STYLES if st not in used_styles] or [st for st in STYLES if st != TOP_STYLE[0]]
     style = options[int(np.random.default_rng(int(seed) + 7919).integers(len(options)))]
 
@@ -846,6 +858,7 @@ def wildcard(track, prints, vids, story_regions, n_videos, seed, check) -> dict:
     track is cut that one way and no other video is scored."""
     from core.styles import STYLES
     rng = np.random.default_rng(int(seed))
+    STYLES = [k for k in STYLES if k != "story"]   # 🎭 Story-led is the planner's per-part choice, not a random pick
     style = list(STYLES)[int(rng.integers(len(STYLES)))]
     pace = int(rng.integers(-1, 2))
     videos = sorted(rng.choice(vids, size=min(n_videos, len(vids)), replace=False).tolist())

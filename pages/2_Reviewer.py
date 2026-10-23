@@ -1169,6 +1169,32 @@ def _role_fit_inputs(prefix: str, fit: dict) -> dict:
     return {"energy": energy, "place": place, "moments": moments, "suggest": suggest}
 
 
+def _save_role_cut(rid: str) -> None:
+    SR.set_role_cut(rid, st.session_state.get(f"rev_rcut_pace_{rid}", 0),
+                    st.session_state.get(f"rev_rcut_style_{rid}"))
+
+
+def _role_cut_settings() -> None:
+    """✂️ How each role's story-map parts are cut in the planner (core/story_cuts.py)."""
+    import core.styles as CSTY
+    st.markdown("**✂️ Cutting per role**")
+    st.caption("How a story-map part with this role is cut in the planner. **Pace** is added to the planner's "
+               "Pace when *Pace per story part* is on, or with 🎭 Story-led. **Style** is used by 🎭 Story-led.")
+    cuts = SR.role_cuts()
+    styles = [None] + [k for k in CSTY.STYLES if k != "story"]
+    for rid, r in _roles.items():
+        rc = cuts.get(rid, {"pace": 0, "style": None})
+        c = st.columns([2, 3, 3], vertical_alignment="center")
+        c[0].markdown(f"{r['emoji']} {r['name']}")
+        c[1].selectbox("Style", styles, index=styles.index(rc["style"]) if rc["style"] in styles else 0,
+                       format_func=lambda k: "🧠 Smart (default)" if k is None else CSTY.STYLES[k]["label"],
+                       key=f"rev_rcut_style_{rid}", on_change=_save_role_cut, args=(rid,),
+                       label_visibility="collapsed")
+        c[2].select_slider("Pace", options=[-2, -1, 0, 1, 2], value=rc["pace"], format_func=lambda v: (
+            {-2: "much calmer", -1: "calmer", 0: "same", 1: "busier", 2: "much busier"}[v]),
+            key=f"rev_rcut_pace_{rid}", on_change=_save_role_cut, args=(rid,), label_visibility="collapsed")
+
+
 def role_manager() -> None:
     st.markdown("**Built in**")
     for r in SR.BUILTIN:
@@ -1181,6 +1207,8 @@ def role_manager() -> None:
     for r in custom:
         st.markdown(f"{r['emoji']} **{r['name']}**" + (f" — {r['help']}" if r["help"] else "")
                     + f"  \n:gray[Music fit: {SR.describe_fit(r['fit'])}]")
+    st.divider()
+    _role_cut_settings()
     st.divider()
     choices = ["➕ New role", *[r["id"] for r in custom]]
     pick = st.selectbox("Add or change", choices, key="rev_role_edit_pick",

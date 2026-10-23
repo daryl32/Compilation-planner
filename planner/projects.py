@@ -504,9 +504,14 @@ def _open_recommended_plan(plan: dict) -> None:
     ss = st.session_state
     ss["track_id"] = plan["track_id"]
     for k, v in plan["settings"].items():
-        ss[k] = v
+        if k != "parts":                            # 🎭 story parts come from the style + story map below
+            ss[k] = v
     ss["audio_style"] = AUDIO_STYLE_CUSTOM          # these settings exactly — don't re-tune over them
     ss["cut_style"] = "custom"                      # 🎨 style row shows Custom (the plan's own settings)
+    if plan.get("cut_style"):                       # 🎛️ a tuned plan: its style + pace (🎭 Story-led needs it)
+        ss["cut_style"] = plan["cut_style"]
+        ss["cut_style_pace"] = int(plan.get("cut_style_pace", 0))
+        ss["story_part_pace"] = bool(plan.get("story_part_pace", False))
     ss["committed_selected_videos"] = list(plan["videos"])
     for vid in plan["videos"]:
         ss[f"select_video_{vid}"] = True

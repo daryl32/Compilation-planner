@@ -14,7 +14,8 @@ rem         new tracks   - the full analysis (beats, energy, downbeats,
 rem                        sections, drops, vocals, key) + stems
 rem         older tracks - only what they're missing (extra analysis,
 rem                        vocals, key, stems), keeping their beats
-rem       Stems (vocals + instrumental, for mashups) are saved in
+rem       Stems (vocals + instrumental for mashups, and drums / bass /
+rem       other for neural transitions) are saved in
 rem       scene-labeling\stems\ in your Google Drive (a folder per track).
 rem
 rem  From a terminal you can pass options through, e.g.:
@@ -73,7 +74,7 @@ if not "%EXITCODE%"=="0" (
     echo Stopped with an error - exit code %EXITCODE%. Scroll up for details.
 ) else (
     echo Finished. Drive for desktop uploads the track files and stems; press Sync in the app
-    echo ^(or wait for the 12-hourly sync^) and they show up in the Media Library.
+    echo and they show up in the Media Library.
 )
 
 :end

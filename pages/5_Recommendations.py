@@ -21,6 +21,7 @@ import streamlit as st
 import catalogue_store as CStore
 import core.feeds as FEEDS
 import core.recommend as REC
+import core.calibrate as CAL
 import jobs as J
 import rec_library as RL
 import scene_roles as SR
@@ -32,6 +33,10 @@ page_setup("Recommendations", "pages/5_Recommendations.py", title="🔮 Recommen
 top_button("recs-top", wrap_css("rc_wrap", 130))   # rows wrap on narrow screens (iPad portrait)
 
 DEFAULT_VIDEOS = RL.DEFAULT_VIDEOS
+try:
+    _CAL = RL.calibration()      # 📏 ranked % (core/calibrate.py); raw % until there's enough to rank against
+except Exception:
+    _CAL = None
 FEED_SIZE = 10
 
 
@@ -40,7 +45,8 @@ FEED_SIZE = 10
 # ---------------------------------------------------------------------------
 
 def _mode_label(mode: str) -> str:
-    return REC.MODE_LABELS.get(mode) or ("🆕 Spotlight" if mode == "spotlight" else mode)
+    return REC.MODE_LABELS.get(mode) or ("🆕 Spotlight" if mode == "spotlight" else
+                                         "🎛️ Tuned" if mode == "tuned" else mode)
 
 
 def open_plan(track_id: str, plan: dict, rank: int) -> None:
@@ -51,7 +57,50 @@ def open_plan(track_id: str, plan: dict, rank: int) -> None:
         "sequential": bool(plan.get("sequential")),
         "label": f"Recommended plan {rank} for {track_id} ({_mode_label(plan['mode'])}) — {plan['variant']}, "
                  f"{plan['scores']['overall']:.0f}% overall"}
+    if plan.get("tuned"):
+        st.session_state["_open_recommended_plan"].update(
+            cut_style=plan["style"], cut_style_pace=int(plan["pace"]),
+            label=f"{track_id} tuned for your videos — {plan['variant']}")
     st.switch_page("pages/1_Compilation_Planner.py")
+
+
+# ---------------------------------------------------------------------------
+# 🎛️ Tune: the cutting style + pace that suit a plan's videos best (rec_library.tune_settings)
+# ---------------------------------------------------------------------------
+
+def _tune_key(track_id: str, videos, sequential: bool) -> str:
+    return f"rec_tune_{track_id}_{'_'.join(sorted(videos))}_{int(bool(sequential))}"
+
+
+def run_tune(track_id: str, videos: list, sequential: bool) -> None:
+    bar = st.progress(0.0, "Tuning…")
+    try:
+        res = RL.tune_settings(track_id, videos, sequential, progress=lambda f, t: bar.progress(min(f, 1.0), t))
+    except Exception as e:
+        bar.empty()
+        st.error(f"Couldn't tune: {e}")
+        return
+    bar.empty()
+    st.session_state[_tune_key(track_id, videos, sequential)] = res
+
+
+def tune_results(track_id: str, videos: list, sequential: bool, rank: int, key: str) -> None:
+    """The tuned ways of cutting, best first, each with 🎬 Open."""
+    res = st.session_state.get(_tune_key(track_id, videos, sequential))
+    if not res:
+        return
+    st.markdown(f"**🎛️ Best ways to cut {track_id} for these videos** "
+                f":gray[({res['tried']} tried, the best {len(res['results'])} checked with the matcher)]")
+    for i, r in enumerate(res["results"][:6]):
+        c = st.columns([4, 1], vertical_alignment="center")
+        with c[0]:
+            _metrics(r["scores"], ["overall", "shape", "intensity", "story"],
+                     about=f"{'⭐ ' if i == 0 else ''}{r['label']} · {r['segments']} blocks")
+        plan = {"mode": "tuned", "tuned": True, "variant": r["label"], "style": r["style"], "pace": r["pace"],
+                "method": r["method"], "settings": r["settings"], "videos": res["videos"], "story": r["story"],
+                "story_regions": res["story_regions"], "sequential": res["sequential"], "scores": r["scores"]}
+        if c[1].button("🎬 Open", key=f"{key}_open_{i}", width="stretch"):
+            open_plan(track_id, plan, rank)
 
 
 # ---------------------------------------------------------------------------
@@ -140,9 +189,14 @@ def _badge(name: str, v) -> str:
 
 def _metrics(sc: dict, keys: list, about: str = "", about_help: str = "") -> None:
     """The plan's scores as coloured badges (green ≥ 70 %, orange ≥ 50 %, red below), then what the
-    plan is (style, videos…) on the same line; what each score means is in the tooltip."""
-    st.markdown(" ".join(_badge(NAMES[k], sc.get(k)) for k in keys) + (f"  :gray[{about}]" if about else ""),
+    plan is (style, videos…) on the same line; what each score means is in the tooltip.
+    📏 With enough plans scored, each % is its rank among them (core/calibrate.py)."""
+    shown = CAL.ranked(sc, _CAL)
+    raw = shown.get("raw") if shown.get("ranked") else None
+    raw_line = ("  \n\n📏 Raw scores: " + " · ".join(f"{NAMES[k]} {_pct(raw.get(k))}" for k in keys)) if raw else ""
+    st.markdown(" ".join(_badge(NAMES[k], shown.get(k)) for k in keys) + (f"  :gray[{about}]" if about else ""),
                 help="  \n".join(f"**{NAMES[k]}** — {HELPS[k]}" for k in keys)
+                + f"  \n\n📏 {CAL.describe(_CAL)}" + raw_line
                 + (f"  \n\n{about_help}" if about_help else ""))
 
 
@@ -160,7 +214,7 @@ def render_result(track_id: str, rank: int, result: dict, data: dict) -> None:
     mode = result["mode"]
     plan = result.get("plan")
     with st.container(border=True, key=f"rc_wrap_card_{mode}"):
-        h = st.columns([3, 1], vertical_alignment="center")
+        h = st.columns([3, 1.6], vertical_alignment="center")
         h[0].markdown(f"**{rank} · {REC.MODE_LABELS[mode]}**")
         if not plan:
             h[0].caption(REC.MODE_HELP[mode])
@@ -172,7 +226,11 @@ def render_result(track_id: str, rank: int, result: dict, data: dict) -> None:
             bits.append("🎭 story map on")
         if plan.get("sequential"):
             bits.append("in order")
-        open_now = h[1].button("🎬 Open", key=f"open_{track_id}_{mode}", type="primary", width="stretch")
+        hb = h[1].columns(2)
+        open_now = hb[0].button("🎬 Open", key=f"open_{track_id}_{mode}", type="primary", width="stretch")
+        tune_now = hb[1].button("🎛️ Tune", key=f"tune_{track_id}_{mode}", width="stretch",
+                                help="Try every cutting style and pace with these videos and show which cut "
+                                     "matches them best (about a minute).")
         if mode == "verses" and plan.get("actors"):
             a, b = (", ".join(plan["actors"].get(v) or ["?"]) for v in plan["videos"][:2])
             st.markdown(f"**👤 {a}  vs  👤 {b}**")
@@ -183,6 +241,9 @@ def render_result(track_id: str, rank: int, result: dict, data: dict) -> None:
         st.plotly_chart(_strip(sc, lead), width="stretch", key=f"strip_{track_id}_{mode}",
                         config={"displayModeBar": False})
         _videos_row(plan["videos"])
+        if tune_now:
+            run_tune(track_id, plan["videos"], bool(plan.get("sequential")))
+        tune_results(track_id, plan["videos"], bool(plan.get("sequential")), rank, f"tune_{track_id}_{mode}")
         if mode == "wildcard":
             st.button("🎲 Roll again", key=f"reroll_{track_id}", width="stretch",
                       help="A new random cutting style and random videos (just this card).",
@@ -544,6 +605,17 @@ if not tracks:
     st.stop()
 
 background_panel()
+with st.expander("📏 What the % mean", expanded=False):
+    st.caption(CAL.describe(_CAL))
+    if _CAL and _CAL.get("fit"):
+        st.caption("How each part goes with your ⭐ ratings (−1 … +1): " + " · ".join(
+            f"{NAMES[k]} {v:+.2f}" for k, v in _CAL["fit"].items()))
+    if st.button("📏 Score my rated renders now", key="rec_cal_rescore",
+                 help="Scores rated renders that don't have scores yet (the nightly run does this too), "
+                      "so your ⭐ ratings can tune the Overall weights."):
+        with st.spinner("Scoring rated renders…"):
+            _CAL = RL.calibration(rescore=True)
+        st.caption(f"Done — {_CAL['n_rated']} rated render(s) with scores.")
 tabs = st.tabs(["🎵 For this track", "🏆 Top plans", "💥 Best action", "🆕 New videos", "🧩 Hidden gems", "🕳️ Gaps"])
 with tabs[0]:
     for_this_track(tracks)

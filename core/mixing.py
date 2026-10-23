@@ -194,10 +194,16 @@ def layout(recipe: dict, grids: dict) -> dict:
     for a, b in zip(out[:-1], out[1:]):
         same = a["track"] == b["track"]
         own = b.get("xfade") or {}              # 🔀 this join's own crossfade (set on the incoming piece)
+        neural = own.get("neural") if isinstance(own.get("neural"), dict) else None
         beats = float(own["beats"]) if own.get("beats") is not None else \
             float(recipe.get("xfade_same", 0.25) if same else recipe.get("xfade_other", 4))
         where = own.get("where") if own.get("where") is not None else "centre"
         shape = own.get("shape") or ("linear" if same else "smooth")
+        if neural:
+            # 🧠 A stem blend (core/stem_mix.py) of `bars` bars, all before the join: the incoming part
+            # plays its bars before its start under the end of the outgoing one ("comes in early").
+            bpb = int(grids[b["track"]].get("beats_per_bar") or 4)
+            beats, where, shape = float(int(neural.get("bars") or 8) * bpb), "before", "smooth"
         xf = max(beats, 0.0) * beat_len(out_bpm)
         frac = where_frac(where)                  # share of the fade before the bar line
         pre, post = xf * frac, xf * (1 - frac)
@@ -208,7 +214,10 @@ def layout(recipe: dict, grids: dict) -> dict:
             pre = post = 0.005
         joins.append({"at": b["out_start"], "xfade": pre + post, "pre": pre, "post": post, "where": where,
                       "shape": shape, "beats": beats, "same_track": same,
-                      "bass_swap": bool(own.get("bass_swap")) and pre + post >= beat_len(out_bpm) - 1e-6})
+                      "bass_swap": bool(own.get("bass_swap")) and not neural and pre + post >= beat_len(out_bpm) - 1e-6,
+                      **({"neural": {"profile": neural.get("profile") or "smooth",
+                                     "bars": int(neural.get("bars") or 8),
+                                     "beats": (pre + post) / beat_len(out_bpm)}} if neural else {})})
     layers = []
     by_uid = {p.get("uid"): p for p in out if p.get("uid")}
     for ly in recipe.get("layers") or []:
@@ -518,5 +527,70 @@ def suggest_pairs(infos: list, top: int = 12, need_stems: bool = False) -> list:
             else:
                 a_, b_ = a, b
             out.append({"a": a_["track_id"], "b": b_["track_id"], **ab})
+    out.sort(key=lambda x: -x["score"])
+    return out[:top]
+
+
+# ---------------------------------------------------------------------------
+# 💥 Drop swaps — track A's build-up crashes into track B's drop
+# ---------------------------------------------------------------------------
+
+DROP_LEAD_BARS = 8       # bars of A before its build-up starts, to set the scene
+DROP_AFTER_BARS = 16     # bars of B from its drop
+DROP_XFADE_BEATS = 1     # a quick swap on the drop's downbeat (with the bass swap)
+
+
+def _drops_builds(track: dict) -> tuple:
+    a = track.get("analysis") or {}
+    drops = sorted(float(t) for t in a.get("drops") or [])
+    builds = [(float(b["start"]), float(b["end"])) for b in a.get("builds") or []
+              if isinstance(b, dict) and b.get("end", 0) > b.get("start", 0)]
+    return drops, builds
+
+
+def drop_swap_plan(track_a: dict, track_b: dict, lead_bars: int = DROP_LEAD_BARS,
+                   after_bars: int = DROP_AFTER_BARS) -> dict | None:
+    """Where to cut for "A's build-up → B's drop": {"a": (start, end), "b": (start, end), "build_bars",
+    "a_drop", "b_drop"} in each track's own seconds, bar-snapped — or None if A has no build-up
+    or B has no drop. A runs from a few bars before its longest build-up up to the drop the build
+    leads into; B starts on its drop (the first with room for after_bars after it)."""
+    ga, gb = grid(track_a), grid(track_b)
+    drops_a, builds_a = _drops_builds(track_a)
+    drops_b, _ = _drops_builds(track_b)
+    if not builds_a or not drops_b:
+        return None
+    # A's build-up: the longest one, ending on (or near) a drop.
+    def into_drop(b):
+        return min(drops_a, key=lambda d: abs(d - b[1])) if drops_a else b[1]
+    bs, be = max(builds_a, key=lambda b: b[1] - b[0])
+    a_drop = into_drop((bs, be))
+    if abs(a_drop - be) > 2 * ga["bar_len"]:
+        a_drop = be
+    a_end = snap_to_bar(ga, a_drop)
+    a_start = snap_to_bar(ga, max(0.0, bs - lead_bars * ga["bar_len"]))
+    if a_end - a_start < 2 * ga["bar_len"]:
+        return None
+    # B's drop: the first with room after it, else the latest.
+    room = after_bars * gb["bar_len"]
+    b_drop = next((d for d in drops_b if d + room <= gb["duration"] + 0.05), drops_b[-1])
+    b_start = snap_to_bar(gb, b_drop)
+    b_end = snap_to_bar(gb, min(gb["duration"], b_start + room))
+    if b_end - b_start < 2 * gb["bar_len"]:
+        return None
+    return {"a": (a_start, a_end), "b": (b_start, b_end), "a_drop": a_drop, "b_drop": b_drop,
+            "build_bars": round((a_end - max(bs, a_start)) / ga["bar_len"], 1)}
+
+
+def suggest_drop_swaps(infos: list, top: int = 12) -> list:
+    """Best (a, b) for a drop swap — a has a build-up, b a drop — by partner_score (b's key fitted to
+    a's, b at a's tempo), best first. infos: as suggest_pairs, plus "builds" / "drops" counts."""
+    out = []
+    for a in infos:
+        if not a.get("builds"):
+            continue
+        for b in infos:
+            if b["track_id"] == a["track_id"] or not b.get("drops"):
+                continue
+            out.append({"a": a["track_id"], "b": b["track_id"], **partner_score(a, b)})
     out.sort(key=lambda x: -x["score"])
     return out[:top]

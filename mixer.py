@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 
 from core import mixing as MX
+from core import stem_mix as SM
 
 SR = 44100
 CH = 2
@@ -51,13 +52,27 @@ def cache_dir() -> Path:
     return d
 
 
-STEM_PARTS = ("vocals", "instrumental")
+STEM_PARTS = ("vocals", "instrumental", "drums", "bass", "other")
+FOUR_STEMS = ("vocals", "drums", "bass", "other")      # 🧠 neural transitions (core/stem_mix.py)
 
 
 def has_stems(track: dict) -> bool:
     """🎤 Split into vocals + instrumental by analyse_audio_local.py (on the laptop's GPU)."""
     st = track.get("stems") or {}
-    return all(st.get(p) for p in STEM_PARTS)
+    return all(st.get(p) for p in ("vocals", "instrumental"))
+
+
+def has_four_stems(track: dict) -> bool:
+    """🧠 Split into vocals, drums, bass and other — what a neural transition mixes."""
+    st = (track or {}).get("stems") or {}
+    return all(st.get(p) for p in FOUR_STEMS)
+
+
+def neural_joins(recipe: dict) -> list:
+    """[(outgoing piece, incoming piece)] for every 🧠 neural join in the recipe."""
+    pieces = recipe.get("pieces") or []
+    return [(a, b) for a, b in zip(pieces[:-1], pieces[1:])
+            if isinstance((b.get("xfade") or {}).get("neural"), dict)]
 
 
 def _drive_ref(track: dict, part: str = "full") -> str:
@@ -94,13 +109,19 @@ def ensure_local(track: dict, progress=None, parts=("full",)) -> str | None:
     return None
 
 
-def parts_needed(recipe: dict) -> dict:
-    """{track_id: {parts}} — which files a recipe plays (the full song and/or its stems)."""
+def parts_needed(recipe: dict, tracks: dict = None) -> dict:
+    """{track_id: {parts}} — which files a recipe plays (the full song and/or its stems). 🧠 Neural
+    joins add both sides' four stems — when tracks ({track_id: catalogue track}) says they have them
+    (without, the join falls back to an ordinary crossfade)."""
     out = {}
     for p in recipe.get("pieces") or []:
         out.setdefault(p["track"], set()).add(p.get("part") or "full")
     for ly in recipe.get("layers") or []:
         out.setdefault(ly["track"], set()).add(ly.get("part") or "vocals")
+    for a, b in neural_joins(recipe):
+        if tracks is None or (has_four_stems(tracks.get(a["track"])) and has_four_stems(tracks.get(b["track"]))):
+            for p in (a, b):
+                out[p["track"]] |= set(FOUR_STEMS)
     return out
 
 
@@ -302,6 +323,26 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
         if note and f"{p['track']}: {note}" not in warnings:
             warnings.append(f"{p['track']}: {note}")
 
+    # 1b. 🧠 neural joins: both sides' four stems at the same speed / shift (else an ordinary crossfade)
+    neural_ok = set()
+    for k, jn in enumerate(lay["joins"]):
+        if not jn.get("neural"):
+            continue
+        a, b = lay["pieces"][k], lay["pieces"][k + 1]
+        if not all(has_four_stems(tracks[p["track"]]) and all(local_path(tracks[p["track"]], s).exists()
+                                                             for s in FOUR_STEMS) for p in (a, b)):
+            warnings.append(f"🧠 Join {k + 1} → {k + 2}: {a['track'] if not has_four_stems(tracks[a['track']]) else b['track']} "
+                            "has no drums / bass / other stems yet (run run_audio_analysis.bat) — an ordinary "
+                            "crossfade instead.")
+            continue
+        for p in (a, b):
+            for stem in FOUR_STEMS:
+                key = key_of({**p, "part": stem})
+                if key not in audio:
+                    say(f"reading {p['track']} ({stem})")
+                    audio[key] = decode(local_path(tracks[p["track"]], stem), key[1], key[2])
+        neural_ok.add(k)
+
     # 2. level matching: every track to the loudest track's level (within limits). A vocal
     #    layer gets its own track's correction (vocals alone are quieter than a full mix).
     gains = {}
@@ -339,20 +380,55 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
         if k > 0:
             jn = joins[k - 1]
             n = min(len(seg), int(round((head_eff + jn["post"]) * SR)))
-            _fade_region(seg[:n], _ramp(n, jn.get("shape", "smooth") == "smooth", True), jn,
-                         jn["at"] - head_eff, lay["bpm"], outgoing=False)
+            if k - 1 in neural_ok:
+                seg[:n] = 0.0                                    # 🧠 the stem blend fills it (below)
+            else:
+                _fade_region(seg[:n], _ramp(n, jn.get("shape", "smooth") == "smooth", True), jn,
+                             jn["at"] - head_eff, lay["bpm"], outgoing=False)
         elif p["start"] > 0.05 or recipe.get("fade_in"):
             n = min(len(seg), int(max(float(recipe.get("fade_in") or 0.0), 0.01) * SR))
             seg[:n] *= _ramp(n, False, True)[:, None]
         if k < len(joins):
             jn = joins[k]
             n = min(len(seg), int(round((tail_eff + jn["pre"]) * SR)))
-            _fade_region(seg[len(seg) - n:], _ramp(n, jn.get("shape", "smooth") == "smooth", False), jn,
-                         jn["at"] + tail_eff - n / SR, lay["bpm"], outgoing=True)
+            if k in neural_ok:
+                seg[len(seg) - n:] = 0.0                         # 🧠 the stem blend fills it (below)
+            else:
+                _fade_region(seg[len(seg) - n:], _ramp(n, jn.get("shape", "smooth") == "smooth", False), jn,
+                             jn["at"] + tail_eff - n / SR, lay["bpm"], outgoing=True)
         at = int(round((p["out_start"] - head_eff) * SR))
         at = max(0, at)
         end = min(n_out, at + len(seg))
         out[at:end] += seg[:end - at]
+
+    # 3a. 🧠 neural joins: each side's stems over the blend, mixed with their own curves (core/stem_mix.py)
+    for k in sorted(neural_ok):
+        jn, a, b = joins[k], lay["pieces"][k], lay["pieces"][k + 1]
+        w0 = jn["at"] - jn["pre"]
+        n = int(round((jn["pre"] + jn["post"]) * SR))
+        sides = []
+        for p in (a, b):
+            src0 = int(round((p["start"] / p["speed"] + (w0 - p["out_start"])) * SR))
+            gain_db = gains.get(key_of(p), 0.0) + float(p.get("gain_db") or 0.0)
+            g = np.float32(10 ** (gain_db / 20))
+            stems = {}
+            for stem in FOUR_STEMS:
+                part = np.zeros((n, CH), dtype=np.float32)
+                if (p.get("part") == "instrumental" and stem == "vocals") or \
+                        (p.get("part") == "vocals" and stem != "vocals"):
+                    stems[stem] = part                           # the piece plays only those stems
+                    continue
+                y = audio[key_of({**p, "part": stem})]
+                lo, hi = max(src0, 0), min(src0 + n, len(y))
+                if hi > lo:
+                    part[lo - src0:hi - src0] = y[lo:hi] * g
+                stems[stem] = part
+            sides.append(stems)
+        blend = SM.render_region(sides[0], sides[1], jn["neural"]["profile"], jn["neural"]["beats"], SR)
+        at = int(round(w0 * SR))
+        lo, hi = max(at, 0), min(n_out, at + n)
+        if hi > lo:
+            out[lo:hi] += blend[lo - at:hi - at]
 
     # 3b. 🎤 layers (one track's vocals, instrumental or the full song) over the pieces, faded in and out
     for ly in lay.get("layers") or []:
@@ -384,6 +460,8 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
     n = min(len(out), int(max(fade_out, 0.01) * SR))
     if n:
         out[len(out) - n:] *= _ramp(n, False, False)[:, None]
+    if neural_ok:                     # 🧠 summed stems can peak: round them off (soft knee, not a hard clip)
+        out = SM.soft_knee(out).astype(np.float32)
     peak = float(np.abs(out).max()) if len(out) else 0.0
     if peak > PEAK:
         out *= np.float32(PEAK / peak)
