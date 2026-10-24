@@ -48,7 +48,7 @@ function sendValue(v) { post("streamlit:setComponentValue", {value: v, dataType:
 const $ = id => document.getElementById(id);
 const deck = $("deck");
 const HINT = "Drag lane B to where it comes in · the ◆ mix point to where A hands over · the blend's left edge for " +
-             "1 – 16 bars · the ● handles to shape each fade (sideways: earlier / later, up / down: sudden / gentle) · " +
+             "1 – 16 bars · the ● handles (three a curve) to shape each fade: sideways = when, up / down = how loud by then (a split ● is both — left half A, right half B) · " +
              "tap to set where ▶ plays from · drag the ruler to scroll";
 
 let D = null, S = null;             // args, editable state {a_end, b_full, bars, profile, curves}
@@ -92,10 +92,30 @@ function bassSwap(t, w, totalBeats) {
   const lo = centre >= 1 - 1e-9 ? Math.min(centre, 1 - width) : centre - width / 2;
   return clip((t - lo) / width, 0, 1);
 }
-function warp(t, mid, steep) {
+const IDENT = [[0.25, 0.25], [0.5, 0.5], [0.75, 0.75]], GAP = 0.03;
+function oldWarp(t, mid, steep) {                 // older one-handle curves, turned into points
   t = clip(t, 0, 1); let u = t < mid ? 0.5 * t / mid : 0.5 + 0.5 * (t - mid) / (1 - mid);
   if (Math.abs(steep - 1) < 1e-9) return u;
   const d = 2 * u - 1; return 0.5 + 0.5 * Math.sign(d) * Math.pow(Math.abs(d), 1 / steep);
+}
+function shape(t, pts) {                          // monotone cubic (Fritsch–Carlson) — as core/stem_mix.shape
+  const xs = [0, ...pts.map(p => p[0]), 1], ys = [0, ...pts.map(p => p[1]), 1], n = xs.length;
+  const h = [], d = [], m = new Array(n);
+  for (let k = 0; k < n - 1; k++) { h.push(xs[k + 1] - xs[k]); d.push((ys[k + 1] - ys[k]) / h[k]); }
+  m[0] = d[0]; m[n - 1] = d[n - 2];
+  for (let k = 1; k < n - 1; k++) m[k] = (d[k - 1] + d[k]) / 2;
+  for (let k = 0; k < d.length; k++) {
+    if (d[k] === 0) { m[k] = 0; m[k + 1] = 0; continue; }
+    let a = m[k] / d[k], b = m[k + 1] / d[k];
+    if (a < 0) { m[k] = 0; a = 0; } if (b < 0) { m[k + 1] = 0; b = 0; }
+    const s2 = a * a + b * b;
+    if (s2 > 9) { const tau = 3 / Math.sqrt(s2); m[k] = tau * a * d[k]; m[k + 1] = tau * b * d[k]; }
+  }
+  t = clip(t, 0, 1);
+  let k = 0; while (k < n - 2 && t >= xs[k + 1]) k++;
+  const hk = h[k], s = (t - xs[k]) / hk;
+  const h00 = 2 * s ** 3 - 3 * s ** 2 + 1, h10 = s ** 3 - 2 * s ** 2 + s, h01 = -2 * s ** 3 + 3 * s ** 2, h11 = s ** 3 - s ** 2;
+  return clip(h00 * ys[k] + h10 * hk * m[k] + h01 * ys[k + 1] + h11 * hk * m[k + 1], 0, 1);
 }
 function baseGains(t, profile, totalBeats) {
   const tm = TIMING[profile] || TIMING.smooth;
@@ -106,16 +126,24 @@ function baseGains(t, profile, totalBeats) {
   return {vocals: [vOut, vIn], drums: [Math.pow(1 - td, 2), td], bass: [1 - bIn, bIn],
           other: [Math.cos(Math.PI / 2 * to), Math.sin(Math.PI / 2 * to)]};
 }
-function curvesOf() {
-  const c = (S && S.curves) || {};
-  const one = s => ({mid: clip(+((c[s] || {}).mid ?? 0.5), 0.05, 0.95), steep: clip(+((c[s] || {}).steep ?? 1), 0.25, 4)});
-  return {out: one("out"), in: one("in")};
+function curvesOf() {                            // {out: [[t,u]×3], in: [...]} — the points (or the profile's own)
+  const c = (S && S.curves) || {}, res = {};
+  for (const side of ["out", "in"]) { const cc = c[side] || {};
+    if (cc.pts && cc.pts.length === 3) res[side] = cc.pts.map(p => [+p[0], +p[1]]);
+    else if ("mid" in cc || "steep" in cc) { const mid = clip(+(cc.mid ?? 0.5), 0.05, 0.95), st = clip(+(cc.steep ?? 1), 0.25, 4);
+      res[side] = [0.25, 0.5, 0.75].map(t => [t, oldWarp(t, mid, st)]); }
+    else res[side] = IDENT.map(p => p.slice()); }
+  return res;
 }
+function isIdent(pts) { return pts.every((p, i) => Math.abs(p[0] - IDENT[i][0]) < 1e-4 && Math.abs(p[1] - IDENT[i][1]) < 1e-4); }
 function stemGains(t, profile, totalBeats) {
   const c = curvesOf();
-  const go = baseGains(warp(t, c.out.mid, c.out.steep), profile, totalBeats), gi = baseGains(warp(t, c.in.mid, c.in.steep), profile, totalBeats);
+  if (isIdent(c.out) && isIdent(c.in)) return baseGains(t, profile, totalBeats);
+  const go = baseGains(shape(t, c.out), profile, totalBeats), gi = baseGains(shape(t, c.in), profile, totalBeats);
   const out = {}; for (const s of STEMS) out[s] = [go[s][0], gi[s][1]]; return out;
 }
+window.__shape = (t, pts) => shape(t, pts);
+window.__handles = () => { const g = deck._geo; if (!g) return null; const r = deck.getBoundingClientRect(); return ["out", "in"].map(side => curveHandles(side, g.X, g.top, g.H).map(h => ({side, i: h.i, x: h.x + r.left, y: h.y + r.top}))).flat(); };
 window.__stemGains = (t, profile, tb, curves) => { const keep = S; S = Object.assign({}, S || {}, {curves}); const r = stemGains(t, profile, tb); S = keep; return r; };
 function gainsAt(x) {
   const b0 = blendStart(), t = (x - b0) / Math.max(S.a_end - b0, 1e-6);
@@ -149,11 +177,11 @@ function lane(g, w, X, y, h, trk, toLane, from, keep0, keep1) {
   if (view.span < 160) for (const b of trk.bars) { const x = X(from(b)); if (x >= 0 && x <= w) { g.beginPath(); g.moveTo(x, y); g.lineTo(x, y + h); g.stroke(); } }
 }
 
-function curveHandle(side, X, top, H) {
-  // the handle sits on the 'other' stem's curve at the side's half-way point
-  const c = curvesOf()[side], b0 = blendStart(), len = S.a_end - b0;
-  const x = b0 + c.mid * len, gg = stemGains(c.mid, S.profile || "smooth", S.bars * (D.bpb || 4)).other[side === "out" ? 0 : 1];
-  return {x: X(x), y: top + (1 - gg) * H};
+function curveHandles(side, X, top, H) {
+  // three handles on the 'other' stem's curve (the overall level), at the side's points
+  const pts = curvesOf()[side], b0 = blendStart(), len = S.a_end - b0;
+  return pts.map((p, i) => { const gg = stemGains(p[0], S.profile || "smooth", S.bars * (D.bpb || 4)).other[side === "out" ? 0 : 1];
+                             return {x: X(b0 + p[0] * len), y: top + (1 - gg) * H, i}; });
 }
 
 function draw() {
@@ -181,10 +209,16 @@ function draw() {
     for (let i = 0; i <= 80; i++) { const tt = i / 80, gg = stemGains(tt, prof, tb).other[side === "out" ? 0 : 1];
       const x = xb0 + (xb1 - xb0) * tt, y = top + (1 - gg) * H; if (i) g.lineTo(x, y); else g.moveTo(x, y); }
     g.stroke();
-    const hd = curveHandle(side, X, top, H);
-    g.fillStyle = css(col); g.beginPath(); g.arc(hd.x, hd.y, 9, 0, 2 * Math.PI); g.fill();
-    g.strokeStyle = css("--panel"); g.lineWidth = 2; g.stroke();
   }
+  // handles; where an A and a B handle sit on top of each other, a split dot (left half A, right half B)
+  const hA = curveHandles("out", X, top, H), hB = curveHandles("in", X, top, H);
+  const dot = (hd, col, a0, a1) => { const r = hd.i === 1 ? 9 : 7; g.fillStyle = css(col); g.beginPath();
+    if (a0 === undefined) g.arc(hd.x, hd.y, r, 0, 2 * Math.PI); else { g.moveTo(hd.x, hd.y); g.arc(hd.x, hd.y, r, a0, a1); g.closePath(); }
+    g.fill(); g.strokeStyle = css("--panel"); g.lineWidth = 2; g.stroke(); };
+  for (const ha of hA) { const tw = hB.find(hb => Math.hypot(ha.x - hb.x, ha.y - hb.y) < 6);
+    if (tw) { dot(ha, "--curveA", Math.PI / 2, 3 * Math.PI / 2); dot(tw, "--curveB", -Math.PI / 2, Math.PI / 2); tw.done = true; }
+    else dot(ha, "--curveA"); }
+  for (const hb of hB) if (!hb.done) dot(hb, "--curveB");
   // mix point ◆ and blend edge
   g.strokeStyle = css("--accent"); g.lineWidth = 2;
   g.beginPath(); g.moveTo(xb1, ruler); g.lineTo(xb1, yB + laneH); g.stroke();
@@ -310,16 +344,24 @@ function pos(ev) { const r = deck.getBoundingClientRect(); return {x: ev.clientX
 deck.addEventListener("pointerdown", ev => {
   if (!D || !deck._geo) return;
   const g = deck._geo, p = pos(ev); deck.setPointerCapture(ev.pointerId);
-  const ha = curveHandle("out", g.X, g.top, g.H), hb = curveHandle("in", g.X, g.top, g.H);
-  let kind;
+  let kind, handle = null, best = 22;
+  const near = [];
+  for (const side of ["out", "in"]) for (const hd of curveHandles(side, g.X, g.top, g.H)) {
+    const dd = Math.hypot(p.x - hd.x, p.y - hd.y); if (dd < 22) near.push({side, i: hd.i, x: hd.x, y: hd.y, dd}); }
+  near.sort((u, v) => u.dd - v.dd);
+  if (near.length) {
+    const h0 = near[0], tw = near.find(n => n.side !== h0.side && Math.hypot(n.x - h0.x, n.y - h0.y) < 6);
+    // a split dot: the left half is A's fade, the right half B's
+    const pickd = tw ? (p.x < h0.x ? [h0, tw].find(n => n.side === "out") : [h0, tw].find(n => n.side === "in")) : h0;
+    handle = {side: pickd.side, i: pickd.i};
+  }
   if (p.y < g.ruler) kind = "pan";
-  else if (Math.hypot(p.x - ha.x, p.y - ha.y) < 20) kind = "curve_out";
-  else if (Math.hypot(p.x - hb.x, p.y - hb.y) < 20) kind = "curve_in";
+  else if (handle) kind = "curve";
   else if (Math.abs(p.x - g.xb1) < 16) kind = "mix";
   else if (Math.abs(p.x - g.xb0) < 16) kind = "edge";
   else if (p.y >= g.yB) kind = "laneB";
   else kind = "laneA";
-  drag = {kind, x0: p.x, y0: p.y, moved: false, s0: JSON.parse(JSON.stringify(S)), v0: view.start};
+  drag = {kind, handle, x0: p.x, y0: p.y, moved: false, s0: JSON.parse(JSON.stringify(S)), pts0: curvesOf(), v0: view.start};
 });
 deck.addEventListener("pointermove", ev => {
   if (!drag) return;
@@ -331,11 +373,14 @@ deck.addEventListener("pointermove", ev => {
   else if (drag.kind === "edge") { const bars = (S.a_end - (drag.s0.a_end - drag.s0.bars * D.bar_a + dt)) / D.bar_a;
                                    S.bars = [1, 2, 4, 8, 16].reduce((a, b) => Math.abs(b - bars) < Math.abs(a - bars) ? b : a); }
   else if (drag.kind === "laneB") S.b_full = nearest(D.b.bars, drag.s0.b_full - dt * D.speed_b);
-  else if (drag.kind.startsWith("curve")) {
-    const side = drag.kind === "curve_out" ? "out" : "in", c0 = ((drag.s0.curves || {})[side]) || {mid: 0.5, steep: 1};
-    const len = (g.xb1 - g.xb0) || 1;
-    const mid = clip((c0.mid ?? 0.5) + dx / len, 0.05, 0.95), steep = clip((c0.steep ?? 1) * Math.pow(2, -dy / 60), 0.25, 4);
-    S.curves = Object.assign({}, S.curves || {}, {[side]: {mid: Math.round(mid * 100) / 100, steep: Math.round(steep * 100) / 100}});
+  else if (drag.kind === "curve") {
+    // sideways: when (t); up / down: how far that side has faded by then (u) — kept in order, never backwards
+    const {side, i} = drag.handle, pts = drag.pts0[side].map(q => q.slice()), len = (g.xb1 - g.xb0) || 1;
+    const lo = i ? pts[i - 1] : [0, 0], hi = i < 2 ? pts[i + 1] : [1, 1];
+    const t = clip(pts[i][0] + dx / len, lo[0] + GAP, hi[0] - GAP);
+    const u = clip(pts[i][1] + (side === "out" ? dy : -dy) / g.H, lo[1], hi[1]);
+    pts[i] = [Math.round(t * 1000) / 1000, Math.round(u * 1000) / 1000];
+    const all = drag.pts0; S.curves = {out: {pts: side === "out" ? pts : all.out}, in: {pts: side === "in" ? pts : all.in}};
   }
   draw();
 });
@@ -349,7 +394,7 @@ deck.addEventListener("pointerup", ev => {
     else cue.A = clip(t, 0, D.a.duration);
     if (playing === "L") playLive(t);
     draw();
-  } else if (["mix", "edge", "laneB", "curve_out", "curve_in"].includes(drag.kind)) {
+  } else if (["mix", "edge", "laneB", "curve"].includes(drag.kind)) {
     send(); restartLiveIfPlaying();
   }
   drag = null;
