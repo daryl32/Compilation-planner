@@ -204,31 +204,33 @@ def bass_swap(t: np.ndarray, window: tuple, total_beats: float | None) -> np.nda
 
 
 # ---------------------------------------------------------------------------
-# ✍️ Shaping each side's curve — when it crosses half way, and how suddenly
+# ✍️ Shaping each side's curve — three handles each, or a preset
 # ---------------------------------------------------------------------------
-# curves = {"out": {"mid", "steep"}, "in": {"mid", "steep"}}: mid (0.05–0.95) is where in the blend that side's
-# stems are half way (0.5 = as the profile has it), steep (0.25–4) how sudden (1 = as the profile has it). Each side
-# gets its own warped t, so A can drop away early while B comes in late, or the reverse.
+# curves = {"out": {"pts": [[t, u], [t, u], [t, u]]}, "in": {...}}: three points (t = how far through the blend,
+# u = how far through its fade that side is by then, both 0–1, in order). The fade between them is a smooth,
+# never-backwards curve through (0, 0), the three points and (1, 1) (monotone cubic — Fritsch–Carlson, the same
+# in the browser's live preview). The identity (u = t) is the profile exactly as designed. Older curves saved as
+# {"mid", "steep"} are turned into points.
 
-CURVE_DEFAULT = {"mid": 0.5, "steep": 1.0}
-
-
-def norm_curves(curves) -> dict:
-    out = {}
-    for side in ("out", "in"):
-        c = (curves or {}).get(side) or {}
-        try:
-            mid = float(c.get("mid", 0.5))
-            steep = float(c.get("steep", 1.0))
-        except (TypeError, ValueError):
-            mid, steep = 0.5, 1.0
-        out[side] = {"mid": float(np.clip(mid, 0.05, 0.95)), "steep": float(np.clip(steep, 0.25, 4.0))}
-    return out
+IDENTITY_PTS = [[0.25, 0.25], [0.5, 0.5], [0.75, 0.75]]
+CURVE_PRESETS = {
+    "even":         {"label": "Even",          "out": IDENTITY_PTS, "in": IDENTITY_PTS},
+    "quick_swap":   {"label": "Quick swap",    "out": [[0.3, 0.05], [0.5, 0.5], [0.7, 0.95]],
+                     "in":  [[0.3, 0.05], [0.5, 0.5], [0.7, 0.95]]},
+    "early_out":    {"label": "Early out",     "out": [[0.2, 0.5], [0.45, 0.85], [0.75, 0.97]], "in": IDENTITY_PTS},
+    "late_in":      {"label": "Late in",       "out": IDENTITY_PTS, "in": [[0.3, 0.03], [0.6, 0.15], [0.85, 0.55]]},
+    "long_overlap": {"label": "Long overlap",  "out": [[0.3, 0.05], [0.6, 0.18], [0.85, 0.45]],
+                     "in":  [[0.15, 0.55], [0.4, 0.85], [0.7, 0.97]]},
+    "hold_cut":     {"label": "Hold then cut", "out": [[0.6, 0.05], [0.8, 0.15], [0.92, 0.6]],
+                     "in":  [[0.6, 0.05], [0.8, 0.15], [0.92, 0.6]]},
+    "dip":          {"label": "Dip",           "out": [[0.2, 0.5], [0.45, 0.9], [0.75, 0.98]],
+                     "in":  [[0.25, 0.02], [0.55, 0.1], [0.8, 0.5]]},
+}
+GAP = 0.03            # handles keep at least this far apart (and from 0 / 1)
 
 
 def warp(t: np.ndarray, mid: float = 0.5, steep: float = 1.0) -> np.ndarray:
-    """t re-timed so the half-way point lands at `mid` and the change round it is `steep` times as sudden
-    (0 and 1 stay put; monotonic)."""
+    """The older one-handle shape (half-way point + steepness) — kept to convert saved curves."""
     t = np.clip(np.asarray(t, dtype=float), 0.0, 1.0)
     u = np.where(t < mid, 0.5 * t / mid, 0.5 + 0.5 * (t - mid) / (1.0 - mid))
     if abs(steep - 1.0) < 1e-9:
@@ -237,14 +239,98 @@ def warp(t: np.ndarray, mid: float = 0.5, steep: float = 1.0) -> np.ndarray:
     return 0.5 + 0.5 * np.sign(d) * np.abs(d) ** (1.0 / steep)
 
 
+def _norm_pts(pts) -> list:
+    out, last_t, last_u = [], 0.0, 0.0
+    for i, pt in enumerate((list(pts) + IDENTITY_PTS)[:3]):
+        try:
+            t, u = float(pt[0]), float(pt[1])
+        except (TypeError, ValueError, IndexError):
+            t, u = IDENTITY_PTS[i]
+        t = float(np.clip(t, last_t + GAP, 1.0 - GAP * (3 - i)))
+        u = float(np.clip(u, last_u, 1.0))
+        out.append([round(t, 4), round(u, 4)])
+        last_t, last_u = t, u
+    return out
+
+
+def norm_curves(curves) -> dict:
+    """{"out": {"pts"}, "in": {"pts"}} — from points, a preset name ({"preset": name}), or the older mid / steep."""
+    curves = curves or {}
+    if curves.get("preset") in CURVE_PRESETS:
+        pr = CURVE_PRESETS[curves["preset"]]
+        curves = {"out": {"pts": pr["out"]}, "in": {"pts": pr["in"]}}
+    out = {}
+    for side in ("out", "in"):
+        c = curves.get(side) or {}
+        if c.get("pts"):
+            pts = c["pts"]
+        elif "mid" in c or "steep" in c:
+            try:
+                mid = float(np.clip(float(c.get("mid", 0.5)), 0.05, 0.95))
+                steep = float(np.clip(float(c.get("steep", 1.0)), 0.25, 4.0))
+            except (TypeError, ValueError):
+                mid, steep = 0.5, 1.0
+            pts = [[t, float(warp(np.array([t]), mid, steep)[0])] for t in (0.25, 0.5, 0.75)]
+        else:
+            pts = IDENTITY_PTS
+        out[side] = {"pts": _norm_pts(pts)}
+    return out
+
+
+def preset_of(curves) -> str | None:
+    """The preset these curves match (None when shaped by hand). No curves = "even"."""
+    if not curves:
+        return "even"
+    c = norm_curves(curves)
+    for name, pr in CURVE_PRESETS.items():
+        if np.allclose(c["out"]["pts"], _norm_pts(pr["out"]), atol=2e-3) and \
+                np.allclose(c["in"]["pts"], _norm_pts(pr["in"]), atol=2e-3):
+            return name
+    return None
+
+
+def is_identity(c: dict) -> bool:
+    return all(np.allclose(c[s]["pts"], IDENTITY_PTS, atol=1e-4) for s in ("out", "in"))
+
+
+def shape(t: np.ndarray, pts) -> np.ndarray:
+    """u at each t: the monotone cubic (Fritsch–Carlson) through (0, 0), pts and (1, 1)."""
+    xs = np.array([0.0] + [p[0] for p in pts] + [1.0])
+    ys = np.array([0.0] + [p[1] for p in pts] + [1.0])
+    h = np.diff(xs)
+    d = np.diff(ys) / h
+    m = np.empty(len(xs))
+    m[0], m[-1] = d[0], d[-1]
+    m[1:-1] = (d[:-1] + d[1:]) / 2.0
+    for k in range(len(d)):
+        if d[k] == 0.0:
+            m[k] = m[k + 1] = 0.0
+            continue
+        a, b = m[k] / d[k], m[k + 1] / d[k]
+        if a < 0:
+            m[k], a = 0.0, 0.0
+        if b < 0:
+            m[k + 1], b = 0.0, 0.0
+        s2 = a * a + b * b
+        if s2 > 9.0:
+            tau = 3.0 / np.sqrt(s2)
+            m[k], m[k + 1] = tau * a * d[k], tau * b * d[k]
+    t = np.clip(np.asarray(t, dtype=float), 0.0, 1.0)
+    k = np.clip(np.searchsorted(xs, t, side="right") - 1, 0, len(h) - 1)
+    hk = h[k]
+    s = (t - xs[k]) / hk
+    h00, h10, h01, h11 = 2 * s**3 - 3 * s**2 + 1, s**3 - 2 * s**2 + s, -2 * s**3 + 3 * s**2, s**3 - s**2
+    return np.clip(h00 * ys[k] + h10 * hk * m[k] + h01 * ys[k + 1] + h11 * hk * m[k + 1], 0.0, 1.0)
+
+
 def stem_gains(t: np.ndarray, profile: str = "smooth", total_beats: float | None = None, curves: dict = None) -> dict:
     """{stem: (gain out for deck A, gain in for deck B)} — arrays the shape of t (before smoothing).
     total_beats (the transition's length in beats) puts the bass swap on a beat; curves (norm_curves) shape each side."""
     if curves:
         c = norm_curves(curves)
-        if any(c[s] != CURVE_DEFAULT for s in c):
-            g_out = stem_gains(warp(t, **c["out"]), profile, total_beats)
-            g_in = stem_gains(warp(t, **c["in"]), profile, total_beats)
+        if not is_identity(c):
+            g_out = stem_gains(shape(t, c["out"]["pts"]), profile, total_beats)
+            g_in = stem_gains(shape(t, c["in"]["pts"]), profile, total_beats)
             return {s: (g_out[s][0], g_in[s][1]) for s in STEMS}
     tm = _TIMING[profile]
     tv, td, to = (_window(t, *tm[s]) for s in ("vocals", "drums", "other"))

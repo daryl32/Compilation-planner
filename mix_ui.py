@@ -777,6 +777,24 @@ def _neural_autoplace(a_uid: str, b_uid: str) -> None:
                                           f"{format_mmss(b_at)}.")
 
 
+CURVE_HELP = ("How each side fades. Even = the profile as it is; Quick swap = both change over fast in the middle; "
+              "Early out = A drops away first; Late in = B waits then arrives; Long overlap = both stay up together; "
+              "Hold then cut = nothing happens until the end; Dip = A goes early and B comes late. "
+              "Shape it further with the ● handles in the two-deck editor.")
+
+
+def _preset_label(name) -> str:
+    return SM.CURVE_PRESETS[name]["label"] if name in SM.CURVE_PRESETS else "✋ Hand-shaped"
+
+
+def _tx_set_preset(stk: str, pick_key: str) -> None:
+    name = st.session_state.get(pick_key)
+    if name in SM.CURVE_PRESETS and stk in st.session_state:
+        s = st.session_state[stk]
+        s["curves"] = None if name == "even" else SM.norm_curves({"preset": name})
+        s["from"] = f"preset:{name}"
+
+
 def _neural_join(b: dict, uid: str, c, a: dict) -> None:
     """🧠 The neural join's own controls: profile, bars, 📍 auto-place."""
     import mixer
@@ -789,8 +807,14 @@ def _neural_join(b: dict, uid: str, c, a: dict) -> None:
                              help="  \n".join(SM.PROFILES.values()))
     bars = c[3].selectbox("Bars", NEURAL_BARS, key=bk, label_visibility="collapsed",
                           format_func=lambda n: f"{n} bars", help="How long the blend lasts.")
-    b["xfade"] = {"neural": {"profile": profile, "bars": int(bars),
-                             **({"curves": own["curves"]} if own.get("curves") else {})}}
+    cur = SM.preset_of(own.get("curves")) or "hand"
+    opts = list(SM.CURVE_PRESETS) + (["hand"] if cur == "hand" else [])
+    ck = f"mxm_nnc_{uid}"
+    if st.session_state.get(ck, "∅") not in opts:
+        st.session_state[ck] = cur
+    pick = st.selectbox("Curve shape", opts, key=ck, format_func=_preset_label, help=CURVE_HELP)
+    curves = own.get("curves") if pick == "hand" else (None if pick == "even" else SM.norm_curves({"preset": pick}))
+    b["xfade"] = {"neural": {"profile": profile, "bars": int(bars), **({"curves": curves} if curves else {})}}
     c[4].button("📍 Place", key=f"mxm_nnplace_{uid}", width="stretch", on_click=_neural_autoplace,
                 args=(a["uid"], uid),
                 help="Sets where the blend starts in this part (the last phrase line with room for it) and "
@@ -1184,6 +1208,13 @@ def _transition(summaries: dict) -> None:
     if missing:
         st.caption(f"▶ A / ▶ B need the song on the server: {', '.join(missing)} — ⬇️ fetch below.")
         _audio_ready({x: {"full"} for x in missing}, "mxt_src")
+
+    # Curve shape presets (the ● handles above shape them further)
+    cur = SM.preset_of(s.get("curves")) or "hand"
+    opts = list(SM.CURVE_PRESETS) + (["hand"] if cur == "hand" else [])
+    st.session_state["mxt_curve"] = cur
+    st.pills("Curve shape", opts, key="mxt_curve", format_func=_preset_label, help=CURVE_HELP,
+             on_change=_tx_set_preset, args=(stk, "mxt_curve"))
 
     # Profile, length, preview
     st.session_state.setdefault("mxt_profile", s.get("profile") or "smooth")
