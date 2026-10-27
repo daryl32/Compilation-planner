@@ -13,6 +13,8 @@ models are trained and judged against (claude/ml-redesign-plan.md, Phase 4).
                  ⏭️ Skip (bad frame) is remembered, so that frame never comes back.
   📊 Progress    how many of each, which tags still need examples, recent answers (with ↩️ undo).
   📒 Vocabulary  tag_vocabulary.csv — edit it here, upload your Excel copy, or download it.
+  🧪 Trial results  the latest Modal trial (trial_view.py): every tagged frame with your tags, the
+                 old tags and each model's tags side by side; motion curves and cuts; the report.
 
 Answers go to training_labels.json in the catalogue folder (saved to Drive with the other
 edits). Nothing here changes scene tags — the Reviewer still owns those.
@@ -57,7 +59,7 @@ st.sidebar.caption("New cards lean toward videos with the fewest labels and scen
                    "reviewed yet.")
 
 with st.container(key="mainnav_tl"):   # the page's main menu — styled as tabs (menu_css)
-    view = st.radio("View", ["🎯 Label", "📊 Progress", "📒 Vocabulary"], horizontal=True,
+    view = st.radio("View", ["🎯 Label", "📊 Progress", "📒 Vocabulary", "🧪 Trial results"], horizontal=True,
                     key="tl_view", label_visibility="collapsed")
 
 vocab, vocab_source = TL.load_vocabulary()
@@ -286,4 +288,10 @@ def vocab_view() -> None:
                       file_name="tag_vocabulary.csv", mime="text/csv", key="tl_vocab_dl", width="stretch")
 
 
-{"🎯 Label": label_view, "📊 Progress": progress_view, "📒 Vocabulary": vocab_view}[view]()
+def trial_view() -> None:
+    import trial_view as TV
+    TV.render()
+
+
+{"🎯 Label": label_view, "📊 Progress": progress_view, "📒 Vocabulary": vocab_view,
+ "🧪 Trial results": trial_view}[view]()

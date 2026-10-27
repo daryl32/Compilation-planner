@@ -285,6 +285,16 @@ def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None,
             for f in _list_files(service, sprite_id):
                 tasks.append((f, catalogue_dir / "timeline_sprites" / f["name"]))
 
+        # trial_results (subfolder of catalogue): the latest Modal trial — results.json,
+        # report.md and one frame per tagged moment in frames/<video_id>/ (modal_trial.py export)
+        for trial_id in ids("trial_results", cat_folder_id):
+            for f in _list_files(service, trial_id):
+                tasks.append((f, catalogue_dir / "trial_results" / f["name"]))
+            for frames_id in ids("frames", trial_id):
+                for vid_folder in _list_subfolders(service, frames_id):
+                    for f in _list_files(service, vid_folder["id"]):
+                        tasks.append((f, catalogue_dir / "trial_results" / "frames" / vid_folder["name"] / f["name"]))
+
     _record_added_dates(catalogue_dir, created)
 
     # preview copies (proxies)
