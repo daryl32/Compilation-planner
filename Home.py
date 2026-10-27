@@ -16,7 +16,7 @@ page_setup("Media Planner", "Home.py")
 
 st.divider()
 
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3 = st.columns(3)
 
 with col1:
     st.subheader("📁 Media Library")
@@ -33,6 +33,8 @@ with col3:
     st.write("Match clips to a music track and build a compilation plan.")
     st.page_link("pages/1_Compilation_Planner.py", label="Open Compilation Planner →")
 
+col4, col5, col6 = st.columns(3)
+
 with col4:
     st.subheader("🖥️ Server")
     st.write("See what's using the server's disk and clear temporary files.")
@@ -42,3 +44,8 @@ with col5:
     st.subheader("🔮 Recommendations")
     st.write("The best videos and cut settings for a track, found across your whole library.")
     st.page_link("pages/5_Recommendations.py", label="Open Recommendations →")
+
+with col6:
+    st.subheader("🎯 Training Labels")
+    st.write("Hand-check random frames and scene changes to train the new tagging models.")
+    st.page_link("pages/6_Training_Labels.py", label="Open Training Labels →")

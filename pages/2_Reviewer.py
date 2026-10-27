@@ -64,6 +64,10 @@ top_button("reviewer-top",
 # Sidebar (this page's controls — the shared ones are drawn by page_setup)
 # ---------------------------------------------------------------------------
 st.sidebar.header("Reviewer")
+try:
+    st.sidebar.page_link("pages/6_Training_Labels.py", label="🎯 Training Labels — label frames for the new models")
+except Exception:   # page list unavailable (e.g. run on its own) — a plain link instead
+    st.sidebar.markdown("[🎯 Training Labels](Training_Labels)")
 use_library_range = st.sidebar.toggle(
     "Use library range", value=True,
     help="Only show scenes inside the video's Media Library time range. "
