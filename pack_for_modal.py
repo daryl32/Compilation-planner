@@ -76,15 +76,22 @@ def _read_json(path: Path, default=None):
         return default
 
 
-def load_catalogues() -> dict:
-    """{video_id: catalogue} for every video catalogue in CATALOGUE_DIR."""
-    out = {}
-    for p in sorted(CATALOGUE_DIR.glob("*.json")):
-        if p.name in NOT_CATALOGUES or p.name.startswith("."):
-            continue
-        cat = _read_json(p)
-        if isinstance(cat, dict) and "video_id" in cat and "scenes" in cat:
-            out[cat["video_id"]] = cat
+def load_catalogues(progress: bool = False) -> dict:
+    """{video_id: catalogue} for every video catalogue in CATALOGUE_DIR. Read 8 at a time:
+    with Google Drive in Stream mode each file is downloaded the first time it's read."""
+    from concurrent.futures import ThreadPoolExecutor
+    paths = [p for p in sorted(CATALOGUE_DIR.glob("*.json"))
+             if p.name not in NOT_CATALOGUES and not p.name.startswith(".")]
+    out, started = {}, time.time()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for i, cat in enumerate(pool.map(_read_json, paths), 1):
+            if isinstance(cat, dict) and "video_id" in cat and "scenes" in cat:
+                out[cat["video_id"]] = cat
+            if progress and (i % 10 == 0 or i == len(paths)):
+                print(f"\rReading catalogues from Google Drive: {i}/{len(paths)} "
+                      f"({time.time() - started:.0f}s)", end="", flush=True)
+    if progress:
+        print()
     return out
 
 
@@ -274,7 +281,8 @@ def main(argv=None) -> int:
         print("ffprobe isn't on PATH — install ffmpeg (winget install ffmpeg) and open a new terminal.")
         return 1
     print(f"Catalogues:     {CATALOGUE_DIR}\nPreview copies: {PROXY_DIR}\nPack folder:    {args.out}\n")
-    cats = load_catalogues()
+    print("The first run downloads every catalogue from Drive (a few minutes); later runs are quicker.")
+    cats = load_catalogues(progress=True)
     meta = library_meta()
     has_proxy = lambda v: (PROXY_DIR / f"{v}.mp4").exists()
     no_proxy = sorted(v for v in cats if not has_proxy(v))
