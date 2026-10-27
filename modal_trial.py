@@ -176,7 +176,8 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
     import trial_logic as TL
 
     out_dir = Path(f"{OUT}/{video_id}")
-    if not redo and (out_dir / "vision.json").exists():
+    prev = _read_json(out_dir / "vision.json")
+    if not redo and prev and not prev.get("partial"):
         return {"video_id": video_id, "skipped": True}
     started = time.time()
     timings = {}
@@ -319,7 +320,8 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
     np.save(out_dir / "person_curve.npy", curve.astype(np.float32))
 
     timings["total"] = time.time() - started
-    result = {"video_id": video_id, "duration": round(duration, 2), "native_fps": native_fps,
+    result = {"video_id": video_id, "duration": round(duration, 2), "partial": bool(max_seconds),
+              "native_fps": native_fps,
               "pose_fps": TL.POSE_FPS, "cuts": cuts, "shot_error": shot_error, "frames": n_frames, "tracks": len(tracks),
               "targets": targets, "scenes": scenes, "timings": {k: round(v, 1) for k, v in timings.items()},
               "gpu": VISION_GPU, "models": {"pose": POSE_MODEL, "embed": EMB_MODEL, "shots": "TransNetV2"}}
@@ -354,11 +356,13 @@ class Tagger:
 
         pack_vol.reload()
         out = Path(f"{OUT}/{video_id}/tags.json")
-        if not redo and out.exists():
-            return {"video_id": video_id, "skipped": True}
         vis = _read_json(f"{OUT}/{video_id}/vision.json")
         if not vis:
             return {"video_id": video_id, "error": "no vision.json — run the vision stage first"}
+        prev = _read_json(out)
+        if (not redo and prev and not prev.get("partial") and not vis.get("partial")
+                and prev.get("targets") == len(vis["targets"])):
+            return {"video_id": video_id, "skipped": True}
         started = time.time()
         vocab = _vocab()
         before, after = TL.build_prompt(vocab)
@@ -391,6 +395,8 @@ class Tagger:
         load = self.load_seconds if self.first else 0.0
         self.first = False
         out.write_text(json.dumps({"video_id": video_id, "model": VLM_MODEL, "gpu": TAG_GPU,
+                                   "partial": bool(max_prompts) or bool(vis.get("partial")),
+                                   "targets": len(vis["targets"]),
                                    "seconds": round(seconds, 1), "load_seconds": round(load, 1),
                                    "prompts": len(convs), "unreadable": bad,
                                    "vocab": [r["tag"] for r in vocab], "results": results}), encoding="utf-8")
