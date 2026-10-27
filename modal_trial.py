@@ -38,8 +38,10 @@ import modal
 VLM_MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct"
 EMB_MODEL = "google/siglip2-so400m-patch14-384"
 POSE_MODEL = "yolo11l-pose.pt"
-VISION_GPU = "L4"
-TAG_GPU = "H100"
+# First choice first; Modal falls back down the list when that GPU type is busy.
+VISION_GPUS = ["L4", "A10", "L40S", "A100-40GB"]
+TAG_GPUS = ["H100", "A100-80GB"]
+VISION_GPU, TAG_GPU = VISION_GPUS[0], TAG_GPUS[0]
 
 DATA, CACHE = "/data", "/cache"
 PACK, OUT = f"{DATA}/pack", f"{DATA}/trial"
@@ -84,6 +86,23 @@ def _vocab() -> list:
         if rows:
             return rows
     return TL.vocabulary_from_labels(_read_json(f"{PACK}/library/labels.json", []))
+
+
+def _gpu_name(default: str) -> str:
+    """The GPU this container actually got (it may be a fallback), in trial_logic.GPU_RATE's names."""
+    try:
+        import subprocess
+        name = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+                              capture_output=True, text=True, timeout=20).stdout.upper()
+    except Exception:
+        return default
+    for key, label in (("H100", "H100"), ("L40S", "L40S"), ("A10G", "A10"), ("A10", "A10"), ("L4", "L4"),
+                       ("T4", "T4")):
+        if key in name:
+            return label
+    if "A100" in name:
+        return "A100-80GB" if "81" in name or "80" in name else "A100-40GB"
+    return default
 
 
 def _video_path(video_id: str, max_seconds) -> str:
@@ -166,7 +185,7 @@ def _transnet_cuts(path: str, threshold: float = 0.5) -> tuple:
     return [c for c in cuts if c > 0.2], fps
 
 
-@app.function(image=vision_image, gpu=VISION_GPU, volumes={DATA: pack_vol, CACHE: cache_vol},
+@app.function(image=vision_image, gpu=VISION_GPUS, volumes={DATA: pack_vol, CACHE: cache_vol},
               timeout=4 * 3600, cpu=4, memory=16384)
 def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
     import subprocess
@@ -324,7 +343,7 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
               "native_fps": native_fps,
               "pose_fps": TL.POSE_FPS, "cuts": cuts, "shot_error": shot_error, "frames": n_frames, "tracks": len(tracks),
               "targets": targets, "scenes": scenes, "timings": {k: round(v, 1) for k, v in timings.items()},
-              "gpu": VISION_GPU, "models": {"pose": POSE_MODEL, "embed": EMB_MODEL, "shots": "TransNetV2"}}
+              "gpu": _gpu_name(VISION_GPU), "models": {"pose": POSE_MODEL, "embed": EMB_MODEL, "shots": "TransNetV2"}}
     (out_dir / "vision.json").write_text(json.dumps(result), encoding="utf-8")
     pack_vol.commit()
     return {"video_id": video_id, "seconds": round(timings["total"], 1), "cuts": len(cuts), "shot_error": shot_error,
@@ -335,7 +354,7 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
 # tag — the teacher
 # ---------------------------------------------------------------------------
 
-@app.cls(image=tag_image, gpu=TAG_GPU, volumes={DATA: pack_vol, CACHE: cache_vol},
+@app.cls(image=tag_image, gpu=TAG_GPUS, volumes={DATA: pack_vol, CACHE: cache_vol},
          timeout=4 * 3600, cpu=8, memory=65536, max_containers=1)
 class Tagger:
     @modal.enter()
@@ -394,7 +413,7 @@ class Tagger:
         seconds = time.time() - started
         load = self.load_seconds if self.first else 0.0
         self.first = False
-        out.write_text(json.dumps({"video_id": video_id, "model": VLM_MODEL, "gpu": TAG_GPU,
+        out.write_text(json.dumps({"video_id": video_id, "model": VLM_MODEL, "gpu": _gpu_name(TAG_GPU),
                                    "partial": bool(max_prompts) or bool(vis.get("partial")),
                                    "targets": len(vis["targets"]),
                                    "seconds": round(seconds, 1), "load_seconds": round(load, 1),
@@ -486,7 +505,13 @@ def report() -> str:
     stage_sec = {"vision": sum(d["timings"]["total"] for d in vis.values()),
                  "tag": sum(t["seconds"] + t.get("load_seconds", 0) for t in tagged.values())}
     lib_hours = float(pack.get("library_hours") or 0) or trial_hours
-    cost = TL.extrapolate(stage_sec, {"vision": VISION_GPU, "tag": TAG_GPU}, trial_hours, lib_hours)
+
+    def used(rows, default):        # the GPU most of the work actually ran on
+        names = [r.get("gpu") or default for r in rows]
+        return max(set(names), key=names.count) if names else default
+
+    cost = TL.extrapolate(stage_sec, {"vision": used(vis.values(), VISION_GPU),
+                                      "tag": used(tagged.values(), TAG_GPU)}, trial_hours, lib_hours)
 
     def f(x):
         return "–" if x is None else f"{x:.2f}"
@@ -568,11 +593,11 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     if "download" in stages:
         print(download_models.remote())
     if "vision" in stages:
-        print(f"Vision on {len(vids)} video(s) ({VISION_GPU})…")
+        print(f"Vision on {len(vids)} video(s) ({' / '.join(VISION_GPUS)}, first free)…")
         for r in vision.starmap([(v, max_seconds, redo) for v in vids], return_exceptions=True):
             print("  ", r)
     if "tag" in stages:
-        print(f"Tagging with {VLM_MODEL} ({TAG_GPU})…")
+        print(f"Tagging with {VLM_MODEL} ({' / '.join(TAG_GPUS)}, first free)…")
         tagger = Tagger()
         for r in tagger.tag_video.starmap([(v, max_prompts, redo) for v in vids], return_exceptions=True):
             print("  ", r)
