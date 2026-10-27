@@ -687,8 +687,12 @@ def report() -> str:
            f"**{f(old_trial['overall']['f1'])}**"
            + "".join(f", {k} **{f(scores[k]['overall']['f1'])}**" for k in keys)
            + f". Old tagger on all your frames: {f(old_all['overall']['f1'])}.", ""]
-    if len(keys) > 1:
+    if len(keys) > 1 and trial_gold:
         md.append(f"**Better teacher: {best}** — the suggestions below use it.")
+        md.append("")
+    elif len(keys) > 1:
+        md.append("**No better teacher yet** — none of your labelled frames are in these videos, so the "
+                  "models can't be scored. The full run includes them.")
         md.append("")
     head = "| Tag | Kind | Your examples | Old F1 | " + " | ".join(f"{k} F1" for k in keys) + \
            f" | {best or 'teacher'} P / R | Suggestion |"
