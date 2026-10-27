@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -87,13 +88,25 @@ def load_catalogues() -> dict:
     return out
 
 
+def newest_copy(name: str):
+    """The newest of name and Google Drive's duplicates of it ("name (1).csv", …), or None.
+    Drive keeps a second file with the same name when the app saves one it can't overwrite;
+    the server's sync always takes the newest, so this does too."""
+    stem, suffix = Path(name).stem, Path(name).suffix
+    found = [p for p in CATALOGUE_DIR.glob(f"{stem}*{suffix}")
+             if p.name == name or re.fullmatch(re.escape(stem) + r" \(\d+\)" + re.escape(suffix), p.name)]
+    return max(found, key=lambda p: p.stat().st_mtime) if found else None
+
+
 def library_meta() -> dict:
-    meta = _read_json(CATALOGUE_DIR / "library_meta.json", {})
+    src = newest_copy("library_meta.json")
+    meta = _read_json(src, {}) if src else {}
     return meta if isinstance(meta, dict) else {}
 
 
 def labelled_counts() -> dict:
-    data = _read_json(CATALOGUE_DIR / "training_labels.json", {})
+    src = newest_copy("training_labels.json")
+    data = _read_json(src, {}) if src else {}
     counts = {}
     for it in (data or {}).get("items") or []:
         if isinstance(it, dict) and not it.get("skipped"):
@@ -290,8 +303,8 @@ def main(argv=None) -> int:
     (out / "manifests").mkdir(parents=True, exist_ok=True)
     (out / "library").mkdir(parents=True, exist_ok=True)
     for name in LIBRARY_FILES:
-        src = CATALOGUE_DIR / name
-        if src.exists():
+        src = newest_copy(name)
+        if src is not None:
             shutil.copyfile(src, out / "library" / name)
 
     started, rows, copied = time.time(), [], 0

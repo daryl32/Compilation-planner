@@ -87,3 +87,17 @@ def test_dry_run_copies_nothing(proxies, tmp_path):
     out = tmp_path / "pack"
     assert PK.main(["--dry-run", "--out", str(out)]) == 0
     assert not out.exists()
+
+
+def test_newest_copy_takes_drives_duplicate(tmp_path, monkeypatch):
+    import os
+    monkeypatch.setattr(PK, "CATALOGUE_DIR", tmp_path)
+    assert PK.newest_copy("tag_vocabulary.csv") is None
+    a, b = tmp_path / "tag_vocabulary.csv", tmp_path / "tag_vocabulary (1).csv"
+    other = tmp_path / "tag_vocabulary_old.csv"
+    for i, p in enumerate((a, b, other)):
+        p.write_text("tag\nx\n")
+        os.utime(p, (1000 + i, 1000 + i))
+    assert PK.newest_copy("tag_vocabulary.csv") == b          # newer duplicate wins, unrelated names ignored
+    os.utime(a, (5000, 5000))
+    assert PK.newest_copy("tag_vocabulary.csv") == a
