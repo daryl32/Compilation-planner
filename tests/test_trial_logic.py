@@ -137,7 +137,8 @@ class _Vol:
         pass
 
 
-def test_report(tmp_path, monkeypatch):
+def _fake_trial(tmp_path, monkeypatch):
+    """A made-up trial on the Volume: pack + 1 video with vision, 8b and 32b results."""
     pytest.importorskip("modal")
     import modal_trial as M
     pack, out = tmp_path / "pack", tmp_path / "trial"
@@ -158,8 +159,16 @@ def test_report(tmp_path, monkeypatch):
         {"scene_id": 0, "start": 0.0, "end": 22.0, "motion_intensity": 3.0},
         {"scene_id": 1, "start": 22.0, "end": 40.0, "motion_intensity": 9.0}]}))
     (out / "v").mkdir(parents=True)
+    targets = [{"key": f"g_{i['t']:.2f}", "t": i["t"], "scene_id": 0 if i["t"] < 22 else 1, "gold_id": i["id"]}
+               for i in gold if i["type"] == "tags"] + [{"key": "s1_0", "t": 31.0, "scene_id": 1}]
+    (out / "v" / "frames").mkdir(parents=True)
+    for tg in targets:
+        (out / "v" / "frames" / TL.frame_name(tg["t"])).write_bytes(b"jpg")
+    import numpy as np
+    np.save(out / "v" / "person_curve.npy", np.linspace(0, 1, 600).astype(np.float32))
     (out / "v" / "vision.json").write_text(json.dumps({
-        "video_id": "v", "duration": 40.0, "cuts": [10.2], "timings": {"total": 120.0},
+        "video_id": "v", "duration": 40.0, "cuts": [10.2], "timings": {"total": 120.0, "load_models": 20.0},
+        "targets": targets, "pose_fps": 15.0,
         "scenes": [{"scene_id": 0, "level": 0.02, "periodicity": 0.7, "movement_bpm": 118.0},
                    {"scene_id": 1, "level": 0.05, "periodicity": 0.2, "movement_bpm": 90.0}]}))
     gold_tag_items = [i for i in gold if i["type"] == "tags"]
@@ -170,6 +179,11 @@ def test_report(tmp_path, monkeypatch):
                                                     "unreadable": 1, "results": sloppy, "gpu": "L40S"}))
     (out / "v" / "tags_32b.json").write_text(json.dumps({"seconds": 120.0, "load_seconds": 100.0, "prompts": 4,
                                                         "unreadable": 0, "results": perfect, "gpu": "H100"}))
+    return M, pack, out, gold
+
+
+def test_report(tmp_path, monkeypatch):
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
     text = M.report.local()
     assert "1 videos, 0.01 h of footage" in text
     assert ", 8b **" in text and ", 32b **1.00**" in text  # the made-up 32b is perfect
@@ -182,3 +196,22 @@ def test_report(tmp_path, monkeypatch):
     assert data["best_teacher"] == "32b" and data["library_total"] > 0
     assert data["library_total"] < data["cost"]["total"]["library_$"]      # one teacher, not both
     assert data["tags"]["verdicts"]["walking"] == "need more labels"
+
+
+def test_export(tmp_path, monkeypatch):
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    M.report.local()
+    res = M.export.local(False)
+    assert res == {"videos": 1, "frames": 5}
+    data = json.loads((out / "export" / "results.json").read_text())
+    assert set(data["teachers"]) == {"8b", "32b"} and (out / "export" / "report.md").exists()
+    v = data["videos"]["v"]
+    assert v["cuts_new"] == [10.2] and v["cuts_old"] == [22.0]
+    assert {b["verdict"] for b in v["boundaries"]} == {"cut", "no_cut"}
+    assert len(v["person_curve"]) == 80                       # 40 s at 2 points a second
+    m = next(m for m in v["moments"] if m["key"] == "g_5.00")
+    assert m["mine"] == ["close-up", "dancing"] and m["old"] == []
+    assert m["teachers"]["32b"]["tags"] == ["close-up", "dancing"] and m["teachers"]["8b"]["tags"] == ["wide"]
+    assert (out / "export" / m["frame"]).exists()
+    plain = next(m for m in v["moments"] if m["key"] == "s1_0")
+    assert plain["mine"] is None and plain["teachers"] == {}

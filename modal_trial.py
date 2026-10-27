@@ -22,7 +22,8 @@ Run from the scene-labeling folder, in the venv (pip install modal; modal setup)
     modal run modal_trial.py                  the whole trial pack
     modal run modal_trial.py --stage report   just rebuild the report
     modal run modal_trial.py --stage tag --videos vid05,vid06
-Stages: download, vision, tag, report, all (default). Each skips a video it has already done
+Stages: download, vision, tag, report, export, all (default). export puts the results in your
+Drive catalogue folder (catalogue/trial_results) for the web app's 🧪 Trial results view. Each skips a video it has already done
 unless you pass --redo.
 """
 
@@ -733,6 +734,142 @@ def report() -> str:
     return text
 
 
+# ---------------------------------------------------------------------------
+# export — a compact bundle for the web app's 🧪 Trial results view: results.json, report.md and
+# one frame per tagged moment. Written to /trial/export on the Volume; the laptop then downloads
+# it into the Drive catalogue folder (catalogue/trial_results), and the server's Drive sync picks
+# it up.
+# ---------------------------------------------------------------------------
+
+CURVE_FPS = 2.0         # motion curves in the bundle: 2 points a second
+
+
+def _resample_curve(values, fps: float, out_fps: float = CURVE_FPS) -> list:
+    """Mean of each 1/out_fps-second window (NaN-aware), rounded — for small charts."""
+    import numpy as np
+    v = np.asarray(values, dtype=float)
+    if v.size == 0 or fps <= 0:
+        return []
+    n = int(v.size / fps * out_fps)          # whole 1/out_fps-second windows
+    if n == 0:
+        return []
+    edges = np.round(np.arange(n + 1) * fps / out_fps).astype(int)
+    out = []
+    with np.errstate(all="ignore"):
+        for a, b in zip(edges[:-1], edges[1:]):
+            x = np.nanmean(v[a:max(b, a + 1)]) if np.isfinite(v[a:max(b, a + 1)]).any() else np.nan
+            out.append(None if not np.isfinite(x) else round(float(x), 5))
+    return out
+
+
+@app.function(image=report_image, volumes={DATA: pack_vol}, timeout=1800)
+def export(smoke: bool = False) -> dict:
+    import shutil
+    import numpy as np
+    import trial_logic as TL
+
+    pack_vol.reload()
+    EXPORT = f"{OUT}/export"      # (read here, so tests can point OUT elsewhere)
+    if Path(EXPORT).exists():
+        shutil.rmtree(EXPORT)
+    Path(f"{EXPORT}/frames").mkdir(parents=True)
+    gold = {i["id"]: i for i in _gold_items()}
+    done = sorted(p.name for p in Path(OUT).iterdir() if (p / "vision.json").exists())
+    videos, n_frames = {}, 0
+    for v in done:
+        vis = _read_json(f"{OUT}/{v}/vision.json")
+        man = _read_json(f"{PACK}/manifests/{v}.json") or {"scenes": []}
+        teachers = {}
+        for key in TEACHERS:
+            tj = _read_json(tags_file(v, key)) or (_read_json(f"{OUT}/{v}/tags.json") if key == "8b" else None)
+            if tj:
+                teachers[key] = tj["results"]
+        old_scenes = {s["scene_id"]: s for s in man["scenes"]}
+        moments = []
+        for tg in vis["targets"]:
+            src = Path(f"{OUT}/{v}/frames/{TL.frame_name(tg['t'])}")
+            frame = None
+            if src.exists():
+                frame = f"frames/{v}/{tg['key']}.jpg"
+                Path(f"{EXPORT}/frames/{v}").mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(src, f"{EXPORT}/{frame}")
+                n_frames += 1
+            sc = old_scenes.get(tg.get("scene_id")) or {}
+            g = gold.get(tg.get("gold_id")) if tg.get("gold_id") else None
+            moments.append({
+                "key": tg["key"], "t": tg["t"], "scene_id": tg.get("scene_id"), "frame": frame,
+                "mine": None if g is None else list(g.get("tags") or []),
+                "old": list(sc.get("corrected_tags") if sc.get("corrected_tags") is not None else sc.get("tags") or []),
+                "teachers": {k: {f: r[tg["key"]].get(f) for f in ("tags", "unsure", "caption")}
+                             for k, r in teachers.items() if tg["key"] in r},
+            })
+        old_curve, old_fps = [], 0.0
+        for s in man["scenes"]:                 # the old pixel-change curve, stitched scene by scene
+            c = s.get("motion_curve") or {}
+            if c.get("values"):
+                old_fps = float(c.get("fps") or old_fps or 25.0)
+                start = int(round(s.get("start", 0) * old_fps))
+                if len(old_curve) < start:
+                    old_curve += [float("nan")] * (start - len(old_curve))
+                old_curve += c["values"]
+        pc = Path(f"{OUT}/{v}/person_curve.npy")
+        person = _resample_curve(np.load(pc), vis.get("pose_fps", TL.POSE_FPS)) if pc.exists() else []
+        boundaries = [{"t": i["t"], "verdict": i.get("verdict"), "source": i.get("source")}
+                      for i in gold.values() if i.get("type") == "boundary" and i.get("video_id") == v
+                      and not i.get("skipped") and i.get("t") is not None and i["t"] <= vis["duration"]]
+        videos[v] = {
+            "duration": vis["duration"], "partial": bool(vis.get("partial")),
+            "cuts_new": vis["cuts"],
+            "cuts_old": [s["start"] for s in man["scenes"] if 0.2 < s.get("start", 0) <= vis["duration"]],
+            "boundaries": boundaries,
+            "scenes": [{**{k: s.get(k) for k in ("scene_id", "start", "end", "level", "periodicity",
+                                                    "movement_bpm", "people")},
+                        "onsets": s.get("onsets", [])[:200],
+                        "old_motion": (old_scenes.get(s["scene_id"]) or {}).get("motion_intensity")}
+                       for s in vis["scenes"]],
+            "curve_fps": CURVE_FPS, "person_curve": person,
+            "old_curve": _resample_curve(old_curve, old_fps) if old_fps else [],
+            "gpu": vis.get("gpu"), "tracks": vis.get("tracks"),
+            "moments": moments,
+        }
+    report_json = _read_json(f"{OUT}/report.json", {}) or {}
+    results = {"version": 1, "created": time.strftime("%Y-%m-%d %H:%M"), "smoke": smoke,
+               "teachers": {k: TEACHERS[k] for k in TEACHERS
+                            if any(k in m["teachers"] for vd in videos.values() for m in vd["moments"])},
+               "report": report_json, "videos": videos}
+    Path(f"{EXPORT}/results.json").write_text(json.dumps(results), encoding="utf-8")
+    if Path(f"{OUT}/report.md").exists():
+        shutil.copyfile(f"{OUT}/report.md", f"{EXPORT}/report.md")
+    pack_vol.commit()
+    return {"videos": len(videos), "frames": n_frames}
+
+
+def _download_export(dest_name: str = "trial_results") -> str:
+    """Laptop side: fetch /trial/export into the Drive catalogue folder (config.py's CATALOGUE_DIR),
+    replacing the previous trial's results. Returns where it went (or why it couldn't)."""
+    import shutil
+    import subprocess
+    import sys
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from config import CATALOGUE_DIR
+    except Exception as e:
+        return f"couldn't read CATALOGUE_DIR from config.py ({e}) — results stay on Modal"
+    tmp = Path(__file__).resolve().parent / "_trial_download"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir()
+    r = subprocess.run(["modal", "volume", "get", "--force", "media-train", "/trial/export", str(tmp)],
+                       capture_output=True, text=True)
+    found = list(tmp.rglob("results.json"))
+    if r.returncode != 0 or not found:
+        return f"download failed: {(r.stderr or r.stdout).strip()[-400:]}"
+    dest = Path(CATALOGUE_DIR) / dest_name
+    shutil.rmtree(dest, ignore_errors=True)
+    shutil.copytree(found[0].parent, dest)
+    shutil.rmtree(tmp, ignore_errors=True)
+    return str(dest)
+
+
 @app.function(image=report_image, volumes={DATA: pack_vol})
 def list_pack() -> list:
     pack_vol.reload()
@@ -749,7 +886,7 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     if any(k not in TEACHERS for k in keys):
         print(f"--teacher must be one of: {', '.join(TEACHERS)}, both")
         return
-    stages = ["download", "vision", "tag", "report"] if stage == "all" else [stage]
+    stages = ["download", "vision", "tag", "report", "export"] if stage == "all" else [stage]
     vids = [v.strip() for v in videos.split(",") if v.strip()] or list_pack.remote()
     if not vids:
         print("No videos in the pack — run pack_for_modal.bat --upload first.")
@@ -780,4 +917,10 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         name = "trial_report_smoke.md" if smoke else "trial_report.md"
         Path(name).write_text(text, encoding="utf-8")
         print("\n" + text + f"\n\nSaved {Path(name).resolve()}")
+    if "export" in stages:
+        print("Exporting results for the web app…")
+        print("  ", export.remote(smoke))
+        where = _download_export()
+        print(f"   Trial results → {where}\n   In the app: ☁️ Sync from Google Drive, then "
+              f"🎯 Training Labels → 🧪 Trial results.")
     print(f"\nDone in {(time.time() - t_all) / 60:.1f} min.")
