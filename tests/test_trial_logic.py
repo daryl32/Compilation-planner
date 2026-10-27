@@ -102,6 +102,21 @@ def test_scoring():
     assert b["new"]["accuracy"] == 1.0 and b["old"]["accuracy"] == 0.0
 
 
+def test_tag_names_match_ignoring_spaces_and_case():
+    s = TL.score_tags([(["Close-Up Shot", "dogg ystyle"], ["close-upshot", "Doggy Style"])],
+                      ["close-up shot", "Doggy Style"])
+    assert s["overall"]["f1"] == 1.0
+
+
+def test_cost_counts_start_up_once():
+    # 90 s of footage, 60 s of work, 300 s of start-up: the library pays start-up once, not 40 times.
+    c = TL.extrapolate({"tag": 60}, {"tag": "L40S"}, trial_hours=0.025, library_hours=50.0,
+                       fixed={"tag": (300, 1)})
+    work_per_hour = TL.stage_cost(60, "L40S") / 0.025
+    assert c["tag"]["library_$"] == pytest.approx(work_per_hour * 50 + TL.stage_cost(300, "L40S"), abs=0.02)
+    assert c["tag"]["trial_$"] == pytest.approx(TL.stage_cost(360, "L40S"), abs=0.01)
+
+
 def test_cost():
     assert TL.stage_cost(3600, "H100", cores=0, mem_gib=0) == pytest.approx(3.95, abs=0.01)
     c = TL.extrapolate({"vision": 1800, "tag": 900}, {"vision": "L4", "tag": "H100"}, trial_hours=2.0,

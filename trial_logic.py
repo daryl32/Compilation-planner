@@ -265,11 +265,14 @@ def score_tags(pairs: list, vocab_tags: list) -> dict:
     """pairs: [(predicted tags, gold tags)]. Gold labels are complete (an unticked tag is "not
     there"), so a predicted tag not in gold is a false positive. Returns per-tag and overall
     precision / recall / F1."""
-    vocab_l = {t.lower(): t for t in vocab_tags}
+    # Matched ignoring case and spaces, so "close-up shot", "Close-Up Shot" and "close-upshot"
+    # all count as the same tag.
+    norm = lambda t: "".join(str(t).split()).lower()
+    vocab_l = {norm(t): t for t in vocab_tags}
     per = {t: [0, 0, 0] for t in vocab_tags}
     for pred, gold in pairs:
-        p = {vocab_l[x.lower()] for x in pred if x.lower() in vocab_l}
-        g = {vocab_l[x.lower()] for x in gold if x.lower() in vocab_l}
+        p = {vocab_l[norm(x)] for x in pred if norm(x) in vocab_l}
+        g = {vocab_l[norm(x)] for x in gold if norm(x) in vocab_l}
         for t in p & g:
             per[t][0] += 1
         for t in p - g:
@@ -315,16 +318,26 @@ def stage_cost(seconds: float, gpu: str, cores: float = 4.0, mem_gib: float = 16
     return round(seconds * (GPU_RATE.get(gpu, 0.0) + cores * CPU_CORE_RATE + mem_gib * MEM_GIB_RATE), 4)
 
 
-def extrapolate(stage_seconds: dict, gpus: dict, trial_hours: float, library_hours: float) -> dict:
-    """{stage: {"trial_$", "per_hour_$", "library_$", "library_hours_of_gpu"}} plus a total."""
+def extrapolate(stage_seconds: dict, gpus: dict, trial_hours: float, library_hours: float,
+                fixed: dict = None) -> dict:
+    """{stage: {"trial_$", "per_footage_hour_$", "library_$", "library_gpu_hours"}} plus a total.
+    stage_seconds: work that grows with the footage. fixed: {stage: (seconds, times)} — start-up
+    work paid `times` over for the whole library (once per run for a teacher, once per video for
+    vision), so a short trial's start-up isn't wrongly spread over every hour of the library."""
+    fixed = fixed or {}
     out, tot = {}, {"trial_$": 0.0, "library_$": 0.0}
     for stage, sec in stage_seconds.items():
-        c = stage_cost(sec, gpus.get(stage, "CPU"))
+        gpu = gpus.get(stage, "CPU")
+        f_sec, f_times = fixed.get(stage, (0.0, 1))
+        c = stage_cost(sec, gpu)
+        c_fixed = stage_cost(f_sec, gpu)
         per_hour = c / trial_hours if trial_hours else 0.0
-        out[stage] = {"gpu": gpus.get(stage, "CPU"), "trial_seconds": round(sec, 1), "trial_$": round(c, 2),
-                      "per_footage_hour_$": round(per_hour, 3), "library_$": round(per_hour * library_hours, 2),
-                      "library_gpu_hours": round(sec / trial_hours * library_hours / 3600, 2) if trial_hours else 0}
-        tot["trial_$"] += c
-        tot["library_$"] += per_hour * library_hours
+        lib = per_hour * library_hours + c_fixed * f_times
+        lib_sec = (sec / trial_hours * library_hours if trial_hours else 0.0) + f_sec * f_times
+        out[stage] = {"gpu": gpu, "trial_seconds": round(sec + f_sec, 1), "trial_$": round(c + c_fixed, 2),
+                      "per_footage_hour_$": round(per_hour, 3), "library_$": round(lib, 2),
+                      "library_gpu_hours": round(lib_sec / 3600, 2)}
+        tot["trial_$"] += c + c_fixed
+        tot["library_$"] += lib
     out["total"] = {k: round(v, 2) for k, v in tot.items()}
     return out

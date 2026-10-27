@@ -307,6 +307,11 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
             left = el / done_s * max(duration - done_s, 0)
             print(f"[vision] {video_id[:40]}: {done_s / 60:.0f} of {duration / 60:.0f} min of video · "
                   f"about {left / 60:.1f} min left", flush=True)
+        if idx % int(TL.POSE_FPS * 120) == 0:          # every 2 minutes of video
+            done_s, el = idx / TL.POSE_FPS, time.time() - started
+            left = el / done_s * max(duration - done_s, 0)
+            print(f"[vision] {video_id[:40]}: {done_s / 60:.0f} of {duration / 60:.0f} min of video · "
+                  f"about {left / 60:.1f} min left", flush=True)
     flush_emb()
     proc.wait()
     n_frames = idx
@@ -638,10 +643,16 @@ def report() -> str:
 
     # --- Cost
     trial_hours = sum(d["duration"] for d in vis.values()) / 3600
-    stage_sec = {"vision": sum(d["timings"]["total"] for d in vis.values())}
-    for k in keys:
-        stage_sec[f"tag {k}"] = sum(t["seconds"] + t.get("load_seconds", 0) for t in tagged_by[k].values())
+    # Start-up is counted apart from the work: vision loads its models once per video, a
+    # teacher once per run — so a short trial doesn't make the library look far dearer.
     lib_hours = float(pack.get("library_hours") or 0) or trial_hours
+    lib_videos = int(pack.get("library_videos") or 0) or len(done)
+    v_fixed = [d["timings"].get("load_models", 0.0) for d in vis.values()]
+    stage_sec = {"vision": sum(d["timings"]["total"] for d in vis.values()) - sum(v_fixed)}
+    fixed = {"vision": (sum(v_fixed) / max(len(v_fixed), 1), lib_videos)}
+    for k in keys:
+        stage_sec[f"tag {k}"] = sum(t["seconds"] for t in tagged_by[k].values())
+        fixed[f"tag {k}"] = (sum(t.get("load_seconds", 0) for t in tagged_by[k].values()), 1)
 
     def used(rows, default):        # the GPU most of the work actually ran on
         names = [r.get("gpu") or default for r in rows]
@@ -649,7 +660,7 @@ def report() -> str:
 
     gpus = {"vision": used(vis.values(), VISION_GPU)}
     gpus.update({f"tag {k}": used(tagged_by[k].values(), TEACHER_GPUS[k][0]) for k in keys})
-    cost = TL.extrapolate(stage_sec, gpus, trial_hours, lib_hours)
+    cost = TL.extrapolate(stage_sec, gpus, trial_hours, lib_hours, fixed)
     # The library only needs one teacher: the estimate counts vision + the better one.
     lib_total = cost["vision"]["library_$"] + (cost[f"tag {best}"]["library_$"] if best else 0.0)
 
