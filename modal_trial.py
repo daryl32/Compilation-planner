@@ -57,7 +57,12 @@ vision_image = (base.pip_install("torch", "torchvision", "transformers>=4.57", "
                                  "transnetv2-pytorch", "opencv-python-headless", "numpy", "pillow",
                                  "huggingface_hub")
                 .add_local_python_source("trial_logic"))
-tag_image = (base.pip_install("vllm", "numpy", "pillow", "huggingface_hub")
+# vLLM compiles some GPU kernels when it starts, so it needs the CUDA compiler: the same base
+# image and vLLM version as Modal's own vLLM example (a tested pair).
+tag_image = (modal.Image.from_registry("nvidia/cuda:12.9.0-devel-ubuntu22.04", add_python="3.12")
+             .entrypoint([])
+             .uv_pip_install("vllm==0.21.0", "numpy", "pillow", "huggingface_hub")
+             .env({"HF_HOME": f"{CACHE}/hf", "HF_XET_HIGH_PERFORMANCE": "1"})
              .add_local_python_source("trial_logic"))
 report_image = base.pip_install("numpy").add_local_python_source("trial_logic")
 
@@ -361,11 +366,19 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
 class Tagger:
     @modal.enter()
     def load(self):
+        # A failure here is caught, not raised: a container that fails to start is restarted by
+        # Modal over and over (paying for the GPU each time). Instead every call reports the error.
         t0 = time.time()
-        from vllm import LLM
-        self.llm = LLM(model=VLM_MODEL, max_model_len=8192, gpu_memory_utilization=0.92,
-                       limit_mm_per_prompt={"image": 7, "video": 0}, max_num_seqs=32,
-                       enable_prefix_caching=True)
+        self.llm, self.load_error = None, None
+        try:
+            from vllm import LLM
+            self.llm = LLM(model=VLM_MODEL, max_model_len=8192, gpu_memory_utilization=0.92,
+                           limit_mm_per_prompt={"image": 7, "video": 0}, max_num_seqs=32,
+                           enable_prefix_caching=True)
+        except Exception as e:
+            import traceback
+            self.load_error = f"{e.__class__.__name__}: {e}"[:500]
+            traceback.print_exc()
         self.load_seconds = time.time() - t0
         self.first = True
 
@@ -375,6 +388,8 @@ class Tagger:
         import trial_logic as TL
         from vllm import SamplingParams
 
+        if self.llm is None:
+            return {"video_id": video_id, "error": f"the tagging model didn't load — {self.load_error}"}
         pack_vol.reload()
         out = Path(f"{OUT}/{video_id}/tags.json")
         vis = _read_json(f"{OUT}/{video_id}/vision.json")
@@ -603,6 +618,9 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         tagger = Tagger()
         for r in tagger.tag_video.starmap([(v, max_prompts, redo) for v in vids], return_exceptions=True):
             print("  ", r)
+            if isinstance(r, dict) and "didn't load" in str(r.get("error", "")):
+                print("Stopping: the tagging model couldn't start (see the error above).")
+                break
     if "report" in stages:
         text = report.remote()
         name = "trial_report_smoke.md" if smoke else "trial_report.md"
