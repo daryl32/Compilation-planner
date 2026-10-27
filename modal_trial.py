@@ -302,6 +302,11 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
         for t in need.get(idx, []):
             cv2.imwrite(str(frames_dir / TL.frame_name(t)), frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
         idx += 1
+        if idx % int(TL.POSE_FPS * 120) == 0:          # every 2 minutes of video
+            done_s, el = idx / TL.POSE_FPS, time.time() - started
+            left = el / done_s * max(duration - done_s, 0)
+            print(f"[vision] {video_id[:40]}: {done_s / 60:.0f} of {duration / 60:.0f} min of video · "
+                  f"about {left / 60:.1f} min left", flush=True)
     flush_emb()
     proc.wait()
     n_frames = idx
@@ -373,26 +378,79 @@ def tags_file(video_id: str, key: str) -> Path:
     return Path(f"{OUT}/{video_id}/tags_{key}.json")
 
 
+LOAD_LIMIT_MIN = 20     # a teacher that takes longer than this to start is stopped
+
+
+def _gpu_status() -> str:
+    """'GPU memory 18.2 / 46.1 GB · GPU busy 97%' from nvidia-smi, or '' if it can't be read."""
+    import subprocess
+    try:
+        line = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu",
+                               "--format=csv,noheader,nounits"], capture_output=True, text=True,
+                              timeout=10).stdout.strip().splitlines()[0]
+        used, total, busy = (float(x) for x in line.split(","))
+        return f"GPU memory {used / 1024:.1f} / {total / 1024:.0f} GB · GPU busy {busy:.0f}%"
+    except Exception:
+        return ""
+
+
+def _start_heartbeat(key: str, t0: float, done):
+    """Every 30 s while the teacher starts: elapsed time and what the GPU is doing, so a long
+    start-up never looks like a hang. Memory climbing = loading the weights; memory full and the
+    GPU idle = vLLM compiling / warming up on the CPU. Past LOAD_LIMIT_MIN it stops the container,
+    leaving a note so the restart Modal makes doesn't try (and pay) again."""
+    import threading
+
+    def beat():
+        while not done.wait(30):
+            mins = (time.time() - t0) / 60
+            print(f"[{key} teacher] starting… {int(mins)}:{int(mins % 1 * 60):02d} elapsed · "
+                  f"{_gpu_status()}", flush=True)
+            if mins > LOAD_LIMIT_MIN:
+                print(f"[{key} teacher] gave up after {LOAD_LIMIT_MIN} minutes of starting.", flush=True)
+                Path(f"{CACHE}/load_timeout_{key}.json").write_text(json.dumps({"at": time.time()}))
+                try:
+                    cache_vol.commit()
+                finally:
+                    os._exit(3)
+
+    threading.Thread(target=beat, daemon=True).start()
+
+
 def _load_teacher(self, key: str) -> None:
     # A failure here is caught, not raised: a container that fails to start is restarted by
     # Modal over and over (paying for the GPU each time). Instead every call reports the error.
+    import threading
     t0 = time.time()
     self.llm, self.load_error, self.key = None, None, key
+    self.load_seconds, self.first = 0.0, True
+    note = Path(f"{CACHE}/load_timeout_{key}.json")
+    stamp = (_read_json(note) or {}).get("at")
+    if stamp and time.time() - stamp < 3600:
+        self.load_error = f"it took over {LOAD_LIMIT_MIN} minutes to start last time — not trying again for an hour"
+        print(f"[{key} teacher] {self.load_error}", flush=True)
+        return
+    print(f"[{key} teacher] starting {TEACHERS[key]} on {_gpu_name('?')} — progress every 30 s…", flush=True)
+    done = threading.Event()
+    _start_heartbeat(key, t0, done)
     try:
         from vllm import LLM
         self.llm = LLM(model=TEACHERS[key], max_model_len=8192, gpu_memory_utilization=0.90,
                        limit_mm_per_prompt={"image": 7, "video": 0}, max_num_seqs=32,
                        enable_prefix_caching=True)
+        note.unlink(missing_ok=True)
         try:
             cache_vol.commit()          # keep what start-up compiled for next time
         except Exception:
             pass
+        print(f"[{key} teacher] ready after {(time.time() - t0) / 60:.1f} min.", flush=True)
     except Exception as e:
         import traceback
         self.load_error = f"{e.__class__.__name__}: {e}"[:500]
         traceback.print_exc()
+    finally:
+        done.set()
     self.load_seconds = time.time() - t0
-    self.first = True
 
 
 def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False) -> dict:
@@ -432,7 +490,13 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False) ->
             parts.append({"type": "text", "text": after})
             convs.append([{"role": "user", "content": parts}])
             keep.append(tg)
-    outs = self.llm.chat(convs, SamplingParams(temperature=0.0, max_tokens=256), use_tqdm=False) if convs else []
+    outs, chunk, params = [], 64, SamplingParams(temperature=0.0, max_tokens=256)
+    for i in range(0, len(convs), chunk):
+        outs += self.llm.chat(convs[i:i + chunk], params, use_tqdm=False)
+        el = time.time() - started
+        left = el / len(outs) * (len(convs) - len(outs))
+        print(f"[{key} teacher] {video_id[:40]}: {len(outs)}/{len(convs)} moments tagged · "
+              f"{el / 60:.1f} min so far, about {left / 60:.1f} min left", flush=True)
     results = {}
     bad = 0
     for tg, o in zip(keep, outs):
