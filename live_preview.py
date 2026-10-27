@@ -60,6 +60,13 @@ def out_dir() -> Path:
     return d
 
 
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0
+
+
 def window(t: float, bar: float, before: int, after: int, duration: float) -> tuple:
     """(start, end) around t, snapped outward to a GRID-bar grid (so nearby points share a window)."""
     step = GRID * bar
@@ -139,7 +146,7 @@ def prepare(a_id: str, b_id: str, ta: dict, tb: dict, state: dict, have: dict = 
     for deck, tid, t, w, speed, shift in (("a", a_id, ta, wa, 1.0, 0.0), ("b", b_id, tb, wb, speed_b, shift_b)):
         for part in parts:
             path = mixer.local_path(t, part)
-            name = hashlib.sha1(json.dumps([str(path), path.stat().st_mtime if path.exists() else 0, w,
+            name = hashlib.sha1(json.dumps([str(path), _mtime(path), w,
                                             round(speed, 6), shift, LIVE_SR]).encode()).hexdigest()[:20] + ".flac"
             jobs.append((deck, part, path, w, speed, shift, out_dir() / name))
 

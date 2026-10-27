@@ -52,6 +52,14 @@ PALETTE = ["rgba(99,132,255,{a})", "rgba(255,140,60,{a})", "rgba(46,184,120,{a})
 # ---------------------------------------------------------------------------
 
 @st.cache_data(max_entries=12, show_spinner=False)
+
+def _has_file(path) -> bool:
+    """Whether a song file is here — False (not a crash) when its folder can't be read."""
+    try:
+        return Path(path).exists()
+    except OSError:
+        return False
+
 def _load_track(track_id: str, mtime: float) -> dict:
     return json.loads(track_file(track_id, AUDIO_DIR).read_text())
 
@@ -93,7 +101,7 @@ def _audio_ready(needs, ns: str) -> bool:
     import mixer
     needs = needs if isinstance(needs, dict) else {tid: {"full"} for tid in needs}
     missing = [(tid, part) for tid, parts in needs.items() for part in sorted(parts)
-               if (t := full_track(tid)) and not mixer.local_path(t, part).exists()]
+               if (t := full_track(tid)) and not _has_file(mixer.local_path(t, part))]
     if not missing:
         return True
     st.info(f"🎵 {len(missing)} file(s) need fetching from Google Drive first: "
@@ -285,7 +293,7 @@ def _mashup_lanes(recipe: dict, tracks: dict, mix_url: str) -> None:
     for tid, t in tracks.items():
         path = mixer.local_path(t, "full")
         urls[tid] = media_url(path, "audio/mp4" if path.suffix == ".m4a" else "audio/mpeg", f"mxm_lane_{tid}") \
-            if path.exists() else ""
+            if _has_file(path) else ""
         data[tid] = DE.lane_data(t, tid, grids[tid], urls[tid])
     lanes = []
     for k, p in enumerate(lay["pieces"]):
@@ -1109,7 +1117,7 @@ def _tx_live(a: str, b: str, ta: dict, tb: dict, s: dict):
     have = st.session_state.get("mxt_live")
     if not LP.still_fits(have, a, b, ta, tb, s):
         need = LP.needed_files(ta, tb)
-        if any(not mixer.local_path(t, part).exists() for t in (ta, tb) for part in need[t.get("track_id")]):
+        if any(not _has_file(mixer.local_path(t, part)) for t in (ta, tb) for part in need[t.get("track_id")]):
             return None
         with st.spinner("⚡ Getting the live preview ready (tempo-matching the stems)…"):
             try:
@@ -1190,7 +1198,7 @@ def _transition(summaries: dict) -> None:
     for tid, t in ((a, ta), (b, tb)):
         path = mixer.local_path(t, "full")
         urls[tid] = media_url(path, "audio/mp4" if path.suffix == ".m4a" else "audio/mpeg", f"mxt_audio_{tid}") \
-            if path.exists() else ""
+            if _has_file(path) else ""
     pv = st.session_state.get("mxt_pv")
     rec_short = _tx_recipe(a, b, ta, tb, s, short=True)
     pv_ok = pv and pv.get("sig") == json.dumps(rec_short, sort_keys=True) and Path(pv["path"]).exists()
