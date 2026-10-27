@@ -101,3 +101,60 @@ def test_newest_copy_takes_drives_duplicate(tmp_path, monkeypatch):
     assert PK.newest_copy("tag_vocabulary.csv") == b          # newer duplicate wins, unrelated names ignored
     os.utime(a, (5000, 5000))
     assert PK.newest_copy("tag_vocabulary.csv") == a
+
+
+def test_batches(proxies, tmp_path, monkeypatch):
+    out = tmp_path / "pack"
+    assert PK.main(["--out", str(out)]) == 0                     # first run → batch 1
+    b = json.loads((out / "batches.json").read_text())
+    assert list(b) == ["1"] and sorted(b["1"]) == ["vid_a", "vid_b", "vid_c"]   # only those have previews
+    assert PK.main(["--batch", "--out", str(out)]) == 0          # nothing new left
+    assert json.loads((out / "batches.json").read_text()) == b
+    assert PK.main(["--batch", "7", "--out", str(out)]) == 1     # no such batch
+    assert PK.main(["--batch", "1", "--out", str(out)]) == 0
+    assert json.loads((out / "pack.json").read_text())["batch"] == "1"
+
+
+def test_next_batch_skips_done_and_puts_labelled_first():
+    cats = PK.load_catalogues()
+    nb = PK.next_batch(cats, {"1": ["vid_a", "vid_b"]}, {"vid_f": 3}, {}, lambda v: True, size=3)
+    assert nb[0] == "vid_f" and not {"vid_a", "vid_b"} & set(nb) and len(nb) == 3
+
+
+def test_old_pack_counts_as_batch_1(tmp_path):
+    (tmp_path / "manifests").mkdir()
+    for v in ("x", "y"):
+        (tmp_path / "manifests" / f"{v}.json").write_text("{}")
+    assert PK.load_batches(tmp_path) == {"1": ["x", "y"]}
+
+
+def test_upload_sends_only_new_previews(tmp_path, monkeypatch):
+    out = tmp_path / "pack"
+    (out / "videos").mkdir(parents=True)
+    (out / "manifests").mkdir()
+    (out / "library").mkdir()
+    (out / "videos" / "old.mp4").write_bytes(b"x" * 10)
+    (out / "videos" / "new.mp4").write_bytes(b"y" * 20)
+    (out / "pack.json").write_text("{}")
+    calls = []
+    monkeypatch.setattr(PK.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(PK, "remote_videos", lambda vol: {"old.mp4": 10})
+
+    class R:
+        returncode, stdout = 0, ""
+
+    monkeypatch.setattr(PK.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or R())
+    assert PK.upload(out, "media-train") == 0
+    puts = [c for c in calls if c[:3] == ["modal", "volume", "put"]]
+    assert any(c[-1] == "/pack/videos/new.mp4" for c in puts)
+    assert not any(c[-1] == "/pack/videos/old.mp4" for c in puts)
+    assert any(c[-1] == "/pack/manifests" for c in puts) and any(c[-1] == "/pack/pack.json" for c in puts)
+
+
+def test_remote_videos_reads_cli_json(monkeypatch):
+    class R:
+        returncode = 0
+        stdout = json.dumps([{"filename": "pack/videos/Caf\\xe9 night.mp4", "type": "file",
+                              "created_modified": "x", "size": 123}])
+    monkeypatch.setattr(PK.subprocess, "run", lambda *a, **k: R())
+    assert PK.remote_videos("media-train") == {"Café night.mp4": 123}

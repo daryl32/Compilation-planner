@@ -191,6 +191,7 @@ def test_report(tmp_path, monkeypatch):
     assert "| close-up | frame | 3 |" in text and "teacher = yes" in text
     assert "| tag 8b | L40S |" in text and "| tag 32b | H100 |" in text
     assert "8b: replies that weren't valid JSON 1 of 4." in text
+    assert "Where the vision time goes" in text and "| Loading models |" in text
     assert "| New (TransNetV2) | 1.00 |" in text and "| Old (PySceneDetect) | 0.00 |" in text
     data = json.loads((out / "report.json").read_text())
     assert data["best_teacher"] == "32b" and data["library_total"] > 0

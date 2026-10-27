@@ -105,3 +105,56 @@ def test_view(bundle, sub):
         assert not errors(at), errors(at)
     elif sub == "📋 Report":
         assert "Hello." in md
+
+
+@pytest.fixture
+def no_labels(tmp_path):
+    import training_labels as TLB
+    from library_common import PENDING_FILE
+    saved = {}
+    for p in (TLB.LABELS_FILE, PENDING_FILE):
+        if p.exists():
+            saved[p] = tmp_path / p.name
+            shutil.copy2(p, saved[p])
+            p.unlink()
+    yield
+    for p in (TLB.LABELS_FILE, PENDING_FILE):
+        p.unlink(missing_ok=True)
+        if p in saved:
+            shutil.copy2(saved[p], p)
+
+
+def test_saved_labels_overlay():
+    import training_labels as TLB
+    vids = _bundle()["videos"]
+    mid = TR.moment_id("vid_a", vids["vid_a"]["moments"][1])
+    assert mid == TLB.card_id("tags", "vid_a", 12.0)
+    out = TR.with_saved_labels(vids, [{"id": mid, "type": "tags", "tags": ["crowd"]}])
+    m = out["vid_a"]["moments"][1]
+    assert m["mine"] == ["crowd"] and m["gold_id"] == mid
+    assert vids["vid_a"]["moments"][1]["mine"] is None          # the original isn't changed
+
+
+def test_accept_and_correct(bundle, no_labels):
+    import training_labels as TLB
+    from tests.apptest_util import errors, page_app
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.run()
+    # ✅ 32B is right on the frame you hadn't labelled (s1_0, at 12 s)
+    accept = [b for b in at.button if b.label == "✅ 32B is right"]
+    assert len(accept) == 3
+    accept[1].click().run()
+    assert not errors(at), errors(at)
+    items = TLB.load_labels()
+    assert [(i["id"], i["tags"]) for i in items] == [(TLB.card_id("tags", "vid_a", 12.0), ["dance", "crowd"])]
+    # ✏️ Correct the first frame (your existing label): drop "dance", save
+    next(b for b in at.button if b.label == "✏️ Correct").click().run()
+    assert not errors(at), errors(at)
+    multi = [p for p in at.button_group if "dance" in (p.options or [])]
+    assert multi
+    multi[0].set_value([]).run()
+    next(b for b in at.button if b.label == "💾 Save my tags").click().run()
+    assert not errors(at), errors(at)
+    first = next(i for i in TLB.load_labels() if i["t"] == 5.0)
+    assert "dance" not in first["tags"]

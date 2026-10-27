@@ -49,6 +49,36 @@ def report_markdown() -> str:
         return ""
 
 
+def moment_id(video_id: str, moment: dict) -> str:
+    """The 🎯 Training Labels id for this frame — the same id a tag card at that moment gets, so
+    a correction here and a card there are one label."""
+    import training_labels as TLB
+    return TLB.card_id("tags", video_id, float(moment["t"]))
+
+
+def with_saved_labels(videos: dict, items: list) -> dict:
+    """The results' moments with "mine" taken from your current training labels where you've
+    labelled (or corrected) that frame since the trial ran. Returns a new videos dict."""
+    saved = {i["id"]: i for i in items if i.get("type") == "tags" and not i.get("skipped")}
+    out = {}
+    for vid, v in videos.items():
+        ms = []
+        for m in v.get("moments") or []:
+            mid = m.get("gold_id") or moment_id(vid, m)
+            if mid in saved:
+                m = {**m, "mine": list(saved[mid].get("tags") or []), "gold_id": mid}
+            ms.append(m)
+        out[vid] = {**v, "moments": ms}
+    return out
+
+
+def correction_card(video_id: str, moment: dict, prefill: list) -> dict:
+    """A 🎯 tag card for this frame, for training_labels.save_label."""
+    return {"id": moment.get("gold_id") or moment_id(video_id, moment), "type": "tags",
+            "video_id": video_id, "scene_id": moment.get("scene_id"), "t": float(moment["t"]),
+            "suggested": list(prefill)}
+
+
 def frame_path(moment: dict) -> Path | None:
     return RESULTS_DIR / moment["frame"] if moment.get("frame") else None
 
