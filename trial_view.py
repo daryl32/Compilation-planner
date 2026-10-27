@@ -4,11 +4,13 @@ side; motion curves and scene cuts per video; the report. Data: trial_results.py
 
 from __future__ import annotations
 
+import hashlib
 import html
 
 import streamlit as st
 
 from library_common import safe_image, format_mmss
+import training_labels as TLB
 import trial_results as TR
 
 CHIP_STYLE = {
@@ -18,6 +20,11 @@ CHIP_STYLE = {
     TR.NEUTRAL: ("", "rgba(128,128,128,.12)", "rgba(128,128,128,.4)", ""),
 }
 PER_PAGE = 12
+
+
+def _k(video_id: str, moment: dict) -> str:
+    """A short, safe widget key for one frame (video names have spaces and punctuation)."""
+    return hashlib.md5(f"{video_id}|{moment['key']}".encode()).hexdigest()[:12]
 
 
 def _chip(tag: str, status: str, faded: bool = False) -> str:
@@ -40,8 +47,45 @@ def _row(label: str, pred, mine, unsure=()) -> str:
             f'font-size:.86rem">{label}</span>{body}</div>')
 
 
+def _save(card: dict, tags: list, key: str) -> None:
+    TLB.save_label(card, tags=tags)
+    st.session_state.pop(key, None)        # close the editor
+    st.session_state["tr_saved_note"] = f"Saved your tags for {card['video_id'][:40]} at {format_mmss(card['t'])}."
+
+
+def _editor(vid: str, m: dict, teachers: list, ekey: str) -> None:
+    """Fix the tags for one frame: pick-one rows and grouped chips from the vocabulary, starting
+    from your tags (or the best model's)."""
+    vocab, _ = TLB.load_vocabulary()
+    names = {TR.norm(r["tag"]): r["tag"] for r in vocab}
+    start = m.get("mine")
+    if start is None:
+        r = next(((m.get("teachers") or {}).get(k) for k in reversed(teachers) if (m.get("teachers") or {}).get(k)),
+                 None)
+        start = (r or {}).get("tags") or m.get("old") or []
+    start = [names.get(TR.norm(t), t) for t in start]
+    picked = []
+    for gi, (title, single, tags) in enumerate(TLB.chip_groups(vocab, extra=start)):
+        default = [t for t in start if t in tags]
+        wkey = f"{ekey}_g{gi}"
+        if single:
+            val = st.pills(title, tags, selection_mode="single", default=default[0] if default else None, key=wkey)
+            picked += [val] if val else []
+        else:
+            picked += list(st.pills(title, tags, selection_mode="multi", default=default, key=wkey) or [])
+    card = TR.correction_card(vid, m, start)
+    c1, c2 = st.columns(2)
+    c1.button("💾 Save my tags", type="primary", key=f"{ekey}_save", width="stretch",
+              on_click=_save, args=(card, picked, ekey))
+    c2.button("Cancel", key=f"{ekey}_cancel", width="stretch",
+              on_click=lambda: st.session_state.pop(ekey, None))
+
+
 def _compare(data: dict) -> None:
-    videos = data["videos"]
+    videos = TR.with_saved_labels(data["videos"], TLB.load_labels())
+    note = st.session_state.pop("tr_saved_note", None)
+    if note:
+        st.toast(note, icon="💾")
     teachers = list(data.get("teachers") or {})
     c = st.columns([3, 2, 2])
     vid = c[0].selectbox("Video", ["(all videos)"] + sorted(videos), key="tr_vid")
@@ -74,7 +118,7 @@ def _compare(data: dict) -> None:
     page = st.number_input(f"Page (of {pages}) — {len(moments)} moments", 1, pages, 1, key="tr_page") \
         if pages > 1 else 1
     for v, m in moments[(page - 1) * PER_PAGE: page * PER_PAGE]:
-        with st.container(border=True, key=f"tr_wrap_card_{v}_{m['key']}"):
+        with st.container(border=True, key=f"tr_wrap_card_{_k(v, m)}"):
             a, b = st.columns([2, 3])
             with a:
                 p = TR.frame_path(m)
@@ -98,6 +142,23 @@ def _compare(data: dict) -> None:
                 caps = [(k, cap) for k, cap in caps if cap]
                 if caps:
                     st.caption("  \n".join(f"**{k}:** {cap}" for k, cap in caps))
+                # ✏️ Correct: your tags for this frame go to your training labels (the gold set).
+                ekey = f"tr_edit_{_k(v, m)}"
+                if st.session_state.get(ekey):
+                    _editor(v, m, teachers, ekey)
+                else:
+                    with st.container(key=f"tr_wrap_act_{_k(v, m)}"):
+                        acts = [k for k in teachers if (m.get("teachers") or {}).get(k)]
+                        cols = st.columns(1 + len(acts))
+                        cols[0].button("✏️ Correct", key=f"{ekey}_open", width="stretch",
+                                       on_click=lambda k=ekey: st.session_state.__setitem__(k, True),
+                                       help="Set the right tags for this frame — saved to your training labels.")
+                        for col, k in zip(cols[1:], acts):
+                            tags = (m["teachers"][k].get("tags") or [])
+                            col.button(f"✅ {k.upper()} is right", key=f"{ekey}_ok_{k}", width="stretch",
+                                       on_click=_save,
+                                       args=(TR.correction_card(v, m, tags), tags, ekey),
+                                       help=f"Save {k.upper()}'s tags as your tags for this frame.")
 
 
 def _motion(data: dict) -> None:

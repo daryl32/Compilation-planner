@@ -18,14 +18,17 @@ Writes (default: _modal_pack next to this script, on genuine local disk):
     pack_report.txt                the same, readable
 
 Usage (from the activated venv in the scene-labeling folder, or pack_for_modal.bat):
-    python pack_for_modal.py                     the 10-video trial (default)
-    python pack_for_modal.py --trial 5           a smaller trial
+    python pack_for_modal.py                     the latest batch again (the first run: batch 1)
+    python pack_for_modal.py --batch             the NEXT batch: 10 videos not done yet, labelled first
+    python pack_for_modal.py --batch 2           batch 2 again
     python pack_for_modal.py --all               every video with a preview copy
     python pack_for_modal.py --only vid05 vid06  just these
     python pack_for_modal.py --dry-run           show what would be packed, copy nothing
     python pack_for_modal.py --upload            ... then upload the pack to the Modal Volume
                                                  (needs: pip install modal, then modal setup)
-Safe to re-run: preview copies already in the pack (same size) aren't copied again.
+Safe to re-run: preview copies already in the pack (same size) aren't copied again, and --upload
+only sends preview copies the Volume doesn't have. After a good upload, earlier batches' preview
+copies are removed from the local pack folder (they're on Modal; their manifests stay).
 
 Trial picks: videos you've already labelled in 🎯 Training Labels first (so the big model can
 be scored against your answers), then a spread of lengths and actors.
@@ -252,15 +255,86 @@ def check(info: dict, cat_dur: float) -> list:
 # Upload
 # ---------------------------------------------------------------------------
 
+def remote_videos(volume: str) -> dict | None:
+    """{file name: size} of the preview copies already on the Volume, or None if unknown."""
+    r = subprocess.run(["modal", "volume", "ls", "--json", volume, "/pack/videos"], capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    try:
+        rows = json.loads(r.stdout)
+    except ValueError:
+        return None
+    out = {}
+    for row in rows if isinstance(rows, list) else []:
+        raw = str(row.get("filename") or row.get("Filename") or "")
+        try:        # the CLI escapes non-ASCII characters (é → \xe9) — undo that
+            raw = raw.encode("ascii", "backslashreplace").decode("unicode_escape")
+        except UnicodeError:
+            pass
+        name = Path(raw).name
+        size = row.get("size", row.get("Size"))
+        if name:
+            out[name] = size if isinstance(size, int) else None
+    return out
+
+
 def upload(out: Path, volume: str) -> int:
+    """Send the pack to the Volume (as /pack): manifests, library files and the summaries every
+    time (they're small); preview copies only when they aren't there yet (or changed size)."""
     if not shutil.which("modal"):
         print("\nThe modal command isn't installed here. In this venv run:\n"
               "    pip install modal\n    modal setup\nthen run this again with --upload.")
         return 1
     subprocess.run(["modal", "volume", "create", volume], capture_output=True)   # fine if it exists
-    print(f"\nUploading {out} to Modal Volume '{volume}' as /pack (the whole folder is sent again; "
-          f"--force replaces files already there)…")
-    return subprocess.run(["modal", "volume", "put", "--force", volume, str(out), "/pack"]).returncode
+    have = remote_videos(volume)
+    videos = sorted((out / "videos").glob("*.mp4"))
+    todo = [v for v in videos if have is None or have.get(v.name) not in (v.stat().st_size, None)
+            or v.name not in have]
+    print(f"\nUploading to Modal Volume '{volume}': {len(todo)} preview cop{'y' if len(todo) == 1 else 'ies'} "
+          f"({sum(v.stat().st_size for v in todo) / 1e9:.1f} GB; {len(videos) - len(todo)} already there), "
+          f"plus manifests and library files…")
+    for i, v in enumerate(todo, 1):
+        print(f"  [{i}/{len(todo)}] {v.name}")
+        rc = subprocess.run(["modal", "volume", "put", "--force", volume, str(v), f"/pack/videos/{v.name}"]).returncode
+        if rc:
+            return rc
+    for folder in ("manifests", "library"):
+        rc = subprocess.run(["modal", "volume", "put", "--force", volume, str(out / folder), f"/pack/{folder}"]).returncode
+        if rc:
+            return rc
+    for name in ("pack.json", "batches.json"):
+        if (out / name).exists():
+            rc = subprocess.run(["modal", "volume", "put", "--force", volume, str(out / name), f"/pack/{name}"]).returncode
+            if rc:
+                return rc
+    print("Upload done.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Batches — the library goes through Modal 10 videos at a time, so you can correct each batch
+# in the app (🧪 Trial results) before the next one runs. batches.json in the pack folder:
+# {"1": [video ids], "2": [...]}.
+# ---------------------------------------------------------------------------
+
+BATCH_SIZE = 10
+
+
+def load_batches(out: Path) -> dict:
+    data = _read_json(out / "batches.json", None)
+    if isinstance(data, dict) and data:
+        return {str(k): list(v) for k, v in data.items()}
+    # A pack made before batches existed: what's in it is batch 1.
+    packed = sorted(p.stem for p in (out / "manifests").glob("*.json")) if (out / "manifests").exists() else []
+    return {"1": packed} if packed else {}
+
+
+def next_batch(cats: dict, batches: dict, labelled: dict, meta: dict, has_proxy, size: int = BATCH_SIZE) -> list:
+    """The next `size` videos that aren't in any batch yet — labelled ones first, then a spread
+    of lengths and actors (the same picking as the first trial)."""
+    done = {v for ids in batches.values() for v in ids}
+    rest = {v: c for v, c in cats.items() if v not in done}
+    return pick_trial(rest, size, labelled, meta, has_proxy)
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +342,10 @@ def upload(out: Path, volume: str) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Pack preview copies + catalogues for Modal.")
     g = ap.add_mutually_exclusive_group()
-    g.add_argument("--trial", type=int, default=10, help="pack this many videos (default 10)")
+    g.add_argument("--batch", nargs="?", const="next", default=None, metavar="N",
+                   help="--batch: the next 10 new videos · --batch N: batch N again "
+                        "(no option: the latest batch again, e.g. after editing tags)")
+    g.add_argument("--trial", type=int, default=None, help=argparse.SUPPRESS)   # old name for batch 1
     g.add_argument("--all", action="store_true", help="pack every video with a preview copy")
     g.add_argument("--only", nargs="+", metavar="VIDEO_ID", help="pack just these videos")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT, help=f"pack folder (default {DEFAULT_OUT})")
@@ -287,6 +364,9 @@ def main(argv=None) -> int:
     has_proxy = lambda v: (PROXY_DIR / f"{v}.mp4").exists()
     no_proxy = sorted(v for v in cats if not has_proxy(v))
 
+    labelled = labelled_counts()
+    batches = load_batches(args.out)
+    batch_no = None
     if args.only:
         unknown = [v for v in args.only if v not in cats]
         if unknown:
@@ -294,11 +374,30 @@ def main(argv=None) -> int:
         ids = [v for v in args.only if v in cats and has_proxy(v)]
     elif args.all:
         ids = [v for v in sorted(cats) if has_proxy(v)]
-    else:
-        ids = pick_trial(cats, args.trial, labelled_counts(), meta, has_proxy)
-    labelled = labelled_counts()
-    print(f"{len(cats)} videos in the catalogue, {len(cats) - len(no_proxy)} with a preview copy. "
-          f"Packing {len(ids)}:")
+    elif args.trial is not None and not batches:
+        batch_no, ids = "1", pick_trial(cats, args.trial, labelled, meta, has_proxy)
+    elif args.batch == "next":
+        batch_no = str(max((int(k) for k in batches), default=0) + 1)
+        ids = next_batch(cats, batches, labelled, meta, has_proxy)
+        if not ids:
+            print("Every video with a preview copy is already in a batch — nothing new to pack.")
+            return 0
+    elif args.batch is not None:
+        if not str(args.batch).isdigit() or str(int(args.batch)) not in batches:
+            print(f"There's no batch {args.batch} yet (batches so far: {', '.join(sorted(batches, key=int)) or 'none'}). "
+                  f"Use --batch for the next one.")
+            return 1
+        batch_no = str(int(args.batch))
+        ids = [v for v in batches[batch_no] if v in cats and has_proxy(v)]
+    elif batches:                       # no option: the latest batch again
+        batch_no = max(batches, key=int)
+        ids = [v for v in batches[batch_no] if v in cats and has_proxy(v)]
+    else:                               # first ever run: batch 1
+        batch_no, ids = "1", pick_trial(cats, BATCH_SIZE, labelled, meta, has_proxy)
+    in_batches = len({v for b in batches.values() for v in b} | (set(ids) if batch_no else set()))
+    print(f"{len(cats)} videos in the catalogue, {len(cats) - len(no_proxy)} with a preview copy, "
+          f"{in_batches} in batches so far.")
+    print(f"Packing {'batch ' + batch_no + ' — ' if batch_no else ''}{len(ids)} video(s):")
     for v in ids:
         extra = f", {labelled[v]} labels" if labelled.get(v) else ""
         print(f"  {v}  ({catalogue_duration(cats[v]) / 60:.1f} min, {len(cats[v]['scenes'])} scenes{extra})")
@@ -349,8 +448,14 @@ def main(argv=None) -> int:
         "library_files": [n for n in LIBRARY_FILES if (out / "library" / n).exists()],
         "this_run": rows, "no_preview_copy": no_proxy,
     }
+    if batch_no:
+        batches[batch_no] = list(ids)
+        (out / "batches.json").write_text(json.dumps(batches, indent=1), encoding="utf-8")
+        summary["batch"] = batch_no
+        summary["batches"] = {k: len(v) for k, v in sorted(batches.items(), key=lambda kv: int(kv[0]))}
     (out / "pack.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
-    lines = [f"Pack {summary['created']}: {len(packed)} videos, {summary['hours']} hours, {summary['gb']} GB "
+    lines = [(f"Batch {batch_no}: {len(ids)} videos. " if batch_no else "")
+             + f"Pack {summary['created']}: {len(packed)} videos, {summary['hours']} hours, {summary['gb']} GB "
              f"(whole library: {len(cats)} videos, {summary['library_hours']} hours)",
              f"This run: {len(rows)} videos, {copied} preview copies copied, {time.time() - started:.0f}s",
              "Library files: " + (", ".join(summary["library_files"]) or "none")]
@@ -367,8 +472,19 @@ def main(argv=None) -> int:
     print("\n" + "\n".join(lines))
 
     if args.upload:
-        return upload(out, args.volume)
-    print(f"\nNext: run again with --upload to send it to Modal (Volume '{args.volume}').")
+        rc = upload(out, args.volume)
+        if rc == 0 and batch_no:
+            freed = 0
+            for f in (out / "videos").glob("*.mp4"):
+                if f.stem not in ids:
+                    freed += f.stat().st_size
+                    f.unlink()
+            if freed:
+                print(f"Removed earlier batches' preview copies from {out / 'videos'} ({freed / 1e9:.1f} GB) "
+                      f"— they're on Modal.")
+        return rc
+    print(f"\nNext: run again with --upload to send it to Modal (Volume '{args.volume}'), then "
+          f"run_modal_trial.bat --full (it skips videos already done).")
     return 0
 
 

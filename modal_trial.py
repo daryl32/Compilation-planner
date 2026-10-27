@@ -43,7 +43,9 @@ TEACHER_GPUS = {"8b": ["L40S", "A100-40GB", "A100-80GB", "H100"],   # 17 GB of w
                 "32b": ["H100", "A100-80GB"]}                        # 66 GB of weights
 VLM_MODEL = TEACHERS["8b"]
 EMB_MODEL = "google/siglip2-so400m-patch14-384"
-POSE_MODEL = "yolo11l-pose.pt"
+# Medium pose model: about twice as fast as the large one, and closer to what the laptop's
+# RTX 4070 can run in its 5-minute-per-video budget.
+POSE_MODEL = "yolo11m-pose.pt"
 # First choice first; Modal falls back down the list when that GPU type is busy.
 VISION_GPUS = ["L4", "A10", "L40S", "A100-40GB"]
 VISION_GPU = VISION_GPUS[0]
@@ -210,7 +212,7 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
 
     out_dir = Path(f"{OUT}/{video_id}")
     prev = _read_json(out_dir / "vision.json")
-    if not redo and prev and not prev.get("partial"):
+    if not redo and prev and not prev.get("partial") and (prev.get("models") or {}).get("pose") == POSE_MODEL:
         return {"video_id": video_id, "skipped": True}
     started = time.time()
     timings = {}
@@ -679,16 +681,34 @@ def report() -> str:
         c = cost[k]
         md.append(f"| {k} | {c['gpu']} | ${c['trial_$']:.2f} | ${c['per_footage_hour_$']:.3f} | "
                   f"${c['library_$']:.2f} | {c['library_gpu_hours']:.1f} |")
+    # Where the vision time goes, in seconds per hour of footage.
+    steps = {"Scene cuts (TransNetV2)": "shots", "Loading models": "load_models",
+             "Pose + tracking (GPU)": "pose_gpu", "Embeddings (GPU)": "embed_gpu"}
+    tot = {k: sum(d["timings"].get(v, 0.0) for d in vis.values()) for k, v in steps.items()}
+    dpe = sum(d["timings"].get("decode_pose_embed", 0.0) for d in vis.values())
+    tot["Decoding, tracker, saving frames (CPU)"] = max(dpe - tot["Pose + tracking (GPU)"] - tot["Embeddings (GPU)"], 0.0)
+    tot["Motion + rhythm maths"] = max(sum(d["timings"].get("total", 0.0) for d in vis.values())
+                                       - dpe - tot["Scene cuts (TransNetV2)"] - tot["Loading models"], 0.0)
+    vision_breakdown = {k: round(v / trial_hours) if trial_hours else 0 for k, v in tot.items()}
+    md_steps = ["", "Where the vision time goes (seconds per hour of footage):", "",
+                "| Step | Seconds | Share |", "|---|---|---|"]
+    all_s = sum(vision_breakdown.values()) or 1
+    md_steps += [f"| {k} | {v} | {100 * v / all_s:.0f}% |" for k, v in vision_breakdown.items()]
     md += [f"| **total** | | **${cost['total']['trial_$']:.2f}** | | "
            f"**${lib_total:.2f}**{' (vision + ' + best + ' only)' if len(keys) > 1 else ''} | |", "",
+           *md_steps, "",
            "## Tags", "",
            f"Your labels: {len(gold_tags)} frames ({len(trial_gold)} in the trial videos, tagged by every teacher).",
            "Overall F1 on those frames (1 = matches you exactly): old tagger "
            f"**{f(old_trial['overall']['f1'])}**"
            + "".join(f", {k} **{f(scores[k]['overall']['f1'])}**" for k in keys)
            + f". Old tagger on all your frames: {f(old_all['overall']['f1'])}.", ""]
-    if len(keys) > 1:
+    if len(keys) > 1 and trial_gold:
         md.append(f"**Better teacher: {best}** — the suggestions below use it.")
+        md.append("")
+    elif len(keys) > 1:
+        md.append("**No better teacher yet** — none of your labelled frames are in these videos, so the "
+                  "models can't be scored. The full run includes them.")
         md.append("")
     head = "| Tag | Kind | Your examples | Old F1 | " + " | ".join(f"{k} F1" for k in keys) + \
            f" | {best or 'teacher'} P / R | Suggestion |"
@@ -726,7 +746,7 @@ def report() -> str:
     text = "\n".join(md)
     Path(f"{OUT}/report.md").write_text(text, encoding="utf-8")
     Path(f"{OUT}/report.json").write_text(json.dumps({
-        "cost": cost, "library_total": lib_total, "best_teacher": best,
+        "cost": cost, "library_total": lib_total, "best_teacher": best, "vision_breakdown": vision_breakdown,
         "tags": {"old_all": old_all, "old_trial": old_trial, "teachers": scores,
                                "positives": positives, "verdicts": {t: verdict(t) for t in tags}},
         "boundaries": bounds, "shots": shot_stats, "movement_corr": corr}, indent=1), encoding="utf-8")
