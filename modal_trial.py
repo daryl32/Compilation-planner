@@ -35,12 +35,14 @@ from pathlib import Path
 
 import modal
 
-VLM_MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+# A dense (non mixture-of-experts) model: the 30B-A3B MoE needed a FlashInfer MoE kernel that
+# vLLM compiles from scratch on start-up (20+ silent minutes on an H100).
+VLM_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 EMB_MODEL = "google/siglip2-so400m-patch14-384"
 POSE_MODEL = "yolo11l-pose.pt"
 # First choice first; Modal falls back down the list when that GPU type is busy.
 VISION_GPUS = ["L4", "A10", "L40S", "A100-40GB"]
-TAG_GPUS = ["H100", "A100-80GB"]
+TAG_GPUS = ["L40S", "A100-40GB", "A100-80GB", "H100"]
 VISION_GPU, TAG_GPU = VISION_GPUS[0], TAG_GPUS[0]
 
 DATA, CACHE = "/data", "/cache"
@@ -62,7 +64,11 @@ vision_image = (base.pip_install("torch", "torchvision", "transformers>=4.57", "
 tag_image = (modal.Image.from_registry("nvidia/cuda:12.9.0-devel-ubuntu22.04", add_python="3.12")
              .entrypoint([])
              .uv_pip_install("vllm==0.21.0", "numpy", "pillow", "huggingface_hub")
-             .env({"HF_HOME": f"{CACHE}/hf", "HF_XET_HIGH_PERFORMANCE": "1"})
+             .env({"HF_HOME": f"{CACHE}/hf", "HF_XET_HIGH_PERFORMANCE": "1",
+                   # compiled code kept on the cache Volume, so only the first start pays for it
+                   "VLLM_CACHE_ROOT": f"{CACHE}/vllm", "FLASHINFER_WORKSPACE_BASE": f"{CACHE}/flashinfer",
+                   # plain PyTorch sampling — no FlashInfer kernel to compile
+                   "VLLM_USE_FLASHINFER_SAMPLER": "0"})
              .add_local_python_source("trial_logic"))
 report_image = base.pip_install("numpy").add_local_python_source("trial_logic")
 
@@ -372,9 +378,13 @@ class Tagger:
         self.llm, self.load_error = None, None
         try:
             from vllm import LLM
-            self.llm = LLM(model=VLM_MODEL, max_model_len=8192, gpu_memory_utilization=0.92,
+            self.llm = LLM(model=VLM_MODEL, max_model_len=8192, gpu_memory_utilization=0.90,
                            limit_mm_per_prompt={"image": 7, "video": 0}, max_num_seqs=32,
                            enable_prefix_caching=True)
+            try:
+                cache_vol.commit()          # keep what start-up compiled for next time
+            except Exception:
+                pass
         except Exception as e:
             import traceback
             self.load_error = f"{e.__class__.__name__}: {e}"[:500]
