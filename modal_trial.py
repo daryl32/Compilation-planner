@@ -35,15 +35,17 @@ from pathlib import Path
 
 import modal
 
-# A dense (non mixture-of-experts) model: the 30B-A3B MoE needed a FlashInfer MoE kernel that
-# vLLM compiles from scratch on start-up (20+ silent minutes on an H100).
-VLM_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+# The teachers to compare. Both dense (non mixture-of-experts): the 30B-A3B MoE needed a
+# FlashInfer MoE kernel that vLLM compiles from scratch on start-up (20+ silent minutes).
+TEACHERS = {"8b": "Qwen/Qwen3-VL-8B-Instruct", "32b": "Qwen/Qwen3-VL-32B-Instruct"}
+TEACHER_GPUS = {"8b": ["L40S", "A100-40GB", "A100-80GB", "H100"],   # 17 GB of weights
+                "32b": ["H100", "A100-80GB"]}                        # 66 GB of weights
+VLM_MODEL = TEACHERS["8b"]
 EMB_MODEL = "google/siglip2-so400m-patch14-384"
 POSE_MODEL = "yolo11l-pose.pt"
 # First choice first; Modal falls back down the list when that GPU type is busy.
 VISION_GPUS = ["L4", "A10", "L40S", "A100-40GB"]
-TAG_GPUS = ["L40S", "A100-40GB", "A100-80GB", "H100"]
-VISION_GPU, TAG_GPU = VISION_GPUS[0], TAG_GPUS[0]
+VISION_GPU = VISION_GPUS[0]
 
 DATA, CACHE = "/data", "/cache"
 PACK, OUT = f"{DATA}/pack", f"{DATA}/trial"
@@ -135,10 +137,10 @@ def _video_path(video_id: str, max_seconds) -> str:
 # ---------------------------------------------------------------------------
 
 @app.function(image=vision_image, volumes={CACHE: cache_vol}, timeout=3 * 3600, cpu=4, memory=8192)
-def download_models(vlm: str = VLM_MODEL) -> str:
+def download_models(vlms: list = None) -> str:
     from huggingface_hub import snapshot_download
     done = []
-    for repo in (EMB_MODEL, vlm, "Sn4kehead/TransNetV2"):
+    for repo in [EMB_MODEL, *(vlms or [VLM_MODEL]), "Sn4kehead/TransNetV2"]:
         try:
             snapshot_download(repo)
             done.append(repo)
@@ -367,87 +369,117 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
 # tag — the teacher
 # ---------------------------------------------------------------------------
 
-@app.cls(image=tag_image, gpu=TAG_GPUS, volumes={DATA: pack_vol, CACHE: cache_vol},
+def tags_file(video_id: str, key: str) -> Path:
+    return Path(f"{OUT}/{video_id}/tags_{key}.json")
+
+
+def _load_teacher(self, key: str) -> None:
+    # A failure here is caught, not raised: a container that fails to start is restarted by
+    # Modal over and over (paying for the GPU each time). Instead every call reports the error.
+    t0 = time.time()
+    self.llm, self.load_error, self.key = None, None, key
+    try:
+        from vllm import LLM
+        self.llm = LLM(model=TEACHERS[key], max_model_len=8192, gpu_memory_utilization=0.90,
+                       limit_mm_per_prompt={"image": 7, "video": 0}, max_num_seqs=32,
+                       enable_prefix_caching=True)
+        try:
+            cache_vol.commit()          # keep what start-up compiled for next time
+        except Exception:
+            pass
+    except Exception as e:
+        import traceback
+        self.load_error = f"{e.__class__.__name__}: {e}"[:500]
+        traceback.print_exc()
+    self.load_seconds = time.time() - t0
+    self.first = True
+
+
+def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False) -> dict:
+    import base64
+    import trial_logic as TL
+    from vllm import SamplingParams
+
+    key = self.key
+    if self.llm is None:
+        return {"video_id": video_id, "teacher": key, "error": f"the {key} model didn't load — {self.load_error}"}
+    pack_vol.reload()
+    out = tags_file(video_id, key)
+    vis = _read_json(f"{OUT}/{video_id}/vision.json")
+    if not vis:
+        return {"video_id": video_id, "teacher": key, "error": "no vision.json — run the vision stage first"}
+    prev = _read_json(out)
+    if (not redo and prev and not prev.get("partial") and not vis.get("partial")
+            and prev.get("targets") == len(vis["targets"])):
+        return {"video_id": video_id, "teacher": key, "skipped": True}
+    started = time.time()
+    vocab = _vocab()
+    before, after = TL.build_prompt(vocab)
+    frames_dir = Path(f"{OUT}/{video_id}/frames")
+    targets = vis["targets"][:max_prompts] if max_prompts else vis["targets"]
+    convs, keep = [], []
+    for tg in targets:
+        parts = [{"type": "text", "text": before}]
+        ok = True
+        for t in TL.context_times(tg["t"], vis["duration"]):
+            f = frames_dir / TL.frame_name(t)
+            if not f.exists():
+                ok = False
+                break
+            b64 = base64.b64encode(f.read_bytes()).decode()
+            parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        if ok:
+            parts.append({"type": "text", "text": after})
+            convs.append([{"role": "user", "content": parts}])
+            keep.append(tg)
+    outs = self.llm.chat(convs, SamplingParams(temperature=0.0, max_tokens=256), use_tqdm=False) if convs else []
+    results = {}
+    bad = 0
+    for tg, o in zip(keep, outs):
+        ans = TL.parse_answer(o.outputs[0].text, vocab)
+        bad += not ans["ok"]
+        results[tg["key"]] = {**ans, "t": tg["t"], "scene_id": tg.get("scene_id"),
+                              "gold_id": tg.get("gold_id"), "raw": o.outputs[0].text[:400]}
+    seconds = time.time() - started
+    load = self.load_seconds if self.first else 0.0
+    self.first = False
+    out.write_text(json.dumps({"video_id": video_id, "teacher": key, "model": TEACHERS[key],
+                               "gpu": _gpu_name(TEACHER_GPUS[key][0]),
+                               "partial": bool(max_prompts) or bool(vis.get("partial")),
+                               "targets": len(vis["targets"]),
+                               "seconds": round(seconds, 1), "load_seconds": round(load, 1),
+                               "prompts": len(convs), "unreadable": bad,
+                               "vocab": [r["tag"] for r in vocab], "results": results}), encoding="utf-8")
+    pack_vol.commit()
+    return {"video_id": video_id, "teacher": key, "prompts": len(convs), "seconds": round(seconds, 1),
+            "unreadable": bad}
+
+
+@app.cls(image=tag_image, gpu=TEACHER_GPUS["8b"], volumes={DATA: pack_vol, CACHE: cache_vol},
          timeout=4 * 3600, cpu=8, memory=65536, max_containers=1)
-class Tagger:
+class Tagger8B:
     @modal.enter()
     def load(self):
-        # A failure here is caught, not raised: a container that fails to start is restarted by
-        # Modal over and over (paying for the GPU each time). Instead every call reports the error.
-        t0 = time.time()
-        self.llm, self.load_error = None, None
-        try:
-            from vllm import LLM
-            self.llm = LLM(model=VLM_MODEL, max_model_len=8192, gpu_memory_utilization=0.90,
-                           limit_mm_per_prompt={"image": 7, "video": 0}, max_num_seqs=32,
-                           enable_prefix_caching=True)
-            try:
-                cache_vol.commit()          # keep what start-up compiled for next time
-            except Exception:
-                pass
-        except Exception as e:
-            import traceback
-            self.load_error = f"{e.__class__.__name__}: {e}"[:500]
-            traceback.print_exc()
-        self.load_seconds = time.time() - t0
-        self.first = True
+        _load_teacher(self, "8b")
 
     @modal.method()
     def tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False) -> dict:
-        import base64
-        import trial_logic as TL
-        from vllm import SamplingParams
+        return _tag_video(self, video_id, max_prompts, redo)
 
-        if self.llm is None:
-            return {"video_id": video_id, "error": f"the tagging model didn't load — {self.load_error}"}
-        pack_vol.reload()
-        out = Path(f"{OUT}/{video_id}/tags.json")
-        vis = _read_json(f"{OUT}/{video_id}/vision.json")
-        if not vis:
-            return {"video_id": video_id, "error": "no vision.json — run the vision stage first"}
-        prev = _read_json(out)
-        if (not redo and prev and not prev.get("partial") and not vis.get("partial")
-                and prev.get("targets") == len(vis["targets"])):
-            return {"video_id": video_id, "skipped": True}
-        started = time.time()
-        vocab = _vocab()
-        before, after = TL.build_prompt(vocab)
-        frames_dir = Path(f"{OUT}/{video_id}/frames")
-        targets = vis["targets"][:max_prompts] if max_prompts else vis["targets"]
-        convs, keep = [], []
-        for tg in targets:
-            parts = [{"type": "text", "text": before}]
-            ok = True
-            for t in TL.context_times(tg["t"], vis["duration"]):
-                f = frames_dir / TL.frame_name(t)
-                if not f.exists():
-                    ok = False
-                    break
-                b64 = base64.b64encode(f.read_bytes()).decode()
-                parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-            if ok:
-                parts.append({"type": "text", "text": after})
-                convs.append([{"role": "user", "content": parts}])
-                keep.append(tg)
-        outs = self.llm.chat(convs, SamplingParams(temperature=0.0, max_tokens=256), use_tqdm=False) if convs else []
-        results = {}
-        bad = 0
-        for tg, o in zip(keep, outs):
-            ans = TL.parse_answer(o.outputs[0].text, vocab)
-            bad += not ans["ok"]
-            results[tg["key"]] = {**ans, "t": tg["t"], "scene_id": tg.get("scene_id"),
-                                  "gold_id": tg.get("gold_id"), "raw": o.outputs[0].text[:400]}
-        seconds = time.time() - started
-        load = self.load_seconds if self.first else 0.0
-        self.first = False
-        out.write_text(json.dumps({"video_id": video_id, "model": VLM_MODEL, "gpu": _gpu_name(TAG_GPU),
-                                   "partial": bool(max_prompts) or bool(vis.get("partial")),
-                                   "targets": len(vis["targets"]),
-                                   "seconds": round(seconds, 1), "load_seconds": round(load, 1),
-                                   "prompts": len(convs), "unreadable": bad,
-                                   "vocab": [r["tag"] for r in vocab], "results": results}), encoding="utf-8")
-        pack_vol.commit()
-        return {"video_id": video_id, "prompts": len(convs), "seconds": round(seconds, 1), "unreadable": bad}
+
+@app.cls(image=tag_image, gpu=TEACHER_GPUS["32b"], volumes={DATA: pack_vol, CACHE: cache_vol},
+         timeout=4 * 3600, cpu=8, memory=98304, max_containers=1)
+class Tagger32B:
+    @modal.enter()
+    def load(self):
+        _load_teacher(self, "32b")
+
+    @modal.method()
+    def tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False) -> dict:
+        return _tag_video(self, video_id, max_prompts, redo)
+
+
+TAGGERS = {"8b": Tagger8B, "32b": Tagger32B}
 
 
 # ---------------------------------------------------------------------------
@@ -466,20 +498,33 @@ def report() -> str:
     tags = [r["tag"] for r in vocab]
     done = sorted(p.name for p in Path(OUT).iterdir() if (p / "vision.json").exists()) if Path(OUT).exists() else []
     vis = {v: _read_json(f"{OUT}/{v}/vision.json") for v in done}
-    tagged = {v: _read_json(f"{OUT}/{v}/tags.json") for v in done if Path(f"{OUT}/{v}/tags.json").exists()}
     mans = {v: _read_json(f"{PACK}/manifests/{v}.json") for v in done}
+    # {teacher: {video: tags json}} — "tags.json" from before there were two teachers counts as 8b
+    tagged_by = {}
+    for v in done:
+        for key in TEACHERS:
+            tj = _read_json(tags_file(v, key)) or (_read_json(f"{OUT}/{v}/tags.json") if key == "8b" else None)
+            if tj:
+                tagged_by.setdefault(key, {})[v] = tj
+    keys = [k for k in TEACHERS if k in tagged_by]
 
-    # --- Tags: old tagger (all your answers, and just the trial videos) vs the teacher
+    # --- Tags: old tagger vs each teacher, on the same labelled frames (ones every teacher tagged)
     gold_tags = [i for i in gold if i.get("type") == "tags" and not i.get("skipped")]
     old_all = TL.score_tags([(i.get("suggested") or [], i.get("tags") or []) for i in gold_tags], tags)
     by_gold = {}
-    for v, tj in tagged.items():
-        for r in tj["results"].values():
-            if r.get("gold_id"):
-                by_gold[r["gold_id"]] = r
-    trial_gold = [i for i in gold_tags if i["id"] in by_gold]
+    for key in keys:
+        for tj in tagged_by[key].values():
+            for r in tj["results"].values():
+                if r.get("gold_id"):
+                    by_gold.setdefault(key, {})[r["gold_id"]] = r
+    trial_gold = [i for i in gold_tags if keys and all(i["id"] in by_gold.get(k, {}) for k in keys)]
     old_trial = TL.score_tags([(i.get("suggested") or [], i.get("tags") or []) for i in trial_gold], tags)
-    teacher = TL.score_tags([(by_gold[i["id"]]["tags"], i.get("tags") or []) for i in trial_gold], tags)
+    scores = {k: TL.score_tags([(by_gold[k][i["id"]]["tags"], i.get("tags") or []) for i in trial_gold], tags)
+              for k in keys}
+    # The better teacher overall is the one the verdicts (and the library run) go with.
+    best = max(keys, key=lambda k: scores[k]["overall"]["f1"] or 0.0) if keys else None
+    teacher = scores[best] if best else TL.score_tags([], tags)
+    tagged = tagged_by.get(best, {})
     positives = {t: sum(t in (i.get("tags") or []) for i in gold_tags) for t in tags}
     kinds = {r["tag"]: r["kind"] for r in vocab}
 
@@ -529,44 +574,60 @@ def report() -> str:
 
     # --- Cost
     trial_hours = sum(d["duration"] for d in vis.values()) / 3600
-    stage_sec = {"vision": sum(d["timings"]["total"] for d in vis.values()),
-                 "tag": sum(t["seconds"] + t.get("load_seconds", 0) for t in tagged.values())}
+    stage_sec = {"vision": sum(d["timings"]["total"] for d in vis.values())}
+    for k in keys:
+        stage_sec[f"tag {k}"] = sum(t["seconds"] + t.get("load_seconds", 0) for t in tagged_by[k].values())
     lib_hours = float(pack.get("library_hours") or 0) or trial_hours
 
     def used(rows, default):        # the GPU most of the work actually ran on
         names = [r.get("gpu") or default for r in rows]
         return max(set(names), key=names.count) if names else default
 
-    cost = TL.extrapolate(stage_sec, {"vision": used(vis.values(), VISION_GPU),
-                                      "tag": used(tagged.values(), TAG_GPU)}, trial_hours, lib_hours)
+    gpus = {"vision": used(vis.values(), VISION_GPU)}
+    gpus.update({f"tag {k}": used(tagged_by[k].values(), TEACHER_GPUS[k][0]) for k in keys})
+    cost = TL.extrapolate(stage_sec, gpus, trial_hours, lib_hours)
+    # The library only needs one teacher: the estimate counts vision + the better one.
+    lib_total = cost["vision"]["library_$"] + (cost[f"tag {best}"]["library_$"] if best else 0.0)
 
     def f(x):
         return "–" if x is None else f"{x:.2f}"
 
+    names = {k: TEACHERS[k].split("/")[-1] for k in keys}
     md = [f"# Modal trial report — {time.strftime('%d %b %Y %H:%M')}", "",
-          f"**{len(done)} videos, {trial_hours:.2f} h of footage** processed "
-          f"({len(tagged)} tagged). Library: {lib_hours:.1f} h.", "",
+          f"**{len(done)} videos, {trial_hours:.2f} h of footage** processed. "
+          f"Teachers: {', '.join(names.values()) or 'none yet'}. Library: {lib_hours:.1f} h.", "",
           "## Cost", "",
           "| Stage | GPU | Trial | Per footage hour | Full library (est.) | GPU hours (library) |",
           "|---|---|---|---|---|---|"]
-    for k in ("vision", "tag"):
+    for k in stage_sec:
         c = cost[k]
         md.append(f"| {k} | {c['gpu']} | ${c['trial_$']:.2f} | ${c['per_footage_hour_$']:.3f} | "
                   f"${c['library_$']:.2f} | {c['library_gpu_hours']:.1f} |")
-    md += [f"| **total** | | **${cost['total']['trial_$']:.2f}** | | **${cost['total']['library_$']:.2f}** | |", "",
+    md += [f"| **total** | | **${cost['total']['trial_$']:.2f}** | | "
+           f"**${lib_total:.2f}**{' (vision + ' + best + ' only)' if len(keys) > 1 else ''} | |", "",
            "## Tags", "",
-           f"Your labels: {len(gold_tags)} frames ({len(trial_gold)} in the trial videos). Overall F1 on the "
-           f"trial frames — old tagger **{f(old_trial['overall']['f1'])}**, teacher "
-           f"**{f(teacher['overall']['f1'])}** (old tagger on all your frames: {f(old_all['overall']['f1'])}).", "",
-           "| Tag | Kind | Your examples | Old F1 | Teacher F1 | Teacher P / R | Suggestion |",
-           "|---|---|---|---|---|---|---|"]
+           f"Your labels: {len(gold_tags)} frames ({len(trial_gold)} in the trial videos, tagged by every teacher).",
+           "Overall F1 on those frames (1 = matches you exactly): old tagger "
+           f"**{f(old_trial['overall']['f1'])}**"
+           + "".join(f", {k} **{f(scores[k]['overall']['f1'])}**" for k in keys)
+           + f". Old tagger on all your frames: {f(old_all['overall']['f1'])}.", ""]
+    if len(keys) > 1:
+        md.append(f"**Better teacher: {best}** — the suggestions below use it.")
+        md.append("")
+    head = "| Tag | Kind | Your examples | Old F1 | " + " | ".join(f"{k} F1" for k in keys) + \
+           f" | {best or 'teacher'} P / R | Suggestion |"
+    md += [head, "|" + "---|" * (6 + len(keys))]
     for t in sorted(tags, key=lambda t: -positives[t]):
         tp, ot = teacher["per_tag"][t], old_trial["per_tag"][t]
-        md.append(f"| {t} | {kinds[t]} | {positives[t]} | {f(ot['f1'])} | {f(tp['f1'])} | "
-                  f"{f(tp['precision'])} / {f(tp['recall'])} | {verdict(t)} |")
-    unreadable = sum(t.get("unreadable", 0) for t in tagged.values())
-    prompts = sum(t.get("prompts", 0) for t in tagged.values())
-    md += ["", f"Teacher replies that weren't valid JSON: {unreadable} of {prompts}.", "",
+        md.append(f"| {t} | {kinds[t]} | {positives[t]} | {f(ot['f1'])} | "
+                  + " | ".join(f(scores[k]["per_tag"][t]["f1"]) for k in keys)
+                  + f" | {f(tp['precision'])} / {f(tp['recall'])} | {verdict(t)} |")
+    md.append("")
+    for k in keys:
+        unreadable = sum(t.get("unreadable", 0) for t in tagged_by[k].values())
+        prompts = sum(t.get("prompts", 0) for t in tagged_by[k].values())
+        md.append(f"{k}: replies that weren't valid JSON {unreadable} of {prompts}.")
+    md += ["",
            "## Scene changes", "",
            f"Your answers in the trial videos: {bounds['n']}.", "",
            "| Detector | Accuracy | Precision | Recall |", "|---|---|---|---|",
@@ -583,13 +644,14 @@ def report() -> str:
            f"camera / picture change).", ""]
     if shot_errors:
         md += ["## Scene detector errors", ""] + [f"- {v}: {e}" for v, e in shot_errors.items()] + [""]
-    errs = [v for v in done if v not in tagged]
+    errs = [v for v in done if not any(v in tagged_by[k] for k in keys)]
     if errs:
         md += ["## Not tagged yet", "", ", ".join(errs), ""]
     text = "\n".join(md)
     Path(f"{OUT}/report.md").write_text(text, encoding="utf-8")
     Path(f"{OUT}/report.json").write_text(json.dumps({
-        "cost": cost, "tags": {"old_all": old_all, "old_trial": old_trial, "teacher": teacher,
+        "cost": cost, "library_total": lib_total, "best_teacher": best,
+        "tags": {"old_all": old_all, "old_trial": old_trial, "teachers": scores,
                                "positives": positives, "verdicts": {t: verdict(t) for t in tags}},
         "boundaries": bounds, "shots": shot_stats, "movement_corr": corr}, indent=1), encoding="utf-8")
     pack_vol.commit()
@@ -605,7 +667,13 @@ def list_pack() -> list:
 # ---------------------------------------------------------------------------
 
 @app.local_entrypoint()
-def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False):
+def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False, teacher: str = ""):
+    """teacher: 8b, 32b or both (default: 8b for --smoke, both otherwise)."""
+    teacher = (teacher or ("8b" if smoke else "both")).lower()
+    keys = list(TEACHERS) if teacher == "both" else [teacher]
+    if any(k not in TEACHERS for k in keys):
+        print(f"--teacher must be one of: {', '.join(TEACHERS)}, both")
+        return
     stages = ["download", "vision", "tag", "report"] if stage == "all" else [stage]
     vids = [v.strip() for v in videos.split(",") if v.strip()] or list_pack.remote()
     if not vids:
@@ -618,19 +686,20 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         print(f"Smoke test on {vids[0]} (first {max_seconds} s, {max_prompts} prompts).")
     t_all = time.time()
     if "download" in stages:
-        print(download_models.remote())
+        print(download_models.remote([TEACHERS[k] for k in keys]))
     if "vision" in stages:
         print(f"Vision on {len(vids)} video(s) ({' / '.join(VISION_GPUS)}, first free)…")
         for r in vision.starmap([(v, max_seconds, redo) for v in vids], return_exceptions=True):
             print("  ", r)
     if "tag" in stages:
-        print(f"Tagging with {VLM_MODEL} ({' / '.join(TAG_GPUS)}, first free)…")
-        tagger = Tagger()
-        for r in tagger.tag_video.starmap([(v, max_prompts, redo) for v in vids], return_exceptions=True):
-            print("  ", r)
-            if isinstance(r, dict) and "didn't load" in str(r.get("error", "")):
-                print("Stopping: the tagging model couldn't start (see the error above).")
-                break
+        for k in keys:
+            print(f"Tagging with {TEACHERS[k]} ({' / '.join(TEACHER_GPUS[k])}, first free)…")
+            tagger = TAGGERS[k]()
+            for r in tagger.tag_video.starmap([(v, max_prompts, redo) for v in vids], return_exceptions=True):
+                print("  ", r)
+                if isinstance(r, dict) and "didn't load" in str(r.get("error", "")):
+                    print(f"Stopping {k}: the model couldn't start (see the error above).")
+                    break
     if "report" in stages:
         text = report.remote()
         name = "trial_report_smoke.md" if smoke else "trial_report.md"

@@ -147,14 +147,23 @@ def test_report(tmp_path, monkeypatch):
         "video_id": "v", "duration": 40.0, "cuts": [10.2], "timings": {"total": 120.0},
         "scenes": [{"scene_id": 0, "level": 0.02, "periodicity": 0.7, "movement_bpm": 118.0},
                    {"scene_id": 1, "level": 0.05, "periodicity": 0.2, "movement_bpm": 90.0}]}))
-    results = {f"g_{i['t']:.2f}": {"tags": i["tags"], "gold_id": i["id"]} for i in gold if i["type"] == "tags"}
+    gold_tag_items = [i for i in gold if i["type"] == "tags"]
+    perfect = {f"g_{i['t']:.2f}": {"tags": i["tags"], "gold_id": i["id"]} for i in gold_tag_items}
+    sloppy = {f"g_{i['t']:.2f}": {"tags": ["wide"], "gold_id": i["id"]} for i in gold_tag_items}
+    # 8b in the old file name (from before two teachers) — still read; 32b in its own file.
     (out / "v" / "tags.json").write_text(json.dumps({"seconds": 60.0, "load_seconds": 90.0, "prompts": 4,
-                                                    "unreadable": 0, "results": results}))
+                                                    "unreadable": 1, "results": sloppy, "gpu": "L40S"}))
+    (out / "v" / "tags_32b.json").write_text(json.dumps({"seconds": 120.0, "load_seconds": 100.0, "prompts": 4,
+                                                        "unreadable": 0, "results": perfect, "gpu": "H100"}))
     text = M.report.local()
     assert "1 videos, 0.01 h of footage" in text
-    assert "teacher **1.00**" in text                      # the made-up teacher is perfect
+    assert ", 8b **" in text and ", 32b **1.00**" in text  # the made-up 32b is perfect
+    assert "**Better teacher: 32b**" in text
     assert "| close-up | frame | 3 |" in text and "teacher = yes" in text
+    assert "| tag 8b | L40S |" in text and "| tag 32b | H100 |" in text
+    assert "8b: replies that weren't valid JSON 1 of 4." in text
     assert "| New (TransNetV2) | 1.00 |" in text and "| Old (PySceneDetect) | 0.00 |" in text
     data = json.loads((out / "report.json").read_text())
-    assert data["cost"]["total"]["library_$"] > 0
+    assert data["best_teacher"] == "32b" and data["library_total"] > 0
+    assert data["library_total"] < data["cost"]["total"]["library_$"]      # one teacher, not both
     assert data["tags"]["verdicts"]["walking"] == "need more labels"
