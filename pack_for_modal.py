@@ -322,11 +322,15 @@ def main(argv=None) -> int:
     summary = {
         "pack_version": PACK_VERSION, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "videos": packed, "hours": round(total_sec / 3600, 2), "gb": round(total_bytes / 1e9, 2),
+        # The whole library (every catalogue) — the trial report scales its costs to this.
+        "library_hours": round(sum(catalogue_duration(c) for c in cats.values()) / 3600, 2),
+        "library_videos": len(cats),
         "library_files": [n for n in LIBRARY_FILES if (out / "library" / n).exists()],
         "this_run": rows, "no_preview_copy": no_proxy,
     }
     (out / "pack.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
-    lines = [f"Pack {summary['created']}: {len(packed)} videos, {summary['hours']} hours, {summary['gb']} GB",
+    lines = [f"Pack {summary['created']}: {len(packed)} videos, {summary['hours']} hours, {summary['gb']} GB "
+             f"(whole library: {len(cats)} videos, {summary['library_hours']} hours)",
              f"This run: {len(rows)} videos, {copied} preview copies copied, {time.time() - started:.0f}s",
              "Library files: " + (", ".join(summary["library_files"]) or "none")]
     flagged = [r for r in rows if r["problems"]]

@@ -61,6 +61,7 @@ def test_pack_trial(proxies, tmp_path):
     summary = json.loads((out / "pack.json").read_text())
     assert sorted(summary["videos"]) == ["vid_a", "vid_b", "vid_c"]
     assert summary["hours"] > 0 and "labels.json" in summary["library_files"]
+    assert summary["library_videos"] == 6 and summary["library_hours"] >= summary["hours"]
     assert set(summary["no_preview_copy"]) == {"vid_d", "vid_e", "vid_f"}
     m = json.loads((out / "manifests" / "vid_a.json").read_text())
     cat = PK.load_catalogues()["vid_a"]
