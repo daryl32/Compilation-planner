@@ -350,6 +350,9 @@ def _pending_target(stem: str):
         vid, _, name = stem[6:].partition("/")
         path = CATALOGUE_DIR / "thumbnails" / vid / name
         folder = f"scene-labeling/catalogue/thumbnails/{vid}"
+    elif stem.startswith("cat:"):
+        # "cat:<file>" — any other file in the catalogue folder (e.g. tag_vocabulary.csv).
+        path, folder = CATALOGUE_DIR / Path(stem[4:]).name, "scene-labeling/catalogue"
     else:
         path, folder = CATALOGUE_DIR / f"{stem}.json", "scene-labeling/catalogue"
     return (path, folder) if path.exists() else None
@@ -360,7 +363,8 @@ def push_pending(token: dict, progress=None) -> dict:
     (CATALOGUE_DIR → scene-labeling/catalogue); "audio:<stem>" entries are
     track catalogues (AUDIO_DIR → scene-labeling/audio_catalogue), e.g. ones
     the server analysed; "thumb:<video_id>/<file>" entries are thumbnails
-    (CATALOGUE_DIR/thumbnails → scene-labeling/catalogue/thumbnails);
+    (CATALOGUE_DIR/thumbnails → scene-labeling/catalogue/thumbnails); "cat:<file>" entries
+    are other catalogue-folder files such as tag_vocabulary.csv;
     "render:<file>.mp4" entries are a render's details (rating, notes, keep)
     edited while Drive wasn't connected (PREVIEW_DIR → scene-labeling/previews).
 

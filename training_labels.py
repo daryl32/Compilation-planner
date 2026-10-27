@@ -1,0 +1,462 @@
+"""
+🎯 Training Labels — the hand-checked "gold set" for the new models (claude/ml-redesign-plan.md).
+
+No Streamlit here: the page (pages/6_Training_Labels.py) passes data in, so everything can be
+tested on its own.
+
+Two files, both in CATALOGUE_DIR so they sync with the catalogues:
+
+* tag_vocabulary.csv — the tag list and what each tag means (Daryl edits it, in Excel or on
+  the page). Columns:
+      tag, group, kind, one_of, teacher, description, not_to_be_confused_with, search_words
+  kind      "frame" (visible in one still) or "motion" (needs a few seconds of movement)
+  one_of    a name shared by tags that can't both be true (e.g. "shot size") — empty if none
+  teacher   yes / no — may the big model try this tag, or is it learned only from your labels
+  search_words  "; "-separated words you'd type when searching for it
+  With no vocabulary file the Reviewer's labels.json is used (every tag kind=frame, teacher=yes).
+
+* training_labels.json — what you labelled, one item per card:
+      {"id", "type": "tags" | "boundary", "video_id", "scene_id", "t" (seconds, source timeline),
+       "tags": [...]            tags cards: every tag that IS there (complete — anything else in
+                                the vocabulary is taken as not there)
+       "suggested": [...]       what the card was prefilled with (the scene's current tags)
+       "verdict": "cut" | "no_cut" | "unsure"   boundary cards
+       "source": "detected" | "peak" | "random"  boundary cards: where the point came from
+       "skipped": true, "reason"  a card you skipped (bad frame etc.) — never shown again
+       "labelled_at", "vocab_version"}
+
+Cards are picked at random, spread across videos (videos with fewer labels come up more) and
+leaning toward scenes nobody has reviewed. Boundary cards mix three kinds of point: cuts the
+detector made ("is this really a new scene?"), the sharpest picture change inside long scenes
+("did the detector miss a cut here?"), and random points (so "no" answers are fair too).
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import json
+import os
+import random
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+import numpy as np
+
+from config import CATALOGUE_DIR
+
+VOCAB_FILE = CATALOGUE_DIR / "tag_vocabulary.csv"
+VOCAB_PENDING = f"cat:{VOCAB_FILE.name}"
+LABELS_FILE = CATALOGUE_DIR / "training_labels.json"
+LABELS_STEM = LABELS_FILE.stem
+
+VOCAB_COLUMNS = ["tag", "group", "kind", "one_of", "teacher", "description",
+                 "not_to_be_confused_with", "search_words"]
+KINDS = ("frame", "motion")
+
+LONG_SCENE_SEC = 20.0      # boundary "missed cut?" points come from scenes longer than this
+EDGE_SEC = 0.4             # tag-card frames stay this far inside a scene
+BOUNDARY_PAD_SEC = 2.0     # boundary clips: this much either side of the point
+MOTION_CLIP_SEC = 4.0      # motion-tag clips: this long, centred on the frame
+FRAME_CACHE = Path(tempfile.gettempdir()) / "mp_training_frames"
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary
+# ---------------------------------------------------------------------------
+
+def _yes(v) -> bool:
+    return str(v).strip().lower() in ("yes", "y", "true", "1", "x")
+
+
+def _row(raw: dict) -> dict | None:
+    tag = " ".join(str(raw.get("tag") or "").split())
+    if not tag:
+        return None
+    kind = str(raw.get("kind") or "").strip().lower()
+    teacher = raw.get("teacher")
+    words = raw.get("search_words") or ""
+    if isinstance(words, str):
+        words = [w.strip() for w in words.replace(",", ";").split(";")]
+    return {
+        "tag": tag,
+        "group": " ".join(str(raw.get("group") or "").split()),
+        "kind": kind if kind in KINDS else "frame",
+        "one_of": " ".join(str(raw.get("one_of") or "").split()),
+        "teacher": True if teacher in (None, "") else (teacher if isinstance(teacher, bool) else _yes(teacher)),
+        "description": str(raw.get("description") or "").strip(),
+        "not_to_be_confused_with": str(raw.get("not_to_be_confused_with") or "").strip(),
+        "search_words": [w for w in words if w],
+    }
+
+
+def parse_vocabulary(text: str) -> list:
+    """Rows from tag_vocabulary.csv text (Excel's UTF-8 BOM and ; or , separators are fine).
+    Duplicate tags (any case) keep the first row."""
+    text = text.lstrip("﻿")
+    first = text.splitlines()[0] if text.strip() else ""
+    delim = ";" if first.count(";") > first.count(",") else ","
+    rows, seen = [], set()
+    for raw in csv.DictReader(io.StringIO(text), delimiter=delim):
+        raw = {str(k).strip().lower(): v for k, v in raw.items() if k}
+        r = _row(raw)
+        if r and r["tag"].lower() not in seen:
+            seen.add(r["tag"].lower())
+            rows.append(r)
+    return rows
+
+
+def _labels_json() -> list:
+    try:
+        data = json.loads((CATALOGUE_DIR / "labels.json").read_text())
+    except (OSError, ValueError):
+        return []
+    if isinstance(data, dict):
+        data = data.get("labels") or data.get("candidate_labels") or data.get("tags") or []
+    out = []
+    for item in data if isinstance(data, list) else []:
+        name = item if isinstance(item, str) else (item.get("name") or item.get("label") or item.get("tag")
+                                                    if isinstance(item, dict) else None)
+        if name:
+            out.append(str(name))
+    return out
+
+
+def load_vocabulary() -> tuple:
+    """(rows, source) — source is "tag_vocabulary.csv" or "labels.json"."""
+    try:
+        rows = parse_vocabulary(VOCAB_FILE.read_text(encoding="utf-8-sig"))
+        if rows:
+            return rows, VOCAB_FILE.name
+    except (OSError, UnicodeDecodeError, csv.Error):
+        pass
+    seen, rows = set(), []
+    for t in _labels_json():
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            rows.append(_row({"tag": t}))
+    return rows, "labels.json"
+
+
+def vocabulary_version() -> str:
+    """Changes whenever the vocabulary file changes — stored with every label."""
+    try:
+        return str(int(VOCAB_FILE.stat().st_mtime))
+    except OSError:
+        return "labels.json"
+
+
+def vocabulary_csv(rows: list) -> str:
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=VOCAB_COLUMNS, lineterminator="\n")
+    w.writeheader()
+    for r in rows:
+        r = _row(r)
+        if r:
+            w.writerow({**r, "teacher": "yes" if r["teacher"] else "no",
+                        "search_words": "; ".join(r["search_words"])})
+    return buf.getvalue()
+
+
+def save_vocabulary(rows: list) -> int:
+    """Write tag_vocabulary.csv (UTF-8 with BOM, so Excel opens it cleanly) and queue it for
+    Drive. Returns the number of tags written."""
+    clean = parse_vocabulary(vocabulary_csv(rows))
+    _atomic_write(VOCAB_FILE, "﻿" + vocabulary_csv(clean))
+    from library_common import mark_pending   # here, so reading never needs Streamlit
+    mark_pending(VOCAB_PENDING)
+    return len(clean)
+
+
+def chip_groups(rows: list, extra: list = ()) -> list:
+    """How a card shows the tags: [(title, single_choice, [tags])]. Tags sharing a one_of are
+    one single-choice row each; the rest are grouped by "group" (multi-choice). extra: tags
+    the scene has that aren't in the vocabulary — shown last so they can still be confirmed."""
+    exclusive, groups = {}, {}
+    for r in rows:
+        if r["one_of"]:
+            exclusive.setdefault(r["one_of"], []).append(r["tag"])
+        else:
+            groups.setdefault(r["group"] or "Tags", []).append(r["tag"])
+    out = [(name, True, tags) for name, tags in exclusive.items()]
+    out += [(name, False, tags) for name, tags in groups.items()]
+    known = {r["tag"].lower() for r in rows}
+    rest = [t for t in dict.fromkeys(extra) if t.lower() not in known]
+    if rest:
+        out.append(("Not in the vocabulary", False, rest))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Labels
+# ---------------------------------------------------------------------------
+
+def _atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def load_labels() -> list:
+    try:
+        data = json.loads(LABELS_FILE.read_text())
+    except (OSError, ValueError):
+        return []
+    items = data.get("items") if isinstance(data, dict) else None
+    return [i for i in items or [] if isinstance(i, dict) and i.get("id")]
+
+
+def _write_labels(items: list) -> None:
+    _atomic_write(LABELS_FILE, json.dumps({"version": 1, "items": items}, indent=1))
+    from library_common import mark_pending
+    mark_pending(LABELS_STEM)
+
+
+def card_id(kind: str, video_id: str, t: float) -> str:
+    return f"{kind}:{video_id}:{t:.2f}"
+
+
+def save_label(card: dict, **answer) -> dict:
+    """Store the answer to a card (replacing an earlier answer to the same card).
+    answer: tags=[...] / verdict="cut"|"no_cut"|"unsure" / skipped=True, reason="…"."""
+    item = {k: card[k] for k in ("id", "type", "video_id", "scene_id", "t") if k in card}
+    if card["type"] == "tags":
+        item["suggested"] = list(card.get("suggested") or [])
+    else:
+        item["source"] = card.get("source")
+    if answer.get("skipped"):
+        item["skipped"] = True
+        item["reason"] = answer.get("reason") or "skipped"
+    elif card["type"] == "tags":
+        item["tags"] = list(dict.fromkeys(answer.get("tags") or []))
+    else:
+        if answer.get("verdict") not in ("cut", "no_cut", "unsure"):
+            raise ValueError("verdict must be cut, no_cut or unsure")
+        item["verdict"] = answer["verdict"]
+    item["labelled_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    item["vocab_version"] = vocabulary_version()
+    items = [i for i in load_labels() if i["id"] != item["id"]] + [item]
+    _write_labels(items)
+    return item
+
+
+def remove_label(item_id: str) -> bool:
+    items = load_labels()
+    keep = [i for i in items if i["id"] != item_id]
+    if len(keep) == len(items):
+        return False
+    _write_labels(keep)
+    return True
+
+
+def summary(items: list) -> dict:
+    """Counts for the progress line."""
+    tags = [i for i in items if i.get("type") == "tags" and not i.get("skipped")]
+    bounds = [i for i in items if i.get("type") == "boundary" and not i.get("skipped")]
+    per_tag = {}
+    for i in tags:
+        for t in i.get("tags") or []:
+            per_tag[t] = per_tag.get(t, 0) + 1
+    return {
+        "tags": len(tags),
+        "boundaries": len(bounds),
+        "cuts": sum(1 for i in bounds if i.get("verdict") == "cut"),
+        "skipped": sum(1 for i in items if i.get("skipped")),
+        "videos": len({i.get("video_id") for i in items if not i.get("skipped")}),
+        "changed": sum(1 for i in tags if set(i.get("tags") or []) != set(i.get("suggested") or [])),
+        "per_tag": per_tag,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Picking cards
+# ---------------------------------------------------------------------------
+
+def _usable_scenes(video: dict, rng_limits) -> list:
+    """(scene, start, end) clipped to the library range, excluded scenes left out."""
+    out = []
+    for s in video.get("scenes") or []:
+        if s.get("excluded"):
+            continue
+        a, b = s["start"], s["end"]
+        if rng_limits:
+            a, b = max(a, rng_limits[0]), min(b, rng_limits[1])
+        if b - a > 2 * EDGE_SEC:
+            out.append((s, a, b))
+    return out
+
+
+def _video_weights(vids: list, items: list) -> np.ndarray:
+    done = {}
+    for i in items:
+        done[i.get("video_id")] = done.get(i.get("video_id"), 0) + 1
+    return np.array([1.0 / (1 + done.get(v, 0)) for v in vids])
+
+
+def _near_existing(vid: str, t: float, taken: dict, gap: float) -> bool:
+    return any(abs(t - u) < gap for u in taken.get(vid, ()))
+
+
+def pick_tag_cards(videos: dict, n: int, items: list, ranges: dict = None, *, seed=None,
+                   has_media=None) -> list:
+    """n random frames to tag. videos: CS.video_index()-style {stem: slim video}.
+    has_media(video_id) -> bool: leave out videos with nothing to show."""
+    rnd = random.Random(seed)
+    ranges = ranges or {}
+    pool = {}
+    for v in videos.values():
+        vid = v["video_id"]
+        if has_media and not has_media(vid):
+            continue
+        sc = _usable_scenes(v, ranges.get(vid))
+        if sc:
+            pool[vid] = sc
+    if not pool:
+        return []
+    vids = sorted(pool)
+    weights = _video_weights(vids, items)
+    taken = {}
+    for i in items:
+        if i.get("type") == "tags" and i.get("t") is not None:
+            taken.setdefault(i["video_id"], []).append(i["t"])
+    cards = []
+    for _ in range(n * 6):
+        if len(cards) >= n:
+            break
+        vid = rnd.choices(vids, weights=weights)[0]
+        scenes = pool[vid]
+        # Time-uniform, but unreviewed scenes count double (their tags are only the old model's guess).
+        sw = [(b - a) * (1.0 if s.get("reviewed") else 2.0) for s, a, b in scenes]
+        s, a, b = rnd.choices(scenes, weights=sw)[0]
+        t = round(rnd.uniform(a + EDGE_SEC, b - EDGE_SEC), 2)
+        if _near_existing(vid, t, taken, 3.0):
+            continue
+        taken.setdefault(vid, []).append(t)
+        weights[vids.index(vid)] *= 0.5        # spread a deck across videos
+        cards.append({"id": card_id("tags", vid, t), "type": "tags", "video_id": vid,
+                      "scene_id": s["scene_id"], "t": t, "scene_start": s["start"], "scene_end": s["end"],
+                      "suggested": list(s.get("tags") or []), "reviewed": bool(s.get("reviewed"))})
+    return cards
+
+
+def sharpest_change(values, fps: float, skip_sec: float = 1.0):
+    """Offset (seconds from the curve's start) of the biggest jump in a motion curve,
+    ignoring the first/last skip_sec. None if the curve is too short."""
+    v = np.asarray(values, dtype=float)
+    if fps <= 0 or v.size < 3:
+        return None
+    lo, hi = int(skip_sec * fps), v.size - int(skip_sec * fps)
+    if hi - lo < 1:
+        return None
+    return float(lo + int(np.argmax(v[lo:hi]))) / fps
+
+
+def pick_boundary_cards(videos: dict, n: int, items: list, ranges: dict = None, *, seed=None,
+                        curves=None, has_media=None) -> list:
+    """n points to check for a scene change. curves(video_id) -> {scene_id: {"fps", "values"}}
+    (CS.motion_curves); without it, "peak" points fall back to random ones."""
+    rnd = random.Random(seed)
+    ranges = ranges or {}
+    pool = {}
+    for v in videos.values():
+        vid = v["video_id"]
+        if has_media and not has_media(vid):
+            continue
+        sc = _usable_scenes(v, ranges.get(vid))
+        if sc:
+            pool[vid] = sc
+    if not pool:
+        return []
+    vids = sorted(pool)
+    weights = _video_weights(vids, [i for i in items if i.get("type") == "boundary"])
+    taken = {}
+    for i in items:
+        if i.get("type") == "boundary" and i.get("t") is not None:
+            taken.setdefault(i["video_id"], []).append(i["t"])
+    sources = ["detected", "peak", "random"]
+    cards = []
+    for k in range(n * 8):
+        if len(cards) >= n:
+            break
+        vid = rnd.choices(vids, weights=weights)[0]
+        scenes = pool[vid]
+        source = sources[len(cards) % 3] if k < n * 4 else "random"
+        t, scene = None, None
+        if source == "detected":
+            # A scene's own start (not one clipped by the library range) is a cut the detector made.
+            cuts = [(s, a) for s, a, b in scenes if a > 0 and abs(a - s["start"]) < 1e-6]
+            if cuts:
+                scene, t = rnd.choice(cuts)
+        elif source == "peak":
+            longs = [(s, a, b) for s, a, b in scenes if b - a >= LONG_SCENE_SEC]
+            if longs and curves:
+                s, a, b = rnd.choice(longs)
+                c = (curves(vid) or {}).get(s["scene_id"])
+                if c is not None and len(c["values"]):
+                    off = sharpest_change(c["values"], float(c["fps"]))
+                    if off is not None and a + 1 < s["start"] + off < b - 1:
+                        scene, t = s, s["start"] + off
+        if t is None:
+            source = "random"
+            s, a, b = rnd.choices(scenes, weights=[b - a for _, a, b in scenes])[0]
+            if b - a < 2.5:
+                continue
+            scene, t = s, rnd.uniform(a + 1.0, b - 1.0)
+        t = round(t, 2)
+        if _near_existing(vid, t, taken, 2.0):
+            continue
+        taken.setdefault(vid, []).append(t)
+        weights[vids.index(vid)] *= 0.5
+        cards.append({"id": card_id("boundary", vid, t), "type": "boundary", "video_id": vid,
+                      "scene_id": scene["scene_id"], "t": t, "source": source})
+    return cards
+
+
+def build_deck(videos: dict, n: int, mix: str, items: list, ranges: dict = None, *, seed=None,
+               curves=None, has_media=None) -> list:
+    """A shuffled deck of n cards. mix: "tags", "boundary" or "mixed" (about 70 / 30)."""
+    n_b = 0 if mix == "tags" else n if mix == "boundary" else max(1, round(n * 0.3))
+    deck = (pick_tag_cards(videos, n - n_b, items, ranges, seed=seed, has_media=has_media)
+            + pick_boundary_cards(videos, n_b, items, ranges, seed=None if seed is None else seed + 1,
+                                  curves=curves, has_media=has_media))
+    random.Random(seed).shuffle(deck)
+    return deck
+
+
+# ---------------------------------------------------------------------------
+# Frames
+# ---------------------------------------------------------------------------
+
+def extract_frame(video_path: Path, t: float, *, width: int = 854) -> Path | None:
+    """A JPEG of the frame at t seconds (cached). None if ffmpeg can't read it."""
+    video_path = Path(video_path)
+    try:
+        stamp = int(video_path.stat().st_mtime)
+    except OSError:
+        return None
+    out = FRAME_CACHE / f"{video_path.stem}_{stamp}_{t:.2f}.jpg"
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{max(t, 0):.3f}",
+           "-i", str(video_path), "-frames:v", "1", "-vf", f"scale='min({width},iw)':-2",
+           "-q:v", "3", str(out)]
+    try:
+        subprocess.run(cmd, check=True, timeout=30, capture_output=True)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out if out.exists() and out.stat().st_size > 0 else None
+
+
+def clear_frame_cache() -> int:
+    n = 0
+    for p in FRAME_CACHE.glob("*.jpg"):
+        try:
+            p.unlink()
+            n += 1
+        except OSError:
+            pass
+    return n
