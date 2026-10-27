@@ -228,7 +228,7 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
     from ultralytics import YOLO
     pose = YOLO(POSE_MODEL)
     from transformers import AutoModel, AutoProcessor
-    emb_model = AutoModel.from_pretrained(EMB_MODEL, torch_dtype=torch.float16).cuda().eval()
+    emb_model = AutoModel.from_pretrained(EMB_MODEL, dtype=torch.float16).cuda().eval()
     emb_proc = AutoProcessor.from_pretrained(EMB_MODEL)
     timings["load_models"] = time.time() - t0
 
@@ -250,6 +250,8 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
         with torch.no_grad():
             inp = emb_proc(images=[cv2.cvtColor(b, cv2.COLOR_BGR2RGB) for b in batch], return_tensors="pt").to("cuda")
             f = emb_model.get_image_features(pixel_values=inp["pixel_values"].half())
+            if not torch.is_tensor(f):      # newer transformers return an output object
+                f = getattr(f, "pooler_output", None) if getattr(f, "pooler_output", None) is not None else f[0]
             f = torch.nn.functional.normalize(f.float(), dim=-1)
         emb_vecs.append(f.cpu().numpy().astype(np.float16))
         emb_times.extend(batch_t)
