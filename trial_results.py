@@ -124,16 +124,37 @@ def any_wrong(moment: dict) -> bool:
 
 FILTERS = {
     "all": "All moments",
+    "todo": "Not reviewed by me yet",
     "mine": "Only frames I labelled",
     "wrong": "A model differs from me",
     "disagree": "The models disagree",
 }
+# The teacher picked after batch 1 — the view shows only it when its tags are there.
+MAIN_TEACHER = "32b"
+
+
+def shown_teachers(teachers) -> list:
+    """The teachers the view shows: just the chosen one (32B) when the results have it, else all."""
+    teachers = list(teachers or [])
+    return [MAIN_TEACHER] if MAIN_TEACHER in teachers else teachers
+
+
+def ordered(items: list, how: str = "video", seed: int = 0) -> list:
+    """items in video/time order, or shuffled ("random") — the same shuffle for the same seed,
+    so paging through a shuffled list doesn't reshuffle it."""
+    import random
+    items = list(items)
+    if how == "random":
+        random.Random(seed).shuffle(items)
+    return items
 
 
 def filter_moments(moments: list, how: str = "all", tag: str | None = None) -> list:
     out = []
     for m in moments:
         if how == "mine" and m.get("mine") is None:
+            continue
+        if how == "todo" and m.get("mine") is not None:
             continue
         if how == "wrong" and not any_wrong(m):
             continue

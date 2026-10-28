@@ -98,7 +98,9 @@ def test_view(bundle, sub):
     assert not errors(at), errors(at)
     md = " ".join(m.value for m in at.markdown)
     if sub == "🖼️ Compare tags":
-        assert "✓ close-up shot" in md and "+ dance" in md and "night?" in md
+        assert "✓ close-up shot" in md and "+ dance" in md       # 32B right; the old tags missed "dance"
+        assert ">8B<" not in md and "✅ 8B is right" not in [b.label for b in at.button]   # only the 32B is shown
+        assert "The models disagree" not in at.selectbox(key="tr_filter").options
         assert any("exactly right on 1 of 1" in c.value for c in at.caption)
         at.session_state["tr_filter"] = "mine"
         at.run()
@@ -158,3 +160,33 @@ def test_accept_and_correct(bundle, no_labels):
     assert not errors(at), errors(at)
     first = next(i for i in TLB.load_labels() if i["t"] == 5.0)
     assert "dance" not in first["tags"]
+
+
+def test_only_32b_shown_and_order():
+    assert TR.shown_teachers({"8b": 1, "32b": 1}) == ["32b"]
+    assert TR.shown_teachers({"8b": 1}) == ["8b"]
+    items = list(range(20))
+    a, b = TR.ordered(items, "random", 1), TR.ordered(items, "random", 2)
+    assert sorted(a) == items and a != items and a != b and a == TR.ordered(items, "random", 1)
+    assert TR.ordered(items, "video") == items
+    ms = _bundle()["videos"]["vid_a"]["moments"]
+    assert [m["key"] for m in TR.filter_moments(ms, "todo")] == ["s1_0", "s2_0"]
+
+
+def test_view_random_order_and_todo(bundle, no_labels):
+    from tests.apptest_util import errors, page_app
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_order"] = "random"
+    at.session_state["tr_filter"] = "todo"
+    at.run()
+    assert not errors(at), errors(at)
+    before = at.session_state["tr_seed"] if "tr_seed" in at.session_state else 0
+    next(b for b in at.button if b.label == "🎲 Shuffle again").click().run()
+    assert not errors(at), errors(at)
+    assert at.session_state["tr_seed"] == before + 1
+    # Saving a frame takes it out of "not reviewed by me yet".
+    n = len([b for b in at.button if b.label == "✅ 32B is right"])
+    next(b for b in at.button if b.label == "✅ 32B is right").click().run()
+    assert not errors(at), errors(at)
+    assert len([b for b in at.button if b.label == "✅ 32B is right"]) == n - 1
