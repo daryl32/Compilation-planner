@@ -3,8 +3,10 @@ pack_for_modal.py — Phase 1 of the ML redesign (claude/ml-redesign-plan.md): g
 480p preview copies and everything the app already knows about each video into one folder,
 ready to upload once to a Modal Volume for the GPU trial / training run.
 
-Runs on the laptop (paths from config.py, like the other local scripts). Nothing in Google
-Drive is changed — it only reads.
+Runs on the laptop or on the server (paths from config.py either way). Nothing in Google Drive
+or the catalogue is changed — it only reads. On the server, from /root/Compilation-planner with the
+Modal venv active (source /root/modal-venv/bin/activate):
+    python pack_for_modal.py --batch --upload
 
 Writes (default: _modal_pack next to this script, on genuine local disk):
     videos\<video_id>.mp4          the preview copy (same timeline as the original)
@@ -38,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -198,7 +201,9 @@ def probe(path: Path) -> dict:
 
 
 def copy_if_changed(src: Path, dest: Path) -> bool:
-    """Copy src → dest unless dest already has the same size. True if it copied."""
+    """Put src at dest unless dest already has the same size. True if it did. On the server the
+    preview copies are on the same disk, so this makes a hard link (no extra space); elsewhere
+    (e.g. the laptop reading Google Drive) it copies."""
     try:
         if dest.exists() and dest.stat().st_size == src.stat().st_size:
             return False
@@ -206,7 +211,11 @@ def copy_if_changed(src: Path, dest: Path) -> bool:
         pass
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".part")
-    shutil.copyfile(src, tmp)
+    tmp.unlink(missing_ok=True)
+    try:
+        os.link(src, tmp)
+    except OSError:
+        shutil.copyfile(src, tmp)
     tmp.replace(dest)
     return True
 
@@ -329,6 +338,38 @@ def load_batches(out: Path) -> dict:
     return {"1": packed} if packed else {}
 
 
+def remote_batches(volume: str) -> dict:
+    """The batch record kept on the Volume — so a pack folder on another machine (the server
+    after the laptop, say) knows which videos are done. Falls back to the manifests already
+    uploaded, counted as batch 1. {} if Modal can't be reached."""
+    import tempfile
+    if not shutil.which("modal"):
+        return {}
+    with tempfile.TemporaryDirectory() as tmp:
+        r = subprocess.run(["modal", "volume", "get", "--force", volume, "/pack/batches.json", tmp],
+                           capture_output=True, text=True)
+        found = list(Path(tmp).rglob("batches.json"))
+        if r.returncode == 0 and found:
+            data = _read_json(found[0], None)
+            if isinstance(data, dict) and data:
+                return {str(k): list(v) for k, v in data.items()}
+    r = subprocess.run(["modal", "volume", "ls", "--json", volume, "/pack/manifests"], capture_output=True, text=True)
+    try:
+        rows = json.loads(r.stdout) if r.returncode == 0 else []
+    except ValueError:
+        rows = []
+    stems = []
+    for row in rows if isinstance(rows, list) else []:
+        raw = str(row.get("filename") or "")
+        try:
+            raw = raw.encode("ascii", "backslashreplace").decode("unicode_escape")
+        except UnicodeError:
+            pass
+        if raw.endswith(".json"):
+            stems.append(Path(raw).stem)
+    return {"1": sorted(stems)} if stems else {}
+
+
 def next_batch(cats: dict, batches: dict, labelled: dict, meta: dict, has_proxy, size: int = BATCH_SIZE) -> list:
     """The next `size` videos that aren't in any batch yet — labelled ones first, then a spread
     of lengths and actors (the same picking as the first trial)."""
@@ -366,6 +407,11 @@ def main(argv=None) -> int:
 
     labelled = labelled_counts()
     batches = load_batches(args.out)
+    if not batches and not (args.only or args.all):
+        batches = remote_batches(args.volume)
+        if batches:
+            print("Batches so far (from Modal): " + ", ".join(f"{k}: {len(v)} videos"
+                                                            for k, v in sorted(batches.items(), key=lambda kv: int(kv[0]))))
     batch_no = None
     if args.only:
         unknown = [v for v in args.only if v not in cats]

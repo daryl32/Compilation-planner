@@ -33,3 +33,8 @@ config.py
 oauth_config.py
 
 tests/.data/
+
+# Modal trial working folders (pack_for_modal.py / modal_trial.py)
+_modal_pack/
+_trial_download/
+trial_report*.md

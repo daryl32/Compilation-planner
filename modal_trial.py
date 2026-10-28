@@ -900,8 +900,8 @@ def list_pack() -> list:
 
 @app.local_entrypoint()
 def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False, teacher: str = ""):
-    """teacher: 8b, 32b or both (default: 8b for --smoke, both otherwise)."""
-    teacher = (teacher or ("8b" if smoke else "both")).lower()
+    """teacher: 8b, 32b or both (default: 8b for --smoke, 32b otherwise — chosen after batch 1)."""
+    teacher = (teacher or ("8b" if smoke else "32b")).lower()
     keys = list(TEACHERS) if teacher == "both" else [teacher]
     if any(k not in TEACHERS for k in keys):
         print(f"--teacher must be one of: {', '.join(TEACHERS)}, both")

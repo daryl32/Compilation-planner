@@ -30,6 +30,7 @@ def proxies(monkeypatch, tmp_path):
     for v in ("vid_a", "vid_b", "vid_c"):
         _make_proxy(folder / f"{v}.mp4", PK.catalogue_duration(cats[v]))
     monkeypatch.setattr(PK, "PROXY_DIR", folder)
+    monkeypatch.setattr(PK, "remote_batches", lambda vol: {})     # never call the real Modal from tests
     return folder
 
 
@@ -158,3 +159,39 @@ def test_remote_videos_reads_cli_json(monkeypatch):
                               "created_modified": "x", "size": 123}])
     monkeypatch.setattr(PK.subprocess, "run", lambda *a, **k: R())
     assert PK.remote_videos("media-train") == {"Café night.mp4": 123}
+
+
+def test_copy_links_on_the_same_disk(tmp_path):
+    src = tmp_path / "proxies" / "v.mp4"
+    src.parent.mkdir()
+    src.write_bytes(b"x" * 100)
+    dest = tmp_path / "pack" / "videos" / "v.mp4"
+    assert PK.copy_if_changed(src, dest) is True
+    assert dest.read_bytes() == src.read_bytes() and dest.stat().st_ino == src.stat().st_ino   # a hard link
+    assert PK.copy_if_changed(src, dest) is False
+    dest.unlink()                                   # removing the pack's link leaves the original
+    assert src.exists()
+
+
+def test_remote_batches_falls_back_to_uploaded_manifests(monkeypatch):
+    monkeypatch.setattr(PK.shutil, "which", lambda name: "/usr/bin/" + name)
+
+    class R:
+        def __init__(self, rc, out=""):
+            self.returncode, self.stdout, self.stderr = rc, out, ""
+
+    def run(cmd, **kw):
+        if cmd[2] == "get":
+            return R(1)                                  # no batches.json on the Volume yet
+        return R(0, json.dumps([{"filename": "pack/manifests/vid_a.json", "size": 5},
+                                {"filename": "pack/manifests/vid_b.json", "size": 5}]))
+    monkeypatch.setattr(PK.subprocess, "run", run)
+    assert PK.remote_batches("media-train") == {"1": ["vid_a", "vid_b"]}
+
+
+def test_server_pack_continues_after_laptop_batches(proxies, tmp_path, monkeypatch):
+    monkeypatch.setattr(PK, "remote_batches", lambda vol: {"1": ["vid_a", "vid_b"]})   # after the fixture's
+    out = tmp_path / "server_pack"
+    assert PK.main(["--batch", "--out", str(out)]) == 0
+    b = json.loads((out / "batches.json").read_text())
+    assert b == {"1": ["vid_a", "vid_b"], "2": ["vid_c"]}
