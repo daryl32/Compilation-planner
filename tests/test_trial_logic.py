@@ -216,3 +216,26 @@ def test_export(tmp_path, monkeypatch):
     assert (out / "export" / m["frame"]).exists()
     plain = next(m for m in v["moments"] if m["key"] == "s1_0")
     assert plain["mine"] is None and plain["teachers"] == {}
+
+
+def test_status_and_pending(tmp_path, monkeypatch, capsys):
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    (pack / "batches.json").write_text(json.dumps({"1": ["v"], "2": ["w"]}))
+    vis = json.loads((out / "v" / "vision.json").read_text())
+    vis["models"] = {"pose": M.POSE_MODEL}
+    (out / "v" / "vision.json").write_text(json.dumps(vis))
+    t32 = json.loads((out / "v" / "tags_32b.json").read_text())
+    t32["targets"] = len(vis["targets"])
+    (out / "v" / "tags_32b.json").write_text(json.dumps(t32))
+    (pack / "manifests" / "w.json").write_text(json.dumps({"video_id": "w", "scenes": []}))
+    st = M.status.local(["32b"])
+    rows = {r["video_id"]: r for r in st["rows"]}
+    assert rows["v"]["batch"] == "1" and rows["v"]["vision"] and rows["v"]["tags_32b"]
+    assert rows["w"]["batch"] == "2" and not rows["w"]["vision"] and not rows["w"]["tags_32b"]
+    M._print_status(st, ["32b"])
+    out_text = capsys.readouterr().out
+    assert "to do" in out_text and "2 videos packed · vision done 1 · 32b tags done 1" in out_text
+    # A vision result from an older pose model doesn't count as done.
+    vis["models"] = {"pose": "yolo11l-pose.pt"}
+    (out / "v" / "vision.json").write_text(json.dumps(vis))
+    assert not M._vision_done("v")
