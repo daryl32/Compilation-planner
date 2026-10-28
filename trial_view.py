@@ -86,10 +86,17 @@ def _compare(data: dict) -> None:
     note = st.session_state.pop("tr_saved_note", None)
     if note:
         st.toast(note, icon="💾")
-    teachers = list(data.get("teachers") or {})
-    c = st.columns([3, 2, 2])
+    teachers = TR.shown_teachers(data.get("teachers") or {})
+    filters = {k: v for k, v in TR.FILTERS.items() if k != "disagree" or len(teachers) > 1}
+    if st.session_state.get("tr_filter") not in filters:
+        st.session_state["tr_filter"] = "all"
+    with st.container(key="tl_wrap_tr_filters"):
+        c = st.columns([3, 2, 2, 2])
     vid = c[0].selectbox("Video", ["(all videos)"] + sorted(videos), key="tr_vid")
-    how = c[1].selectbox("Show", list(TR.FILTERS), format_func=TR.FILTERS.get, key="tr_filter")
+    how = c[1].selectbox("Show", list(filters), format_func=filters.get, key="tr_filter")
+    order = c[3].selectbox("Order", ["video", "random"], key="tr_order",
+                           format_func={"video": "By video and time", "random": "🎲 Random"}.get,
+                           help="Random mixes frames from every video, so a review isn't stuck in one video.")
     all_tags = sorted({t for v in videos.values() for m in v["moments"]
                        for t in (m.get("mine") or []) + (m.get("old") or [])
                        + [x for r in m.get("teachers", {}).values() for x in r.get("tags") or []]},
@@ -98,6 +105,13 @@ def _compare(data: dict) -> None:
     pool = [(v, m) for v in (sorted(videos) if vid == "(all videos)" else [vid]) for m in videos[v]["moments"]]
     moments = [(v, m) for v, m in pool
                if TR.filter_moments([m], how, None if tag == "(any tag)" else tag)]
+    if order == "random":
+        def _reshuffle():
+            st.session_state["tr_seed"] = st.session_state.get("tr_seed", 0) + 1
+            st.session_state["tr_page"] = 1
+        st.button("🎲 Shuffle again", key="tr_shuffle", on_click=_reshuffle,
+                  help="A new random sample. Frames you save drop out of “Not reviewed by me yet”.")
+        moments = TR.ordered(moments, "random", st.session_state.get("tr_seed", 0))
 
     agr = TR.agreement([m for _, m in pool])
     if agr:
@@ -115,6 +129,8 @@ def _compare(data: dict) -> None:
         st.info("Nothing matches these filters.")
         return
     pages = max(1, -(-len(moments) // PER_PAGE))
+    if st.session_state.get("tr_page", 1) > pages:      # e.g. frames dropped out of "not reviewed"
+        st.session_state["tr_page"] = pages
     page = st.number_input(f"Page (of {pages}) — {len(moments)} moments", 1, pages, 1, key="tr_page") \
         if pages > 1 else 1
     for v, m in moments[(page - 1) * PER_PAGE: page * PER_PAGE]:

@@ -22,7 +22,8 @@ Run from the scene-labeling folder, in the venv (pip install modal; modal setup)
     modal run modal_trial.py                  the whole trial pack
     modal run modal_trial.py --stage report   just rebuild the report
     modal run modal_trial.py --stage tag --videos vid05,vid06
-Stages: download, vision, tag, report, export, all (default). export puts the results in your
+Stages: download, vision, tag, report, export, status, all (default). status lists every packed
+video with its batch and when vision / tagging were done — nothing runs on a GPU. export puts the results in your
 Drive catalogue folder (catalogue/trial_results) for the web app's 🧪 Trial results view. Each skips a video it has already done
 unless you pass --redo.
 """
@@ -42,6 +43,7 @@ TEACHERS = {"8b": "Qwen/Qwen3-VL-8B-Instruct", "32b": "Qwen/Qwen3-VL-32B-Instruc
 TEACHER_GPUS = {"8b": ["L40S", "A100-40GB", "A100-80GB", "H100"],   # 17 GB of weights
                 "32b": ["H100", "A100-80GB"]}                        # 66 GB of weights
 VLM_MODEL = TEACHERS["8b"]
+TEACHERS_DEFAULT = "32b"     # chosen after batch 1
 EMB_MODEL = "google/siglip2-so400m-patch14-384"
 # Medium pose model: about twice as fast as the large one, and closer to what the laptop's
 # RTX 4070 can run in its 5-minute-per-video budget.
@@ -102,6 +104,20 @@ def _vocab() -> list:
         if rows:
             return rows
     return TL.vocabulary_from_labels(_read_json(f"{PACK}/library/labels.json", []))
+
+
+def _vision_done(video_id: str) -> bool:
+    """A complete vision result made with the current pose model (a smoke test's is partial)."""
+    prev = _read_json(f"{OUT}/{video_id}/vision.json")
+    return bool(prev) and not prev.get("partial") and (prev.get("models") or {}).get("pose") == POSE_MODEL
+
+
+def _tags_done(video_id: str, key: str) -> bool:
+    """A complete tagging by this teacher of every moment the current vision result has."""
+    vis = _read_json(f"{OUT}/{video_id}/vision.json")
+    prev = _read_json(f"{OUT}/{video_id}/tags_{key}.json")
+    return (bool(vis) and bool(prev) and not prev.get("partial") and not vis.get("partial")
+            and prev.get("targets") == len(vis.get("targets") or []))
 
 
 def _gpu_name(default: str) -> str:
@@ -211,8 +227,7 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
     import trial_logic as TL
 
     out_dir = Path(f"{OUT}/{video_id}")
-    prev = _read_json(out_dir / "vision.json")
-    if not redo and prev and not prev.get("partial") and (prev.get("models") or {}).get("pose") == POSE_MODEL:
+    if not redo and _vision_done(video_id):
         return {"video_id": video_id, "skipped": True}
     started = time.time()
     timings = {}
@@ -474,9 +489,7 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False) ->
     vis = _read_json(f"{OUT}/{video_id}/vision.json")
     if not vis:
         return {"video_id": video_id, "teacher": key, "error": "no vision.json — run the vision stage first"}
-    prev = _read_json(out)
-    if (not redo and prev and not prev.get("partial") and not vis.get("partial")
-            and prev.get("targets") == len(vis["targets"])):
+    if not redo and _tags_done(video_id, key):
         return {"video_id": video_id, "teacher": key, "skipped": True}
     started = time.time()
     vocab = _vocab()
@@ -891,6 +904,48 @@ def _download_export(dest_name: str = "trial_results") -> str:
 
 
 @app.function(image=report_image, volumes={DATA: pack_vol})
+def status(keys: list = None) -> dict:
+    """Every packed video: its batch, and when vision and each teacher's tagging were done (and how
+    long they took) — or that they're still to do. {"batches": {...}, "rows": [...]}."""
+    pack_vol.reload()
+    keys = keys or [TEACHERS_DEFAULT]
+    batches = _read_json(f"{PACK}/batches.json", {}) or {}
+    batch_of = {v: str(b) for b, ids in batches.items() for v in ids}
+    rows = []
+    for m in sorted(Path(f"{PACK}/manifests").glob("*.json")):
+        v = m.stem
+        vf = Path(f"{OUT}/{v}/vision.json")
+        vis = _read_json(vf) or {}
+        row = {"video_id": v, "batch": batch_of.get(v, "1" if not batches else "?"),
+               "vision": _vision_done(v),
+               "vision_at": vf.stat().st_mtime if vf.exists() else None,
+               "vision_s": (vis.get("timings") or {}).get("total"),
+               "minutes": round((vis.get("duration") or 0) / 60, 1)}
+        for k in keys:
+            tf = Path(f"{OUT}/{v}/tags_{k}.json")
+            tj = _read_json(tf) or {}
+            row[f"tags_{k}"] = _tags_done(v, k)
+            row[f"tags_{k}_at"] = tf.stat().st_mtime if tf.exists() else None
+            row[f"tags_{k}_s"] = tj.get("seconds")
+        rows.append(row)
+    return {"batches": batches, "rows": rows}
+
+
+def _print_status(st: dict, keys: list) -> None:
+    def when(ts):
+        return time.strftime("%d %b %H:%M", time.gmtime(ts)) if ts else "—"
+    rows = sorted(st["rows"], key=lambda r: (int(r["batch"]) if str(r["batch"]).isdigit() else 999, r["video_id"]))
+    print(f"\n{'Batch':>5}  {'Video':<42} {'Vision (UTC)':<14} " + " ".join(f"{k + ' tags (UTC)':<15}" for k in keys))
+    for r in rows:
+        line = f"{r['batch']:>5}  {r['video_id'][:42]:<42} {(when(r['vision_at']) if r['vision'] else 'to do'):<14} "
+        line += " ".join(f"{(when(r[f'tags_{k}_at']) if r[f'tags_{k}'] else 'to do'):<15}" for k in keys)
+        print(line)
+    done_v = sum(r["vision"] for r in rows)
+    print(f"\n{len(rows)} videos packed · vision done {done_v} · "
+          + " · ".join(f"{k} tags done {sum(r[f'tags_{k}'] for r in rows)}" for k in keys))
+
+
+@app.function(image=report_image, volumes={DATA: pack_vol})
 def list_pack() -> list:
     pack_vol.reload()
     return sorted(p.stem for p in Path(f"{PACK}/manifests").glob("*.json"))
@@ -907,10 +962,25 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         print(f"--teacher must be one of: {', '.join(TEACHERS)}, both")
         return
     stages = ["download", "vision", "tag", "report", "export"] if stage == "all" else [stage]
+    if stage == "status":
+        _print_status(status.remote(keys), keys)
+        return
     vids = [v.strip() for v in videos.split(",") if v.strip()] or list_pack.remote()
     if not vids:
         print("No videos in the pack — run pack_for_modal.bat --upload first.")
         return
+    todo_vision, todo_tags = list(vids), {k: list(vids) for k in keys}
+    if not smoke and not redo and ("vision" in stages or "tag" in stages):
+        # Only send Modal the videos that still need work — finished ones (earlier batches)
+        # aren't started at all, so they cost nothing.
+        st = {r["video_id"]: r for r in status.remote(keys)["rows"]}
+        todo_vision = [v for v in vids if not (st.get(v) or {}).get("vision")]
+        todo_tags = {k: [v for v in vids if not (st.get(v) or {}).get(f"tags_{k}")] for k in keys}
+        print(f"{len(vids)} videos packed. To do: vision {len(todo_vision)}, "
+              + ", ".join(f"{k} tags {len(todo_tags[k])}" for k in keys)
+              + f". Already done (skipped): vision {len(vids) - len(todo_vision)}.")
+        for v in todo_vision:
+            print(f"   new: {v}")
     max_seconds, max_prompts = (90, 12) if smoke else (0, 0)
     if smoke:
         vids = vids[:1]
@@ -919,15 +989,22 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     t_all = time.time()
     if "download" in stages:
         print(download_models.remote([TEACHERS[k] for k in keys]))
-    if "vision" in stages:
-        print(f"Vision on {len(vids)} video(s) ({' / '.join(VISION_GPUS)}, first free)…")
-        for r in vision.starmap([(v, max_seconds, redo) for v in vids], return_exceptions=True):
+    if "vision" in stages and todo_vision:
+        print(f"Vision on {len(todo_vision)} video(s) ({' / '.join(VISION_GPUS)}, first free)…")
+        for r in vision.starmap([(v, max_seconds, redo) for v in todo_vision], return_exceptions=True):
             print("  ", r)
     if "tag" in stages:
         for k in keys:
-            print(f"Tagging with {TEACHERS[k]} ({' / '.join(TEACHER_GPUS[k])}, first free)…")
+            if "vision" in stages and not smoke and not redo:
+                # vision just ran — anything it finished needs tagging too
+                st = {r["video_id"]: r for r in status.remote([k])["rows"]}
+                todo_tags[k] = [v for v in vids if not (st.get(v) or {}).get(f"tags_{k}")]
+            if not todo_tags[k]:
+                print(f"{k}: every video already tagged.")
+                continue
+            print(f"Tagging {len(todo_tags[k])} video(s) with {TEACHERS[k]} ({' / '.join(TEACHER_GPUS[k])}, first free)…")
             tagger = TAGGERS[k]()
-            for r in tagger.tag_video.starmap([(v, max_prompts, redo) for v in vids], return_exceptions=True):
+            for r in tagger.tag_video.starmap([(v, max_prompts, redo) for v in todo_tags[k]], return_exceptions=True):
                 print("  ", r)
                 if isinstance(r, dict) and "didn't load" in str(r.get("error", "")):
                     print(f"Stopping {k}: the model couldn't start (see the error above).")
