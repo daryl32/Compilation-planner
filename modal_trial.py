@@ -29,6 +29,9 @@ Run from the scene-labeling folder, in the venv (pip install modal; modal setup)
     modal run modal_trial.py --stage prep                 CPU only: shows how many moments dedup saves
     modal run modal_trial.py --stage fp8-check            the FP8 check: re-tags the 32B video with
                                                           the most labelled frames, then the report
+    modal run modal_trial.py --stage tag --batch 6 --examples 3 --redo     re-tag one batch (the
+                                                          earlier tags are kept as tags_<teacher>_before)
+    modal run modal_trial.py --stage compare --batch 6    before vs after that re-tag: F1, time, cost
 Stages: download, vision, prep, tag, report, export, status, results (report + export, CPU only),
 all (default); tag always runs prep first. status lists every packed video with its batch and when
 vision / tagging were done — nothing runs on a GPU. export puts the results in your Drive catalogue
@@ -685,6 +688,8 @@ def _tag_video(self, video_id: str, redo: bool = False) -> dict:
     data = _read_json(pf)
     if not data:
         return {"video_id": video_id, "teacher": key, "error": "no prompts.json — the prep step didn't run"}
+    if out.exists():        # a --redo: keep the earlier run so --stage compare can set them side by side
+        out.replace(out.with_name(f"tags_{key}_before.json"))
     started = time.time()
     moments, copies, vocab_names = data["moments"], data.get("copies") or {}, data.get("vocab") or []
     vocab = [r for r in TL.teacher_vocab(_vocab()) if r["tag"] in set(vocab_names)] or TL.teacher_vocab(_vocab())
@@ -805,21 +810,43 @@ def report() -> str:
     if any(k != "8b" for k in keys):    # the 8B was dropped after batch 1 — only when nothing else
         keys = [k for k in keys if k != "8b"]
 
-    # --- Tags: old tagger vs each teacher, on the same labelled frames (ones every teacher tagged)
+    # --- Tags: each teacher against your labels — 🎯 cards AND ✏️ corrections, matched to the
+    # teacher's moments by video and time — on every labelled frame IT tagged. The old tagger is
+    # scored on the same frames as the teacher in use, from the scene's tags in the manifest.
     gold_tags = [i for i in gold if i.get("type") == "tags" and not i.get("skipped")]
-    old_all = TL.score_tags([(i.get("suggested") or [], i.get("tags") or []) for i in gold_tags], tags)
-    by_gold = {}
+
+    def old_tags(i):
+        sc = next((x for x in (mans.get(i.get("video_id")) or {}).get("scenes") or []
+                   if x.get("scene_id") == i.get("scene_id")), None)
+        if sc is None:
+            return list(i.get("suggested") or [])
+        return list(sc.get("corrected_tags") if sc.get("corrected_tags") is not None else sc.get("tags") or [])
+
+    old_all = TL.score_tags([(old_tags(i), i.get("tags") or []) for i in gold_tags], tags)
+    by_gold = {}             # {teacher: {label id: the teacher's result for that frame}}
     for key in keys:
-        for tj in tagged_by[key].values():
+        idx, ids = {}, {}
+        for v, tj in tagged_by[key].items():
             for r in tj["results"].values():
+                if r.get("t") is not None:
+                    idx[(v, round(float(r["t"]), 2))] = r
                 if r.get("gold_id"):
-                    by_gold.setdefault(key, {})[r["gold_id"]] = r
-    trial_gold = [i for i in gold_tags if keys and all(i["id"] in by_gold.get(k, {}) for k in keys)]
-    old_trial = TL.score_tags([(i.get("suggested") or [], i.get("tags") or []) for i in trial_gold], tags)
-    scores = {k: TL.score_tags([(by_gold[k][i["id"]]["tags"], i.get("tags") or []) for i in trial_gold], tags)
+                    ids[r["gold_id"]] = r
+        hit = {}
+        for i in gold_tags:
+            r = ids.get(i["id"]) or (idx.get((i.get("video_id"), round(float(i["t"]), 2)))
+                                     if i.get("t") is not None else None)
+            if r is not None:
+                hit[i["id"]] = r
+        by_gold[key] = hit
+    frames_of = {k: [i for i in gold_tags if i["id"] in by_gold[k]] for k in keys}
+    scores = {k: TL.score_tags([(by_gold[k][i["id"]]["tags"], i.get("tags") or []) for i in frames_of[k]], tags)
               for k in keys}
-    # The better teacher overall is the one the verdicts (and the library run) go with.
-    best = max(keys, key=lambda k: scores[k]["overall"]["f1"] or 0.0) if keys else None
+    # The teacher the verdicts (and the library estimate) go with: the one in use, else the best.
+    best = (TEACHERS_DEFAULT if TEACHERS_DEFAULT in keys
+            else max(keys, key=lambda k: scores[k]["overall"]["f1"] or 0.0) if keys else None)
+    trial_gold = frames_of.get(best, [])
+    old_trial = TL.score_tags([(old_tags(i), i.get("tags") or []) for i in trial_gold], tags)
     teacher = scores[best] if best else TL.score_tags([], tags)
     tagged = tagged_by.get(best, {})
     positives = {t: sum(t in (i.get("tags") or []) for i in gold_tags) for t in tags}
@@ -931,17 +958,15 @@ def report() -> str:
            f"**${lib_total:.2f}**{' (vision + ' + lib_teacher + ' only)' if len(keys) > 1 else ''} | |", "",
            *md_steps, "",
            "## Tags", "",
-           f"Your labels: {len(gold_tags)} frames ({len(trial_gold)} in the trial videos, tagged by every teacher).",
-           "Overall F1 on those frames (1 = matches you exactly): old tagger "
-           f"**{f(old_trial['overall']['f1'])}**"
-           + "".join(f", {k} **{f(scores[k]['overall']['f1'])}**" for k in keys)
-           + f". Old tagger on all your frames: {f(old_all['overall']['f1'])}.", ""]
-    if len(keys) > 1 and trial_gold:
-        md.append(f"**Better teacher: {best}** — the suggestions below use it.")
-        md.append("")
-    elif len(keys) > 1:
-        md.append("**No better teacher yet** — none of your labelled frames are in these videos, so the "
-                  "models can't be scored. The full run includes them.")
+           f"Your labels: {len(gold_tags)} frames (🎯 cards and ✏️ corrections). Each teacher is scored on "
+           "every one of them it tagged: " + ", ".join(f"{k} {len(frames_of[k])} frames" for k in keys) + ".",
+           "Overall F1 (1 = matches you exactly): "
+           + ", ".join(f"{k} **{f(scores[k]['overall']['f1'])}**" for k in keys)
+           + (f"; old tagger on {best}'s frames **{f(old_trial['overall']['f1'])}**" if best else "")
+           + f", on all your frames {f(old_all['overall']['f1'])}.", ""]
+    if len(keys) > 1:
+        md.append(f"**Teacher in use: {best}** — the suggestions below use it. The teachers tagged different "
+                  "videos, so compare their F1 columns with care (only the FP8 check video has both).")
         md.append("")
     head = "| Tag | Kind | Your examples | Old F1 | " + " | ".join(f"{k} F1" for k in keys) + \
            f" | {best or 'teacher'} P / R | Suggestion |"
@@ -1230,6 +1255,68 @@ def _print_status(st: dict, keys: list) -> None:
           + " · ".join(f"{k} tags done {sum(r[f'tags_{k}'] for r in rows)}" for k in keys))
 
 
+def _match_labels(video_id: str, results: dict, gold_tags: list) -> list:
+    """[(teacher tags, your tags)] for your labelled frames in this video that the run tagged —
+    🎯 cards by their id, ✏️ corrections by time."""
+    by_t = {round(float(r["t"]), 2): r for r in results.values() if r.get("t") is not None}
+    by_id = {r["gold_id"]: r for r in results.values() if r.get("gold_id")}
+    pairs = []
+    for i in gold_tags:
+        if i.get("video_id") != video_id:
+            continue
+        r = by_id.get(i["id"]) or (by_t.get(round(float(i["t"]), 2)) if i.get("t") is not None else None)
+        if r is not None:
+            pairs.append((r.get("tags") or [], i.get("tags") or []))
+    return pairs
+
+
+@app.function(image=report_image, volumes={DATA: pack_vol})
+def compare_runs(video_ids: list, key: str) -> str:
+    """Before vs after a --redo of these videos by this teacher (tags_<key>_before.json vs
+    tags_<key>.json): accuracy on your labelled frames, speed and cost, as a small table."""
+    import trial_logic as TL
+    pack_vol.reload()
+    tags = [r["tag"] for r in _vocab()]
+    gold_tags = [i for i in _gold_items() if i.get("type") == "tags" and not i.get("skipped")]
+    runs = {"before": [], "after": []}
+    for v in video_ids:
+        for name, fn in (("before", f"tags_{key}_before.json"), ("after", f"tags_{key}.json")):
+            tj = _read_json(f"{OUT}/{v}/{fn}")
+            if tj:
+                runs[name].append((v, tj))
+    common = {v for v, _ in runs["before"]} & {v for v, _ in runs["after"]}
+    if not common:
+        return ("Nothing to compare: no video has both an earlier run (tags_" + key + "_before.json) and a "
+                "new one. Run the --redo first.")
+    rows = []
+    for name in ("before", "after"):
+        pairs, sec, moments, ex, gpu = [], 0.0, 0, 0, None
+        for v, tj in runs[name]:
+            if v not in common:
+                continue
+            pairs += _match_labels(v, tj.get("results") or {}, gold_tags)
+            sec += float(tj.get("seconds") or 0.0)
+            moments += int(tj.get("prompts") or 0)
+            ex += int(tj.get("examples_used") or 0)
+            gpu = gpu or tj.get("gpu")
+        sc = TL.score_tags(pairs, tags)["overall"]
+        cost = TL.stage_cost(sec, gpu or "H100")
+        rows.append((name, len(pairs), sc, sec, moments, ex, cost))
+
+    def f(x):
+        return "–" if x is None else f"{x:.2f}"
+    md = [f"Before vs after on {len(common)} video(s), teacher {key}, scored on your labelled frames "
+          "(🎯 cards and ✏️ corrections) in those videos:", "",
+          "| Run | Your frames | F1 | Precision | Recall | Worked examples / moment | Moments sent | Tagging min | Tagging $ |",
+          "|---|---|---|---|---|---|---|---|---|"]
+    for name, n, sc, sec, moments, ex, cost in rows:
+        md.append(f"| {name} | {n} | {f(sc['f1'])} | {f(sc['precision'])} | {f(sc['recall'])} | "
+                  f"{ex / max(moments, 1):.1f} | {moments} | {sec / 60:.1f} | ${cost:.2f} |")
+    md += ["", "Your corrections in these videos started from the BEFORE run's tags, which can flatter it "
+               "slightly. A gain of a few points of F1 is noise on under ~100 frames."]
+    return "\n".join(md)
+
+
 @app.function(image=report_image, volumes={DATA: pack_vol})
 def pick_check_video() -> dict:
     """For --stage fp8-check: the video already tagged by the 32B with the most of your labelled
@@ -1256,11 +1343,12 @@ def list_pack() -> list:
 
 @app.local_entrypoint()
 def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False, teacher: str = "",
-         examples: int = -1, dedup: float = -1.0):
+         examples: int = -1, dedup: float = -1.0, batch: int = 0):
     """teacher: 8b, 32b, 32b-fp8 or both (= 8b + 32b). Default: 8b for --smoke, 32b-fp8 otherwise.
     examples: worked examples from your labels before each moment (default 0 = off, at most 6).
     dedup: near-identical moments in a scene are tagged once and the answer copied when their
-    picture similarity is above this (default 0.96; 0 = tag every moment)."""
+    picture similarity is above this (default 0.96; 0 = tag every moment).
+    batch: only the videos of this batch (e.g. --batch 6), instead of typing their names."""
     # No trial_logic import here: this runs on the machine you start it from, whose venv may
     # only have modal (trial_logic needs numpy).
     examples = EXAMPLES_DEFAULT if examples < 0 else min(examples, EXAMPLES_MAX)
@@ -1287,8 +1375,19 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         print(f"FP8 check on {pick['video_id']} ({pick['labelled']} of your labelled frames).")
         check_vid, keys, redo = pick["video_id"], ["32b-fp8"], True
         stages = ["download", "prep", "tag", "report", "export"]
-    vids = ([check_vid] if stage == "fp8-check"          # (file names can contain commas)
-            else [v.strip() for v in videos.split(",") if v.strip()] or list_pack.remote())
+    if batch:
+        rows = status.remote(keys)["rows"]
+        vids = [r["video_id"] for r in rows if str(r["batch"]) == str(batch)]
+        if not vids:
+            print(f"No videos in batch {batch}.")
+            return
+        print(f"Batch {batch}: {len(vids)} videos.")
+    else:
+        vids = ([check_vid] if stage == "fp8-check"          # (file names can contain commas)
+                else [v.strip() for v in videos.split(",") if v.strip()] or list_pack.remote())
+    if stage == "compare":
+        print(compare_runs.remote(vids, keys[0]))
+        return
     if not vids:
         print("No videos in the pack — run pack_for_modal.bat --upload first.")
         return

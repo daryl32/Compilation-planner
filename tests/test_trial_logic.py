@@ -187,7 +187,7 @@ def test_report(tmp_path, monkeypatch):
     M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
     text = M.report.local()
     assert "1 videos, 0.01 h of footage" in text
-    assert ", 32b **1.00**" in text  # the made-up 32b is perfect
+    assert "32b **1.00**" in text and "32b 4 frames" in text   # the made-up 32b is perfect
     assert "8b" not in text and "8B" not in text           # the 8B was dropped after batch 1
     assert "| close-up | frame | 3 |" in text and "teacher = yes" in text
     assert "| tag 32b | H100 |" in text
@@ -417,3 +417,46 @@ def test_extrapolate_per_stage_hours():
     assert c["tag x"]["per_footage_hour_$"] == pytest.approx(TL.stage_cost(360.0, "H100"), abs=1e-3)
     assert c["vision"]["per_footage_hour_$"] == pytest.approx(TL.stage_cost(360.0, "L4"), abs=1e-3)
     assert TL.extrapolate({"vision": 3600.0}, {"vision": "L4"}, 10.0, 100.0)["vision"] == c["vision"]
+
+
+def test_report_counts_corrections_matched_by_time(tmp_path, monkeypatch):
+    """A ✏️ correction has no gold_id in the teacher's results — it's matched by video + time."""
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    t32 = json.loads((out / "v" / "tags_32b.json").read_text())
+    t32["results"]["s1_0"] = {"tags": ["close-up"], "t": 31.0}
+    (out / "v" / "tags_32b.json").write_text(json.dumps(t32))
+    labels = json.loads((pack / "library" / "training_labels.json").read_text())
+    labels["items"].append({"id": "tags:v:31.00", "type": "tags", "video_id": "v", "t": 31.0,
+                            "scene_id": 1, "tags": ["wide"], "suggested": ["close-up"]})
+    (pack / "library" / "training_labels.json").write_text(json.dumps(labels))
+    text = M.report.local()
+    assert "32b 5 frames" in text and "32b **1.00**" not in text      # the correction counts, and it's wrong
+
+
+def test_redo_keeps_before_and_compare(tmp_path, monkeypatch):
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    import sys
+    import types
+    fake_vllm = types.ModuleType("vllm")
+    fake_vllm.SamplingParams = lambda **kw: kw
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    monkeypatch.setattr(M, "_gpu_name", lambda d: "H100")
+    vis = json.loads((out / "v" / "vision.json").read_text())
+    for tg in vis["targets"]:
+        for t in TL.context_times(tg["t"], 40.0):
+            (out / "v" / "frames" / TL.frame_name(t)).write_bytes(b"jpg")
+    # the "before" run: an FP8 run that got every labelled frame wrong
+    (out / "v" / "tags_32b-fp8.json").write_text(json.dumps({
+        "seconds": 600.0, "prompts": 5, "examples_used": 0, "gpu": "H100",
+        "results": {f"g_{i['t']:.2f}": {"tags": ["walking"], "t": i["t"], "gold_id": i["id"]}
+                    for i in gold if i["type"] == "tags"}}))
+    M.prepare_prompts.local("v", 0, 0, 0)
+
+    class Self:
+        key, llm, load_error, load_seconds, first = "32b-fp8", _FakeLLM(), None, 0.0, True
+    M._tag_video(Self, "v", redo=True)
+    before = json.loads((out / "v" / "tags_32b-fp8_before.json").read_text())
+    assert before["seconds"] == 600.0                          # the earlier run is kept
+    text = M.compare_runs.local(["v"], "32b-fp8")
+    assert "| before | 4 | 0.00 |" in text and "| after | 4 |" in text
+    assert "Nothing to compare" in M.compare_runs.local(["nope"], "32b-fp8")
