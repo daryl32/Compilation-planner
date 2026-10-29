@@ -1257,6 +1257,7 @@ def export(smoke: bool = False) -> dict:
             tag_runs[slot] = {"seconds": tj.get("seconds"), "load_seconds": tj.get("load_seconds"),
                               "gpu": tj.get("gpu"), "prompts": tj.get("prompts"), "copied": tj.get("copied"),
                               "unreadable": tj.get("unreadable"), "model": tj.get("model"),
+                              "examples_used": tj.get("examples_used"), "dedup": tj.get("dedup"),
                               "tokens_per_s": tj.get("tokens_per_s"), "mfu": tj.get("mfu"),
                               "at": tf.stat().st_mtime if tf.exists() else None}
             models.setdefault(slot, set()).add((tj.get("model") or TEACHERS.get(slot, slot)).split("/")[-1])

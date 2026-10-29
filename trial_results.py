@@ -248,6 +248,13 @@ def _cut_near(times, t: float, window: float = 0.5) -> bool:
     return any(abs(float(x) - float(t)) <= window for x in times or [])
 
 
+def teacher_label(model) -> str:
+    """'32B' / '32B FP8' / '8B' from a model name like Qwen/Qwen3-VL-32B-Instruct-FP8."""
+    m = str(model or "").upper()
+    size = "32B" if "32B" in m else "8B" if "8B" in m else (m.split("/")[-1] or "?")
+    return f"{size} FP8" if "FP8" in m else size
+
+
 def batch_report(videos: dict, teacher: str = MAIN_TEACHER) -> list:
     """One row per batch plus "All": footage, GPU time and cost per step, the teacher's scores
     against your labels, and scene cuts — so batches run with different settings can be compared.
@@ -264,7 +271,7 @@ def batch_report(videos: dict, teacher: str = MAIN_TEACHER) -> list:
         hours = sum(v.get("duration") or 0 for v in vs) / 3600
         vis_s = vis_load = vis_cost = tag_s = tag_load = tag_cost = 0.0
         prompts = unreadable = 0
-        gpus_v, gpus_t, at = set(), set(), []
+        gpus_v, gpus_t, at, models, ex = set(), set(), [], set(), set()
         for v in vs:
             run = v.get("run") or {}
             sec = float(run.get("vision_seconds") or 0)
@@ -286,6 +293,9 @@ def batch_report(videos: dict, teacher: str = MAIN_TEACHER) -> list:
                 gpus_t.add(tgpu)
             prompts += int(t.get("prompts") or 0)
             unreadable += int(t.get("unreadable") or 0)
+            if t:
+                models.add(teacher_label(t.get("model")))
+                ex.add("on" if t.get("examples_used") else "off" if t.get("model") else "?")
         moments = [m for v in vs for m in v.get("moments") or []]
         agr = agreement(moments).get(teacher) or {}
         answers = [(v, b) for v in vs for b in v.get("boundaries") or [] if b.get("verdict") in ("cut", "no_cut")]
@@ -304,6 +314,10 @@ def batch_report(videos: dict, teacher: str = MAIN_TEACHER) -> list:
             "moments": prompts, "unreadable": unreadable,
             "labelled": agr.get("frames", 0), "exact": agr.get("exact", 0),
             "recall": agr.get("recall"), "precision": agr.get("precision"),
+            "f1": (2 * agr["recall"] * agr["precision"] / (agr["recall"] + agr["precision"])
+                   if agr.get("recall") and agr.get("precision") else None),
+            "teacher": " + ".join(sorted(models)) or None,
+            "examples": "mixed" if len(ex - {"?"}) > 1 else (next(iter(ex - {"?"}), None)),
             "cuts_old": sum(len(v.get("cuts_old") or []) for v in vs),
             "cuts_new": sum(len(v.get("cuts_new") or []) for v in vs),
             "cut_answers": len(answers),

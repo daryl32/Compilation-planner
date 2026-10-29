@@ -149,6 +149,7 @@ def test_accept_and_correct(bundle, no_labels):
     from tests.apptest_util import errors, page_app
     at = page_app("pages/6_Training_Labels.py")
     at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_sub"] = "🖼️ Compare tags"          # (📋 Summary opens first)
     at.run()
     # ✅ 32B is right on the frame you hadn't labelled (s1_0, at 12 s)
     accept = [b for b in at.button if b.label == "✅ 32B is right"]
@@ -186,6 +187,7 @@ def test_view_random_order_and_todo(bundle, no_labels):
     at.session_state["tl_view"] = "🧪 Trial results"
     at.session_state["tr_order"] = "random"
     at.session_state["tr_filter"] = "todo"
+    at.session_state["tr_sub"] = "🖼️ Compare tags"
     at.run()
     assert not errors(at), errors(at)
     before = at.session_state["tr_seed"] if "tr_seed" in at.session_state else 0
@@ -278,3 +280,32 @@ def test_motion_view_with_preview_copy(bundle, no_labels):
     finally:
         if not existed:
             pp.unlink(missing_ok=True)
+
+
+def test_teacher_label_and_batch_scorecard_fields():
+    assert TR.teacher_label("Qwen/Qwen3-VL-32B-Instruct-FP8") == "32B FP8"
+    assert TR.teacher_label("Qwen/Qwen3-VL-32B-Instruct") == "32B"
+    assert TR.teacher_label("Qwen/Qwen3-VL-8B-Instruct") == "8B"
+    videos = {"a": {"batch": "6", "duration": 3600, "run": {"tagging": {"32b": {
+                  "model": "Qwen/Qwen3-VL-32B-Instruct-FP8", "examples_used": 30, "seconds": 60, "gpu": "H100"}}},
+                    "moments": [{"mine": ["x"], "teachers": {"32b": {"tags": ["x", "y"]}}}]},
+              "b": {"batch": "5", "duration": 3600, "run": {"tagging": {"32b": {
+                  "model": "Qwen/Qwen3-VL-32B-Instruct", "examples_used": 0, "seconds": 60, "gpu": "H100"}}},
+                    "moments": [{"mine": ["x"], "teachers": {"32b": {"tags": ["x"]}}}]}}
+    rows = {r["batch"]: r for r in TR.batch_report(videos, "32b")}
+    assert rows["6"]["teacher"] == "32B FP8" and rows["6"]["examples"] == "on"
+    assert rows["5"]["teacher"] == "32B" and rows["5"]["examples"] == "off" and rows["5"]["f1"] == 1.0
+    assert rows["6"]["f1"] == pytest.approx(2 * 1 * 0.5 / 1.5)
+    assert rows["All"]["teacher"] == "32B + 32B FP8" and rows["All"]["examples"] == "mixed"
+
+
+def test_summary_opens_first_with_scorecard(bundle, no_labels):
+    from tests.apptest_util import errors, page_app
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.run()
+    assert not errors(at), errors(at)
+    assert any("How well the teacher matches your tags" in m.value for m in at.markdown)
+    assert [e.label for e in at.expander][:4] == ["💷 Cost and time per batch", "🔎 Tagging detail per batch",
+                                                  "✂️ Scene changes per batch",
+                                                  "📄 Full written report (as at the last export)"]

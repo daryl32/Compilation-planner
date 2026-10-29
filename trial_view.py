@@ -298,26 +298,45 @@ def _report(data: dict, batch) -> None:
                 "`modal run modal_trial.py --stage results` (no GPU, about a minute).")
     pct = lambda x: None if x is None else round(x * 100)
     names = lambda r: "All batches" if r["batch"] == "All" else (f"Batch {r['batch']}" if r["batch"] != "?" else "Not recorded")
-    st.markdown("**Cost and time**")
-    st.dataframe([{"": names(r), "Run (UTC)": r["run"], "Videos": r["videos"], "Footage (h)": r["footage_h"],
-                   "Vision GPU": r["vision_gpu"], "Vision (min)": r["vision_min"], "Vision $": r["vision_cost"],
-                   "Tagging GPU": r["tag_gpu"], "Tagging (min)": r["tag_min"],
-                   "Tagging min / footage h": r["tag_min_per_h"], "Start-up (min)": r["tag_startup_min"],
-                   "Tagging $": r["tag_cost"], "Total $": r["total_cost"], "$ / footage h": r["cost_per_h"]}
-                  for r in rows], hide_index=True, width="stretch", key="tr_rep_cost")
-    st.markdown(f"**{teacher.upper()} tags against yours** (updates as you correct frames)")
-    st.dataframe([{"": names(r), "Moments tagged": r["moments"], "Unreadable replies": r["unreadable"],
-                   "Your labelled frames": r["labelled"], "Exactly right": r["exact"],
-                   "Found (recall %)": pct(r["recall"]), "Right (precision %)": pct(r["precision"])}
-                  for r in rows], hide_index=True, width="stretch", key="tr_rep_tags")
-    st.markdown("**Scene changes**")
-    st.dataframe([{"": names(r), "Old cuts": r["cuts_old"], "New cuts": r["cuts_new"],
-                   "Your answers": r["cut_answers"], "New right %": pct(r["cut_acc_new"]),
-                   "Old right %": pct(r["cut_acc_old"])} for r in rows],
-                 hide_index=True, width="stretch", key="tr_rep_cuts")
-    st.caption("Costs use Modal's list prices for the GPU each step ran on. Start-up = loading the model once "
-               "per run, so small batches pay proportionally more of it. Tag-level detail: 📊 Scores.")
-    with st.expander("Full written report (all batches, as at the last export)"):
+    ex = {"on": "✅ on", "off": "— off", "mixed": "mixed"}
+
+    # 1. The scorecard: one line per batch, the numbers that decide things.
+    st.markdown("#### 🎯 How well the teacher matches your tags")
+    st.caption("Per batch, on the frames you've labelled (🎯 cards and ✏️ corrections) — updates as you correct "
+               "more. **Found** = share of your tags the teacher also gave · **Right** = share of the teacher's "
+               "tags you agree with · **F1** combines both (1 = perfect). Compare batches with the same teacher.")
+    st.dataframe([{"": names(r), "Teacher": r.get("teacher") or "–",
+                   "Worked examples": ex.get(r.get("examples"), "–") if r["batch"] != "All" else "",
+                   "Your labelled frames": r["labelled"],
+                   "Found %": pct(r["recall"]), "Right %": pct(r["precision"]),
+                   "F1": None if r.get("f1") is None else round(r["f1"], 2),
+                   "$ / footage h": r["cost_per_h"]} for r in rows],
+                 hide_index=True, width="stretch", key="tr_rep_score",
+                 column_config={"F1": st.column_config.ProgressColumn("F1", min_value=0.0, max_value=1.0, format="%.2f"),
+                                "$ / footage h": st.column_config.NumberColumn(format="$%.2f")})
+    st.caption("Per-tag detail for a batch: pick it above, then 📊 Scores.")
+
+    # 2. The detail, folded away.
+    with st.expander("💷 Cost and time per batch"):
+        st.dataframe([{"": names(r), "Run (UTC)": r["run"], "Videos": r["videos"], "Footage (h)": r["footage_h"],
+                       "Vision GPU": r["vision_gpu"], "Vision (min)": r["vision_min"], "Vision $": r["vision_cost"],
+                       "Tagging GPU": r["tag_gpu"], "Tagging (min)": r["tag_min"],
+                       "Tagging min / footage h": r["tag_min_per_h"], "Start-up (min)": r["tag_startup_min"],
+                       "Tagging $": r["tag_cost"], "Total $": r["total_cost"], "$ / footage h": r["cost_per_h"]}
+                      for r in rows], hide_index=True, width="stretch", key="tr_rep_cost")
+        st.caption("Modal's list prices for the GPU each step ran on. Start-up = loading the model once per run, "
+                   "so small batches pay proportionally more of it.")
+    with st.expander("🔎 Tagging detail per batch"):
+        st.dataframe([{"": names(r), "Moments tagged": r["moments"], "Unreadable replies": r["unreadable"],
+                       "Your labelled frames": r["labelled"], "Exactly right": r["exact"],
+                       "Found %": pct(r["recall"]), "Right %": pct(r["precision"])}
+                      for r in rows], hide_index=True, width="stretch", key="tr_rep_tags")
+    with st.expander("✂️ Scene changes per batch"):
+        st.dataframe([{"": names(r), "Old cuts": r["cuts_old"], "New cuts": r["cuts_new"],
+                       "Your answers": r["cut_answers"], "New right %": pct(r["cut_acc_new"]),
+                       "Old right %": pct(r["cut_acc_old"])} for r in rows],
+                     hide_index=True, width="stretch", key="tr_rep_cuts")
+    with st.expander("📄 Full written report (as at the last export)"):
         st.markdown(TR.report_markdown() or "_No report._")
 
 
@@ -341,10 +360,10 @@ def render() -> None:
                             help="Look at one batch run on its own, or all of them together.")
         with b:
             with st.container(key="subnav_tr"):
-                sub = st.radio("Trial", ["🖼️ Compare tags", "📊 Scores", "🕺 Motion", "📋 Report"], horizontal=True,
+                sub = st.radio("Trial", ["📋 Summary", "🖼️ Compare tags", "📊 Scores", "🕺 Motion"], horizontal=True,
                                key="tr_sub", label_visibility="collapsed")
     view = {**data, "videos": TR.in_batch(data["videos"], batch)}
-    if not view["videos"] and sub != "📋 Report":
+    if not view["videos"] and sub != "📋 Summary":
         st.info("No videos in this batch.")
         return
     if sub == "🖼️ Compare tags":
