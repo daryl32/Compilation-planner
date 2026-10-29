@@ -401,3 +401,10 @@ def test_prep_then_tag_with_fake_model(tmp_path, monkeypatch):
     m = next(m for m in v["moments"] if m["key"] == "s1_2")
     assert m["teachers"]["32b-fp8"]["copied_from"] == "g_25.00"
     assert v["run"]["tagging"]["32b-fp8"]["copied"] == 3
+
+
+def test_pick_check_video(tmp_path, monkeypatch):
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    (out / "w").mkdir()
+    (out / "w" / "tags_32b.json").write_text(json.dumps({"results": {"a": {"gold_id": "x"}, "b": {}}}))
+    assert M.pick_check_video.local() == {"video_id": "v", "labelled": 4}

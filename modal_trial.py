@@ -27,7 +27,8 @@ Run from the scene-labeling folder, in the venv (pip install modal; modal setup)
     modal run modal_trial.py --stage report   just rebuild the report
     modal run modal_trial.py --stage tag --videos vid05,vid06
     modal run modal_trial.py --stage prep                 CPU only: shows how many moments dedup saves
-    modal run modal_trial.py --stage tag --teacher 32b-fp8 --videos vid05 --redo    the FP8 check
+    modal run modal_trial.py --stage fp8-check            the FP8 check: re-tags the 32B video with
+                                                          the most labelled frames, then the report
 Stages: download, vision, prep, tag, report, export, status, results (report + export, CPU only),
 all (default); tag always runs prep first. status lists every packed video with its batch and when
 vision / tagging were done — nothing runs on a GPU. export puts the results in your Drive catalogue
@@ -1225,6 +1226,22 @@ def _print_status(st: dict, keys: list) -> None:
 
 
 @app.function(image=report_image, volumes={DATA: pack_vol})
+def pick_check_video() -> dict:
+    """For --stage fp8-check: the video already tagged by the 32B with the most of your labelled
+    frames (🎯 cards that the 32B was scored on), so the FP8 check has the most to compare."""
+    pack_vol.reload()
+    best, best_n = None, 0
+    for p in sorted(Path(OUT).iterdir()) if Path(OUT).exists() else []:
+        tj = _read_json(p / "tags_32b.json")
+        if not tj:
+            continue
+        n = sum(1 for r in (tj.get("results") or {}).values() if r.get("gold_id"))
+        if n > best_n:
+            best, best_n = p.name, n
+    return {"video_id": best, "labelled": best_n}
+
+
+@app.function(image=report_image, volumes={DATA: pack_vol})
 def list_pack() -> list:
     pack_vol.reload()
     return sorted(p.stem for p in Path(f"{PACK}/manifests").glob("*.json"))
@@ -1255,7 +1272,18 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     if stage == "status":
         _print_status(status.remote(keys), keys)
         return
-    vids = [v.strip() for v in videos.split(",") if v.strip()] or list_pack.remote()
+    if stage == "fp8-check":
+        # One command for the FP8 check: re-tag the 32B video with the most labelled frames with
+        # the FP8 build, then rebuild the report so the two sit side by side.
+        pick = pick_check_video.remote()
+        if not pick["video_id"]:
+            print("No video tagged by the 32B with labelled frames yet — nothing to compare.")
+            return
+        print(f"FP8 check on {pick['video_id']} ({pick['labelled']} of your labelled frames).")
+        check_vid, keys, redo = pick["video_id"], ["32b-fp8"], True
+        stages = ["download", "prep", "tag", "report", "export"]
+    vids = ([check_vid] if stage == "fp8-check"          # (file names can contain commas)
+            else [v.strip() for v in videos.split(",") if v.strip()] or list_pack.remote())
     if not vids:
         print("No videos in the pack — run pack_for_modal.bat --upload first.")
         return
