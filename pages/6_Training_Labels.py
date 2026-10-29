@@ -127,10 +127,11 @@ def tag_card(card: dict) -> None:
         default = [t for t in card.get("suggested") or [] if t in tags]
         if single:
             val = st.pills(title, tags, selection_mode="single", default=default[0] if default else None,
-                           key=key, help="  \n".join(notes) or "Pick one, or none if none fits.")
+                           wrap=True, width="stretch", key=key, help="  \n".join(notes) or "Pick one, or none if none fits.")
             picked += [val] if val else []
         else:
-            val = st.pills(title, tags, selection_mode="multi", default=default, key=key,
+            val = st.pills(title, tags, selection_mode="multi", default=default, wrap=True, width="stretch",
+                           key=key,
                            help="  \n".join(notes) or None)
             picked += list(val or [])
 

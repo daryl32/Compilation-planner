@@ -69,10 +69,12 @@ def _editor(vid: str, m: dict, teachers: list, ekey: str) -> None:
         default = [t for t in start if t in tags]
         wkey = f"{ekey}_g{gi}"
         if single:
-            val = st.pills(title, tags, selection_mode="single", default=default[0] if default else None, key=wkey)
+            val = st.pills(title, tags, selection_mode="single", default=default[0] if default else None,
+                           wrap=True, width="stretch", key=wkey)
             picked += [val] if val else []
         else:
-            picked += list(st.pills(title, tags, selection_mode="multi", default=default, key=wkey) or [])
+            picked += list(st.pills(title, tags, selection_mode="multi", default=default,
+                                    wrap=True, width="stretch", key=wkey) or [])
     card = TR.correction_card(vid, m, start)
     c1, c2 = st.columns(2)
     c1.button("💾 Save my tags", type="primary", key=f"{ekey}_save", width="stretch",
@@ -137,7 +139,7 @@ def _compare(data: dict) -> None:
         if pages > 1 else 1
     for v, m in moments[(page - 1) * PER_PAGE: page * PER_PAGE]:
         with st.container(border=True, key=f"tr_wrap_card_{_k(v, m)}"):
-            a, b = st.columns([2, 3])
+            a, b = st.columns([3, 7])        # picture ~25% smaller than before (was 2:3), more room for tags
             with a:
                 p = TR.frame_path(m)
                 if p is not None and p.exists():
