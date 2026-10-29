@@ -237,3 +237,80 @@ def tag_scores(moments: list, teacher: str) -> list:
         f = 2 * p * rc / (p + rc) if p and rc else (0.0 if p is not None and rc is not None else None)
         out.append({**r, "precision": p, "recall": rc, "f1": f})
     return sorted(out, key=lambda r: (-r["yours"], r["tag"].lower()))
+
+
+# ---------------------------------------------------------------------------
+# Per-batch report
+# ---------------------------------------------------------------------------
+
+def _cut_near(times, t: float, window: float = 0.5) -> bool:
+    return any(abs(float(x) - float(t)) <= window for x in times or [])
+
+
+def batch_report(videos: dict, teacher: str = MAIN_TEACHER) -> list:
+    """One row per batch plus "All": footage, GPU time and cost per step, the teacher's scores
+    against your labels, and scene cuts — so batches run with different settings can be compared.
+    videos: results' videos (with your saved labels applied). Rows: dicts, the last is "All"."""
+    import time as _time
+    import trial_logic as TLG
+
+    groups = {}
+    for vid, v in videos.items():
+        groups.setdefault(str(v.get("batch") or "?"), []).append(v)
+    order = sorted(groups, key=lambda b: (not b.isdigit(), int(b) if b.isdigit() else 0, b))
+
+    def row(name, vs):
+        hours = sum(v.get("duration") or 0 for v in vs) / 3600
+        vis_s = vis_load = vis_cost = tag_s = tag_load = tag_cost = 0.0
+        prompts = unreadable = 0
+        gpus_v, gpus_t, at = set(), set(), []
+        for v in vs:
+            run = v.get("run") or {}
+            sec = float(run.get("vision_seconds") or 0)
+            load = float((run.get("vision_timings") or {}).get("load_models") or 0)
+            gpu = run.get("vision_gpu") or v.get("gpu") or "L4"
+            vis_s += sec
+            vis_load += load
+            vis_cost += TLG.stage_cost(sec, gpu)
+            gpus_v.add(gpu)
+            if run.get("vision_at"):
+                at.append(run["vision_at"])
+            t = (run.get("tagging") or {}).get(teacher) or {}
+            ts, tl = float(t.get("seconds") or 0), float(t.get("load_seconds") or 0)
+            tgpu = t.get("gpu") or "H100"
+            tag_s += ts
+            tag_load += tl
+            tag_cost += TLG.stage_cost(ts + tl, tgpu)
+            if t:
+                gpus_t.add(tgpu)
+            prompts += int(t.get("prompts") or 0)
+            unreadable += int(t.get("unreadable") or 0)
+        moments = [m for v in vs for m in v.get("moments") or []]
+        agr = agreement(moments).get(teacher) or {}
+        answers = [(v, b) for v in vs for b in v.get("boundaries") or [] if b.get("verdict") in ("cut", "no_cut")]
+        right_new = sum(_cut_near(v.get("cuts_new"), b["t"]) == (b["verdict"] == "cut") for v, b in answers)
+        right_old = sum(_cut_near(v.get("cuts_old"), b["t"]) == (b["verdict"] == "cut") for v, b in answers)
+        total = vis_cost + tag_cost
+        return {
+            "batch": name, "videos": len(vs), "footage_h": round(hours, 2),
+            "run": _time.strftime("%d %b %H:%M", _time.gmtime(min(at))) if at else None,
+            "vision_gpu": "/".join(sorted(gpus_v)), "vision_min": round(vis_s / 60, 1),
+            "vision_startup_min": round(vis_load / 60, 1), "vision_cost": round(vis_cost, 2),
+            "tag_gpu": "/".join(sorted(gpus_t)), "tag_min": round(tag_s / 60, 1),
+            "tag_startup_min": round(tag_load / 60, 1), "tag_cost": round(tag_cost, 2),
+            "total_cost": round(total, 2), "cost_per_h": round(total / hours, 2) if hours else None,
+            "tag_min_per_h": round(tag_s / 60 / hours, 1) if hours else None,
+            "moments": prompts, "unreadable": unreadable,
+            "labelled": agr.get("frames", 0), "exact": agr.get("exact", 0),
+            "recall": agr.get("recall"), "precision": agr.get("precision"),
+            "cuts_old": sum(len(v.get("cuts_old") or []) for v in vs),
+            "cuts_new": sum(len(v.get("cuts_new") or []) for v in vs),
+            "cut_answers": len(answers),
+            "cut_acc_new": right_new / len(answers) if answers else None,
+            "cut_acc_old": right_old / len(answers) if answers else None,
+        }
+
+    rows = [row(b, groups[b]) for b in order]
+    if len(rows) > 1:
+        rows.append(row("All", [v for b in order for v in groups[b]]))
+    return rows

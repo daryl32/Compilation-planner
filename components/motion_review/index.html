@@ -1,0 +1,266 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#ffffff; --fg:#262730; --muted:#8a8f98; --line:#d9dce1; --accent:#ff4b4b; --panel:#f3f4f7;
+          --person:#4c78a8; --old:#b9b3ad; --newcut:#e45756; --oldcut:#8a8f98; --good:#2e9e5b; --bad:#e45756;
+          --manual:#9b59d0; --sel:#f2a900; }
+  html, body { margin:0; padding:0; background:transparent; color:var(--fg);
+               font-family:"Source Sans Pro", -apple-system, system-ui, sans-serif; font-size:15px;
+               -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color:transparent; }
+  video { display:block; width:100%; max-height:52vh; background:#000; border-radius:8px; }
+  .bar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:6px 0; }
+  button { min-height:44px; min-width:44px; padding:0 12px; border-radius:8px; border:1px solid var(--line);
+           background:var(--panel); color:var(--fg); font-size:15px; cursor:pointer; touch-action:manipulation; }
+  button:active { transform:scale(0.97); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  button:disabled { opacity:.4; cursor:default; }
+  .time { font-variant-numeric:tabular-nums; min-width:120px; text-align:center; font-weight:600; }
+  .grow { flex:1; }
+  canvas { display:block; width:100%; touch-action:none; border-radius:8px; background:var(--panel); }
+  #graph { height:170px; }
+  #over { height:30px; margin-top:6px; }
+  .hint { color:var(--muted); font-size:13px; margin-top:4px; min-height:18px; }
+  .legend { color:var(--muted); font-size:12.5px; display:flex; flex-wrap:wrap; gap:12px; margin-top:2px; }
+  .sw { display:inline-block; width:14px; height:3px; vertical-align:middle; margin-right:4px; border-radius:2px; }
+</style>
+</head>
+<body>
+<video id="v" playsinline preload="auto"></video>
+<div class="bar">
+  <button id="play" class="primary" title="Play / pause (space)">▶</button>
+  <button id="back5" title="Back 5 s">−5s</button>
+  <button id="back1" title="Back one frame (,)">◀︎</button>
+  <button id="fwd1" title="Forward one frame (.)">▶︎</button>
+  <button id="fwd5" title="Forward 5 s">+5s</button>
+  <span class="time" id="time">0:00.0</span>
+  <button id="prevcut" title="Previous new cut">⏮ cut</button>
+  <button id="nextcut" title="Next new cut">cut ⏭</button>
+  <span class="grow"></span>
+  <button id="zout" title="Zoom out">−</button>
+  <button id="zin" title="Zoom in">+</button>
+</div>
+<canvas id="graph"></canvas>
+<canvas id="over"></canvas>
+<div class="bar">
+  <button id="good" title="The selected new cut is a real scene change">👍 Good cut</button>
+  <button id="bad" title="The selected new cut shouldn't be there">👎 Bad cut</button>
+  <button id="add" title="A scene change at the playhead that the detector missed">✂️ Add cut here</button>
+  <button id="clear" title="Remove your mark at the selected point">↩️ Remove my mark</button>
+</div>
+<div class="hint" id="hint">Tap the graph to jump there. Tap near a red cut line to select it.</div>
+<div class="legend">
+  <span><span class="sw" style="background:var(--person)"></span>People moving (new)</span>
+  <span><span class="sw" style="background:var(--old)"></span>Picture change (old)</span>
+  <span><span class="sw" style="background:var(--newcut)"></span>New cuts</span>
+  <span><span class="sw" style="background:var(--oldcut)"></span>Old cuts (dotted)</span>
+  <span>▼ your marks: <b style="color:var(--good)">good / added</b> · <b style="color:var(--bad)">bad</b></span>
+</div>
+<script>
+// ---------------------------------------------------------------------------
+// Streamlit component protocol (no build step)
+// ---------------------------------------------------------------------------
+function post(type, extra) {
+  window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra || {}), "*");
+}
+function setHeight() { post("streamlit:setFrameHeight", {height: document.body.scrollHeight + 6}); }
+let nonce = 0;
+function send(action, t, extra) {
+  nonce += 1;
+  post("streamlit:setComponentValue", {value: Object.assign({action: action, t: +t.toFixed(2),
+    video_id: A.video_id, nonce: Date.now() + "_" + nonce}, extra || {}), dataType: "json"});
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+const $ = id => document.getElementById(id);
+const video = $("v"), graph = $("graph"), over = $("over");
+let A = null;                       // args from Python
+let view = {start: 0, span: 30};    // visible window (seconds)
+let selected = null;                // {t, kind: "new" | "mark"}
+let follow = true;                  // keep the playhead in view while playing
+const FRAME = 1 / 25;
+
+function dur() { return (A && A.duration) || video.duration || 0; }
+function now() { return video.currentTime || 0; }
+function fmt(t) { const m = Math.floor(t / 60), s = t - m * 60; return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1); }
+function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+function seek(t) { video.currentTime = clamp(t, 0, Math.max(dur() - 0.05, 0)); follow = true; draw(); }
+function marks() { return (A && A.marks) || []; }      // [{t, verdict, source}]
+function markAt(t) { return marks().find(m => Math.abs(m.t - t) <= 0.5); }
+
+// ---------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------
+function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+function sizeCanvas(c) {
+  const r = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== Math.round(w * r) || c.height !== Math.round(h * r)) { c.width = Math.round(w * r); c.height = Math.round(h * r); }
+  const ctx = c.getContext("2d"); ctx.setTransform(r, 0, 0, r, 0, 0); return [ctx, w, h];
+}
+function curve(ctx, vals, fps, x0, span, w, h, color, width) {
+  if (!vals || !vals.length) return;
+  ctx.strokeStyle = color; ctx.lineWidth = width; ctx.beginPath();
+  let drawing = false;
+  const i0 = Math.max(0, Math.floor(x0 * fps) - 1), i1 = Math.min(vals.length - 1, Math.ceil((x0 + span) * fps) + 1);
+  for (let i = i0; i <= i1; i++) {
+    const v = vals[i];
+    if (v === null || v === undefined) { drawing = false; continue; }
+    const x = (i / fps - x0) / span * w, y = h - 8 - Math.min(v, 1.5) / 1.5 * (h - 26);
+    if (!drawing) { ctx.moveTo(x, y); drawing = true; } else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+function draw() {
+  if (!A) return;
+  const [ctx, w, h] = sizeCanvas(graph);
+  ctx.clearRect(0, 0, w, h);
+  const span = Math.min(view.span, Math.max(dur(), 1));
+  if (follow) {
+    const t = now();
+    if (t < view.start || t > view.start + span * 0.85) view.start = t - span * 0.25;
+  }
+  view.start = clamp(view.start, 0, Math.max(dur() - span, 0));
+  const x0 = view.start, X = t => (t - x0) / span * w;
+  // seconds grid
+  ctx.fillStyle = css("--muted"); ctx.font = "11px sans-serif";
+  const step = span > 120 ? 30 : span > 40 ? 10 : span > 12 ? 5 : 1;
+  for (let s = Math.ceil(x0 / step) * step; s <= x0 + span; s += step) {
+    ctx.fillRect(X(s), h - 4, 1, 4); ctx.fillText(fmt(s).replace(/\.0$/, ""), X(s) + 3, h - 6);
+  }
+  curve(ctx, A.old_curve, A.curve_fps, x0, span, w, h, css("--old"), 1.2);
+  curve(ctx, A.person_curve, A.curve_fps, x0, span, w, h, css("--person"), 2);
+  // old cuts (dotted), new cuts (solid)
+  ctx.setLineDash([3, 4]); ctx.strokeStyle = css("--oldcut"); ctx.lineWidth = 1;
+  for (const t of A.cuts_old || []) if (t >= x0 && t <= x0 + span) { ctx.beginPath(); ctx.moveTo(X(t), 14); ctx.lineTo(X(t), h - 12); ctx.stroke(); }
+  ctx.setLineDash([]);
+  for (const t of A.cuts_new || []) {
+    if (t < x0 || t > x0 + span) continue;
+    const sel = selected && Math.abs(selected.t - t) < 0.01;
+    ctx.strokeStyle = sel ? css("--sel") : css("--newcut"); ctx.lineWidth = sel ? 3 : 1.6;
+    ctx.beginPath(); ctx.moveTo(X(t), 14); ctx.lineTo(X(t), h - 12); ctx.stroke();
+  }
+  // your marks
+  for (const m of marks()) {
+    if (m.t < x0 || m.t > x0 + span) continue;
+    const col = m.verdict === "no_cut" ? css("--bad") : (m.source === "manual" ? css("--manual") : css("--good"));
+    ctx.fillStyle = col; ctx.beginPath();
+    ctx.moveTo(X(m.t) - 7, 2); ctx.lineTo(X(m.t) + 7, 2); ctx.lineTo(X(m.t), 13); ctx.closePath(); ctx.fill();
+    if (m.source === "manual") { ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(X(m.t), 14); ctx.lineTo(X(m.t), h - 12); ctx.stroke(); }
+    if (selected && selected.kind === "mark" && Math.abs(selected.t - m.t) < 0.01) {
+      ctx.strokeStyle = css("--sel"); ctx.lineWidth = 2; ctx.strokeRect(X(m.t) - 9, 0, 18, 15);
+    }
+  }
+  // playhead
+  ctx.fillStyle = css("--accent"); ctx.fillRect(X(now()) - 1, 0, 2, h);
+  drawOverview();
+  $("time").textContent = fmt(now()) + " / " + fmt(dur());
+  $("play").textContent = video.paused ? "▶" : "⏸";
+  refreshButtons();
+}
+function drawOverview() {
+  const [ctx, w, h] = sizeCanvas(over);
+  ctx.clearRect(0, 0, w, h);
+  const D = Math.max(dur(), 1), X = t => t / D * w;
+  ctx.fillStyle = css("--newcut");
+  for (const t of A.cuts_new || []) ctx.fillRect(X(t), 4, 1, h - 8);
+  for (const m of marks()) { ctx.fillStyle = m.verdict === "no_cut" ? css("--bad") : css("--good"); ctx.fillRect(X(m.t) - 1, 0, 3, 6); }
+  ctx.strokeStyle = css("--fg"); ctx.globalAlpha = 0.35; ctx.lineWidth = 1;
+  ctx.strokeRect(X(view.start), 1, Math.max(X(Math.min(view.span, D)), 3), h - 2); ctx.globalAlpha = 1;
+  ctx.fillStyle = css("--accent"); ctx.fillRect(X(now()) - 1, 0, 2, h);
+}
+function refreshButtons() {
+  const onNew = selected && selected.kind === "new";
+  $("good").disabled = !onNew; $("bad").disabled = !onNew;
+  $("clear").disabled = !(selected && markAt(selected.t));
+}
+
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+function tAt(c, ev) {
+  const r = c.getBoundingClientRect(), x = (ev.clientX - r.left) / r.width;
+  return c === over ? x * dur() : view.start + x * Math.min(view.span, Math.max(dur(), 1));
+}
+graph.addEventListener("pointerdown", ev => {
+  const t = tAt(graph, ev), span = Math.min(view.span, Math.max(dur(), 1));
+  const tol = span / graph.clientWidth * 14;                 // 14 px either side
+  const near = (A.cuts_new || []).reduce((b, c) => Math.abs(c - t) < Math.abs(b - t) ? c : b, Infinity);
+  const mk = marks().reduce((b, m) => !b || Math.abs(m.t - t) < Math.abs(b.t - t) ? m : b, null);
+  if (mk && Math.abs(mk.t - t) <= tol && (!isFinite(near) || Math.abs(mk.t - t) <= Math.abs(near - t))) {
+    selected = {t: mk.t, kind: "mark"}; seek(mk.t - 1.0);
+    $("hint").textContent = "Your mark at " + fmt(mk.t) + " (" + (mk.verdict === "no_cut" ? "bad cut" : mk.source === "manual" ? "added cut" : "good cut") + ").";
+  } else if (isFinite(near) && Math.abs(near - t) <= tol) {
+    selected = {t: near, kind: "new"}; seek(near - 1.0);
+    $("hint").textContent = "New cut at " + fmt(near) + " — playing from 1 s before it. 👍 or 👎?";
+  } else {
+    selected = null; seek(t);
+    $("hint").textContent = "Tap near a red cut line to select it.";
+  }
+  draw();
+});
+over.addEventListener("pointerdown", ev => { selected = null; seek(tAt(over, ev)); });
+$("play").onclick = () => { video.paused ? video.play() : video.pause(); };
+$("back5").onclick = () => seek(now() - 5);
+$("fwd5").onclick = () => seek(now() + 5);
+$("back1").onclick = () => { video.pause(); seek(now() - FRAME); };
+$("fwd1").onclick = () => { video.pause(); seek(now() + FRAME); };
+$("zin").onclick = () => { view.span = Math.max(4, view.span / 2); draw(); };
+$("zout").onclick = () => { view.span = Math.min(Math.max(dur(), 4), view.span * 2); draw(); };
+function jumpCut(dir) {
+  const t = now(), cs = (A.cuts_new || []).slice().sort((a, b) => a - b);
+  const c = dir > 0 ? cs.find(x => x > t + 1.05) : cs.slice().reverse().find(x => x < t + 0.95);
+  if (c !== undefined) { selected = {t: c, kind: "new"}; seek(c - 1.0); $("hint").textContent = "New cut at " + fmt(c) + ". 👍 or 👎?"; }
+}
+$("prevcut").onclick = () => jumpCut(-1);
+$("nextcut").onclick = () => jumpCut(1);
+$("good").onclick = () => { if (selected) send("verdict", selected.t, {verdict: "cut", source: "new_cut"}); };
+$("bad").onclick = () => { if (selected) send("verdict", selected.t, {verdict: "no_cut", source: "new_cut"}); };
+$("add").onclick = () => { selected = {t: now(), kind: "mark"}; send("verdict", now(), {verdict: "cut", source: "manual"}); };
+$("clear").onclick = () => { const m = selected && markAt(selected.t); if (m) send("remove", m.t, {id: m.id}); };
+document.addEventListener("keydown", e => {
+  if (e.key === " ") { e.preventDefault(); $("play").click(); }
+  else if (e.key === ",") $("back1").click();
+  else if (e.key === ".") $("fwd1").click();
+  else if (e.key === "ArrowLeft") { e.preventDefault(); seek(now() - 1); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); seek(now() + 1); }
+});
+video.addEventListener("play", draw);
+video.addEventListener("pause", draw);
+video.addEventListener("loadedmetadata", () => { draw(); setHeight(); });
+function loop() { if (!video.paused) draw(); requestAnimationFrame(loop); }
+
+// ---------------------------------------------------------------------------
+// Render from Python
+// ---------------------------------------------------------------------------
+function applyTheme(th) {
+  if (!th) return;
+  const r = document.documentElement.style;
+  if (th.base === "dark") { r.setProperty("--panel", "#1f2129"); r.setProperty("--line", "#3a3d47"); r.setProperty("--muted", "#9aa0aa"); r.setProperty("--old", "#6f6a66"); }
+  if (th.textColor) r.setProperty("--fg", th.textColor);
+  if (th.primaryColor) r.setProperty("--accent", th.primaryColor);
+}
+window.addEventListener("message", ev => {
+  const d = ev.data;
+  if (!d || d.type !== "streamlit:render") return;
+  applyTheme(d.theme);
+  const args = d.args, first = !A, changed = A && A.video_id !== args.video_id;
+  if (first || changed || A.video_url !== args.video_url) {
+    const t = changed || first ? 0 : now();
+    video.src = args.video_url || "";
+    if (t) video.addEventListener("loadedmetadata", () => { video.currentTime = t; }, {once: true});
+    if (changed) { selected = null; view.start = 0; }
+  }
+  A = args;
+  if (selected && selected.kind === "mark" && !markAt(selected.t)) selected = null;
+  draw(); setHeight();
+});
+window.addEventListener("resize", () => { draw(); setHeight(); });
+post("streamlit:componentReady", {apiVersion: 1});
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
