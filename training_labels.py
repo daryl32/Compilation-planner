@@ -460,3 +460,50 @@ def clear_frame_cache() -> int:
         except OSError:
             pass
     return n
+
+
+# ---------------------------------------------------------------------------
+# Editing one tag (📒 Vocabulary's form)
+# ---------------------------------------------------------------------------
+
+def upsert_tag(rows: list, row: dict, old_name: str | None = None) -> list:
+    """rows with `row` added — or replacing the tag called old_name (a rename) / row["tag"].
+    Keeps the order; a new tag goes at the end. Raises ValueError for an empty or clashing name."""
+    new = _row(row)
+    if not new:
+        raise ValueError("Give the tag a name.")
+    key = (old_name or new["tag"]).lower()
+    if any(r["tag"].lower() == new["tag"].lower() and r["tag"].lower() != key for r in rows):
+        raise ValueError(f"There's already a tag called “{new['tag']}”.")
+    out, done = [], False
+    for r in rows:
+        if r["tag"].lower() == key:
+            out.append(new)
+            done = True
+        else:
+            out.append(r)
+    if not done:
+        out.append(new)
+    if old_name and old_name != new["tag"]:     # look-alike lists point at the new name too
+        for r in out:
+            r["not_to_be_confused_with"] = "; ".join(
+                new["tag"] if p.strip().lower() == old_name.lower() else p.strip()
+                for p in str(r.get("not_to_be_confused_with") or "").split(";") if p.strip())
+    return out
+
+
+def delete_tag(rows: list, name: str) -> list:
+    return [r for r in rows if r["tag"].lower() != name.lower()]
+
+
+def rename_in_labels(old: str, new: str) -> int:
+    """Rename a tag in your saved answers (training_labels.json). Returns how many changed."""
+    items, n = load_labels(), 0
+    for i in items:
+        for field in ("tags", "suggested"):
+            if i.get(field) and any(t.lower() == old.lower() for t in i[field]):
+                i[field] = list(dict.fromkeys(new if t.lower() == old.lower() else t for t in i[field]))
+                n += field == "tags"
+    if n:
+        _write_labels(items)
+    return n

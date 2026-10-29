@@ -29,7 +29,11 @@ def _bundle() -> dict:
                 "batch": "2", "duration": 20.0, "cuts_new": [], "cuts_old": [], "boundaries": [], "scenes": [],
                 "curve_fps": 2.0, "person_curve": [], "old_curve": [], "moments": []},
                 "vid_a": {
-                "batch": "1", "duration": 30.0, "cuts_new": [8.1, 16.0], "cuts_old": [10.0],
+                "batch": "1", "duration": 30.0,
+                "run": {"vision_seconds": 120.0, "vision_timings": {"load_models": 20.0}, "vision_gpu": "A10",
+                        "vision_at": 1793100000.0,
+                        "tagging": {"32b": {"seconds": 60.0, "load_seconds": 90.0, "gpu": "H100", "prompts": 3,
+                                            "unreadable": 0}}}, "cuts_new": [8.1, 16.0], "cuts_old": [10.0],
                 "boundaries": [{"t": 8.0, "verdict": "cut", "source": "detected"}],
                 "scenes": [{"scene_id": 0, "start": 0.0, "end": 10.0, "level": 0.02, "periodicity": 0.7,
                             "movement_bpm": 120.0, "people": 2, "onsets": [1.0], "old_motion": 4.2}],
@@ -219,3 +223,58 @@ def test_view_per_batch(bundle, sub, batch):
         assert any("exactly right on **1 of 1**" in m.value for m in at.markdown)
     if sub == "📊 Scores" and batch == "2":
         assert any("None of your labelled frames" in i.value for i in at.info)
+
+
+def test_batch_report():
+    import trial_logic as TLG
+    rows = TR.batch_report(_bundle()["videos"])
+    assert [r["batch"] for r in rows] == ["1", "2", "All"]
+    b1 = rows[0]
+    assert b1["videos"] == 1 and b1["vision_min"] == 2.0 and b1["tag_min"] == 1.0 and b1["tag_startup_min"] == 1.5
+    assert b1["vision_cost"] == round(TLG.stage_cost(120, "A10"), 2)
+    assert b1["tag_cost"] == round(TLG.stage_cost(150, "H100"), 2)
+    assert b1["exact"] == 1 and b1["labelled"] == 1 and b1["cut_answers"] == 1 and b1["cut_acc_new"] == 1.0
+    assert b1["cut_acc_old"] == 0.0 and b1["run"] is not None
+    assert rows[-1]["videos"] == 2 and rows[-1]["total_cost"] == b1["total_cost"]
+
+
+def test_motion_marks_saved_replaced_removed(no_labels):
+    import motion_review as MR
+    import training_labels as TLB
+    MR.apply({"action": "verdict", "t": 8.1, "verdict": "no_cut", "source": "new_cut", "video_id": "vid_a"}, [])
+    MR.apply({"action": "verdict", "t": 20.0, "verdict": "cut", "source": "manual", "video_id": "vid_a"},
+             TLB.load_labels())
+    marks = MR.marks_for("vid_a", TLB.load_labels())
+    assert [(m["t"], m["verdict"], m["source"]) for m in marks] == [(8.1, "no_cut", "new_cut"), (20.0, "cut", "manual")]
+    # Judging the same cut again replaces your mark instead of adding a second one.
+    MR.apply({"action": "verdict", "t": 8.3, "verdict": "cut", "source": "new_cut", "video_id": "vid_a"},
+             TLB.load_labels())
+    marks = MR.marks_for("vid_a", TLB.load_labels())
+    assert len(marks) == 2 and marks[0]["verdict"] == "cut"
+    MR.apply({"action": "remove", "t": 20.0, "id": marks[1]["id"], "video_id": "vid_a"}, TLB.load_labels())
+    assert len(MR.marks_for("vid_a", TLB.load_labels())) == 1
+
+
+def test_motion_view_with_preview_copy(bundle, no_labels):
+    import subprocess
+    from library_common import proxy_path
+    from tests.apptest_util import errors, page_app
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+    pp = proxy_path("vid_a")
+    existed = pp.exists()
+    if not existed:
+        pp.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                        "testsrc=size=160x90:rate=10:duration=3", "-pix_fmt", "yuv420p", str(pp)], check=True)
+    try:
+        at = page_app("pages/6_Training_Labels.py")
+        at.session_state["tl_view"] = "🧪 Trial results"
+        at.session_state["tr_sub"] = "🕺 Motion"
+        at.session_state["tr_mvid"] = "vid_a"
+        at.run()
+        assert not errors(at), errors(at)
+        assert any("Your marks on this video" in c.value for c in at.caption)
+    finally:
+        if not existed:
+            pp.unlink(missing_ok=True)

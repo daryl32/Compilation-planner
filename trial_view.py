@@ -179,13 +179,9 @@ def _compare(data: dict) -> None:
                                        help=f"Save {k.upper()}'s tags as your tags for this frame.")
 
 
-def _motion(data: dict) -> None:
+def _motion_chart(v: dict, marks: list) -> None:
+    """The plain chart (no video) — when there's no preview copy on this machine."""
     import plotly.graph_objects as go
-    videos = data["videos"]
-    if st.session_state.get("tr_mvid") not in videos:
-        st.session_state.pop("tr_mvid", None)
-    vid = st.selectbox("Video", sorted(videos), key="tr_mvid")
-    v = videos[vid]
     fps = float(v.get("curve_fps") or 2.0)
     fig = go.Figure()
     for name, curve, colour in (("People moving (new)", v.get("person_curve"), "#4c78a8"),
@@ -197,7 +193,7 @@ def _motion(data: dict) -> None:
         fig.add_vline(x=t, line={"color": "#e45756", "width": 1})
     for t in v.get("cuts_old") or []:
         fig.add_vline(x=t, line={"color": "#888", "width": 1, "dash": "dot"})
-    for b in v.get("boundaries") or []:
+    for b in marks:
         fig.add_scatter(x=[b["t"]], y=[1.45], mode="markers", showlegend=False,
                         marker={"symbol": "triangle-down", "size": 10,
                                 "color": {"cut": "#54a24b", "no_cut": "#e45756"}.get(b.get("verdict"), "#999")},
@@ -207,6 +203,43 @@ def _motion(data: dict) -> None:
     st.plotly_chart(fig, width="stretch", key="tr_mchart")
     st.caption("Red lines = new scene cuts · grey dotted = old cuts · ▼ your scene-change answers "
                "(green = new scene, red = same scene). Each curve is scaled to its own range.")
+
+
+def _motion(data: dict) -> None:
+    import motion_review as MR
+    from library_common import proxy_path
+    videos = data["videos"]
+    if st.session_state.get("tr_mvid") not in videos:
+        st.session_state.pop("tr_mvid", None)
+    vid = st.selectbox("Video", sorted(videos), key="tr_mvid")
+    v = videos[vid]
+    items = TLB.load_labels()
+    note = st.session_state.pop("tr_motion_note", None)
+    if note:
+        st.toast(note, icon="✂️")
+    marks = MR.marks_for(vid, items)
+    try:
+        has_proxy = proxy_path(vid).exists()
+    except OSError:
+        has_proxy = False
+    if not has_proxy:
+        st.info("No preview copy of this video here — showing the chart only. (☁️ Sync from Google Drive "
+                "brings the preview copies to the server.)")
+        _motion_chart(v, marks)
+    else:
+        player = {**v, "person_curve_n": TR.normalised(v.get("person_curve")),
+                  "old_curve_n": TR.normalised(v.get("old_curve"))}
+        value = MR.motion_review(player, vid, MR.video_url(proxy_path(vid)), marks, key="tr_motion_player")
+        if value and value.get("nonce") != st.session_state.get("tr_motion_nonce"):
+            st.session_state["tr_motion_nonce"] = value.get("nonce")
+            msg = MR.apply(value, items)
+            if msg:
+                st.session_state["tr_motion_note"] = msg
+                st.rerun()
+        good = sum(m["verdict"] == "cut" and m.get("source") != "manual" for m in marks)
+        st.caption(f"Your marks on this video: 👍 {good} · 👎 {sum(m['verdict'] == 'no_cut' for m in marks)} · "
+                   f"✂️ added {sum(m.get('source') == 'manual' for m in marks)}. They're saved as scene-change "
+                   "labels — the scene detector is trained and scored on them.")
     rows = [{"Scene": s.get("scene_id"), "From": format_mmss(s.get("start") or 0),
              "To": format_mmss(s.get("end") or 0),
              "People": s.get("people"),
@@ -248,6 +281,40 @@ def _scores(data: dict) -> None:
                                                                          format="%.2f")})
 
 
+def _report(data: dict, batch) -> None:
+    """Every batch side by side, plus all of them together: footage, time and cost per step, the
+    32B against your labels, scene cuts — to compare batches run with different settings."""
+    teacher = (TR.shown_teachers(data.get("teachers") or {}) or [TR.MAIN_TEACHER])[0]
+    videos = TR.with_saved_labels(data["videos"], TLB.load_labels())
+    rows = TR.batch_report(videos, teacher)
+    if not any(v.get("run") for v in videos.values()):
+        st.info("Times and costs per batch appear after the next export — on the server: "
+                "`modal run modal_trial.py --stage results` (no GPU, about a minute).")
+    pct = lambda x: None if x is None else round(x * 100)
+    names = lambda r: "All batches" if r["batch"] == "All" else (f"Batch {r['batch']}" if r["batch"] != "?" else "Not recorded")
+    st.markdown("**Cost and time**")
+    st.dataframe([{"": names(r), "Run (UTC)": r["run"], "Videos": r["videos"], "Footage (h)": r["footage_h"],
+                   "Vision GPU": r["vision_gpu"], "Vision (min)": r["vision_min"], "Vision $": r["vision_cost"],
+                   "Tagging GPU": r["tag_gpu"], "Tagging (min)": r["tag_min"],
+                   "Tagging min / footage h": r["tag_min_per_h"], "Start-up (min)": r["tag_startup_min"],
+                   "Tagging $": r["tag_cost"], "Total $": r["total_cost"], "$ / footage h": r["cost_per_h"]}
+                  for r in rows], hide_index=True, width="stretch", key="tr_rep_cost")
+    st.markdown(f"**{teacher.upper()} tags against yours** (updates as you correct frames)")
+    st.dataframe([{"": names(r), "Moments tagged": r["moments"], "Unreadable replies": r["unreadable"],
+                   "Your labelled frames": r["labelled"], "Exactly right": r["exact"],
+                   "Found (recall %)": pct(r["recall"]), "Right (precision %)": pct(r["precision"])}
+                  for r in rows], hide_index=True, width="stretch", key="tr_rep_tags")
+    st.markdown("**Scene changes**")
+    st.dataframe([{"": names(r), "Old cuts": r["cuts_old"], "New cuts": r["cuts_new"],
+                   "Your answers": r["cut_answers"], "New right %": pct(r["cut_acc_new"]),
+                   "Old right %": pct(r["cut_acc_old"])} for r in rows],
+                 hide_index=True, width="stretch", key="tr_rep_cuts")
+    st.caption("Costs use Modal's list prices for the GPU each step ran on. Start-up = loading the model once "
+               "per run, so small batches pay proportionally more of it. Tag-level detail: 📊 Scores.")
+    with st.expander("Full written report (all batches, as at the last export)"):
+        st.markdown(TR.report_markdown() or "_No report._")
+
+
 def render() -> None:
     data = TR.load()
     if not data:
@@ -271,7 +338,7 @@ def render() -> None:
                 sub = st.radio("Trial", ["🖼️ Compare tags", "📊 Scores", "🕺 Motion", "📋 Report"], horizontal=True,
                                key="tr_sub", label_visibility="collapsed")
     view = {**data, "videos": TR.in_batch(data["videos"], batch)}
-    if not view["videos"]:
+    if not view["videos"] and sub != "📋 Report":
         st.info("No videos in this batch.")
         return
     if sub == "🖼️ Compare tags":
@@ -281,6 +348,4 @@ def render() -> None:
     elif sub == "🕺 Motion":
         _motion(view)
     else:
-        if batch is not None:
-            st.caption("The report covers every batch — for this batch on its own, see 📊 Scores.")
-        st.markdown(TR.report_markdown() or "_No report._")
+        _report(data, batch)

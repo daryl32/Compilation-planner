@@ -819,13 +819,20 @@ def export(smoke: bool = False) -> dict:
     for v in done:
         vis = _read_json(f"{OUT}/{v}/vision.json")
         man = _read_json(f"{PACK}/manifests/{v}.json") or {"scenes": []}
-        teachers = {}
+        teachers, tag_runs = {}, {}
         for key in TEACHERS:
-            tj = _read_json(tags_file(v, key)) or (_read_json(f"{OUT}/{v}/tags.json") if key == "8b" else None)
+            tf = tags_file(v, key)
+            tj = _read_json(tf) or (_read_json(f"{OUT}/{v}/tags.json") if key == "8b" else None)
             if tj:
                 teachers[key] = tj["results"]
+                tag_runs[key] = {"seconds": tj.get("seconds"), "load_seconds": tj.get("load_seconds"),
+                                 "gpu": tj.get("gpu"), "prompts": tj.get("prompts"),
+                                 "unreadable": tj.get("unreadable"),
+                                 "at": tf.stat().st_mtime if tf.exists() else None}
         if TEACHERS_DEFAULT in teachers:
             teachers = {TEACHERS_DEFAULT: teachers[TEACHERS_DEFAULT]}
+            tag_runs = {TEACHERS_DEFAULT: tag_runs.get(TEACHERS_DEFAULT)}
+        vf = Path(f"{OUT}/{v}/vision.json")
         old_scenes = {s["scene_id"]: s for s in man["scenes"]}
         moments = []
         for tg in vis["targets"]:
@@ -873,6 +880,12 @@ def export(smoke: bool = False) -> dict:
             "curve_fps": CURVE_FPS, "person_curve": person,
             "old_curve": _resample_curve(old_curve, old_fps) if old_fps else [],
             "gpu": vis.get("gpu"), "tracks": vis.get("tracks"),
+            # what each step took — for the per-batch cost / time report in the app
+            "run": {"vision_seconds": (vis.get("timings") or {}).get("total"),
+                    "vision_timings": vis.get("timings") or {}, "vision_gpu": vis.get("gpu"),
+                    "vision_at": vf.stat().st_mtime if vf.exists() else None,
+                    "pose_model": (vis.get("models") or {}).get("pose"),
+                    "tagging": tag_runs},
             "moments": moments,
         }
     report_json = _read_json(f"{OUT}/report.json", {}) or {}

@@ -280,7 +280,55 @@ def test_page_other_views(view, clean_files):
     at.run()
     assert not errors(at), errors(at)
     if view == "📒 Vocabulary":
-        next(b for b in at.button if b.label == "💾 Save vocabulary").click().run()
+        next(b for b in at.button if b.label == "💾 Save table").click().run()
         assert not errors(at), errors(at)
         rows, source = TL.load_vocabulary()
         assert source == "tag_vocabulary.csv" and [r["tag"] for r in rows] == ["dance", "street", "crowd", "night"]
+
+
+def test_upsert_rename_delete_tag():
+    rows = TL.parse_vocabulary(CSV)
+    rows = TL.upsert_tag(rows, {"tag": "kissing", "kind": "motion", "group": "action"})
+    assert rows[-1]["tag"] == "kissing" and rows[-1]["kind"] == "motion"
+    rows = TL.upsert_tag(rows, {"tag": "close up", "one_of": "shot size", "description": "x"}, "close-up shot")
+    assert [r["tag"] for r in rows][:2] == ["close up", "wide shot"]
+    with pytest.raises(ValueError):
+        TL.upsert_tag(rows, {"tag": "Wide Shot"}, "close up")   # renaming onto another tag
+    with pytest.raises(ValueError):
+        TL.upsert_tag(rows, {"tag": "  "})
+    assert "kissing" not in [r["tag"] for r in TL.delete_tag(rows, "KISSING")]
+
+
+def test_rename_in_labels(clean_files):
+    card = {"id": TL.card_id("tags", "vid_a", 2.0), "type": "tags", "video_id": "vid_a", "scene_id": 0,
+            "t": 2.0, "suggested": ["dance"]}
+    TL.save_label(card, tags=["dance", "night"])
+    assert TL.rename_in_labels("Dance", "dancing") == 1
+    item = TL.load_labels()[0]
+    assert item["tags"] == ["dancing", "night"] and item["suggested"] == ["dancing"]
+
+
+def test_tag_form_adds_renames_and_deletes(clean_files):
+    from tests.apptest_util import errors, page_app
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "📒 Vocabulary"
+    at.run()
+    assert not errors(at), errors(at)
+    # ➕ New tag
+    at.text_input(key="tl_ed_➕ New tag_name").set_value("kissing")
+    at.text_area(key="tl_ed_➕ New tag_desc").set_value("Two people kissing")
+    next(b for b in at.button if b.label == "➕ Add tag").click().run()
+    assert not errors(at), errors(at)
+    rows, _ = TL.load_vocabulary()
+    assert rows[-1]["tag"] == "kissing" and rows[-1]["description"] == "Two people kissing"
+    assert at.session_state["tl_ed_pick"] == "kissing"
+    # rename it
+    at.text_input(key="tl_ed_kissing_name").set_value("kiss")
+    next(b for b in at.button if b.label == "💾 Save tag").click().run()
+    assert not errors(at), errors(at)
+    assert "kiss" in [r["tag"] for r in TL.load_vocabulary()[0]]
+    assert any("Renamed" in s.value for s in at.success)
+    # delete it
+    next(b for b in at.button if b.label == "🗑️ Delete tag").click().run()
+    assert not errors(at), errors(at)
+    assert "kiss" not in [r["tag"] for r in TL.load_vocabulary()[0]]

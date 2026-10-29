@@ -247,6 +247,78 @@ def progress_view() -> None:
 # 📒 Vocabulary
 # ---------------------------------------------------------------------------
 
+NEW_TAG = "➕ New tag"
+
+
+def tag_editor() -> None:
+    """Add, change, rename or delete one tag — a form, easier than the table on an iPad."""
+    names = [r["tag"] for r in vocab]
+    if "tl_ed_pick_next" in st.session_state:          # after a save / rename / delete
+        st.session_state["tl_ed_pick"] = st.session_state.pop("tl_ed_pick_next")
+    if st.session_state.get("tl_ed_pick") not in [NEW_TAG] + names:
+        st.session_state.pop("tl_ed_pick", None)
+    pick = st.selectbox("Tag to edit", [NEW_TAG] + names, key="tl_ed_pick")
+    cur = next((r for r in vocab if r["tag"] == pick), None) or {
+        "tag": "", "group": "", "kind": "frame", "one_of": "", "teacher": True, "description": "",
+        "not_to_be_confused_with": "", "search_words": []}
+    groups = sorted({r["group"] for r in vocab if r["group"]}, key=str.lower)
+    sets = sorted({r["one_of"] for r in vocab if r["one_of"]}, key=str.lower)
+    k = f"tl_ed_{pick}"                       # fresh widgets for each tag picked
+    with st.container(border=True, key="tl_wrap_ed"):
+        a, b = st.columns(2)
+        name = a.text_input("Tag name", cur["tag"], key=f"{k}_name")
+        kind = b.radio("Kind", list(TL.KINDS), index=list(TL.KINDS).index(cur["kind"]), horizontal=True,
+                       key=f"{k}_kind", format_func={"frame": "🖼️ frame — visible in one still",
+                                                     "motion": "🎞️ motion — needs a few seconds"}.get)
+        a, b = st.columns(2)
+        g_opts = groups + ["(new group…)"]
+        g_pick = a.selectbox("Group", g_opts, index=g_opts.index(cur["group"]) if cur["group"] in groups else
+                             (len(g_opts) - 1 if cur["group"] else 0), key=f"{k}_group")
+        group = a.text_input("New group name", cur["group"] if cur["group"] not in groups else "",
+                             key=f"{k}_group_new") if g_pick == "(new group…)" else g_pick
+        s_opts = ["(none — can go with any tag)"] + sets + ["(new pick-one set…)"]
+        s_pick = b.selectbox("Pick-one set", s_opts,
+                             index=s_opts.index(cur["one_of"]) if cur["one_of"] in sets else 0, key=f"{k}_set",
+                             help="Tags in the same set can't both be true (e.g. shot size) — one row on the cards.")
+        one_of = (b.text_input("New set name", key=f"{k}_set_new") if s_pick == "(new pick-one set…)"
+                  else "" if s_pick.startswith("(none") else s_pick)
+        desc = st.text_area("Description — what the model should look for", cur["description"], height=70,
+                            key=f"{k}_desc")
+        alikes_now = [x.strip() for x in str(cur["not_to_be_confused_with"]).split(";") if x.strip()]
+        alikes = st.multiselect("Not to be confused with", [n for n in names if n != cur["tag"]],
+                                default=[x for x in alikes_now if x in names], key=f"{k}_alike")
+        words = st.text_input("Search words (separated by ;)", "; ".join(cur["search_words"]), key=f"{k}_words")
+        teacher = st.toggle("The big model may try this tag", cur["teacher"], key=f"{k}_teacher",
+                            help="Off = learned only from your labels (for tags the 32B gets wrong).")
+        c1, c2 = st.columns(2)
+        save = c1.button("💾 Save tag" if pick != NEW_TAG else "➕ Add tag", type="primary", width="stretch",
+                         key=f"{k}_save")
+        delete = pick != NEW_TAG and c2.button("🗑️ Delete tag", width="stretch", key=f"{k}_del",
+                                               help="Your saved labels keep the name; it just leaves the list.")
+    if save:
+        row = {"tag": name, "group": group, "kind": kind, "one_of": one_of, "teacher": teacher,
+               "description": desc, "not_to_be_confused_with": "; ".join(alikes), "search_words": words}
+        try:
+            rows = TL.upsert_tag(vocab, row, None if pick == NEW_TAG else pick)
+        except ValueError as e:
+            st.error(str(e))
+            return
+        TL.save_vocabulary(rows)
+        clean = " ".join(name.split())
+        msg = f"Saved “{clean}”."
+        if pick != NEW_TAG and clean != pick:
+            n = TL.rename_in_labels(pick, clean)
+            msg = f"Renamed “{pick}” to “{clean}”" + (f" — and in {n} of your labelled frames." if n else ".")
+        st.session_state["tl_vocab_note"] = msg
+        st.session_state["tl_ed_pick_next"] = clean
+        st.rerun()
+    if delete:
+        TL.save_vocabulary(TL.delete_tag(vocab, pick))
+        st.session_state["tl_vocab_note"] = f"Deleted “{pick}” from the tag list."
+        st.session_state["tl_ed_pick_next"] = NEW_TAG
+        st.rerun()
+
+
 def vocab_view() -> None:
     st.caption("The tag list the new models learn. **kind**: *frame* = visible in one still, *motion* = "
                "needs a few seconds of movement. **one_of**: a name shared by tags that can't both be true "
@@ -270,21 +342,28 @@ def vocab_view() -> None:
                 st.success(f"Saved {n} tags — they're on the next cards. (Saved to Drive with your other edits.)")
                 st.rerun()
 
-    table = [{**r, "search_words": "; ".join(r["search_words"])} for r in vocab]
-    edited = st.data_editor(
-        table, num_rows="dynamic", hide_index=True, width="stretch", key="tl_vocab_editor",
-        column_order=TL.VOCAB_COLUMNS,
-        column_config={
-            "tag": st.column_config.TextColumn("tag", required=True),
-            "kind": st.column_config.SelectboxColumn("kind", options=list(TL.KINDS), default="frame"),
-            "teacher": st.column_config.CheckboxColumn("teacher", default=True),
-        })
-    a, b = st.columns(2)
-    if a.button("💾 Save vocabulary", type="primary", key="tl_vocab_save", width="stretch"):
-        n = TL.save_vocabulary(list(edited))
-        st.success(f"Saved {n} tags.")
-        st.rerun()
-    b.download_button("⬇️ Download as CSV (for Excel)", "﻿" + TL.vocabulary_csv(vocab),
+    note = st.session_state.pop("tl_vocab_note", None)
+    if note:
+        st.success(note)
+    st.caption("Changes are used from the **next batch you pack** (pack_for_modal.py copies the tag list), "
+               "and straight away on the 🎯 Label cards.")
+    tag_editor()
+
+    with st.expander("Edit as a table (all tags at once)"):
+        table = [{**r, "search_words": "; ".join(r["search_words"])} for r in vocab]
+        edited = st.data_editor(
+            table, num_rows="dynamic", hide_index=True, width="stretch", key="tl_vocab_editor",
+            column_order=TL.VOCAB_COLUMNS,
+            column_config={
+                "tag": st.column_config.TextColumn("tag", required=True),
+                "kind": st.column_config.SelectboxColumn("kind", options=list(TL.KINDS), default="frame"),
+                "teacher": st.column_config.CheckboxColumn("teacher", default=True),
+            })
+        if st.button("💾 Save table", type="primary", key="tl_vocab_save", width="stretch"):
+            n = TL.save_vocabulary(list(edited))
+            st.session_state["tl_vocab_note"] = f"Saved {n} tags."
+            st.rerun()
+    st.download_button("⬇️ Download as CSV (for Excel)", "﻿" + TL.vocabulary_csv(vocab),
                       file_name="tag_vocabulary.csv", mime="text/csv", key="tl_vocab_dl", width="stretch")
 
 
