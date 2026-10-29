@@ -196,7 +196,7 @@ def test_report(tmp_path, monkeypatch):
     data = json.loads((out / "report.json").read_text())
     assert data["best_teacher"] == "32b" and data["library_total"] > 0
     assert data["library_total"] == pytest.approx(data["cost"]["total"]["library_$"], abs=0.02)
-    assert data["tags"]["verdicts"]["walking"] == "need more labels"
+    assert data["tags"]["verdicts"]["walking"] == "teacher off — learned from your labels"
 
 
 def test_export(tmp_path, monkeypatch):

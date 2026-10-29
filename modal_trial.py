@@ -53,6 +53,9 @@ POSE_MODEL = "yolo11m-pose.pt"
 VISION_GPUS = ["L4", "A10", "L40S", "A100-40GB"]
 VISION_GPU = VISION_GPUS[0]
 
+# Worked examples from your labels shown to the teacher before each moment (--examples N).
+EXAMPLES_DEFAULT, EXAMPLES_MAX = 3, 6
+
 DATA, CACHE = "/data", "/cache"
 PACK, OUT = f"{DATA}/pack", f"{DATA}/trial"
 
@@ -458,10 +461,9 @@ def _load_teacher(self, key: str) -> None:
     done = threading.Event()
     _start_heartbeat(key, t0, done)
     try:
-        import trial_logic as TL
         from vllm import LLM
         self.llm = LLM(model=TEACHERS[key], max_model_len=8192, gpu_memory_utilization=0.90,
-                       limit_mm_per_prompt={"image": 7 + TL.EXAMPLES_MAX, "video": 0}, max_num_seqs=32,
+                       limit_mm_per_prompt={"image": 7 + EXAMPLES_MAX, "video": 0}, max_num_seqs=32,
                        enable_prefix_caching=True)
         note.unlink(missing_ok=True)
         try:
@@ -542,7 +544,7 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False,
         return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
 
     # Worked examples: for each moment, the most similar frames you've labelled in other videos.
-    examples = max(0, min(int(examples or 0), TL.EXAMPLES_MAX))
+    examples = max(0, min(int(examples or 0), EXAMPLES_MAX))
     pool, times, embs = [], None, None
     if examples:
         if getattr(self, "pool", None) is None:
@@ -1062,8 +1064,9 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     """teacher: 8b, 32b or both (default: 8b for --smoke, 32b otherwise — chosen after batch 1).
     examples: how many of your labelled frames from other videos the teacher sees as worked
     examples before each moment (default 3, 0 = off, at most 6)."""
-    import trial_logic as TL
-    examples = TL.EXAMPLES_DEFAULT if examples < 0 else min(examples, TL.EXAMPLES_MAX)
+    # No trial_logic import here: this runs on the machine you start it from, whose venv may
+    # only have modal (trial_logic needs numpy).
+    examples = EXAMPLES_DEFAULT if examples < 0 else min(examples, EXAMPLES_MAX)
     teacher = (teacher or ("8b" if smoke else "32b")).lower()
     keys = list(TEACHERS) if teacher == "both" else [teacher]
     if any(k not in TEACHERS for k in keys):

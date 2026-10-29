@@ -167,8 +167,6 @@ def build_prompt(vocab: list) -> tuple:
 # Worked examples from your own labels (shown to the teacher before each moment)
 # ---------------------------------------------------------------------------
 
-EXAMPLES_DEFAULT = 3        # examples per moment (0 = off)
-EXAMPLES_MAX = 6
 EXAMPLES_PER_VIDEO = 2      # at most this many from any one video, so one video can't dominate
 CORRECTED_BONUS = 0.05      # frames where you changed the suggested tags teach the most
 
