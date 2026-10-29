@@ -22,7 +22,8 @@ Run from the scene-labeling folder, in the venv (pip install modal; modal setup)
     modal run modal_trial.py                  the whole trial pack
     modal run modal_trial.py --stage report   just rebuild the report
     modal run modal_trial.py --stage tag --videos vid05,vid06
-Stages: download, vision, tag, report, export, status, all (default). status lists every packed
+Stages: download, vision, tag, report, export, status, results (report + export, CPU only), all
+(default). status lists every packed
 video with its batch and when vision / tagging were done — nothing runs on a GPU. export puts the results in your
 Drive catalogue folder (catalogue/trial_results) for the web app's 🧪 Trial results view. Each skips a video it has already done
 unless you pass --redo.
@@ -592,6 +593,8 @@ def report() -> str:
             if tj:
                 tagged_by.setdefault(key, {})[v] = tj
     keys = [k for k in TEACHERS if k in tagged_by]
+    if TEACHERS_DEFAULT in keys:        # the chosen teacher only — the 8B was dropped after batch 1
+        keys = [TEACHERS_DEFAULT]
 
     # --- Tags: old tagger vs each teacher, on the same labelled frames (ones every teacher tagged)
     gold_tags = [i for i in gold if i.get("type") == "tags" and not i.get("skipped")]
@@ -808,6 +811,10 @@ def export(smoke: bool = False) -> dict:
     Path(f"{EXPORT}/frames").mkdir(parents=True)
     gold = {i["id"]: i for i in _gold_items()}
     done = sorted(p.name for p in Path(OUT).iterdir() if (p / "vision.json").exists())
+    batches = _read_json(f"{PACK}/batches.json", {}) or {}
+    batch_of = {v: str(b) for b, ids in batches.items() for v in ids}
+    if not batches:                     # packs from before batches existed are batch 1
+        batch_of = {v: "1" for v in done}
     videos, n_frames = {}, 0
     for v in done:
         vis = _read_json(f"{OUT}/{v}/vision.json")
@@ -817,6 +824,8 @@ def export(smoke: bool = False) -> dict:
             tj = _read_json(tags_file(v, key)) or (_read_json(f"{OUT}/{v}/tags.json") if key == "8b" else None)
             if tj:
                 teachers[key] = tj["results"]
+        if TEACHERS_DEFAULT in teachers:
+            teachers = {TEACHERS_DEFAULT: teachers[TEACHERS_DEFAULT]}
         old_scenes = {s["scene_id"]: s for s in man["scenes"]}
         moments = []
         for tg in vis["targets"]:
@@ -851,6 +860,7 @@ def export(smoke: bool = False) -> dict:
                       for i in gold.values() if i.get("type") == "boundary" and i.get("video_id") == v
                       and not i.get("skipped") and i.get("t") is not None and i["t"] <= vis["duration"]]
         videos[v] = {
+            "batch": batch_of.get(v),
             "duration": vis["duration"], "partial": bool(vis.get("partial")),
             "cuts_new": vis["cuts"],
             "cuts_old": [s["start"] for s in man["scenes"] if 0.2 < s.get("start", 0) <= vis["duration"]],
@@ -961,7 +971,8 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     if any(k not in TEACHERS for k in keys):
         print(f"--teacher must be one of: {', '.join(TEACHERS)}, both")
         return
-    stages = ["download", "vision", "tag", "report", "export"] if stage == "all" else [stage]
+    stages = (["download", "vision", "tag", "report", "export"] if stage == "all"
+              else ["report", "export"] if stage == "results" else [stage])
     if stage == "status":
         _print_status(status.remote(keys), keys)
         return

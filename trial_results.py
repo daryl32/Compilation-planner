@@ -196,3 +196,44 @@ def normalised(curve) -> list:
         return list(curve or [])
     top = vals[min(len(vals) - 1, int(0.95 * len(vals)))] or vals[-1] or 1.0
     return [None if v is None else min(v / top, 1.5) for v in curve]
+
+
+def batches(videos: dict) -> list:
+    """The batches in the results, in order ("?" for videos exported before batches were recorded)."""
+    keys = {str(v.get("batch") or "?") for v in videos.values()}
+    return sorted(keys, key=lambda b: (not b.isdigit(), int(b) if b.isdigit() else 0, b))
+
+
+def in_batch(videos: dict, batch: str | None) -> dict:
+    """Only the videos of one batch (None = every batch)."""
+    if batch is None:
+        return dict(videos)
+    return {v: d for v, d in videos.items() if str(d.get("batch") or "?") == str(batch)}
+
+
+def tag_scores(moments: list, teacher: str) -> list:
+    """Per tag, the teacher against your labels on the frames you've labelled:
+    [{"tag", "yours" (frames you gave it), "tp", "fp", "fn", "precision", "recall", "f1"}],
+    most-used tag first. Updates as you correct frames (moments with your saved labels)."""
+    per = {}
+    for m in moments:
+        if m.get("mine") is None or teacher not in (m.get("teachers") or {}):
+            continue
+        mine = {norm(t): t for t in m["mine"]}
+        pred = {norm(t): t for t in m["teachers"][teacher].get("tags") or []}
+        for k in set(mine) | set(pred):
+            name = mine.get(k) or pred.get(k)
+            r = per.setdefault(k, {"tag": name, "yours": 0, "tp": 0, "fp": 0, "fn": 0})
+            if k in mine:
+                r["tag"] = mine[k]
+                r["yours"] += 1
+            r["tp"] += k in mine and k in pred
+            r["fp"] += k in pred and k not in mine
+            r["fn"] += k in mine and k not in pred
+    out = []
+    for r in per.values():
+        p = r["tp"] / (r["tp"] + r["fp"]) if r["tp"] + r["fp"] else None
+        rc = r["tp"] / (r["tp"] + r["fn"]) if r["tp"] + r["fn"] else None
+        f = 2 * p * rc / (p + rc) if p and rc else (0.0 if p is not None and rc is not None else None)
+        out.append({**r, "precision": p, "recall": rc, "f1": f})
+    return sorted(out, key=lambda r: (-r["yours"], r["tag"].lower()))

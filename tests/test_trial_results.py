@@ -25,8 +25,11 @@ def _bundle() -> dict:
     ]
     return {"version": 1, "created": "2026-10-27 18:00", "smoke": False,
             "teachers": {"8b": "Qwen/Qwen3-VL-8B-Instruct", "32b": "Qwen/Qwen3-VL-32B-Instruct"},
-            "report": {}, "videos": {"vid_a": {
-                "duration": 30.0, "cuts_new": [8.1, 16.0], "cuts_old": [10.0],
+            "report": {}, "videos": {"vid_b": {
+                "batch": "2", "duration": 20.0, "cuts_new": [], "cuts_old": [], "boundaries": [], "scenes": [],
+                "curve_fps": 2.0, "person_curve": [], "old_curve": [], "moments": []},
+                "vid_a": {
+                "batch": "1", "duration": 30.0, "cuts_new": [8.1, 16.0], "cuts_old": [10.0],
                 "boundaries": [{"t": 8.0, "verdict": "cut", "source": "detected"}],
                 "scenes": [{"scene_id": 0, "start": 0.0, "end": 10.0, "level": 0.02, "periodicity": 0.7,
                             "movement_bpm": 120.0, "people": 2, "onsets": [1.0], "old_motion": 4.2}],
@@ -190,3 +193,29 @@ def test_view_random_order_and_todo(bundle, no_labels):
     next(b for b in at.button if b.label == "✅ 32B is right").click().run()
     assert not errors(at), errors(at)
     assert len([b for b in at.button if b.label == "✅ 32B is right"]) == n - 1
+
+
+def test_batches_and_scores():
+    vids = _bundle()["videos"]
+    assert TR.batches(vids) == ["1", "2"]
+    assert list(TR.in_batch(vids, "2")) == ["vid_b"] and len(TR.in_batch(vids, None)) == 2
+    assert TR.batches({"x": {}}) == ["?"]
+    rows = {r["tag"]: r for r in TR.tag_scores(vids["vid_a"]["moments"], "32b")}
+    assert rows["close-up shot"]["yours"] == 1 and rows["close-up shot"]["recall"] == 1.0
+    assert rows["dance"]["f1"] == 1.0
+
+
+@pytest.mark.parametrize("batch", [None, "1", "2"])
+@pytest.mark.parametrize("sub", ["🖼️ Compare tags", "📊 Scores", "🕺 Motion", "📋 Report"])
+def test_view_per_batch(bundle, sub, batch):
+    from tests.apptest_util import errors, page_app
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_sub"] = sub
+    at.session_state["tr_batch"] = batch
+    at.run()
+    assert not errors(at), errors(at)
+    if sub == "📊 Scores" and batch != "2":
+        assert any("exactly right on **1 of 1**" in m.value for m in at.markdown)
+    if sub == "📊 Scores" and batch == "2":
+        assert any("None of your labelled frames" in i.value for i in at.info)

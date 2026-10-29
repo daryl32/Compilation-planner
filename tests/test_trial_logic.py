@@ -186,16 +186,16 @@ def test_report(tmp_path, monkeypatch):
     M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
     text = M.report.local()
     assert "1 videos, 0.01 h of footage" in text
-    assert ", 8b **" in text and ", 32b **1.00**" in text  # the made-up 32b is perfect
-    assert "**Better teacher: 32b**" in text
+    assert ", 32b **1.00**" in text  # the made-up 32b is perfect
+    assert "8b" not in text and "8B" not in text           # the 8B was dropped after batch 1
     assert "| close-up | frame | 3 |" in text and "teacher = yes" in text
-    assert "| tag 8b | L40S |" in text and "| tag 32b | H100 |" in text
-    assert "8b: replies that weren't valid JSON 1 of 4." in text
+    assert "| tag 32b | H100 |" in text
+    assert "32b: replies that weren't valid JSON 0 of 4." in text
     assert "Where the vision time goes" in text and "| Loading models |" in text
     assert "| New (TransNetV2) | 1.00 |" in text and "| Old (PySceneDetect) | 0.00 |" in text
     data = json.loads((out / "report.json").read_text())
     assert data["best_teacher"] == "32b" and data["library_total"] > 0
-    assert data["library_total"] < data["cost"]["total"]["library_$"]      # one teacher, not both
+    assert data["library_total"] == pytest.approx(data["cost"]["total"]["library_$"], abs=0.02)
     assert data["tags"]["verdicts"]["walking"] == "need more labels"
 
 
@@ -205,14 +205,15 @@ def test_export(tmp_path, monkeypatch):
     res = M.export.local(False)
     assert res == {"videos": 1, "frames": 5}
     data = json.loads((out / "export" / "results.json").read_text())
-    assert set(data["teachers"]) == {"8b", "32b"} and (out / "export" / "report.md").exists()
+    assert set(data["teachers"]) == {"32b"} and (out / "export" / "report.md").exists()
+    assert data["videos"]["v"]["batch"] == "1"                 # no batches.json → batch 1
     v = data["videos"]["v"]
     assert v["cuts_new"] == [10.2] and v["cuts_old"] == [22.0]
     assert {b["verdict"] for b in v["boundaries"]} == {"cut", "no_cut"}
     assert len(v["person_curve"]) == 80                       # 40 s at 2 points a second
     m = next(m for m in v["moments"] if m["key"] == "g_5.00")
     assert m["mine"] == ["close-up", "dancing"] and m["old"] == []
-    assert m["teachers"]["32b"]["tags"] == ["close-up", "dancing"] and m["teachers"]["8b"]["tags"] == ["wide"]
+    assert m["teachers"] == {"32b": {"tags": ["close-up", "dancing"], "unsure": None, "caption": None}}
     assert (out / "export" / m["frame"]).exists()
     plain = next(m for m in v["moments"] if m["key"] == "s1_0")
     assert plain["mine"] is None and plain["teachers"] == {}
