@@ -92,6 +92,8 @@ def _compare(data: dict) -> None:
         st.session_state["tr_filter"] = "all"
     with st.container(key="tl_wrap_tr_filters"):
         c = st.columns([3, 2, 2, 2])
+    if st.session_state.get("tr_vid") not in ["(all videos)"] + sorted(videos):
+        st.session_state.pop("tr_vid", None)          # e.g. after switching batch
     vid = c[0].selectbox("Video", ["(all videos)"] + sorted(videos), key="tr_vid")
     how = c[1].selectbox("Show", list(filters), format_func=filters.get, key="tr_filter")
     order = c[3].selectbox("Order", ["video", "random"], key="tr_order",
@@ -180,6 +182,8 @@ def _compare(data: dict) -> None:
 def _motion(data: dict) -> None:
     import plotly.graph_objects as go
     videos = data["videos"]
+    if st.session_state.get("tr_mvid") not in videos:
+        st.session_state.pop("tr_mvid", None)
     vid = st.selectbox("Video", sorted(videos), key="tr_mvid")
     v = videos[vid]
     fps = float(v.get("curve_fps") or 2.0)
@@ -217,6 +221,33 @@ def _motion(data: dict) -> None:
                                                        help="How regular the movement is (0.5+ = a clear beat)")})
 
 
+def _scores(data: dict) -> None:
+    """Live scores for the chosen batch(es): the main teacher against your labels, per tag."""
+    teachers = TR.shown_teachers(data.get("teachers") or {})
+    videos = TR.with_saved_labels(data["videos"], TLB.load_labels())
+    moments = [m for v in videos.values() for m in v["moments"]]
+    labelled = sum(1 for m in moments if m.get("mine") is not None)
+    st.caption(f"{len(videos)} video(s) · {len(moments)} tagged moments · {labelled} labelled by you. "
+               "These update as you correct frames in 🖼️ Compare tags.")
+    for k in teachers:
+        a = TR.agreement(moments).get(k)
+        if a:
+            st.markdown(f"**{k.upper()}:** exactly right on **{a['exact']} of {a['frames']}** of your frames · "
+                        f"found **{0 if a['recall'] is None else a['recall'] * 100:.0f}%** of your tags · "
+                        f"**{0 if a['precision'] is None else a['precision'] * 100:.0f}%** of its tags right")
+        rows = TR.tag_scores(moments, k)
+        if not rows:
+            st.info("None of your labelled frames are in these videos yet — correct a few in 🖼️ Compare tags.")
+            continue
+        pct = lambda x: None if x is None else round(x * 100)
+        st.dataframe([{"Tag": r["tag"], "Your frames": r["yours"], "Found (recall %)": pct(r["recall"]),
+                       "Right (precision %)": pct(r["precision"]), "F1": None if r["f1"] is None else round(r["f1"], 2),
+                       "Missed": r["fn"], "Wrong": r["fp"]} for r in rows],
+                     hide_index=True, width="stretch", key=f"tr_scores_{k}",
+                     column_config={"F1": st.column_config.ProgressColumn("F1", min_value=0.0, max_value=1.0,
+                                                                         format="%.2f")})
+
+
 def render() -> None:
     data = TR.load()
     if not data:
@@ -226,12 +257,30 @@ def render() -> None:
     teachers = ", ".join(f"{k} ({m.split('/')[-1]})" for k, m in (data.get("teachers") or {}).items())
     st.caption(f"Trial of {data.get('created')} · {len(data['videos'])} video(s) · teachers: {teachers or 'none'}"
                + (" · **smoke test** (first 90 s of one video)" if data.get("smoke") else ""))
-    with st.container(key="subnav_tr"):
-        sub = st.radio("Trial", ["🖼️ Compare tags", "🕺 Motion", "📋 Report"], horizontal=True,
-                       key="tr_sub", label_visibility="collapsed")
+    blist = TR.batches(data["videos"])
+    if "?" in blist:
+        st.caption("Batch numbers appear after the next export — on the server: "
+                   "`modal run modal_trial.py --stage results`.")
+    names = {None: "All batches", **{b: f"Batch {b}" if b != "?" else "Batch not recorded" for b in blist}}
+    with st.container(key="tl_wrap_tr_top"):
+        a, b = st.columns([1, 3])
+        batch = a.selectbox("Batch", [None] + blist, format_func=names.get, key="tr_batch",
+                            help="Look at one batch run on its own, or all of them together.")
+        with b:
+            with st.container(key="subnav_tr"):
+                sub = st.radio("Trial", ["🖼️ Compare tags", "📊 Scores", "🕺 Motion", "📋 Report"], horizontal=True,
+                               key="tr_sub", label_visibility="collapsed")
+    view = {**data, "videos": TR.in_batch(data["videos"], batch)}
+    if not view["videos"]:
+        st.info("No videos in this batch.")
+        return
     if sub == "🖼️ Compare tags":
-        _compare(data)
+        _compare(view)
+    elif sub == "📊 Scores":
+        _scores(view)
     elif sub == "🕺 Motion":
-        _motion(data)
+        _motion(view)
     else:
+        if batch is not None:
+            st.caption("The report covers every batch — for this batch on its own, see 📊 Scores.")
         st.markdown(TR.report_markdown() or "_No report._")
