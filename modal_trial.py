@@ -577,7 +577,11 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False,
             parts.append({"type": "text", "text": after})
             convs.append([{"role": "user", "content": parts}])
             keep.append(tg)
-    outs, chunk, params = [], 64, SamplingParams(temperature=0.0, max_tokens=256)
+    # Chunks the size of vLLM's batch (max_num_seqs), so progress shows every batch at no cost.
+    outs, chunk, params = [], 32, SamplingParams(temperature=0.0, max_tokens=256)
+    print(f"[{key} teacher] {video_id[:40]}: tagging {len(convs)} moments"
+          + (f" with ~{used_examples / max(len(convs), 1):.1f} worked examples each" if used_examples else "")
+          + f" — progress every {chunk}…", flush=True)
     for i in range(0, len(convs), chunk):
         outs += self.llm.chat(convs[i:i + chunk], params, use_tqdm=False)
         el = time.time() - started
