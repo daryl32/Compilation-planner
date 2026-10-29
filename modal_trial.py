@@ -32,6 +32,8 @@ Run from the scene-labeling folder, in the venv (pip install modal; modal setup)
     modal run modal_trial.py --stage tag --batch 6 --examples 3 --redo     re-tag one batch (the
                                                           earlier tags are kept as tags_<teacher>_before)
     modal run modal_trial.py --stage compare --batch 6    before vs after that re-tag: F1, time, cost
+    modal run modal_trial.py --stage vision-check         re-run one finished video through the batched
+                                                          vision pipeline; compare movement, cuts, cost
 Stages: download, vision, prep, tag, report, export, status, results (report + export, CPU only),
 all (default); tag always runs prep first. status lists every packed video with its batch and when
 vision / tagging were done — nothing runs on a GPU. export puts the results in your Drive catalogue
@@ -208,13 +210,97 @@ def download_models(vlms: list = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# vision — scene changes, pose → movement and rhythm, embeddings, frames to tag
+# vision — three steps, each on the right machine:
+#   vision_prep (CPU)  decode the tiny 48×27 frames scene-cut detection needs
+#   vision      (GPU)  scene cuts from those frames; pose in batches of POSE_BATCH (raw detections
+#                      saved, no tracking); picture embeddings; the tagger's frames
+#   vision_motion (CPU) the same BoT-SORT person tracker over the saved detections (it re-decodes
+#                      the frames for its camera-motion step), then movement, rhythm and the
+#                      per-scene numbers → vision.json, the "done" marker
+# Tracking used to run between every pose frame on the GPU machine, so the GPU took one frame at
+# a time and waited; now it only detects, 32 frames at once.
 # ---------------------------------------------------------------------------
 
-def _transnet_cuts(path: str, threshold: float = 0.5) -> tuple:
-    """(cut times in seconds, fps) from TransNetV2's per-frame transition probabilities."""
-    import glob
+POSE_BATCH = 32
+VISION_PIPELINE = 2         # 2 = batched pose + tracking on CPU (1 = tracked on the GPU machine)
+
+
+def _pose_cmd(path: str, man: dict) -> tuple:
+    """The ffmpeg command both the GPU step and the CPU tracking step decode with — the same
+    frames bit for bit, so the tracker's camera-motion step sees what the pose model saw."""
+    import trial_logic as TL
+    src_w, src_h = int(man["proxy"].get("width") or 854), int(man["proxy"].get("height") or 480)
+    w = 640
+    h = int(round(w * src_h / src_w / 2) * 2)
+    cmd = ["ffmpeg", "-v", "error", "-i", path, "-vf", f"fps={TL.POSE_FPS},scale={w}:{h}",
+           "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    return cmd, w, h
+
+
+def _frames(cmd: list, w: int, h: int, ahead: int = READ_AHEAD):
+    """Decoded frames, one at a time, with a reader thread keeping `ahead` frames queued."""
+    import queue
+    import subprocess
+    import threading
     import numpy as np
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=w * h * 3 * 8)
+    q = queue.Queue(maxsize=ahead)
+    n = w * h * 3
+
+    def reader():
+        try:
+            while True:
+                buf = proc.stdout.read(n)
+                if len(buf) < n:
+                    break
+                q.put(buf)
+        finally:
+            q.put(None)
+
+    threading.Thread(target=reader, daemon=True).start()
+    while True:
+        buf = q.get()
+        if buf is None:
+            break
+        yield np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+    proc.wait()
+
+
+def _vision_gpu_done(video_id: str) -> bool:
+    prev = _read_json(f"{OUT}/{video_id}/vision_gpu.json")
+    return (bool(prev) and not prev.get("partial") and (prev.get("models") or {}).get("pose") == POSE_MODEL
+            and Path(f"{OUT}/{video_id}/detections.npz").exists())
+
+
+@app.function(image=vision_image, volumes={DATA: pack_vol}, timeout=3600, cpu=2, memory=4096)
+def vision_prep(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
+    """CPU: the 48×27 RGB frames TransNetV2 reads, at the video's own frame rate, saved for the
+    GPU step (decoding them was most of the scene-cut time on the GPU machine)."""
+    import subprocess
+    import cv2
+    import numpy as np
+    pack_vol.reload()
+    if not redo and (_vision_done(video_id) or _vision_gpu_done(video_id)):
+        return {"video_id": video_id, "skipped": True}
+    t0 = time.time()
+    path = _video_path(video_id, max_seconds)
+    cap = cv2.VideoCapture(path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    cap.release()
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-f", "rawvideo", "-pix_fmt", "rgb24",
+                          "-s", "48x27", "pipe:"], capture_output=True, check=True).stdout
+    frames = np.frombuffer(raw, np.uint8).reshape([-1, 27, 48, 3])
+    out_dir = Path(f"{OUT}/{video_id}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    np.save(out_dir / "shots_frames.npy", frames)
+    (out_dir / "shots_meta.json").write_text(json.dumps({"fps": float(fps), "frames": int(len(frames)),
+                                                        "seconds": round(time.time() - t0, 1)}))
+    pack_vol.commit()
+    return {"video_id": video_id, "frames": int(len(frames)), "seconds": round(time.time() - t0, 1)}
+
+
+def _transnet_model():
+    import glob
     import torch
     import transnetv2_pytorch
     from transnetv2_pytorch import TransNetV2
@@ -225,42 +311,44 @@ def _transnet_cuts(path: str, threshold: float = 0.5) -> tuple:
         weights = [hf_hub_download("Sn4kehead/TransNetV2", "transnetv2-pytorch-weights.pth")]
     model.load_state_dict(torch.load(weights[0], map_location=model.device))
     model.eval()
+    return model
+
+
+def _transnet_cuts(video_id: str, path: str) -> tuple:
+    """(cut times in seconds, fps): from the frames vision_prep decoded when they're there, else
+    decoding here as before."""
+    import numpy as np
+    import torch
+    import trial_logic as TL
+    model = _transnet_model()
+    fpath, meta = Path(f"{OUT}/{video_id}/shots_frames.npy"), _read_json(f"{OUT}/{video_id}/shots_meta.json")
     with torch.no_grad():
-        try:
-            res = model.analyze_video(path)
-            fps, preds = float(res["fps"]), res["single_frame_predictions"]
-        except (AttributeError, KeyError, TypeError):
-            _, preds, _ = model.predict_video(path)
+        if fpath.exists() and meta:
+            frames = torch.from_numpy(np.load(fpath)).to(model.device)
+            preds, _ = model.predict_frames(frames, quiet=True)
+            fps = float(meta["fps"])
+        else:
+            _, preds, _ = model.predict_video(path, quiet=True)
             import cv2
             cap = cv2.VideoCapture(path)
             fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
             cap.release()
-    p = np.asarray(preds.cpu().numpy() if hasattr(preds, "cpu") else preds, dtype=float).reshape(-1)
-    above = p > threshold
-    cuts, i = [], 0
-    while i < len(above):
-        if above[i]:
-            j = i
-            while j + 1 < len(above) and above[j + 1]:
-                j += 1
-            cuts.append(round(((i + j) / 2 + 0.5) / fps, 2))
-            i = j + 1
-        else:
-            i += 1
-    return [c for c in cuts if c > 0.2], fps
+    p = preds.cpu().numpy() if hasattr(preds, "cpu") else preds
+    return TL.cuts_from_predictions(p, fps), fps
 
 
 @app.function(image=vision_image, gpu=VISION_GPUS, volumes={DATA: pack_vol, CACHE: cache_vol},
               timeout=4 * 3600, cpu=4, memory=16384)
 def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
-    import subprocess
+    """GPU: scene cuts, pose detections in batches (no tracking), embeddings, the tagger's frames."""
     import cv2
     import numpy as np
     import torch
     import trial_logic as TL
 
+    pack_vol.reload()
     out_dir = Path(f"{OUT}/{video_id}")
-    if not redo and _vision_done(video_id):
+    if not redo and (_vision_done(video_id) or _vision_gpu_done(video_id)):
         return {"video_id": video_id, "skipped": True}
     started = time.time()
     timings = {}
@@ -269,17 +357,19 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
     if max_seconds:
         duration = min(duration, float(max_seconds))
     path = _video_path(video_id, max_seconds)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Scene changes
+    # 1. Scene changes (from vision_prep's frames)
     t0 = time.time()
     shot_error = None
     try:
-        cuts, native_fps = _transnet_cuts(path)
+        cuts, native_fps = _transnet_cuts(video_id, path)
     except Exception as e:      # keep going — pose, embeddings and frames still matter
         cuts, native_fps, shot_error = [], None, f"{e.__class__.__name__}: {e}"[:300]
     timings["shots"] = time.time() - t0
+    Path(f"{OUT}/{video_id}/shots_frames.npy").unlink(missing_ok=True)
 
-    # 2. One decode at 15 fps: pose (tracked), embeddings at 2 fps, frames for the tagger
+    # 2. One decode at 15 fps: pose in batches, embeddings at 2 fps, frames for the tagger
     t0 = time.time()
     targets = TL.tag_targets(man, _gold_items(), max_seconds or None)
     need = {}
@@ -287,7 +377,6 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
         need.setdefault(int(round(t * TL.POSE_FPS)), []).append(t)
     frames_dir = out_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
-
     os.chdir(f"{CACHE}/yolo")
     from ultralytics import YOLO
     pose = YOLO(POSE_MODEL)
@@ -296,77 +385,62 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
     emb_proc = AutoProcessor.from_pretrained(EMB_MODEL)
     timings["load_models"] = time.time() - t0
 
-    src_w, src_h = int(man["proxy"].get("width") or 854), int(man["proxy"].get("height") or 480)
-    w = 640
-    h = int(round(w * src_h / src_w / 2) * 2)
-    cmd = ["ffmpeg", "-v", "error", "-i", path, "-vf", f"fps={TL.POSE_FPS},scale={w}:{h}",
-           "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=w * h * 3 * 8)
-    # Read-ahead: a thread keeps up to READ_AHEAD decoded frames queued, so ffmpeg decodes while
-    # the GPU works instead of the GPU waiting for each frame (the pipe alone holds < 1 frame).
-    import queue
-    import threading
-    frames_q = queue.Queue(maxsize=READ_AHEAD)
-    frame_bytes = w * h * 3
-
-    def reader():
-        try:
-            while True:
-                buf = proc.stdout.read(frame_bytes)
-                if len(buf) < frame_bytes:
-                    break
-                frames_q.put(buf)
-        finally:
-            frames_q.put(None)
-
-    threading.Thread(target=reader, daemon=True).start()
-    tracks, people, emb_times, emb_vecs, batch, batch_t = {}, [], [], [], [], []
+    cmd, w, h = _pose_cmd(path, man)
+    det_frame, det_box, det_kxy, det_kconf = [], [], [], []
+    emb_times, emb_vecs, ebatch, ebatch_t = [], [], [], []
+    pbatch, pbatch_i = [], []
     every = int(round(TL.POSE_FPS / 2))
     t_pose = t_emb = 0.0
 
     def flush_emb():
         nonlocal t_emb
-        if not batch:
+        if not ebatch:
             return
         t1 = time.time()
         with torch.no_grad():
-            inp = emb_proc(images=[cv2.cvtColor(b, cv2.COLOR_BGR2RGB) for b in batch], return_tensors="pt").to("cuda")
+            inp = emb_proc(images=[cv2.cvtColor(b, cv2.COLOR_BGR2RGB) for b in ebatch], return_tensors="pt").to("cuda")
             f = emb_model.get_image_features(pixel_values=inp["pixel_values"].half())
             if not torch.is_tensor(f):      # newer transformers return an output object
                 f = getattr(f, "pooler_output", None) if getattr(f, "pooler_output", None) is not None else f[0]
             f = torch.nn.functional.normalize(f.float(), dim=-1)
         emb_vecs.append(f.cpu().numpy().astype(np.float16))
-        emb_times.extend(batch_t)
-        batch.clear()
-        batch_t.clear()
+        emb_times.extend(ebatch_t)
+        ebatch.clear()
+        ebatch_t.clear()
         t_emb += time.time() - t1
 
-    idx = 0
-    while True:
-        buf = frames_q.get()
-        if buf is None:
-            break
-        frame = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+    def flush_pose():
+        nonlocal t_pose
+        if not pbatch:
+            return
         t1 = time.time()
-        res = pose.track(frame, persist=True, verbose=False, imgsz=640, conf=0.3)[0]
+        results = pose.predict(pbatch, verbose=False, imgsz=640, conf=0.3)
+        for i, res in zip(pbatch_i, results):
+            b = res.boxes
+            if b is None or not len(b):
+                continue
+            data = b.data.cpu().numpy().astype(np.float32)[:, :6]       # x1 y1 x2 y2 conf cls
+            xy = res.keypoints.xy.cpu().numpy().astype(np.float32)
+            kc = (res.keypoints.conf.cpu().numpy().astype(np.float32) if res.keypoints.conf is not None
+                  else np.ones(xy.shape[:2], np.float32))
+            det_frame.append(np.full(len(data), i, np.int32))
+            det_box.append(data)
+            det_kxy.append(xy)
+            det_kconf.append(kc)
+        pbatch.clear()
+        pbatch_i.clear()
         t_pose += time.time() - t1
-        n = 0
-        if res.keypoints is not None and res.boxes is not None and len(res.boxes):
-            ids = res.boxes.id
-            ids = ids.int().tolist() if ids is not None else [None] * len(res.boxes)
-            xy = res.keypoints.xy.cpu().numpy()
-            kc = res.keypoints.conf.cpu().numpy() if res.keypoints.conf is not None else np.ones(xy.shape[:2])
-            bh = res.boxes.xywh[:, 3].cpu().numpy()
-            for k, tid in enumerate(ids):
-                if tid is None:
-                    continue
-                tracks.setdefault(tid, {})[idx] = (xy[k], kc[k], float(bh[k]))
-                n += 1
-        people.append(n)
+
+    idx = 0
+    for frame in _frames(cmd, w, h):
+        pbatch.append(frame)
+        pbatch_i.append(idx)
+        if len(pbatch) >= POSE_BATCH:
+            flush_pose()
         if idx % every == 0:
-            batch.append(frame.copy())
-            batch_t.append(round(idx / TL.POSE_FPS, 2))
-            if len(batch) >= 32:
+            ebatch.append(frame.copy())
+            ebatch_t.append(round(idx / TL.POSE_FPS, 2))
+            if len(ebatch) >= 32:
                 flush_emb()
         for t in need.get(idx, []):
             cv2.imwrite(str(frames_dir / TL.frame_name(t)), frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
@@ -376,67 +450,115 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
             left = el / done_s * max(duration - done_s, 0)
             print(f"[vision] {video_id[:40]}: {done_s / 60:.0f} of {duration / 60:.0f} min of video · "
                   f"about {left / 60:.1f} min left", flush=True)
+    flush_pose()
     flush_emb()
-    proc.wait()
     n_frames = idx
     timings["decode_pose_embed"] = time.time() - t0 - timings["load_models"]
     timings["pose_gpu"], timings["embed_gpu"] = t_pose, t_emb
 
-    # 3. Movement: per person (camera taken out), then the busiest two people per frame
-    energies = []
-    for tid, frames in tracks.items():
-        if len(frames) < TL.POSE_FPS:          # under a second on screen — ignore
-            continue
-        a, b = min(frames), max(frames) + 1    # only the stretch this person is on screen
-        kps = np.zeros((b - a, 17, 2))
-        conf = np.zeros((b - a, 17))
-        bh = np.ones(b - a)
-        for i, (xy, kc, h_) in frames.items():
-            kps[i - a], conf[i - a], bh[i - a] = xy, kc, h_
-        full = np.full(n_frames, np.nan)
-        full[a:b] = TL.person_energy(kps, conf, bh)
-        energies.append(full)
-    if energies:
-        E = np.vstack(energies)
-        top2 = np.sort(np.nan_to_num(E, nan=0.0), axis=0)[-2:].sum(axis=0)
-        seen = np.isfinite(E).any(axis=0)
-        curve = np.where(seen, top2, np.nan)
-    else:
-        curve = np.full(n_frames, np.nan)
+    def cat(parts, shape, dtype):
+        return np.concatenate(parts) if parts else np.zeros(shape, dtype)
+    np.savez_compressed(out_dir / "detections.npz", frame=cat(det_frame, (0,), np.int32),
+                        box=cat(det_box, (0, 6), np.float32), kxy=cat(det_kxy, (0, 17, 2), np.float32),
+                        kconf=cat(det_kconf, (0, 17), np.float32), n_frames=np.int32(n_frames))
+    np.savez_compressed(out_dir / "frame_embs.npz", frame_times=np.array(emb_times),
+                        frame_embs=np.vstack(emb_vecs) if emb_vecs else np.zeros((0, 1), np.float16))
+    timings["total"] = time.time() - started
+    result = {"video_id": video_id, "duration": round(duration, 2), "partial": bool(max_seconds),
+              "native_fps": native_fps, "pose_fps": TL.POSE_FPS, "cuts": cuts, "shot_error": shot_error,
+              "frames": n_frames, "targets": targets, "pipeline": VISION_PIPELINE, "pose_batch": POSE_BATCH,
+              "timings": {k: round(v, 1) for k, v in timings.items()},
+              "gpu": _gpu_name(VISION_GPU), "models": {"pose": POSE_MODEL, "embed": EMB_MODEL, "shots": "TransNetV2"}}
+    (out_dir / "vision_gpu.json").write_text(json.dumps(result), encoding="utf-8")
+    pack_vol.commit()
+    return {"video_id": video_id, "seconds": round(timings["total"], 1), "cuts": len(cuts), "shot_error": shot_error,
+            "targets": len(targets), "detections": int(sum(len(x) for x in det_box))}
 
-    # 4. Per old scene: rhythm, people, mean embedding
-    emb = np.vstack(emb_vecs) if emb_vecs else np.zeros((0, 1), np.float16)
-    et = np.array(emb_times)
-    scenes = []
-    scene_embs, scene_ids = [], []
-    for s in man["scenes"]:
-        if "start" not in s or s["start"] >= duration:
-            continue
-        a, b = int(s["start"] * TL.POSE_FPS), int(min(s["end"], duration) * TL.POSE_FPS)
-        seg = curve[a:b]
-        row = {"scene_id": s["scene_id"], "start": s["start"], "end": min(s["end"], duration),
-               "people": float(np.median(people[a:b])) if b > a else 0.0,
-               **TL.rhythm_features(seg)}
-        sel = (et >= s["start"]) & (et < min(s["end"], duration)) if et.size else np.array([], bool)
-        if sel.any():
-            v = emb[sel].astype(np.float32).mean(axis=0)
-            scene_embs.append((v / (np.linalg.norm(v) or 1)).astype(np.float16))
-            scene_ids.append(s["scene_id"])
-        scenes.append(row)
+
+def _tracker_cfg():
+    """The tracker config model.track() uses by default in the installed ultralytics (its
+    default.yaml `tracker:` — TrackTrack in 8.4, BoT-SORT in older releases), so tracking here is
+    the same as it was on the GPU machine. The vision image isn't rebuilt, so the version is fixed."""
+    from ultralytics.utils import DEFAULT_CFG, IterableSimpleNamespace
+    from ultralytics.utils.checks import check_yaml
+    path = check_yaml(DEFAULT_CFG.tracker)
+    try:
+        from ultralytics.utils import YAML
+        data = YAML.load(path)
+    except ImportError:                       # older ultralytics
+        from ultralytics.utils import yaml_load
+        data = yaml_load(path)
+    return IterableSimpleNamespace(**data)
+
+
+def _track_offline(frames, det: dict, n_frames: int) -> tuple:
+    """Ultralytics' own default tracker (the one model.track used) run over saved detections, frame
+    by frame, with the frames for its camera-motion compensation — what model.track did on the GPU
+    machine, minus the GPU. (For pose, model.track gives the tracker only the final detections, so
+    nothing else needs saving.) Returns (tracks, people per frame, tracker name):
+    tracks = {id: {frame: (keypoints xy, keypoint conf, tracked box height)}}."""
+    import numpy as np
+    from ultralytics.engine.results import Boxes
+    from ultralytics.trackers.track import TRACKER_MAP
+    cfg = _tracker_cfg()
+    cfg.device = "cpu"
+    tracker = TRACKER_MAP[cfg.tracker_type](args=cfg)
+    fr = np.asarray(det["frame"])
+    order = np.argsort(fr, kind="stable")
+    starts = np.searchsorted(fr[order], np.arange(n_frames + 1))
+    tracks, people = {}, []
+    for idx, frame in enumerate(frames):
+        if idx >= n_frames:
+            break
+        sel = order[starts[idx]:starts[idx + 1]]
+        boxes = Boxes(np.asarray(det["box"][sel], dtype=np.float32).reshape(-1, 6), frame.shape[:2])
+        out = tracker.update(boxes.cpu().numpy(), frame)
+        n = 0
+        for row in out if len(out) else []:
+            j = sel[int(row[-1])]
+            tracks.setdefault(int(row[4]), {})[idx] = (det["kxy"][j], det["kconf"][j], float(row[3] - row[1]))
+            n += 1
+        people.append(n)
+    people += [0] * (n_frames - len(people))
+    return tracks, people, cfg.tracker_type
+
+
+@app.function(image=vision_image, volumes={DATA: pack_vol}, timeout=3 * 3600, cpu=4, memory=8192)
+def vision_motion(video_id: str, max_seconds: float = 0) -> dict:
+    """CPU, after the GPU step: person tracking, the camera-free movement curve, rhythm and the
+    per-scene numbers; writes vision.json (the "done" marker), embeddings.npz, person_curve.npy."""
+    import numpy as np
+    import trial_logic as TL
+
+    pack_vol.reload()
+    out_dir = Path(f"{OUT}/{video_id}")
+    vg = _read_json(out_dir / "vision_gpu.json")
+    if not vg:
+        return {"video_id": video_id, "error": "no vision_gpu.json — the GPU step didn't finish"}
+    t0 = time.time()
+    man = _read_json(f"{PACK}/manifests/{video_id}.json")
+    z = np.load(out_dir / "detections.npz")
+    det = {k: z[k] for k in ("frame", "box", "kxy", "kconf")}
+    n_frames = int(z["n_frames"])
+    cmd, w, h = _pose_cmd(_video_path(video_id, max_seconds), man)
+    tracks, people, tracker_name = _track_offline(_frames(cmd, w, h), det, n_frames)
+    t_track = time.time() - t0
+    t1 = time.time()
+    curve = TL.movement_curve(tracks, n_frames)
+    fe = np.load(out_dir / "frame_embs.npz")
+    et, emb = fe["frame_times"], fe["frame_embs"]
+    scenes, scene_ids, scene_embs = TL.scene_features(man["scenes"], vg["duration"], curve, people, et, emb)
     np.savez_compressed(out_dir / "embeddings.npz", frame_times=et, frame_embs=emb,
                         scene_ids=np.array(scene_ids), scene_embs=np.array(scene_embs))
     np.save(out_dir / "person_curve.npy", curve.astype(np.float32))
-
-    timings["total"] = time.time() - started
-    result = {"video_id": video_id, "duration": round(duration, 2), "partial": bool(max_seconds),
-              "native_fps": native_fps,
-              "pose_fps": TL.POSE_FPS, "cuts": cuts, "shot_error": shot_error, "frames": n_frames, "tracks": len(tracks),
-              "targets": targets, "scenes": scenes, "timings": {k: round(v, 1) for k, v in timings.items()},
-              "gpu": _gpu_name(VISION_GPU), "models": {"pose": POSE_MODEL, "embed": EMB_MODEL, "shots": "TransNetV2"}}
+    cpu = {"track": round(t_track, 1), "maths": round(time.time() - t1, 1),
+           "prep": (_read_json(out_dir / "shots_meta.json") or {}).get("seconds", 0.0)}
+    cpu["total"] = round(cpu["track"] + cpu["maths"] + cpu["prep"], 1)
+    result = {**vg, "tracks": len(tracks), "tracker": tracker_name, "scenes": scenes, "cpu_timings": cpu}
     (out_dir / "vision.json").write_text(json.dumps(result), encoding="utf-8")
+    (out_dir / "frame_embs.npz").unlink(missing_ok=True)
     pack_vol.commit()
-    return {"video_id": video_id, "seconds": round(timings["total"], 1), "cuts": len(cuts), "shot_error": shot_error,
-            "targets": len(targets), "tracks": len(tracks)}
+    return {"video_id": video_id, "tracks": len(tracks), "cpu_seconds": cpu["total"]}
 
 
 # ---------------------------------------------------------------------------
@@ -906,10 +1028,19 @@ def report() -> str:
     # teacher once per run — so a short trial doesn't make the library look far dearer.
     lib_hours = float(pack.get("library_hours") or 0) or trial_hours
     lib_videos = int(pack.get("library_videos") or 0) or len(done)
-    v_fixed = [d["timings"].get("load_models", 0.0) for d in vis.values()]
-    stage_sec = {"vision": sum(d["timings"]["total"] for d in vis.values()) - sum(v_fixed)}
+    # Vision is costed from the videos run with the newest pipeline (batched pose + tracking on
+    # CPU) once there are any — the older ones would make the library estimate look dearer.
+    newest = max((d.get("pipeline", 1) for d in vis.values()), default=1)
+    vis_cost = {v: d for v, d in vis.items() if d.get("pipeline", 1) == newest}
+    v_fixed = [d["timings"].get("load_models", 0.0) for d in vis_cost.values()]
+    stage_sec = {"vision": sum(d["timings"]["total"] for d in vis_cost.values()) - sum(v_fixed)}
     fixed = {"vision": (sum(v_fixed) / max(len(v_fixed), 1), lib_videos)}
-    stage_hours = {"vision": trial_hours}       # each teacher per hour of the videos IT tagged
+    vis_hours = sum(d["duration"] for d in vis_cost.values()) / 3600
+    stage_hours = {"vision": vis_hours}         # each teacher per hour of the videos IT tagged
+    cpu_sec = sum((d.get("cpu_timings") or {}).get("total", 0.0) for d in vis_cost.values())
+    if cpu_sec:
+        stage_sec["vision CPU"] = cpu_sec
+        stage_hours["vision CPU"] = vis_hours
     for k in keys:
         stage_sec[f"tag {k}"] = sum(t["seconds"] for t in tagged_by[k].values())
         fixed[f"tag {k}"] = (sum(t.get("load_seconds", 0) for t in tagged_by[k].values()), 1)
@@ -919,13 +1050,14 @@ def report() -> str:
         names = [r.get("gpu") or default for r in rows]
         return max(set(names), key=names.count) if names else default
 
-    gpus = {"vision": used(vis.values(), VISION_GPU)}
+    gpus = {"vision": used(vis_cost.values(), VISION_GPU), "vision CPU": "CPU"}
     gpus.update({f"tag {k}": used(tagged_by[k].values(), TEACHER_GPUS[k][0]) for k in keys})
     cost = TL.extrapolate(stage_sec, gpus, stage_hours, lib_hours, fixed)
     # The library only needs one teacher: the estimate counts vision + the one in use (the
     # default when it has run, else the better scorer).
     lib_teacher = TEACHERS_DEFAULT if TEACHERS_DEFAULT in keys else best
-    lib_total = cost["vision"]["library_$"] + (cost[f"tag {lib_teacher}"]["library_$"] if lib_teacher else 0.0)
+    lib_total = (cost["vision"]["library_$"] + cost.get("vision CPU", {}).get("library_$", 0.0)
+                 + (cost[f"tag {lib_teacher}"]["library_$"] if lib_teacher else 0.0))
 
     def f(x):
         return "–" if x is None else f"{x:.2f}"
@@ -941,19 +1073,27 @@ def report() -> str:
         c = cost[k]
         md.append(f"| {k} | {c['gpu']} | ${c['trial_$']:.2f} | ${c['per_footage_hour_$']:.3f} | "
                   f"${c['library_$']:.2f} | {c['library_gpu_hours']:.1f} |")
-    # Where the vision time goes, in seconds per hour of footage.
+    # Where the vision time goes, in seconds per hour of footage (newest pipeline's videos).
+    pose_label = "Pose (GPU, batched)" if newest >= 2 else "Pose + tracking (GPU)"
     steps = {"Scene cuts (TransNetV2)": "shots", "Loading models": "load_models",
-             "Pose + tracking (GPU)": "pose_gpu", "Embeddings (GPU)": "embed_gpu"}
-    tot = {k: sum(d["timings"].get(v, 0.0) for d in vis.values()) for k, v in steps.items()}
-    dpe = sum(d["timings"].get("decode_pose_embed", 0.0) for d in vis.values())
-    tot["Decoding, tracker, saving frames (CPU)"] = max(dpe - tot["Pose + tracking (GPU)"] - tot["Embeddings (GPU)"], 0.0)
-    tot["Motion + rhythm maths"] = max(sum(d["timings"].get("total", 0.0) for d in vis.values())
-                                       - dpe - tot["Scene cuts (TransNetV2)"] - tot["Loading models"], 0.0)
-    vision_breakdown = {k: round(v / trial_hours) if trial_hours else 0 for k, v in tot.items()}
-    md_steps = ["", "Where the vision time goes (seconds per hour of footage):", "",
+             pose_label: "pose_gpu", "Embeddings (GPU)": "embed_gpu"}
+    tot = {k: sum(d["timings"].get(v, 0.0) for d in vis_cost.values()) for k, v in steps.items()}
+    dpe = sum(d["timings"].get("decode_pose_embed", 0.0) for d in vis_cost.values())
+    rest = "Decoding, saving frames (GPU machine)" if newest >= 2 else "Decoding, tracker, saving frames (CPU)"
+    tot[rest] = max(dpe - tot[pose_label] - tot["Embeddings (GPU)"], 0.0)
+    tot["Other"] = max(sum(d["timings"].get("total", 0.0) for d in vis_cost.values())
+                       - dpe - tot["Scene cuts (TransNetV2)"] - tot["Loading models"], 0.0)
+    vision_breakdown = {k: round(v / vis_hours) if vis_hours else 0 for k, v in tot.items()}
+    md_steps = ["", f"Where the vision GPU time goes (seconds per hour of footage, {len(vis_cost)} video(s) "
+                f"on the {'batched' if newest >= 2 else 'original'} pipeline):", "",
                 "| Step | Seconds | Share |", "|---|---|---|"]
     all_s = sum(vision_breakdown.values()) or 1
     md_steps += [f"| {k} | {v} | {100 * v / all_s:.0f}% |" for k, v in vision_breakdown.items()]
+    if cpu_sec and vis_hours:
+        cs = {k: sum((d.get("cpu_timings") or {}).get(k, 0.0) for d in vis_cost.values()) / vis_hours
+              for k in ("prep", "track", "maths")}
+        md_steps += ["", f"On cheap CPU machines (not GPU time): scene-cut frames {cs['prep']:.0f} s, "
+                         f"person tracking {cs['track']:.0f} s, movement maths {cs['maths']:.0f} s per hour of footage."]
     md += [f"| **total** | | **${cost['total']['trial_$']:.2f}** | | "
            f"**${lib_total:.2f}**{' (vision + ' + lib_teacher + ' only)' if len(keys) > 1 else ''} | |", "",
            *md_steps, "",
@@ -1317,6 +1457,94 @@ def compare_runs(video_ids: list, key: str) -> str:
     return "\n".join(md)
 
 
+VISION_SNAPSHOT = ("vision.json", "person_curve.npy", "embeddings.npz")
+
+
+@app.function(image=report_image, volumes={DATA: pack_vol})
+def vision_snapshot(video_id: str = "") -> dict:
+    """For --stage vision-check: pick (unless given) the shortest finished video with people tracked
+    in it, from before the batched pipeline, and keep a copy of its vision results to compare."""
+    import shutil
+    pack_vol.reload()
+    if not video_id:
+        cands = []
+        for p in Path(OUT).iterdir() if Path(OUT).exists() else []:
+            vis = _read_json(p / "vision.json")
+            if vis and not vis.get("partial") and vis.get("pipeline", 1) == 1 and (vis.get("tracks") or 0) >= 5:
+                cands.append((vis["duration"], p.name))
+        if not cands:
+            return {"video_id": None}
+        video_id = min(cands)[1]
+    d = Path(f"{OUT}/{video_id}")
+    for f in VISION_SNAPSHOT:
+        if (d / f).exists():
+            shutil.copyfile(d / f, d / f.replace(".", "_before.", 1))
+    pack_vol.commit()
+    return {"video_id": video_id, "minutes": round((_read_json(d / "vision.json") or {}).get("duration", 0) / 60, 1)}
+
+
+@app.function(image=report_image, volumes={DATA: pack_vol})
+def vision_compare(video_id: str, restore: bool = True) -> str:
+    """Old vs new vision on one video: cuts, tracks, the movement curve, per-scene rhythm, and GPU
+    time / cost per footage hour. Then (restore) puts the old results back, so the video's tags
+    stay matched to the moments they were made for — the check changes nothing downstream."""
+    import shutil
+    import numpy as np
+    import trial_logic as TL
+    pack_vol.reload()
+    d = Path(f"{OUT}/{video_id}")
+    old, new = _read_json(d / "vision_before.json"), _read_json(d / "vision.json")
+    if not old or not new or new.get("pipeline", 1) < 2:
+        return "Nothing to compare — the new run didn't finish (see the errors above)."
+    hrs = (new["duration"] or 1) / 3600
+    co, cn = np.load(d / "person_curve_before.npy"), np.load(d / "person_curve.npy")
+    n = min(len(co), len(cn))
+    co, cn = co[:n], cn[:n]
+    both = np.isfinite(co) & np.isfinite(cn)
+    corr = float(np.corrcoef(co[both], cn[both])[0, 1]) if both.sum() > 2 else None
+    mad = float(np.mean(np.abs(co[both] - cn[both]))) if both.any() else None
+    scale = float(np.nanmean(np.abs(co))) if np.isfinite(co).any() else None
+    so, sn = {s["scene_id"]: s for s in old["scenes"]}, {s["scene_id"]: s for s in new["scenes"]}
+    common = [k for k in so if k in sn]
+
+    def diff(key):
+        xs = [abs((so[k].get(key) or 0) - (sn[k].get(key) or 0)) for k in common
+              if so[k].get(key) is not None or sn[k].get(key) is not None]
+        return (max(xs) if xs else 0.0), (sum(1 for x in xs if x > 1e-6))
+
+    cuts_same = sum(1 for c in new["cuts"] if any(abs(c - x) <= 0.1 for x in old["cuts"]))
+    cpu = new.get("cpu_timings") or {}
+    gpu_old, gpu_new = old["timings"]["total"], new["timings"]["total"]
+    cost_old = TL.stage_cost(gpu_old, old.get("gpu") or VISION_GPU) / hrs
+    cost_new = (TL.stage_cost(gpu_new, new.get("gpu") or VISION_GPU) + TL.stage_cost(cpu.get("total", 0), "CPU")) / hrs
+    lines = [f"Vision check on {video_id} ({new['duration'] / 60:.1f} min of video): old pipeline vs batched pose + "
+             "tracking on CPU.", "",
+             "| | Old | New |", "|---|---|---|",
+             f"| Scene cuts | {len(old['cuts'])} | {len(new['cuts'])} ({cuts_same} within 0.1 s of an old one) |",
+             f"| People tracked | {old.get('tracks')} | {new.get('tracks')} |",
+             f"| Pose GPU seconds per footage hour | {old['timings'].get('pose_gpu', 0) / hrs:.0f} | "
+             f"{new['timings'].get('pose_gpu', 0) / hrs:.0f} |",
+             f"| All vision GPU seconds per footage hour | {gpu_old / hrs:.0f} | {gpu_new / hrs:.0f} |",
+             f"| CPU seconds per footage hour (cheap) | – | {cpu.get('total', 0) / hrs:.0f} |",
+             f"| Vision $ per footage hour | ${cost_old:.3f} ({old.get('gpu')}) | ${cost_new:.3f} ({new.get('gpu')} + CPU) |",
+             "", "Movement (should match):",
+             f"- Person-motion curve: correlation {('–' if corr is None else f'{corr:.4f}')} (1 = identical), "
+             f"mean difference {('–' if mad is None else f'{mad:.5f}')} vs a typical value of "
+             f"{('–' if scale is None else f'{scale:.5f}')}.",
+             f"- Per scene ({len(common)} scenes): " + ", ".join(
+                 f"{k} biggest difference {diff(k)[0]:.4g} ({diff(k)[1]} scenes differ)"
+                 for k in ("level", "periodicity", "movement_bpm", "people")) + "."]
+    if restore:
+        for f in VISION_SNAPSHOT:
+            b = d / f.replace(".", "_before.", 1)
+            if b.exists():
+                shutil.copyfile(b, d / f)
+        lines += ["", "The old results are back in place, so nothing downstream changed. From the next batch, "
+                      "new videos use the batched pipeline."]
+    pack_vol.commit()
+    return "\n".join(lines)
+
+
 @app.function(image=report_image, volumes={DATA: pack_vol})
 def pick_check_video() -> dict:
     """For --stage fp8-check: the video already tagged by the 32B with the most of your labelled
@@ -1341,6 +1569,23 @@ def list_pack() -> list:
 
 # ---------------------------------------------------------------------------
 
+def _run_vision(vids: list, max_seconds: float, redo: bool) -> None:
+    """Vision in three steps: CPU (scene-cut frames) → GPU (cuts, pose, embeddings, frames) → CPU
+    (tracking, movement, rhythm). The CPU steps run many videos at once."""
+    t0 = time.time()
+    print(f"Vision step 1/3 (CPU): decoding scene-cut frames for {len(vids)} video(s)…")
+    for r in vision_prep.starmap([(v, max_seconds, redo) for v in vids], return_exceptions=True):
+        print("  ", r)
+    print(f"Vision step 2/3 (GPU: {' / '.join(VISION_GPUS)}, first free): cuts, pose in batches of "
+          f"{POSE_BATCH}, embeddings…")
+    for r in vision.starmap([(v, max_seconds, redo) for v in vids], return_exceptions=True):
+        print("  ", r)
+    print("Vision step 3/3 (CPU): person tracking, movement and rhythm…")
+    for r in vision_motion.starmap([(v, max_seconds) for v in vids], return_exceptions=True):
+        print("  ", r)
+    print(f"   Vision done in {(time.time() - t0) / 60:.1f} min.")
+
+
 @app.local_entrypoint()
 def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False, teacher: str = "",
          examples: int = -1, dedup: float = -1.0, batch: int = 0):
@@ -1364,6 +1609,16 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         stages.insert(stages.index("tag"), "prep")      # the GPU only ever reads what prep wrote
     if stage == "status":
         _print_status(status.remote(keys), keys)
+        return
+    if stage == "vision-check":
+        # One command: re-run one finished video through the batched vision pipeline and compare.
+        snap = vision_snapshot.remote(videos.strip())
+        if not snap["video_id"]:
+            print("No finished video with people tracked from the original pipeline to compare against.")
+            return
+        print(f"Vision check on {snap['video_id']} ({snap['minutes']} min of video).")
+        _run_vision([snap["video_id"]], 0, True)
+        print("\n" + vision_compare.remote(snap["video_id"]))
         return
     if stage == "fp8-check":
         # One command for the FP8 check: re-tag the 32B video with the most labelled frames with
@@ -1413,9 +1668,7 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     if "download" in stages:
         print(download_models.remote([TEACHERS[k] for k in keys]))
     if "vision" in stages and todo_vision:
-        print(f"Vision on {len(todo_vision)} video(s) ({' / '.join(VISION_GPUS)}, first free)…")
-        for r in vision.starmap([(v, max_seconds, redo) for v in todo_vision], return_exceptions=True):
-            print("  ", r)
+        _run_vision(todo_vision, max_seconds, redo)
     if "vision" in stages and "tag" in stages and not smoke and not redo:
         for k in keys:          # vision just ran — anything it finished needs tagging too
             st = {r["video_id"]: r for r in status.remote([k])["rows"]}

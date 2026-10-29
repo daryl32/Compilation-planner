@@ -355,6 +355,70 @@ def parse_answer(text: str, vocab: list) -> dict:
 # Movement
 # ---------------------------------------------------------------------------
 
+def cuts_from_predictions(preds, fps: float, threshold: float = 0.5) -> list:
+    """Cut times (s) from TransNetV2's per-frame transition probabilities: one cut per run of
+    frames above the threshold, at the run's middle; none in the first 0.2 s."""
+    p = np.asarray(preds, dtype=float).reshape(-1)
+    above = p > threshold
+    cuts, i = [], 0
+    while i < len(above):
+        if above[i]:
+            j = i
+            while j + 1 < len(above) and above[j + 1]:
+                j += 1
+            cuts.append(round(((i + j) / 2 + 0.5) / fps, 2))
+            i = j + 1
+        else:
+            i += 1
+    return [c for c in cuts if c > 0.2]
+
+
+def movement_curve(tracks: dict, n_frames: int) -> np.ndarray:
+    """The video's person-motion curve: each tracked person's camera-free body movement (people on
+    screen under a second are ignored), then per frame the sum of the two busiest people (NaN where
+    nobody is tracked). tracks = {track id: {frame index: (keypoints xy (17, 2), conf (17,), box h)}}."""
+    energies = []
+    for frames in tracks.values():
+        if len(frames) < POSE_FPS:
+            continue
+        a, b = min(frames), max(frames) + 1
+        kps = np.zeros((b - a, 17, 2))
+        conf = np.zeros((b - a, 17))
+        bh = np.ones(b - a)
+        for i, (xy, kc, h_) in frames.items():
+            kps[i - a], conf[i - a], bh[i - a] = xy, kc, h_
+        full = np.full(n_frames, np.nan)
+        full[a:b] = person_energy(kps, conf, bh)
+        energies.append(full)
+    if not energies:
+        return np.full(n_frames, np.nan)
+    E = np.vstack(energies)
+    top2 = np.sort(np.nan_to_num(E, nan=0.0), axis=0)[-2:].sum(axis=0)
+    seen = np.isfinite(E).any(axis=0)
+    return np.where(seen, top2, np.nan)
+
+
+def scene_features(scenes_in: list, duration: float, curve, people: list, emb_times, emb) -> tuple:
+    """Per old scene: rhythm, median people on screen, mean picture embedding.
+    Returns (scene rows, scene ids with an embedding, their unit-length mean embeddings)."""
+    et = np.asarray(emb_times, dtype=float)
+    emb = np.asarray(emb)
+    rows, scene_ids, scene_embs = [], [], []
+    for s in scenes_in:
+        if "start" not in s or s["start"] >= duration:
+            continue
+        a, b = int(s["start"] * POSE_FPS), int(min(s["end"], duration) * POSE_FPS)
+        rows.append({"scene_id": s["scene_id"], "start": s["start"], "end": min(s["end"], duration),
+                     "people": float(np.median(people[a:b])) if b > a and len(people[a:b]) else 0.0,
+                     **rhythm_features(curve[a:b])})
+        sel = (et >= s["start"]) & (et < min(s["end"], duration)) if et.size else np.array([], bool)
+        if sel.any():
+            v = emb[sel].astype(np.float32).mean(axis=0)
+            scene_embs.append((v / (np.linalg.norm(v) or 1)).astype(np.float16))
+            scene_ids.append(s["scene_id"])
+    return rows, scene_ids, scene_embs
+
+
 def person_energy(kps: np.ndarray, conf: np.ndarray, box_h: np.ndarray, min_conf: float = 0.3) -> np.ndarray:
     """Body movement of one tracked person, frame by frame, with the camera taken out:
     keypoints relative to the body's own centre, scaled by its height, so a pan or zoom

@@ -192,7 +192,7 @@ def test_report(tmp_path, monkeypatch):
     assert "| close-up | frame | 3 |" in text and "teacher = yes" in text
     assert "| tag 32b | H100 |" in text
     assert "32b: replies that weren't valid JSON 0 of 4." in text
-    assert "Where the vision time goes" in text and "| Loading models |" in text
+    assert "Where the vision GPU time goes" in text and "original pipeline" in text and "| Loading models |" in text
     assert "| New (TransNetV2) | 1.00 |" in text and "| Old (PySceneDetect) | 0.00 |" in text
     data = json.loads((out / "report.json").read_text())
     assert data["best_teacher"] == "32b" and data["library_total"] > 0
@@ -460,3 +460,130 @@ def test_redo_keeps_before_and_compare(tmp_path, monkeypatch):
     text = M.compare_runs.local(["v"], "32b-fp8")
     assert "| before | 4 | 0.00 |" in text and "| after | 4 |" in text
     assert "Nothing to compare" in M.compare_runs.local(["nope"], "32b-fp8")
+
+
+def _old_movement_and_scenes(tracks, n_frames, people, man_scenes, duration, emb_times, emb):
+    """The vision code as it was inline before the split (v1.31.x), kept as the reference."""
+    energies = []
+    for tid, frames in tracks.items():
+        if len(frames) < TL.POSE_FPS:
+            continue
+        a, b = min(frames), max(frames) + 1
+        kps = np.zeros((b - a, 17, 2))
+        conf = np.zeros((b - a, 17))
+        bh = np.ones(b - a)
+        for i, (xy, kc, h_) in frames.items():
+            kps[i - a], conf[i - a], bh[i - a] = xy, kc, h_
+        full = np.full(n_frames, np.nan)
+        full[a:b] = TL.person_energy(kps, conf, bh)
+        energies.append(full)
+    if energies:
+        E = np.vstack(energies)
+        top2 = np.sort(np.nan_to_num(E, nan=0.0), axis=0)[-2:].sum(axis=0)
+        seen = np.isfinite(E).any(axis=0)
+        curve = np.where(seen, top2, np.nan)
+    else:
+        curve = np.full(n_frames, np.nan)
+    emb = np.vstack([emb]) if len(emb) else np.zeros((0, 1), np.float16)
+    et = np.array(emb_times)
+    scenes, scene_embs, scene_ids = [], [], []
+    for s in man_scenes:
+        if "start" not in s or s["start"] >= duration:
+            continue
+        a, b = int(s["start"] * TL.POSE_FPS), int(min(s["end"], duration) * TL.POSE_FPS)
+        seg = curve[a:b]
+        row = {"scene_id": s["scene_id"], "start": s["start"], "end": min(s["end"], duration),
+               "people": float(np.median(people[a:b])) if b > a else 0.0, **TL.rhythm_features(seg)}
+        sel = (et >= s["start"]) & (et < min(s["end"], duration)) if et.size else np.array([], bool)
+        if sel.any():
+            v = emb[sel].astype(np.float32).mean(axis=0)
+            scene_embs.append((v / (np.linalg.norm(v) or 1)).astype(np.float16))
+            scene_ids.append(s["scene_id"])
+        scenes.append(row)
+    return curve, scenes, scene_ids, scene_embs
+
+
+def test_movement_and_scene_features_match_old_code():
+    rng = np.random.default_rng(3)
+    n = 15 * 40                                            # 40 s at 15 fps
+    tracks = {}
+    for tid, (a, b) in enumerate([(0, 300), (100, 600), (50, 60), (400, 590)]):
+        tracks[tid] = {i: (rng.normal(300, 40, (17, 2)) + np.sin(i / 3) * 10, rng.uniform(0.2, 1, 17),
+                           float(rng.uniform(150, 250))) for i in range(a, b)}
+    people = [sum(i in fr for fr in tracks.values()) for i in range(n)]
+    man_scenes = [{"scene_id": 0, "start": 0.0, "end": 12.0}, {"scene_id": 1, "start": 12.0, "end": 33.0},
+                  {"scene_id": 2, "start": 33.0, "end": 45.0}, {"scene_id": 3}]
+    et = np.arange(0, 40, 0.53)
+    emb = rng.normal(size=(len(et), 8)).astype(np.float16)
+    c_old, s_old, ids_old, e_old = _old_movement_and_scenes(tracks, n, people, man_scenes, 40.0, et, emb)
+    c_new = TL.movement_curve(tracks, n)
+    s_new, ids_new, e_new = TL.scene_features(man_scenes, 40.0, c_new, people, et, emb)
+    assert np.array_equal(np.isnan(c_old), np.isnan(c_new)) and np.allclose(np.nan_to_num(c_old), np.nan_to_num(c_new))
+    assert json.dumps(s_old, sort_keys=True, default=float) == json.dumps(s_new, sort_keys=True, default=float)
+    assert ids_old == ids_new and all(np.array_equal(x, y) for x, y in zip(e_old, e_new))
+    assert np.isnan(TL.movement_curve({}, 10)).all()
+
+
+def test_cuts_from_predictions_matches_old_rule():
+    p = np.zeros(300)
+    p[[2, 3]] = 0.9            # 0.1 s in at 25 fps → dropped (≤ 0.2 s)
+    p[100:103] = 0.8           # one run → one cut at its middle
+    p[200] = 0.51
+    assert TL.cuts_from_predictions(p, 25.0) == [round(102 / 25 - 1 / 25 + 0.5 / 25, 2), round(200.5 / 25, 2)]
+    assert TL.cuts_from_predictions(np.zeros(10), 25.0) == []
+
+
+def test_vision_snapshot_compare_restore(tmp_path, monkeypatch):
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    vis = json.loads((out / "v" / "vision.json").read_text())
+    vis.update({"tracks": 6, "gpu": "A10", "scenes": [{"scene_id": 0, "level": 0.02, "periodicity": 0.7,
+                                                       "movement_bpm": 118.0, "people": 2.0}]})
+    (out / "v" / "vision.json").write_text(json.dumps(vis))
+    np.savez_compressed(out / "v" / "embeddings.npz", frame_times=np.arange(3.0), frame_embs=np.ones((3, 2)))
+    snap = M.vision_snapshot.local("")
+    assert snap["video_id"] == "v" and (out / "v" / "vision_before.json").exists()
+    assert (out / "v" / "person_curve_before.npy").exists() and (out / "v" / "embeddings_before.npz").exists()
+    new = {**vis, "pipeline": 2, "cuts": [10.2, 30.0], "timings": {"total": 40.0, "pose_gpu": 20.0},
+           "cpu_timings": {"total": 60.0}, "tracks": 6}
+    (out / "v" / "vision.json").write_text(json.dumps(new))
+    text = M.vision_compare.local("v")
+    assert "| Scene cuts | 1 | 2 (1 within 0.1 s of an old one) |" in text
+    assert "correlation 1.0000" in text and "level biggest difference 0 (0 scenes differ)" in text
+    assert json.loads((out / "v" / "vision.json").read_text()).get("pipeline", 1) == 1      # restored
+    assert "Nothing to compare" in M.vision_compare.local("v")                            # old one is back
+
+
+def test_vision_motion_writes_done_marker(tmp_path, monkeypatch):
+    """vision_motion (CPU) turns the GPU step's files into vision.json, embeddings.npz and the curve."""
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    man = json.loads((pack / "manifests" / "v.json").read_text())
+    man["proxy"] = {"duration": 40.0, "width": 854, "height": 480}
+    (pack / "manifests" / "v.json").write_text(json.dumps(man))
+    vg = json.loads((out / "v" / "vision.json").read_text())
+    (out / "v" / "vision.json").unlink()
+    vg.update({"pipeline": 2, "gpu": "A10", "models": {"pose": M.POSE_MODEL}})
+    vg.pop("scenes")
+    (out / "v" / "vision_gpu.json").write_text(json.dumps(vg))
+    n = 600
+    np.savez_compressed(out / "v" / "detections.npz", frame=np.zeros(0, np.int32), box=np.zeros((0, 6), np.float32),
+                        kxy=np.zeros((0, 17, 2), np.float32), kconf=np.zeros((0, 17), np.float32),
+                        n_frames=np.int32(n))
+    np.savez_compressed(out / "v" / "frame_embs.npz", frame_times=np.arange(0, 40, 0.5),
+                        frame_embs=np.ones((80, 4), np.float16))
+    (out / "v" / "shots_meta.json").write_text(json.dumps({"fps": 25.0, "seconds": 3.0}))
+    rng = np.random.default_rng(1)
+    tracks = {1: {i: (rng.normal(300, 30, (17, 2)), np.ones(17), 200.0) for i in range(0, 400)}}
+    monkeypatch.setattr(M, "_frames", lambda cmd, w, h, ahead=64: iter(()))
+    monkeypatch.setattr(M, "_track_offline", lambda frames, det, n_frames: (tracks, [1] * 400 + [0] * 200, "tracktrack"))
+    assert not M._vision_done("v")
+    r = M.vision_motion.local("v")
+    assert r["tracks"] == 1
+    vis = json.loads((out / "v" / "vision.json").read_text())
+    assert vis["pipeline"] == 2 and vis["tracks"] == 1 and len(vis["scenes"]) == 2
+    assert vis["scenes"][0]["people"] == 1.0 and vis["cpu_timings"]["prep"] == 3.0
+    assert (out / "v" / "embeddings.npz").exists() and not (out / "v" / "frame_embs.npz").exists()
+    assert len(np.load(out / "v" / "person_curve.npy")) == n
+    assert M._vision_done("v")
+    # the report costs vision from the batched video and lists the CPU share
+    text = M.report.local()
+    assert "| vision CPU | CPU |" in text and "batched pipeline" in text and "Pose (GPU, batched)" in text
