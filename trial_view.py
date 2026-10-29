@@ -137,7 +137,15 @@ def _compare(data: dict) -> None:
         st.session_state["tr_page"] = pages
     page = st.number_input(f"Page (of {pages}) — {len(moments)} moments", 1, pages, 1, key="tr_page") \
         if pages > 1 else 1
+    def label(v, k):
+        """The teacher's real name for this video (e.g. '32B FP8' — an FP8-only video is saved under
+        the 32B's slot), else the slot name."""
+        model = (((videos[v].get("run") or {}).get("tagging") or {}).get(k) or {}).get("model")
+        return TR.teacher_label(model) if model else k.upper()
+
     for v, m in moments[(page - 1) * PER_PAGE: page * PER_PAGE]:
+        # only the teachers that tagged this moment (one "not tagged" row if none did)
+        here = [k for k in teachers if (m.get("teachers") or {}).get(k)] or teachers[:1]
         with st.container(border=True, key=f"tr_wrap_card_{_k(v, m)}"):
             a, b = st.columns([3, 7])        # picture ~25% smaller than before (was 2:3), more room for tags
             with a:
@@ -153,16 +161,16 @@ def _compare(data: dict) -> None:
                 if mine is not None:
                     rows.append(_row("You", mine, None))
                 rows.append(_row("Old", m.get("old") or [], mine))
-                for k in teachers:
+                for k in here:
                     r = (m.get("teachers") or {}).get(k)
-                    rows.append(_row(k.upper(), r.get("tags") if r else [], mine, r.get("unsure") if r else ())
-                                if r else f'<div style="opacity:.55;font-size:.86rem">{k.upper()}: not tagged</div>')
+                    rows.append(_row(label(v, k), r.get("tags") if r else [], mine, r.get("unsure") if r else ())
+                                if r else f'<div style="opacity:.55;font-size:.86rem">{label(v, k)}: not tagged</div>')
                 st.markdown("".join(rows), unsafe_allow_html=True)
                 caps = []
-                for k in teachers:
+                for k in here:
                     r = (m.get("teachers") or {}).get(k) or {}
                     if r.get("caption"):
-                        caps.append(f"**{k}:** {r['caption']}"
+                        caps.append(f"**{label(v, k)}:** {r['caption']}"
                                     + (" · ↩ copied from a near-identical moment" if r.get("copied_from") else ""))
                 if caps:
                     st.caption("  \n".join(caps))
@@ -172,17 +180,17 @@ def _compare(data: dict) -> None:
                     _editor(v, m, teachers, ekey)
                 else:
                     with st.container(key=f"tr_wrap_act_{_k(v, m)}"):
-                        acts = [k for k in teachers if (m.get("teachers") or {}).get(k)]
+                        acts = [k for k in here if (m.get("teachers") or {}).get(k)]
                         cols = st.columns(1 + len(acts))
                         cols[0].button("✏️ Correct", key=f"{ekey}_open", width="stretch",
                                        on_click=lambda k=ekey: st.session_state.__setitem__(k, True),
                                        help="Set the right tags for this frame — saved to your training labels.")
                         for col, k in zip(cols[1:], acts):
                             tags = (m["teachers"][k].get("tags") or [])
-                            col.button(f"✅ {k.upper()} is right", key=f"{ekey}_ok_{k}", width="stretch",
+                            col.button(f"✅ {label(v, k)} is right", key=f"{ekey}_ok_{k}", width="stretch",
                                        on_click=_save,
                                        args=(TR.correction_card(v, m, tags), tags, ekey),
-                                       help=f"Save {k.upper()}'s tags as your tags for this frame.")
+                                       help=f"Save {label(v, k)}'s tags as your tags for this frame.")
 
 
 def _motion_chart(v: dict, marks: list) -> None:

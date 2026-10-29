@@ -309,3 +309,32 @@ def test_summary_opens_first_with_scorecard(bundle, no_labels):
     assert [e.label for e in at.expander][:4] == ["💷 Cost and time per batch", "🔎 Tagging detail per batch",
                                                   "✂️ Scene changes per batch",
                                                   "📄 Full written report (as at the last export)"]
+
+
+def test_fp8_only_batch_shows_one_named_row(no_labels):
+    """Batch 7 case: the results have 32b and 32b-fp8 (the FP8 check video), but a video tagged only by
+    FP8 is saved under '32b' — its cards show one row named 32B FP8, not a '32B FP8: not tagged' row."""
+    from tests.apptest_util import errors, page_app
+    data = _bundle()
+    data["teachers"] = {"32b": "Qwen3-VL-32B-Instruct", "32b-fp8": "Qwen3-VL-32B-Instruct-FP8"}
+    va = data["videos"]["vid_a"]
+    va["run"]["tagging"] = {"32b": {"model": "Qwen/Qwen3-VL-32B-Instruct-FP8", "seconds": 10.0}}
+    for m in va["moments"]:
+        m["teachers"] = {"32b": m["teachers"]["32b"]}
+    if TR.RESULTS_DIR.exists():
+        shutil.rmtree(TR.RESULTS_DIR)
+    (TR.RESULTS_DIR / "frames" / "vid_a").mkdir(parents=True)
+    (TR.RESULTS_DIR / "results.json").write_text(json.dumps(data))
+    TR._CACHE.clear()
+    try:
+        at = page_app("pages/6_Training_Labels.py")
+        at.session_state["tl_view"] = "🧪 Trial results"
+        at.session_state["tr_sub"] = "🖼️ Compare tags"
+        at.run()
+        assert not errors(at), errors(at)
+        html = " ".join(m.value for m in at.markdown)
+        assert "not tagged" not in html and "32B FP8" in html
+        assert [b.label for b in at.button if b.label.startswith("✅")][:1] == ["✅ 32B FP8 is right"]
+    finally:
+        shutil.rmtree(TR.RESULTS_DIR, ignore_errors=True)
+        TR._CACHE.clear()
