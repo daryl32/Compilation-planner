@@ -134,9 +134,10 @@ MAIN_TEACHER = "32b"
 
 
 def shown_teachers(teachers) -> list:
-    """The teachers the view shows: just the chosen one (32B) when the results have it, else all."""
+    """The teachers the view shows: the 32B (and its FP8 version where a video has both, for the
+    side-by-side check); the 8B only when the results have nothing else."""
     teachers = list(teachers or [])
-    return [MAIN_TEACHER] if MAIN_TEACHER in teachers else teachers
+    return [k for k in teachers if k != "8b"] or teachers
 
 
 def ordered(items: list, how: str = "video", seed: int = 0) -> list:

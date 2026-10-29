@@ -158,10 +158,14 @@ def _compare(data: dict) -> None:
                     rows.append(_row(k.upper(), r.get("tags") if r else [], mine, r.get("unsure") if r else ())
                                 if r else f'<div style="opacity:.55;font-size:.86rem">{k.upper()}: not tagged</div>')
                 st.markdown("".join(rows), unsafe_allow_html=True)
-                caps = [(k, (m.get("teachers") or {}).get(k, {}).get("caption")) for k in teachers]
-                caps = [(k, cap) for k, cap in caps if cap]
+                caps = []
+                for k in teachers:
+                    r = (m.get("teachers") or {}).get(k) or {}
+                    if r.get("caption"):
+                        caps.append(f"**{k}:** {r['caption']}"
+                                    + (" · ↩ copied from a near-identical moment" if r.get("copied_from") else ""))
                 if caps:
-                    st.caption("  \n".join(f"**{k}:** {cap}" for k, cap in caps))
+                    st.caption("  \n".join(caps))
                 # ✏️ Correct: your tags for this frame go to your training labels (the gold set).
                 ekey = f"tr_edit_{_k(v, m)}"
                 if st.session_state.get(ekey):

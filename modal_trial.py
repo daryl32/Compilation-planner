@@ -9,8 +9,12 @@ each video:
                       how regular it is, and the onsets
                     • SigLIP2 picture embeddings, 2 per second (for the vector search later)
                     • the frames the tagger needs
-  tag (H100 GPU)    • Qwen3-VL-30B-A3B (the "teacher") tags every scene and every 🎯 tag card
-                      from 7 frames over 4 s, using your tag_vocabulary.csv
+  prep (CPU)        • one prompts.json per video: every moment's full prompt with its 7 frames
+                      already read and encoded, so the GPU reads nothing but that file; near-
+                      identical moments in a scene are sent once and copy the answer (--dedup)
+  tag (H100 GPU)    • Qwen3-VL-32B (the "teacher"; --teacher 32b-fp8 for Qwen's FP8 build) tags
+                      every scene and every 🎯 tag card from 7 frames over 4 s, using your
+                      tag_vocabulary.csv; records tokens/s and GPU use (MFU)
   report (CPU)      • teacher vs the old tagger vs your 🎯 Training Labels, per tag
                     • new vs old scene detection vs your scene-change answers
                     • what it cost, per hour of footage, and the full-library estimate
@@ -22,11 +26,15 @@ Run from the scene-labeling folder, in the venv (pip install modal; modal setup)
     modal run modal_trial.py                  the whole trial pack
     modal run modal_trial.py --stage report   just rebuild the report
     modal run modal_trial.py --stage tag --videos vid05,vid06
-Stages: download, vision, tag, report, export, status, results (report + export, CPU only), all
-(default). status lists every packed
-video with its batch and when vision / tagging were done — nothing runs on a GPU. export puts the results in your
-Drive catalogue folder (catalogue/trial_results) for the web app's 🧪 Trial results view. Each skips a video it has already done
-unless you pass --redo.
+    modal run modal_trial.py --stage prep                 CPU only: shows how many moments dedup saves
+    modal run modal_trial.py --stage tag --teacher 32b-fp8 --videos vid05 --redo    the FP8 check
+Stages: download, vision, prep, tag, report, export, status, results (report + export, CPU only),
+all (default); tag always runs prep first. status lists every packed video with its batch and when
+vision / tagging were done — nothing runs on a GPU. export puts the results in your Drive catalogue
+folder (catalogue/trial_results) for the web app's 🧪 Trial results view. Each skips a video it has
+already done unless you pass --redo (32b and 32b-fp8 count as the same teacher).
+Options: --examples N worked examples from your labels per moment (default 0), --dedup S copy the
+answer between moments in a scene more alike than S (default 0.96, 0 = off).
 """
 
 from __future__ import annotations
@@ -40,9 +48,14 @@ import modal
 
 # The teachers to compare. Both dense (non mixture-of-experts): the 30B-A3B MoE needed a
 # FlashInfer MoE kernel that vLLM compiles from scratch on start-up (20+ silent minutes).
-TEACHERS = {"8b": "Qwen/Qwen3-VL-8B-Instruct", "32b": "Qwen/Qwen3-VL-32B-Instruct"}
+TEACHERS = {"8b": "Qwen/Qwen3-VL-8B-Instruct", "32b": "Qwen/Qwen3-VL-32B-Instruct",
+            "32b-fp8": "Qwen/Qwen3-VL-32B-Instruct-FP8"}     # Qwen's own FP8 release of the 32B
 TEACHER_GPUS = {"8b": ["L40S", "A100-40GB", "A100-80GB", "H100"],   # 17 GB of weights
-                "32b": ["H100", "A100-80GB"]}                        # 66 GB of weights
+                "32b": ["H100", "A100-80GB"],                        # 66 GB of weights
+                "32b-fp8": ["H100"]}                                 # 33 GB; FP8 maths needs Hopper
+# 32b and 32b-fp8 are the same teacher at two precisions: a video tagged by either counts as
+# tagged, and the app shows them under one name (both names only where a video has both).
+SLOT = {"8b": "8b", "32b": "32b", "32b-fp8": "32b"}
 VLM_MODEL = TEACHERS["8b"]
 TEACHERS_DEFAULT = "32b"     # chosen after batch 1
 EMB_MODEL = "google/siglip2-so400m-patch14-384"
@@ -55,7 +68,10 @@ VISION_GPUS = ["L4", "A10", "L40S", "A100-40GB"]
 VISION_GPU = VISION_GPUS[0]
 
 # Worked examples from your labels shown to the teacher before each moment (--examples N).
-EXAMPLES_DEFAULT, EXAMPLES_MAX = 3, 6
+# Off by default since batch 5: they cost 30–40% more per moment for no clear gain.
+EXAMPLES_DEFAULT, EXAMPLES_MAX = 0, 6
+# Near-identical moments in a scene are tagged once and the answer copied (--dedup 0 = tag all).
+DEDUP_DEFAULT = 0.96
 
 DATA, CACHE = "/data", "/cache"
 PACK, OUT = f"{DATA}/pack", f"{DATA}/trial"
@@ -118,11 +134,18 @@ def _vision_done(video_id: str) -> bool:
 
 
 def _tags_done(video_id: str, key: str) -> bool:
-    """A complete tagging by this teacher of every moment the current vision result has."""
+    """A complete tagging of every moment the current vision result has, by this teacher or by the
+    other precision of the same one (32b / 32b-fp8). Pass --redo to tag again regardless."""
     vis = _read_json(f"{OUT}/{video_id}/vision.json")
-    prev = _read_json(f"{OUT}/{video_id}/tags_{key}.json")
-    return (bool(vis) and bool(prev) and not prev.get("partial") and not vis.get("partial")
-            and prev.get("targets") == len(vis.get("targets") or []))
+    if not vis or vis.get("partial"):
+        return False
+    for k in TEACHERS:
+        if SLOT[k] != SLOT[key]:
+            continue
+        prev = _read_json(f"{OUT}/{video_id}/tags_{k}.json")
+        if prev and not prev.get("partial") and prev.get("targets") == len(vis.get("targets") or []):
+            return True
+    return False
 
 
 def _gpu_name(default: str) -> str:
@@ -570,9 +593,82 @@ def build_example_pool() -> int:
     return len(pool)
 
 
-def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False,
-               examples: int = 0) -> dict:
+def prompts_file(video_id: str) -> Path:
+    return Path(f"{OUT}/{video_id}/prompts.json")
+
+
+@app.function(image=report_image, volumes={DATA: pack_vol}, timeout=1800, cpu=2, memory=6144)
+def prepare_prompts(video_id: str, max_prompts: int = 0, examples: int = 0, dedup: float = DEDUP_DEFAULT) -> dict:
+    """CPU, before the teacher starts: everything the GPU needs for one video in ONE file
+    (prompts.json) — which moments to send, the full prompt for each with its frames already
+    read and base64-encoded, and which near-identical moments just copy another's answer. The
+    teacher container then reads one file and feeds the GPU; it opens no frames itself."""
     import base64
+    import trial_logic as TL
+
+    pack_vol.reload()
+    vis = _read_json(f"{OUT}/{video_id}/vision.json")
+    if not vis:
+        return {"video_id": video_id, "error": "no vision.json — run the vision stage first"}
+    t0 = time.time()
+    vocab = TL.teacher_vocab(_vocab())         # tags switched off for the teacher aren't asked about
+    head, moment, tail = TL.build_prompt(vocab)
+    targets = vis["targets"][:max_prompts] if max_prompts else vis["targets"]
+    by_key = {tg["key"]: tg for tg in targets}
+    times, embs = _video_embeddings(video_id)
+    keep, copies = TL.dedup_targets(targets, times, embs, dedup)
+    for key, c in copies.items():
+        tg = by_key[key]
+        c.update({"t": tg["t"], "scene_id": tg.get("scene_id"), "gold_id": tg.get("gold_id")})
+
+    examples = max(0, min(int(examples or 0), EXAMPLES_MAX))
+    pool = (_load_pool() or _example_pool()) if examples else []
+    frames_dir = Path(f"{OUT}/{video_id}/frames")
+    cache = {}
+
+    def img(path) -> dict:
+        path = str(path)
+        if path not in cache:
+            cache[path] = base64.b64encode(Path(path).read_bytes()).decode()
+        return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{cache[path]}"}}
+
+    moments, used_examples, missing = [], 0, 0
+    for tg in keep:
+        parts = [{"type": "text", "text": head}]        # same for every moment → prefix-cached
+        if pool and times is not None:
+            j = TL.nearest_index(times, tg["t"])
+            shots = TL.pick_examples(embs[j], pool, examples, exclude_video=video_id) if j is not None else []
+            if shots:
+                parts.append({"type": "text", "text": TL.examples_intro(len(shots))})
+                for n, ex in enumerate(shots, 1):
+                    parts += [img(ex["frame"]), {"type": "text", "text": TL.example_caption(n, ex["tags"], vocab)}]
+                used_examples += len(shots)
+        parts.append({"type": "text", "text": moment})
+        frames = [frames_dir / TL.frame_name(t) for t in TL.context_times(tg["t"], vis["duration"])]
+        if not all(f.exists() for f in frames):
+            missing += 1
+            continue
+        parts += [img(f) for f in frames]
+        parts.append({"type": "text", "text": tail})
+        moments.append({"key": tg["key"], "t": tg["t"], "scene_id": tg.get("scene_id"),
+                        "gold_id": tg.get("gold_id"), "conv": [{"role": "user", "content": parts}]})
+    sent = {m["key"] for m in moments}
+    copies = {k: c for k, c in copies.items() if c["of"] in sent}      # a copy needs its original
+    data = {"video_id": video_id, "created": time.time(), "targets": len(vis["targets"]),
+            "partial": bool(max_prompts) or bool(vis.get("partial")),
+            "vocab": [r["tag"] for r in vocab], "examples": examples, "examples_used": used_examples,
+            "dedup": dedup, "copies": copies, "moments": moments}
+    pf = prompts_file(video_id)
+    pf.write_text(json.dumps(data), encoding="utf-8")
+    pack_vol.commit()
+    return {"video_id": video_id, "targets": len(targets), "prompts": len(moments), "copied": len(copies),
+            "missing_frames": missing, "mb": round(pf.stat().st_size / 1e6, 1),
+            "examples_per_moment": round(used_examples / max(len(moments), 1), 1),
+            "seconds": round(time.time() - t0, 1)}
+
+
+def _tag_video(self, video_id: str, redo: bool = False) -> dict:
+    """GPU: feed the prepared prompts.json through the teacher. Nothing is read but that one file."""
     import trial_logic as TL
     from vllm import SamplingParams
 
@@ -581,68 +677,21 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False,
         return {"video_id": video_id, "teacher": key, "error": f"the {key} model didn't load — {self.load_error}"}
     pack_vol.reload()
     out = tags_file(video_id, key)
-    vis = _read_json(f"{OUT}/{video_id}/vision.json")
-    if not vis:
-        return {"video_id": video_id, "teacher": key, "error": "no vision.json — run the vision stage first"}
     if not redo and _tags_done(video_id, key):
         return {"video_id": video_id, "teacher": key, "skipped": True}
+    pf = prompts_file(video_id)
+    data = _read_json(pf)
+    if not data:
+        return {"video_id": video_id, "teacher": key, "error": "no prompts.json — the prep step didn't run"}
     started = time.time()
-    vocab = TL.teacher_vocab(_vocab())         # tags switched off for the teacher aren't asked about
-    head, moment, tail = TL.build_prompt(vocab)
-    frames_dir = Path(f"{OUT}/{video_id}/frames")
-    targets = vis["targets"][:max_prompts] if max_prompts else vis["targets"]
-
-    def img(path, keep: bool = False) -> dict:
-        path = str(path)
-        cache = getattr(self, "frame_b64", None)
-        b64 = cache.get(path) if keep and cache is not None else None
-        if b64 is None:
-            b64 = base64.b64encode(Path(path).read_bytes()).decode()
-            if keep and cache is not None:
-                cache[path] = b64           # example frames come up again and again
-        return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-
-    # Worked examples: for each moment, the most similar frames you've labelled in other videos.
-    examples = max(0, min(int(examples or 0), EXAMPLES_MAX))
-    pool, times, embs = [], None, None
-    if examples:
-        if getattr(self, "pool", None) is None:
-            self.pool = _load_pool()
-            if self.pool is None:       # no saved pool (e.g. --stage tag on its own): build it here
-                print(f"[{key} teacher] gathering your labelled frames for worked examples…", flush=True)
-                self.pool = _example_pool()
-            self.frame_b64 = {}
-            print(f"[{key} teacher] {len(self.pool)} of your labelled frames available as examples.", flush=True)
-        pool = self.pool
-        times, embs = _video_embeddings(video_id)
-    used_examples = 0
-    convs, keep = [], []
-    for tg in targets:
-        parts = [{"type": "text", "text": head}]        # same for every moment → prefix-cached
-        if pool and times is not None:
-            j = TL.nearest_index(times, tg["t"])
-            shots = TL.pick_examples(embs[j], pool, examples, exclude_video=video_id) if j is not None else []
-            if shots:
-                parts.append({"type": "text", "text": TL.examples_intro(len(shots))})
-                for n, ex in enumerate(shots, 1):
-                    parts += [img(ex["frame"], keep=True), {"type": "text", "text": TL.example_caption(n, ex["tags"], vocab)}]
-                used_examples += len(shots)
-        parts.append({"type": "text", "text": moment})
-        ok = True
-        for t in TL.context_times(tg["t"], vis["duration"]):
-            f = frames_dir / TL.frame_name(t)
-            if not f.exists():
-                ok = False
-                break
-            parts.append(img(f))
-        if ok:
-            parts.append({"type": "text", "text": tail})
-            convs.append([{"role": "user", "content": parts}])
-            keep.append(tg)
+    moments, copies, vocab_names = data["moments"], data.get("copies") or {}, data.get("vocab") or []
+    vocab = [r for r in TL.teacher_vocab(_vocab()) if r["tag"] in set(vocab_names)] or TL.teacher_vocab(_vocab())
+    convs = [m["conv"] for m in moments]
     # Chunks the size of vLLM's batch (max_num_seqs), so progress shows every batch at no cost.
     outs, chunk, params = [], 32, SamplingParams(temperature=0.0, max_tokens=256)
-    print(f"[{key} teacher] {video_id[:40]}: tagging {len(convs)} moments"
-          + (f" with ~{used_examples / max(len(convs), 1):.1f} worked examples each" if used_examples else "")
+    print(f"[{key} teacher] {video_id[:40]}: {len(convs)} moments to tag"
+          + (f" (+{len(copies)} near-identical ones copy an answer)" if copies else "")
+          + (f", ~{data['examples_used'] / max(len(convs), 1):.1f} worked examples each" if data.get("examples_used") else "")
           + f" — progress every {chunk}…", flush=True)
     for i in range(0, len(convs), chunk):
         outs += self.llm.chat(convs[i:i + chunk], params, use_tqdm=False)
@@ -650,27 +699,41 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False,
         left = el / len(outs) * (len(convs) - len(outs))
         print(f"[{key} teacher] {video_id[:40]}: {len(outs)}/{len(convs)} moments tagged · "
               f"{el / 60:.1f} min so far, about {left / 60:.1f} min left", flush=True)
-    results = {}
-    bad = 0
-    for tg, o in zip(keep, outs):
+    seconds = time.time() - started
+    results, bad, p_tok, o_tok = {}, 0, 0, 0
+    for m, o in zip(moments, outs):
         ans = TL.parse_answer(o.outputs[0].text, vocab)
         bad += not ans["ok"]
-        results[tg["key"]] = {**ans, "t": tg["t"], "scene_id": tg.get("scene_id"),
-                              "gold_id": tg.get("gold_id"), "raw": o.outputs[0].text[:400]}
-    seconds = time.time() - started
+        p_tok += len(getattr(o, "prompt_token_ids", None) or [])
+        o_tok += len(getattr(o.outputs[0], "token_ids", None) or [])
+        results[m["key"]] = {**ans, "t": m["t"], "scene_id": m.get("scene_id"),
+                             "gold_id": m.get("gold_id"), "raw": o.outputs[0].text[:400]}
+    for k, c in copies.items():
+        src = results.get(c["of"])
+        if src:
+            results[k] = {**{f: src[f] for f in ("tags", "unsure", "caption", "ok")}, "t": c["t"],
+                          "scene_id": c.get("scene_id"), "gold_id": c.get("gold_id"),
+                          "copied_from": c["of"], "similarity": c.get("similarity")}
+    gpu = _gpu_name(TEACHER_GPUS[key][0])
+    use = TL.gpu_use(key, gpu, p_tok + o_tok, seconds)
     load = self.load_seconds if self.first else 0.0
     self.first = False
-    out.write_text(json.dumps({"video_id": video_id, "teacher": key, "model": TEACHERS[key],
-                               "gpu": _gpu_name(TEACHER_GPUS[key][0]),
-                               "partial": bool(max_prompts) or bool(vis.get("partial")),
-                               "targets": len(vis["targets"]),
+    out.write_text(json.dumps({"video_id": video_id, "teacher": key, "model": TEACHERS[key], "gpu": gpu,
+                               "partial": bool(data.get("partial")), "targets": data["targets"],
                                "seconds": round(seconds, 1), "load_seconds": round(load, 1),
-                               "prompts": len(convs), "unreadable": bad,
-                               "examples": examples, "examples_used": used_examples,
-                               "vocab": [r["tag"] for r in vocab], "results": results}), encoding="utf-8")
+                               "prompts": len(convs), "copied": len(copies), "unreadable": bad,
+                               "prompt_tokens": p_tok, "output_tokens": o_tok,
+                               "tokens_per_s": use["tokens_per_s"], "mfu": use["mfu"],
+                               "moments_per_min": round(60 * len(convs) / max(seconds, 1e-6), 1),
+                               "examples": data.get("examples", 0), "examples_used": data.get("examples_used", 0),
+                               "dedup": data.get("dedup"), "vocab": vocab_names, "results": results}),
+                   encoding="utf-8")
+    pf.unlink(missing_ok=True)          # it's rebuilt by the prep step whenever needed
     pack_vol.commit()
-    return {"video_id": video_id, "teacher": key, "prompts": len(convs), "seconds": round(seconds, 1),
-            "unreadable": bad, "examples_per_moment": round(used_examples / max(len(convs), 1), 1)}
+    print(f"[{key} teacher] {video_id[:40]}: {len(convs)} moments in {seconds / 60:.1f} min · "
+          f"{use['tokens_per_s'] or 0:,} tokens/s · GPU maths used {100 * (use['mfu'] or 0):.0f}%", flush=True)
+    return {"video_id": video_id, "teacher": key, "prompts": len(convs), "copied": len(copies),
+            "seconds": round(seconds, 1), "unreadable": bad, "tokens_per_s": use["tokens_per_s"], "mfu": use["mfu"]}
 
 
 @app.cls(image=tag_image, gpu=TEACHER_GPUS["8b"], volumes={DATA: pack_vol, CACHE: cache_vol},
@@ -681,8 +744,8 @@ class Tagger8B:
         _load_teacher(self, "8b")
 
     @modal.method()
-    def tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False, examples: int = 0) -> dict:
-        return _tag_video(self, video_id, max_prompts, redo, examples)
+    def tag_video(self, video_id: str, redo: bool = False) -> dict:
+        return _tag_video(self, video_id, redo)
 
 
 @app.cls(image=tag_image, gpu=TEACHER_GPUS["32b"], volumes={DATA: pack_vol, CACHE: cache_vol},
@@ -693,11 +756,23 @@ class Tagger32B:
         _load_teacher(self, "32b")
 
     @modal.method()
-    def tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False, examples: int = 0) -> dict:
-        return _tag_video(self, video_id, max_prompts, redo, examples)
+    def tag_video(self, video_id: str, redo: bool = False) -> dict:
+        return _tag_video(self, video_id, redo)
 
 
-TAGGERS = {"8b": Tagger8B, "32b": Tagger32B}
+@app.cls(image=tag_image, gpu=TEACHER_GPUS["32b-fp8"], volumes={DATA: pack_vol, CACHE: cache_vol},
+         timeout=4 * 3600, cpu=8, memory=65536, max_containers=1)
+class Tagger32BFP8:
+    @modal.enter()
+    def load(self):
+        _load_teacher(self, "32b-fp8")
+
+    @modal.method()
+    def tag_video(self, video_id: str, redo: bool = False) -> dict:
+        return _tag_video(self, video_id, redo)
+
+
+TAGGERS = {"8b": Tagger8B, "32b": Tagger32B, "32b-fp8": Tagger32BFP8}
 
 
 # ---------------------------------------------------------------------------
@@ -725,8 +800,8 @@ def report() -> str:
             if tj:
                 tagged_by.setdefault(key, {})[v] = tj
     keys = [k for k in TEACHERS if k in tagged_by]
-    if TEACHERS_DEFAULT in keys:        # the chosen teacher only — the 8B was dropped after batch 1
-        keys = [TEACHERS_DEFAULT]
+    if any(k != "8b" for k in keys):    # the 8B was dropped after batch 1 — only when nothing else
+        keys = [k for k in keys if k != "8b"]
 
     # --- Tags: old tagger vs each teacher, on the same labelled frames (ones every teacher tagged)
     gold_tags = [i for i in gold if i.get("type") == "tags" and not i.get("skipped")]
@@ -875,6 +950,24 @@ def report() -> str:
         unreadable = sum(t.get("unreadable", 0) for t in tagged_by[k].values())
         prompts = sum(t.get("prompts", 0) for t in tagged_by[k].values())
         md.append(f"{k}: replies that weren't valid JSON {unreadable} of {prompts}.")
+    # How hard the tagging GPU worked (only runs that recorded tokens — from v1.32 on).
+    speed = []
+    for k in keys:
+        runs = [t for t in tagged_by[k].values() if t.get("prompt_tokens")]
+        if not runs:
+            continue
+        sec = sum(t.get("seconds", 0.0) for t in runs)
+        tok = sum(t.get("prompt_tokens", 0) + t.get("output_tokens", 0) for t in runs)
+        sent = sum(t.get("prompts", 0) for t in runs)
+        copied = sum(t.get("copied", 0) for t in runs)
+        gpu = runs[0].get("gpu") or TEACHER_GPUS[k][0]
+        use = TL.gpu_use(k, gpu, tok, sec)
+        speed.append(f"| {k} | {gpu} | {len(runs)} | {sent} | {copied} | {60 * sent / max(sec, 1e-6):.0f} | "
+                     f"{(use['tokens_per_s'] or 0):,} | {f(use['mfu'])} |")
+    if speed:
+        md += ["", "How hard the tagging GPU worked (1 MFU = flat out; under 0.3 = mostly waiting):", "",
+               "| Teacher | GPU | Videos | Moments sent | Copied (near-identical) | Moments / min | Tokens / s | MFU |",
+               "|---|---|---|---|---|---|---|---|", *speed]
     # Did the worked examples help? Your labelled frames split by whether their video was tagged
     # with examples (so this batch's videos vs earlier ones).
     if best and trial_gold:
@@ -928,6 +1021,20 @@ def report() -> str:
 CURVE_FPS = 2.0         # motion curves in the bundle: 2 points a second
 
 
+def _export_slots(found: dict) -> dict:
+    """What the app shows as "the teacher" for one video: the 8B only when nothing better exists;
+    32b and 32b-fp8 are one teacher at two precisions, so an FP8-only video shows under "32b" —
+    both names only where a video has both (the FP8 check, side by side)."""
+    if set(found) == {"8b"}:
+        return dict(found)
+    out = {}
+    if "32b" in found:
+        out["32b"] = found["32b"]
+    if "32b-fp8" in found:
+        out["32b-fp8" if "32b" in found else "32b"] = found["32b-fp8"]
+    return out
+
+
 def _resample_curve(values, fps: float, out_fps: float = CURVE_FPS) -> list:
     """Mean of each 1/out_fps-second window (NaN-aware), rounded — for small charts."""
     import numpy as np
@@ -963,23 +1070,25 @@ def export(smoke: bool = False) -> dict:
     batch_of = {v: str(b) for b, ids in batches.items() for v in ids}
     if not batches:                     # packs from before batches existed are batch 1
         batch_of = {v: "1" for v in done}
-    videos, n_frames = {}, 0
+    videos, n_frames, models = {}, 0, {}
     for v in done:
         vis = _read_json(f"{OUT}/{v}/vision.json")
         man = _read_json(f"{PACK}/manifests/{v}.json") or {"scenes": []}
-        teachers, tag_runs = {}, {}
+        found = {}
         for key in TEACHERS:
             tf = tags_file(v, key)
             tj = _read_json(tf) or (_read_json(f"{OUT}/{v}/tags.json") if key == "8b" else None)
             if tj:
-                teachers[key] = tj["results"]
-                tag_runs[key] = {"seconds": tj.get("seconds"), "load_seconds": tj.get("load_seconds"),
-                                 "gpu": tj.get("gpu"), "prompts": tj.get("prompts"),
-                                 "unreadable": tj.get("unreadable"),
-                                 "at": tf.stat().st_mtime if tf.exists() else None}
-        if TEACHERS_DEFAULT in teachers:
-            teachers = {TEACHERS_DEFAULT: teachers[TEACHERS_DEFAULT]}
-            tag_runs = {TEACHERS_DEFAULT: tag_runs.get(TEACHERS_DEFAULT)}
+                found[key] = (tj, tf)
+        teachers, tag_runs = {}, {}
+        for slot, (tj, tf) in _export_slots(found).items():
+            teachers[slot] = tj["results"]
+            tag_runs[slot] = {"seconds": tj.get("seconds"), "load_seconds": tj.get("load_seconds"),
+                              "gpu": tj.get("gpu"), "prompts": tj.get("prompts"), "copied": tj.get("copied"),
+                              "unreadable": tj.get("unreadable"), "model": tj.get("model"),
+                              "tokens_per_s": tj.get("tokens_per_s"), "mfu": tj.get("mfu"),
+                              "at": tf.stat().st_mtime if tf.exists() else None}
+            models.setdefault(slot, set()).add((tj.get("model") or TEACHERS.get(slot, slot)).split("/")[-1])
         vf = Path(f"{OUT}/{v}/vision.json")
         old_scenes = {s["scene_id"]: s for s in man["scenes"]}
         moments = []
@@ -997,7 +1106,7 @@ def export(smoke: bool = False) -> dict:
                 "key": tg["key"], "t": tg["t"], "scene_id": tg.get("scene_id"), "frame": frame,
                 "mine": None if g is None else list(g.get("tags") or []),
                 "old": list(sc.get("corrected_tags") if sc.get("corrected_tags") is not None else sc.get("tags") or []),
-                "teachers": {k: {f: r[tg["key"]].get(f) for f in ("tags", "unsure", "caption")}
+                "teachers": {k: {f: r[tg["key"]].get(f) for f in ("tags", "unsure", "caption", "copied_from")}
                              for k, r in teachers.items() if tg["key"] in r},
             })
         old_curve, old_fps = [], 0.0
@@ -1038,8 +1147,7 @@ def export(smoke: bool = False) -> dict:
         }
     report_json = _read_json(f"{OUT}/report.json", {}) or {}
     results = {"version": 1, "created": time.strftime("%Y-%m-%d %H:%M"), "smoke": smoke,
-               "teachers": {k: TEACHERS[k] for k in TEACHERS
-                            if any(k in m["teachers"] for vd in videos.values() for m in vd["moments"])},
+               "teachers": {k: ", ".join(sorted(v)) for k, v in models.items()},
                "report": report_json, "videos": videos}
     Path(f"{EXPORT}/results.json").write_text(json.dumps(results), encoding="utf-8")
     if Path(f"{OUT}/report.md").exists():
@@ -1126,20 +1234,24 @@ def list_pack() -> list:
 
 @app.local_entrypoint()
 def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False, teacher: str = "",
-         examples: int = -1):
-    """teacher: 8b, 32b or both (default: 8b for --smoke, 32b otherwise — chosen after batch 1).
-    examples: how many of your labelled frames from other videos the teacher sees as worked
-    examples before each moment (default 3, 0 = off, at most 6)."""
+         examples: int = -1, dedup: float = -1.0):
+    """teacher: 8b, 32b, 32b-fp8 or both (= 8b + 32b). Default: 8b for --smoke, 32b otherwise.
+    examples: worked examples from your labels before each moment (default 0 = off, at most 6).
+    dedup: near-identical moments in a scene are tagged once and the answer copied when their
+    picture similarity is above this (default 0.96; 0 = tag every moment)."""
     # No trial_logic import here: this runs on the machine you start it from, whose venv may
     # only have modal (trial_logic needs numpy).
     examples = EXAMPLES_DEFAULT if examples < 0 else min(examples, EXAMPLES_MAX)
+    dedup = DEDUP_DEFAULT if dedup < 0 else dedup
     teacher = (teacher or ("8b" if smoke else "32b")).lower()
-    keys = list(TEACHERS) if teacher == "both" else [teacher]
+    keys = ["8b", "32b"] if teacher == "both" else [teacher]
     if any(k not in TEACHERS for k in keys):
         print(f"--teacher must be one of: {', '.join(TEACHERS)}, both")
         return
-    stages = (["download", "vision", "tag", "report", "export"] if stage == "all"
+    stages = (["download", "vision", "prep", "tag", "report", "export"] if stage == "all"
               else ["report", "export"] if stage == "results" else [stage])
+    if "tag" in stages and "prep" not in stages:
+        stages.insert(stages.index("tag"), "prep")      # the GPU only ever reads what prep wrote
     if stage == "status":
         _print_status(status.remote(keys), keys)
         return
@@ -1162,6 +1274,7 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     max_seconds, max_prompts = (90, 12) if smoke else (0, 0)
     if smoke:
         vids = vids[:1]
+        todo_vision, todo_tags = list(vids), {k: list(vids) for k in keys}
         redo = True
         print(f"Smoke test on {vids[0]} (first {max_seconds} s, {max_prompts} prompts).")
     t_all = time.time()
@@ -1171,25 +1284,38 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         print(f"Vision on {len(todo_vision)} video(s) ({' / '.join(VISION_GPUS)}, first free)…")
         for r in vision.starmap([(v, max_seconds, redo) for v in todo_vision], return_exceptions=True):
             print("  ", r)
-    if "tag" in stages and examples and (smoke or any(todo_tags.values())):
-        t0 = time.time()
-        print("Gathering your labelled frames for the worked examples (CPU)…")
-        print(f"   {build_example_pool.remote()} frames ready in {time.time() - t0:.0f} s.")
+    if "vision" in stages and "tag" in stages and not smoke and not redo:
+        for k in keys:          # vision just ran — anything it finished needs tagging too
+            st = {r["video_id"]: r for r in status.remote([k])["rows"]}
+            todo_tags[k] = [v for v in vids if not (st.get(v) or {}).get(f"tags_{k}")]
+    # prep (CPU): one ready-to-feed file per video, so the GPU reads nothing else.
+    todo_prep = (vids if stage == "prep" else
+                 sorted({v for k in keys for v in todo_tags[k]} if "tag" in stages else set(), key=vids.index))
+    if "prep" in stages and todo_prep:
+        if examples:
+            t0 = time.time()
+            print("Gathering your labelled frames for the worked examples (CPU)…")
+            print(f"   {build_example_pool.remote()} frames ready in {time.time() - t0:.0f} s.")
+        print(f"Preparing prompts for {len(todo_prep)} video(s) on CPU (near-identical moments copy an answer "
+              f"above {dedup:.2f} similarity" + (f", {examples} worked examples" if examples else "") + ")…")
+        tot_p = tot_c = 0
+        for r in prepare_prompts.starmap([(v, max_prompts, examples, dedup) for v in todo_prep],
+                                         return_exceptions=True):
+            print("  ", r)
+            if isinstance(r, dict) and not r.get("error"):
+                tot_p += r["prompts"]
+                tot_c += r["copied"]
+        if tot_p + tot_c:
+            print(f"   {tot_p} moments go to the GPU, {tot_c} copy an answer "
+                  f"({100 * tot_c / (tot_p + tot_c):.0f}% fewer prompts).")
     if "tag" in stages:
         for k in keys:
-            if "vision" in stages and not smoke and not redo:
-                # vision just ran — anything it finished needs tagging too
-                st = {r["video_id"]: r for r in status.remote([k])["rows"]}
-                todo_tags[k] = [v for v in vids if not (st.get(v) or {}).get(f"tags_{k}")]
             if not todo_tags[k]:
                 print(f"{k}: every video already tagged.")
                 continue
             print(f"Tagging {len(todo_tags[k])} video(s) with {TEACHERS[k]} ({' / '.join(TEACHER_GPUS[k])}, first free)…")
-            print(f"   with {examples} worked example(s) per moment from your labels" if examples
-                  else "   without worked examples")
             tagger = TAGGERS[k]()
-            for r in tagger.tag_video.starmap([(v, max_prompts, redo, examples) for v in todo_tags[k]],
-                                              return_exceptions=True):
+            for r in tagger.tag_video.starmap([(v, redo) for v in todo_tags[k]], return_exceptions=True):
                 print("  ", r)
                 if isinstance(r, dict) and "didn't load" in str(r.get("error", "")):
                     print(f"Stopping {k}: the model couldn't start (see the error above).")

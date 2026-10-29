@@ -126,6 +126,91 @@ def context_times(t: float, duration: float) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Near-duplicate moments: tag one, copy to the rest
+# ---------------------------------------------------------------------------
+
+DEDUP_DEFAULT = 0.96        # cosine similarity (picture embeddings) above which two moments in the
+                            # same scene count as the same; 0 = tag every moment
+DEDUP_WINDOW = 2.0          # seconds either side of a moment that must match too (motion tags)
+
+
+def window_embedding(times, embs, t: float, half: float = DEDUP_WINDOW):
+    """Unit-length mean of the picture embeddings within t ± half seconds (None if there are none)."""
+    times = np.asarray(times, dtype=float)
+    sel = (times >= t - half) & (times <= t + half)
+    if not sel.any():
+        return None
+    v = np.asarray(embs, dtype=np.float32)[sel].mean(axis=0)
+    n = float(np.linalg.norm(v))
+    return v / n if n else None
+
+
+def dedup_targets(targets: list, times, embs, threshold: float = DEDUP_DEFAULT) -> tuple:
+    """Split a video's moments into the ones to send to the teacher and the ones that can copy a
+    tagged moment's answer: (keep, copies). copies = {key: {"of": kept key, "similarity": s}}.
+
+    Two moments are "the same" only when they're in the same scene and BOTH their middle frame and
+    their ±2 s window of frames match above the threshold — so a still scene where nothing changes
+    is tagged once, while a scene whose movement differs from one moment to the next is tagged at
+    every moment. Your labelled frames (gold) are always sent, so the report's scores are real."""
+    if not threshold or threshold <= 0 or times is None or embs is None or len(times) == 0:
+        return list(targets), {}
+    times = np.asarray(times, dtype=float)
+    embs = np.asarray(embs, dtype=np.float32)
+    feats = {}
+    for tg in targets:
+        j = nearest_index(times, float(tg["t"]))
+        if j is None or abs(times[j] - float(tg["t"])) > 1.0:
+            continue
+        mid = embs[j] / (np.linalg.norm(embs[j]) or 1.0)
+        win = window_embedding(times, embs, float(tg["t"]))
+        if win is not None:
+            feats[tg["key"]] = (mid, win)
+    keep, copies, reps = [], {}, {}        # reps: scene_id -> [(key, mid, win)]
+    for tg in sorted(targets, key=lambda x: float(x["t"])):
+        f = feats.get(tg["key"])
+        sc = tg.get("scene_id")
+        if f is None or tg.get("gold_id") or sc is None:
+            keep.append(tg)
+            if f is not None and sc is not None:
+                reps.setdefault(sc, []).append((tg["key"], *f))
+            continue
+        best, best_s = None, 0.0
+        for key, mid, win in reps.get(sc, []):
+            s = min(float(mid @ f[0]), float(win @ f[1]))
+            if s >= threshold and s > best_s:
+                best, best_s = key, s
+        if best is None:
+            keep.append(tg)
+            reps.setdefault(sc, []).append((tg["key"], *f))
+        else:
+            copies[tg["key"]] = {"of": best, "similarity": round(best_s, 4)}
+    return keep, copies
+
+
+# ---------------------------------------------------------------------------
+# How hard the GPU worked
+# ---------------------------------------------------------------------------
+
+# Dense BF16 peak, TFLOPS (NVIDIA spec sheets) — what "model FLOPs utilisation" is measured against.
+GPU_PEAK_TFLOPS = {"H100": 989.0, "A100-80GB": 312.0, "A100-40GB": 312.0, "L40S": 362.0, "A10": 125.0,
+                   "L4": 121.0, "T4": 65.0}
+TEACHER_PARAMS = {"8b": 8.8e9, "32b": 33.0e9, "32b-fp8": 33.0e9}
+
+
+def gpu_use(key: str, gpu: str, tokens: int, seconds: float) -> dict:
+    """{"tokens_per_s", "mfu"}: tokens the teacher processed per second, and the share of the GPU's
+    peak maths that took (2 × parameters × tokens ÷ time ÷ peak). Low MFU = the GPU mostly waited."""
+    if not seconds or seconds <= 0:
+        return {"tokens_per_s": None, "mfu": None}
+    tps = tokens / seconds
+    peak = GPU_PEAK_TFLOPS.get(gpu)
+    params = TEACHER_PARAMS.get(key)
+    mfu = (2.0 * params * tps / (peak * 1e12)) if peak and params else None
+    return {"tokens_per_s": round(tps), "mfu": None if mfu is None else round(mfu, 3)}
+
+
+# ---------------------------------------------------------------------------
 # The tagging prompt
 # ---------------------------------------------------------------------------
 

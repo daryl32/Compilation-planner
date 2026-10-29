@@ -214,7 +214,8 @@ def test_export(tmp_path, monkeypatch):
     assert len(v["person_curve"]) == 80                       # 40 s at 2 points a second
     m = next(m for m in v["moments"] if m["key"] == "g_5.00")
     assert m["mine"] == ["close-up", "dancing"] and m["old"] == []
-    assert m["teachers"] == {"32b": {"tags": ["close-up", "dancing"], "unsure": None, "caption": None}}
+    assert m["teachers"] == {"32b": {"tags": ["close-up", "dancing"], "unsure": None, "caption": None,
+                                     "copied_from": None}}
     assert (out / "export" / m["frame"]).exists()
     plain = next(m for m in v["moments"] if m["key"] == "s1_0")
     assert plain["mine"] is None and plain["teachers"] == {}
@@ -288,3 +289,115 @@ def test_example_caption_only_teacher_tags_in_vocab_order():
     assert TL.example_caption(1, ["Dancing", "walking", "close-up"], v) == "Example 1 — correct tags: close-up, dancing"
     assert TL.example_caption(2, ["walking"], v) == "Example 2 — correct tags: none of the listed tags"
     assert "2 moments" in TL.examples_intro(2) and "1 moment " in TL.examples_intro(1)
+
+
+def test_dedup_targets_same_scene_only_and_gold_kept():
+    times = np.arange(0, 30, 0.5)
+    embs = np.zeros((len(times), 3), np.float32)
+    embs[times < 10] = _unit(1, 0, 0)                       # scene 0: nothing changes
+    embs[(times >= 10) & (times < 20)] = _unit(0, 1, 0)     # scene 1: the same picture as...
+    embs[times >= 20] = _unit(0, 1, 0)                      # ...scene 2, but a different scene
+    embs[(times >= 14) & (times < 16)] = _unit(0, 0.7, 0.7)  # ...except 14–16 s, where it moves
+    targets = [{"key": "a", "t": 2.0, "scene_id": 0}, {"key": "b", "t": 5.0, "scene_id": 0},
+               {"key": "g", "t": 8.0, "scene_id": 0, "gold_id": "x"},
+               {"key": "c", "t": 11.0, "scene_id": 1}, {"key": "d", "t": 15.0, "scene_id": 1},
+               {"key": "e", "t": 18.0, "scene_id": 1}, {"key": "f", "t": 25.0, "scene_id": 2}]
+    keep, copies = TL.dedup_targets(targets, times, embs, 0.96)
+    assert [k["key"] for k in keep] == ["a", "g", "c", "d", "f"]
+    assert copies["b"]["of"] == "a" and copies["e"]["of"] == "c"   # e copies c, not the moving d
+    assert copies["b"]["similarity"] >= 0.96
+    assert TL.dedup_targets(targets, times, embs, 0) == (targets, {})
+    assert TL.dedup_targets(targets, None, None, 0.96) == (targets, {})
+
+
+def test_gpu_use():
+    u = TL.gpu_use("32b", "H100", tokens=3_000_000, seconds=1000.0)
+    assert u["tokens_per_s"] == 3000 and u["mfu"] == pytest.approx(2 * 33e9 * 3000 / 989e12, abs=1e-3)
+    assert TL.gpu_use("32b", "unknown", 10, 1.0)["mfu"] is None
+    assert TL.gpu_use("32b", "H100", 10, 0)["tokens_per_s"] is None
+
+
+def test_export_slots_and_tags_done(tmp_path, monkeypatch):
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    assert M._export_slots({"8b": 1}) == {"8b": 1}
+    assert M._export_slots({"8b": 1, "32b": 2}) == {"32b": 2}
+    assert M._export_slots({"32b-fp8": 3}) == {"32b": 3}                 # FP8 alone shows as the 32B
+    assert M._export_slots({"32b": 2, "32b-fp8": 3}) == {"32b": 2, "32b-fp8": 3}   # both: side by side
+    vis = json.loads((out / "v" / "vision.json").read_text())
+    t32 = json.loads((out / "v" / "tags_32b.json").read_text())
+    t32["targets"] = len(vis["targets"])
+    (out / "v" / "tags_32b.json").write_text(json.dumps(t32))
+    assert M._tags_done("v", "32b") and M._tags_done("v", "32b-fp8")    # same teacher, other precision
+    assert not M._tags_done("v", "8b")
+
+
+class _FakeOut:
+    def __init__(self, text, n_prompt):
+        self.prompt_token_ids = list(range(n_prompt))
+        self.outputs = [type("O", (), {"text": text, "token_ids": list(range(12))})()]
+
+
+class _FakeLLM:
+    def __init__(self):
+        self.seen = []
+
+    def chat(self, convs, params, use_tqdm=False):
+        self.seen += convs
+        return [_FakeOut('{"tags": ["close-up"], "unsure": [], "caption": "c"}', 3000) for _ in convs]
+
+
+def test_prep_then_tag_with_fake_model(tmp_path, monkeypatch):
+    """prepare_prompts (CPU) writes one file; _tag_video (GPU) reads only that and copies the
+    near-identical moments' answers."""
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    import numpy as np
+    vis = json.loads((out / "v" / "vision.json").read_text())
+    # two extra plain moments in scene 1 that look exactly like s1_0 → copies; and all 7 context
+    # frames for every moment
+    vis["targets"] += [{"key": "s1_1", "t": 33.0, "scene_id": 1}, {"key": "s1_2", "t": 36.0, "scene_id": 1}]
+    (out / "v" / "vision.json").write_text(json.dumps(vis))
+    for tg in vis["targets"]:
+        for t in TL.context_times(tg["t"], 40.0):
+            (out / "v" / "frames" / TL.frame_name(t)).write_bytes(b"jpg")
+    times = np.arange(0, 40, 0.5)
+    embs = np.tile(_unit(1, 0, 0), (len(times), 1)).astype(np.float16)
+    embs[times < 22] = _unit(0, 1, 0)
+    np.savez_compressed(out / "v" / "embeddings.npz", frame_times=times, frame_embs=embs)
+
+    r = M.prepare_prompts.local("v", 0, 0, 0.96)
+    # the 4 labelled moments always go; the 3 plain ones in scene 1 look like the labelled one at 25 s
+    assert r["prompts"] == 4 and r["copied"] == 3 and r["missing_frames"] == 0
+    data = json.loads((out / "v" / "prompts.json").read_text())
+    assert {m["key"] for m in data["moments"]} == {"g_5.00", "g_15.00", "g_25.00", "g_35.00"}
+    assert {c["of"] for c in data["copies"].values()} == {"g_25.00"}
+    first = data["moments"][0]["conv"][0]["content"]
+    assert first[0]["type"] == "text" and "Tags judged from frame 4" in first[0]["text"]   # head first
+    assert sum(p["type"] == "image_url" for p in first) == 7
+
+    class Self:
+        key, llm, load_error, load_seconds, first = "32b-fp8", _FakeLLM(), None, 50.0, True
+    monkeypatch.setattr(M, "_gpu_name", lambda d: "H100")
+    import sys
+    import types
+    fake_vllm = types.ModuleType("vllm")            # not installed here — the GPU image has it
+    fake_vllm.SamplingParams = lambda **kw: kw
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    res = M._tag_video(Self, "v", redo=True)
+    assert res["prompts"] == 4 and res["copied"] == 3 and res["unreadable"] == 0
+    assert len(Self.llm.seen) == 4 and not (out / "v" / "prompts.json").exists()
+    tj = json.loads((out / "v" / "tags_32b-fp8.json").read_text())
+    assert tj["results"]["s1_2"]["copied_from"] == "g_25.00" and tj["results"]["s1_2"]["tags"] == ["close-up"]
+    assert tj["prompt_tokens"] == 12000 and tj["tokens_per_s"] and tj["mfu"] is not None
+    assert tj["model"].endswith("FP8") and tj["load_seconds"] == 50.0
+    # the report shows both 32B precisions side by side, with the speed table
+    text = M.report.local()
+    assert "| 32b F1 | 32b-fp8 F1 |" in text and "How hard the tagging GPU worked" in text
+    assert "| 32b-fp8 | H100 | 1 | 4 | 3 |" in text
+    assert "8b" not in text
+    M.export.local(False)
+    ex = json.loads((out / "export" / "results.json").read_text())
+    assert set(ex["teachers"]) == {"32b", "32b-fp8"}
+    v = ex["videos"]["v"]
+    m = next(m for m in v["moments"] if m["key"] == "s1_2")
+    assert m["teachers"]["32b-fp8"]["copied_from"] == "g_25.00"
+    assert v["run"]["tagging"]["32b-fp8"]["copied"] == 3
