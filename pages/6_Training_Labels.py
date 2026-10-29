@@ -127,10 +127,11 @@ def tag_card(card: dict) -> None:
         default = [t for t in card.get("suggested") or [] if t in tags]
         if single:
             val = st.pills(title, tags, selection_mode="single", default=default[0] if default else None,
-                           key=key, help="  \n".join(notes) or "Pick one, or none if none fits.")
+                           wrap=True, width="stretch", key=key, help="  \n".join(notes) or "Pick one, or none if none fits.")
             picked += [val] if val else []
         else:
-            val = st.pills(title, tags, selection_mode="multi", default=default, key=key,
+            val = st.pills(title, tags, selection_mode="multi", default=default, wrap=True, width="stretch",
+                           key=key,
                            help="  \n".join(notes) or None)
             picked += list(val or [])
 
@@ -347,22 +348,24 @@ def vocab_view() -> None:
         st.success(note)
     st.caption("Changes are used from the **next batch you pack** (pack_for_modal.py copies the tag list), "
                "and straight away on the 🎯 Label cards.")
-    tag_editor()
+    st.subheader(f"All tags ({len(vocab)})")
+    st.caption("Edit cells directly, add a row at the bottom, then 💾 Save table — or use the form below for one tag.")
+    table = [{**r, "search_words": "; ".join(r["search_words"])} for r in vocab]
+    edited = st.data_editor(
+        table, num_rows="dynamic", hide_index=True, width="stretch", key="tl_vocab_editor",
+        column_order=TL.VOCAB_COLUMNS,
+        column_config={
+            "tag": st.column_config.TextColumn("tag", required=True),
+            "kind": st.column_config.SelectboxColumn("kind", options=list(TL.KINDS), default="frame"),
+            "teacher": st.column_config.CheckboxColumn("teacher", default=True),
+        })
+    if st.button("💾 Save table", type="primary", key="tl_vocab_save", width="stretch"):
+        n = TL.save_vocabulary(list(edited))
+        st.session_state["tl_vocab_note"] = f"Saved {n} tags."
+        st.rerun()
 
-    with st.expander("Edit as a table (all tags at once)"):
-        table = [{**r, "search_words": "; ".join(r["search_words"])} for r in vocab]
-        edited = st.data_editor(
-            table, num_rows="dynamic", hide_index=True, width="stretch", key="tl_vocab_editor",
-            column_order=TL.VOCAB_COLUMNS,
-            column_config={
-                "tag": st.column_config.TextColumn("tag", required=True),
-                "kind": st.column_config.SelectboxColumn("kind", options=list(TL.KINDS), default="frame"),
-                "teacher": st.column_config.CheckboxColumn("teacher", default=True),
-            })
-        if st.button("💾 Save table", type="primary", key="tl_vocab_save", width="stretch"):
-            n = TL.save_vocabulary(list(edited))
-            st.session_state["tl_vocab_note"] = f"Saved {n} tags."
-            st.rerun()
+    st.subheader("✏️ Add or edit one tag")
+    tag_editor()
     st.download_button("⬇️ Download as CSV (for Excel)", "﻿" + TL.vocabulary_csv(vocab),
                       file_name="tag_vocabulary.csv", mime="text/csv", key="tl_vocab_dl", width="stretch")
 
