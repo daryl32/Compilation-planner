@@ -58,7 +58,8 @@ TEACHER_GPUS = {"8b": ["L40S", "A100-40GB", "A100-80GB", "H100"],   # 17 GB of w
 # tagged, and the app shows them under one name (both names only where a video has both).
 SLOT = {"8b": "8b", "32b": "32b", "32b-fp8": "32b"}
 VLM_MODEL = TEACHERS["8b"]
-TEACHERS_DEFAULT = "32b"     # chosen after batch 1
+TEACHERS_DEFAULT = "32b-fp8"  # the 32B (chosen after batch 1), in FP8 since batch 6: same
+                              # accuracy in the check, much faster on the H100
 EMB_MODEL = "google/siglip2-so400m-patch14-384"
 # Medium pose model: about twice as fast as the large one, and closer to what the laptop's
 # RTX 4070 can run in its 5-minute-per-video budget.
@@ -1252,7 +1253,7 @@ def list_pack() -> list:
 @app.local_entrypoint()
 def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False, teacher: str = "",
          examples: int = -1, dedup: float = -1.0):
-    """teacher: 8b, 32b, 32b-fp8 or both (= 8b + 32b). Default: 8b for --smoke, 32b otherwise.
+    """teacher: 8b, 32b, 32b-fp8 or both (= 8b + 32b). Default: 8b for --smoke, 32b-fp8 otherwise.
     examples: worked examples from your labels before each moment (default 0 = off, at most 6).
     dedup: near-identical moments in a scene are tagged once and the answer copied when their
     picture similarity is above this (default 0.96; 0 = tag every moment)."""
@@ -1260,7 +1261,7 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     # only have modal (trial_logic needs numpy).
     examples = EXAMPLES_DEFAULT if examples < 0 else min(examples, EXAMPLES_MAX)
     dedup = DEDUP_DEFAULT if dedup < 0 else dedup
-    teacher = (teacher or ("8b" if smoke else "32b")).lower()
+    teacher = (teacher or ("8b" if smoke else TEACHERS_DEFAULT)).lower()
     keys = ["8b", "32b"] if teacher == "both" else [teacher]
     if any(k not in TEACHERS for k in keys):
         print(f"--teacher must be one of: {', '.join(TEACHERS)}, both")
