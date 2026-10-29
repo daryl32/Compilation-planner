@@ -57,6 +57,12 @@ def parse_vocabulary(text: str) -> list:
     return rows
 
 
+def teacher_vocab(vocab: list) -> list:
+    """The tags the teacher is asked about: the ones whose "teacher" switch is on. Tags switched
+    off are learned from your labels only, so they're left out of its prompt altogether."""
+    return [r for r in vocab if r.get("teacher", True)]
+
+
 def vocabulary_from_labels(labels) -> list:
     out = []
     for t in labels or []:
@@ -155,6 +161,73 @@ def build_prompt(vocab: list) -> tuple:
               "\"unsure\" instead. Reply with JSON only, no other text:",
               '{"tags": ["..."], "unsure": ["..."], "caption": "one short neutral sentence"}']
     return before, "\n".join(after)
+
+
+# ---------------------------------------------------------------------------
+# Worked examples from your own labels (shown to the teacher before each moment)
+# ---------------------------------------------------------------------------
+
+EXAMPLES_DEFAULT = 3        # examples per moment (0 = off)
+EXAMPLES_MAX = 6
+EXAMPLES_PER_VIDEO = 2      # at most this many from any one video, so one video can't dominate
+CORRECTED_BONUS = 0.05      # frames where you changed the suggested tags teach the most
+
+
+def nearest_index(times, t: float):
+    """Index of the time closest to t in a sorted array, or None if it's empty."""
+    times = np.asarray(times, dtype=float)
+    if times.size == 0:
+        return None
+    i = int(np.searchsorted(times, t))
+    if i == 0:
+        return 0
+    if i >= times.size:
+        return times.size - 1
+    return i if abs(times[i] - t) < abs(times[i - 1] - t) else i - 1
+
+
+def pick_examples(query, pool: list, k: int, exclude_video: str = "") -> list:
+    """The k labelled moments in pool most like this one (cosine similarity of their picture
+    embeddings), never from exclude_video — so the moment's own label (or a neighbour's) can't
+    leak into its answer and the report's scores stay honest. pool items: {"video_id", "emb"
+    (unit vector), "corrected" (bool), ...}. Corrected frames get a small bonus."""
+    if k <= 0 or query is None or not pool:
+        return []
+    q = np.asarray(query, dtype=np.float32)
+    q = q / (np.linalg.norm(q) or 1.0)
+    cand = [p for p in pool if p.get("video_id") != exclude_video and p.get("emb") is not None]
+    if not cand:
+        return []
+    sims = np.asarray([np.asarray(p["emb"], dtype=np.float32) for p in cand]) @ q
+    sims = sims + np.asarray([CORRECTED_BONUS if p.get("corrected") else 0.0 for p in cand])
+    out, per_video = [], {}
+    for i in np.argsort(-sims, kind="stable"):
+        p = cand[int(i)]
+        if per_video.get(p["video_id"], 0) >= EXAMPLES_PER_VIDEO:
+            continue
+        per_video[p["video_id"]] = per_video.get(p["video_id"], 0) + 1
+        out.append(p)
+        if len(out) >= k:
+            break
+    return out
+
+
+def examples_intro(n: int) -> str:
+    return (f"First, {n} moment{'s' if n != 1 else ''} from other clips that the editor has already "
+            "labelled by hand, each shown as its middle frame with the correct tags. Use them to "
+            "learn how the editor uses each tag. Movement tags in them were judged from the "
+            "seconds around the frame.")
+
+
+def example_caption(i: int, tags: list, vocab: list) -> str:
+    """'Example 2 — correct tags: a, b' — only tags the teacher is asked about, in vocabulary order."""
+    allowed = {r["tag"].lower(): r["tag"] for r in vocab}
+    mine = {str(t).strip().lower() for t in tags or []}
+    shown = [allowed[t.lower()] for t in (r["tag"] for r in vocab) if t.lower() in mine]
+    return f"Example {i} — correct tags: " + (", ".join(shown) if shown else "none of the listed tags")
+
+
+EXAMPLES_OUTRO = "Now the moment to label."
 
 
 def parse_answer(text: str, vocab: list) -> dict:

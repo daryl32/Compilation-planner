@@ -458,9 +458,10 @@ def _load_teacher(self, key: str) -> None:
     done = threading.Event()
     _start_heartbeat(key, t0, done)
     try:
+        import trial_logic as TL
         from vllm import LLM
         self.llm = LLM(model=TEACHERS[key], max_model_len=8192, gpu_memory_utilization=0.90,
-                       limit_mm_per_prompt={"image": 7, "video": 0}, max_num_seqs=32,
+                       limit_mm_per_prompt={"image": 7 + TL.EXAMPLES_MAX, "video": 0}, max_num_seqs=32,
                        enable_prefix_caching=True)
         note.unlink(missing_ok=True)
         try:
@@ -477,7 +478,45 @@ def _load_teacher(self, key: str) -> None:
     self.load_seconds = time.time() - t0
 
 
-def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False) -> dict:
+def _video_embeddings(video_id: str):
+    """(frame_times, unit-length frame embeddings) from a video's vision run, or (None, None)."""
+    import numpy as np
+    try:
+        z = np.load(f"{OUT}/{video_id}/embeddings.npz")
+        t, e = np.asarray(z["frame_times"], dtype=float), np.asarray(z["frame_embs"], dtype=np.float32)
+    except (OSError, KeyError, ValueError):
+        return None, None
+    return (t, e) if t.size and e.ndim == 2 and len(e) == t.size else (None, None)
+
+
+def _example_pool() -> list:
+    """Every 🎯 tag label (cards and ✏️ corrections) whose frame and embedding are already on the
+    Volume from an earlier vision run: {"video_id", "t", "tags", "corrected", "emb", "frame"}."""
+    import trial_logic as TL
+    by_video = {}
+    for it in _gold_items():
+        if it.get("type") == "tags" and not it.get("skipped") and it.get("t") is not None and it.get("video_id"):
+            by_video.setdefault(it["video_id"], []).append(it)
+    pool = []
+    for vid, items in by_video.items():
+        vis = _read_json(f"{OUT}/{vid}/vision.json")
+        times, embs = _video_embeddings(vid)
+        if not vis or times is None:
+            continue
+        for it in items:
+            t = float(it["t"])
+            frame = Path(f"{OUT}/{vid}/frames") / TL.frame_name(TL.context_times(t, vis["duration"])[3])
+            j = TL.nearest_index(times, t)
+            if j is None or abs(times[j] - t) > 1.0 or not frame.exists():
+                continue
+            pool.append({"video_id": vid, "t": t, "tags": list(it.get("tags") or []),
+                         "corrected": set(it.get("tags") or []) != set(it.get("suggested") or []),
+                         "emb": embs[j], "frame": str(frame)})
+    return pool
+
+
+def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False,
+               examples: int = 0) -> dict:
     import base64
     import trial_logic as TL
     from vllm import SamplingParams
@@ -493,21 +532,45 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False) ->
     if not redo and _tags_done(video_id, key):
         return {"video_id": video_id, "teacher": key, "skipped": True}
     started = time.time()
-    vocab = _vocab()
+    vocab = TL.teacher_vocab(_vocab())         # tags switched off for the teacher aren't asked about
     before, after = TL.build_prompt(vocab)
     frames_dir = Path(f"{OUT}/{video_id}/frames")
     targets = vis["targets"][:max_prompts] if max_prompts else vis["targets"]
+
+    def img(path) -> dict:
+        b64 = base64.b64encode(Path(path).read_bytes()).decode()
+        return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+
+    # Worked examples: for each moment, the most similar frames you've labelled in other videos.
+    examples = max(0, min(int(examples or 0), TL.EXAMPLES_MAX))
+    pool, times, embs = [], None, None
+    if examples:
+        if getattr(self, "pool", None) is None:
+            self.pool = _example_pool()
+            print(f"[{key} teacher] {len(self.pool)} of your labelled frames available as examples.", flush=True)
+        pool = self.pool
+        times, embs = _video_embeddings(video_id)
+    used_examples = 0
     convs, keep = [], []
     for tg in targets:
-        parts = [{"type": "text", "text": before}]
+        parts = []
+        if pool and times is not None:
+            j = TL.nearest_index(times, tg["t"])
+            shots = TL.pick_examples(embs[j], pool, examples, exclude_video=video_id) if j is not None else []
+            if shots:
+                parts.append({"type": "text", "text": TL.examples_intro(len(shots))})
+                for n, ex in enumerate(shots, 1):
+                    parts += [img(ex["frame"]), {"type": "text", "text": TL.example_caption(n, ex["tags"], vocab)}]
+                parts.append({"type": "text", "text": TL.EXAMPLES_OUTRO})
+                used_examples += len(shots)
+        parts.append({"type": "text", "text": before})
         ok = True
         for t in TL.context_times(tg["t"], vis["duration"]):
             f = frames_dir / TL.frame_name(t)
             if not f.exists():
                 ok = False
                 break
-            b64 = base64.b64encode(f.read_bytes()).decode()
-            parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+            parts.append(img(f))
         if ok:
             parts.append({"type": "text", "text": after})
             convs.append([{"role": "user", "content": parts}])
@@ -535,10 +598,11 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False) ->
                                "targets": len(vis["targets"]),
                                "seconds": round(seconds, 1), "load_seconds": round(load, 1),
                                "prompts": len(convs), "unreadable": bad,
+                               "examples": examples, "examples_used": used_examples,
                                "vocab": [r["tag"] for r in vocab], "results": results}), encoding="utf-8")
     pack_vol.commit()
     return {"video_id": video_id, "teacher": key, "prompts": len(convs), "seconds": round(seconds, 1),
-            "unreadable": bad}
+            "unreadable": bad, "examples_per_moment": round(used_examples / max(len(convs), 1), 1)}
 
 
 @app.cls(image=tag_image, gpu=TEACHER_GPUS["8b"], volumes={DATA: pack_vol, CACHE: cache_vol},
@@ -549,8 +613,8 @@ class Tagger8B:
         _load_teacher(self, "8b")
 
     @modal.method()
-    def tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False) -> dict:
-        return _tag_video(self, video_id, max_prompts, redo)
+    def tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False, examples: int = 0) -> dict:
+        return _tag_video(self, video_id, max_prompts, redo, examples)
 
 
 @app.cls(image=tag_image, gpu=TEACHER_GPUS["32b"], volumes={DATA: pack_vol, CACHE: cache_vol},
@@ -561,8 +625,8 @@ class Tagger32B:
         _load_teacher(self, "32b")
 
     @modal.method()
-    def tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False) -> dict:
-        return _tag_video(self, video_id, max_prompts, redo)
+    def tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False, examples: int = 0) -> dict:
+        return _tag_video(self, video_id, max_prompts, redo, examples)
 
 
 TAGGERS = {"8b": Tagger8B, "32b": Tagger32B}
@@ -616,7 +680,11 @@ def report() -> str:
     positives = {t: sum(t in (i.get("tags") or []) for i in gold_tags) for t in tags}
     kinds = {r["tag"]: r["kind"] for r in vocab}
 
+    teacher_on = {r["tag"]: r.get("teacher", True) for r in vocab}
+
     def verdict(t):
+        if not teacher_on.get(t, True):
+            return "teacher off — learned from your labels"
         tp = teacher["per_tag"][t]
         ot = old_trial["per_tag"][t]
         n = tp["tp"] + tp["fn"]
@@ -739,6 +807,18 @@ def report() -> str:
         unreadable = sum(t.get("unreadable", 0) for t in tagged_by[k].values())
         prompts = sum(t.get("prompts", 0) for t in tagged_by[k].values())
         md.append(f"{k}: replies that weren't valid JSON {unreadable} of {prompts}.")
+    # Did the worked examples help? Your labelled frames split by whether their video was tagged
+    # with examples (so this batch's videos vs earlier ones).
+    if best and trial_gold:
+        with_ex = {v for v, tj in tagged.items() if tj.get("examples_used")}
+        split = {"with worked examples": [i for i in trial_gold if i.get("video_id") in with_ex],
+                 "without": [i for i in trial_gold if i.get("video_id") not in with_ex]}
+        if all(split.values()):
+            md += ["", f"**Worked examples ({best}):** overall F1 on your labelled frames — "
+                   + ", ".join(f"{name} **{f(TL.score_tags([(by_gold[best][i['id']]['tags'], i.get('tags') or []) for i in items], tags)['overall']['f1'])}**"
+                               f" ({len(items)} frames, {len({i['video_id'] for i in items})} videos)"
+                               for name, items in split.items())
+                   + ". Different videos, so treat a small gap with caution."]
     md += ["",
            "## Scene changes", "",
            f"Your answers in the trial videos: {bounds['n']}.", "",
@@ -977,8 +1057,13 @@ def list_pack() -> list:
 # ---------------------------------------------------------------------------
 
 @app.local_entrypoint()
-def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False, teacher: str = ""):
-    """teacher: 8b, 32b or both (default: 8b for --smoke, 32b otherwise — chosen after batch 1)."""
+def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False, teacher: str = "",
+         examples: int = -1):
+    """teacher: 8b, 32b or both (default: 8b for --smoke, 32b otherwise — chosen after batch 1).
+    examples: how many of your labelled frames from other videos the teacher sees as worked
+    examples before each moment (default 3, 0 = off, at most 6)."""
+    import trial_logic as TL
+    examples = TL.EXAMPLES_DEFAULT if examples < 0 else min(examples, TL.EXAMPLES_MAX)
     teacher = (teacher or ("8b" if smoke else "32b")).lower()
     keys = list(TEACHERS) if teacher == "both" else [teacher]
     if any(k not in TEACHERS for k in keys):
@@ -1027,8 +1112,11 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
                 print(f"{k}: every video already tagged.")
                 continue
             print(f"Tagging {len(todo_tags[k])} video(s) with {TEACHERS[k]} ({' / '.join(TEACHER_GPUS[k])}, first free)…")
+            print(f"   with {examples} worked example(s) per moment from your labels" if examples
+                  else "   without worked examples")
             tagger = TAGGERS[k]()
-            for r in tagger.tag_video.starmap([(v, max_prompts, redo) for v in todo_tags[k]], return_exceptions=True):
+            for r in tagger.tag_video.starmap([(v, max_prompts, redo, examples) for v in todo_tags[k]],
+                                              return_exceptions=True):
                 print("  ", r)
                 if isinstance(r, dict) and "didn't load" in str(r.get("error", "")):
                     print(f"Stopping {k}: the model couldn't start (see the error above).")

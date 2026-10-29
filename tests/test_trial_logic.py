@@ -240,3 +240,50 @@ def test_status_and_pending(tmp_path, monkeypatch, capsys):
     vis["models"] = {"pose": "yolo11l-pose.pt"}
     (out / "v" / "vision.json").write_text(json.dumps(vis))
     assert not M._vision_done("v")
+
+
+def test_teacher_vocab_leaves_out_switched_off_tags():
+    v = TL.teacher_vocab(vocab())
+    assert [r["tag"] for r in v] == ["close-up", "wide", "dancing"]          # walking is teacher = no
+    before, after = TL.build_prompt(v)
+    assert "\n- walking" not in after and "\n- dancing" in after
+    assert TL.parse_answer('{"tags": ["walking", "dancing"]}', v)["tags"] == ["dancing"]
+
+
+def test_nearest_index():
+    t = np.array([0.0, 0.5, 1.0, 1.5])
+    assert TL.nearest_index(t, 0.7) == 1 and TL.nearest_index(t, 0.8) == 2
+    assert TL.nearest_index(t, -3) == 0 and TL.nearest_index(t, 9) == 3
+    assert TL.nearest_index([], 1.0) is None
+
+
+def _unit(*xs):
+    v = np.array(xs, dtype=np.float32)
+    return v / np.linalg.norm(v)
+
+
+def test_pick_examples_nearest_other_videos_only():
+    pool = [{"video_id": "a", "emb": _unit(1, 0, 0), "tags": ["wide"]},
+            {"video_id": "b", "emb": _unit(1, 0.1, 0), "tags": ["close-up"]},
+            {"video_id": "c", "emb": _unit(0, 1, 0), "tags": ["dancing"]},
+            {"video_id": "d", "emb": _unit(0.9, 0.5, 0), "tags": ["wide"]}]
+    got = TL.pick_examples(_unit(1, 0, 0), pool, 2, exclude_video="a")
+    assert [p["video_id"] for p in got] == ["b", "d"]                       # the query's own video never
+    assert TL.pick_examples(_unit(1, 0, 0), pool, 0) == []
+    assert TL.pick_examples(None, pool, 3) == []
+
+
+def test_pick_examples_caps_per_video_and_prefers_corrections():
+    pool = [{"video_id": "a", "emb": _unit(1, 0, 0)}, {"video_id": "a", "emb": _unit(1, 0.01, 0)},
+            {"video_id": "a", "emb": _unit(1, 0.02, 0)}, {"video_id": "b", "emb": _unit(0.5, 0.5, 0)}]
+    assert [p["video_id"] for p in TL.pick_examples(_unit(1, 0, 0), pool, 3)] == ["a", "a", "b"]
+    tie = [{"video_id": "a", "emb": _unit(1, 0.05, 0)},
+           {"video_id": "b", "emb": _unit(1, 0.06, 0), "corrected": True}]
+    assert TL.pick_examples(_unit(1, 0, 0), tie, 1)[0]["video_id"] == "b"
+
+
+def test_example_caption_only_teacher_tags_in_vocab_order():
+    v = TL.teacher_vocab(vocab())
+    assert TL.example_caption(1, ["Dancing", "walking", "close-up"], v) == "Example 1 — correct tags: close-up, dancing"
+    assert TL.example_caption(2, ["walking"], v) == "Example 2 — correct tags: none of the listed tags"
+    assert "2 moments" in TL.examples_intro(2) and "1 moment " in TL.examples_intro(1)
