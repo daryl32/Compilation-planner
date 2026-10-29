@@ -295,7 +295,8 @@ def batch_report(videos: dict, teacher: str = MAIN_TEACHER) -> list:
             unreadable += int(t.get("unreadable") or 0)
             if t:
                 models.add(teacher_label(t.get("model")))
-                ex.add("on" if t.get("examples_used") else "off" if t.get("model") else "?")
+                # older exports didn't record it: unknown, not "off"
+                ex.add("?" if "examples_used" not in t else "on" if t["examples_used"] else "off")
         moments = [m for v in vs for m in v.get("moments") or []]
         agr = agreement(moments).get(teacher) or {}
         answers = [(v, b) for v in vs for b in v.get("boundaries") or [] if b.get("verdict") in ("cut", "no_cut")]
