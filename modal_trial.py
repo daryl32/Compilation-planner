@@ -882,9 +882,11 @@ def report() -> str:
     v_fixed = [d["timings"].get("load_models", 0.0) for d in vis.values()]
     stage_sec = {"vision": sum(d["timings"]["total"] for d in vis.values()) - sum(v_fixed)}
     fixed = {"vision": (sum(v_fixed) / max(len(v_fixed), 1), lib_videos)}
+    stage_hours = {"vision": trial_hours}       # each teacher per hour of the videos IT tagged
     for k in keys:
         stage_sec[f"tag {k}"] = sum(t["seconds"] for t in tagged_by[k].values())
         fixed[f"tag {k}"] = (sum(t.get("load_seconds", 0) for t in tagged_by[k].values()), 1)
+        stage_hours[f"tag {k}"] = sum(vis[v]["duration"] for v in tagged_by[k] if v in vis) / 3600
 
     def used(rows, default):        # the GPU most of the work actually ran on
         names = [r.get("gpu") or default for r in rows]
@@ -892,9 +894,11 @@ def report() -> str:
 
     gpus = {"vision": used(vis.values(), VISION_GPU)}
     gpus.update({f"tag {k}": used(tagged_by[k].values(), TEACHER_GPUS[k][0]) for k in keys})
-    cost = TL.extrapolate(stage_sec, gpus, trial_hours, lib_hours, fixed)
-    # The library only needs one teacher: the estimate counts vision + the better one.
-    lib_total = cost["vision"]["library_$"] + (cost[f"tag {best}"]["library_$"] if best else 0.0)
+    cost = TL.extrapolate(stage_sec, gpus, stage_hours, lib_hours, fixed)
+    # The library only needs one teacher: the estimate counts vision + the one in use (the
+    # default when it has run, else the better scorer).
+    lib_teacher = TEACHERS_DEFAULT if TEACHERS_DEFAULT in keys else best
+    lib_total = cost["vision"]["library_$"] + (cost[f"tag {lib_teacher}"]["library_$"] if lib_teacher else 0.0)
 
     def f(x):
         return "–" if x is None else f"{x:.2f}"
@@ -924,7 +928,7 @@ def report() -> str:
     all_s = sum(vision_breakdown.values()) or 1
     md_steps += [f"| {k} | {v} | {100 * v / all_s:.0f}% |" for k, v in vision_breakdown.items()]
     md += [f"| **total** | | **${cost['total']['trial_$']:.2f}** | | "
-           f"**${lib_total:.2f}**{' (vision + ' + best + ' only)' if len(keys) > 1 else ''} | |", "",
+           f"**${lib_total:.2f}**{' (vision + ' + lib_teacher + ' only)' if len(keys) > 1 else ''} | |", "",
            *md_steps, "",
            "## Tags", "",
            f"Your labels: {len(gold_tags)} frames ({len(trial_gold)} in the trial videos, tagged by every teacher).",

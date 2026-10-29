@@ -408,3 +408,12 @@ def test_pick_check_video(tmp_path, monkeypatch):
     (out / "w").mkdir()
     (out / "w" / "tags_32b.json").write_text(json.dumps({"results": {"a": {"gold_id": "x"}, "b": {}}}))
     assert M.pick_check_video.local() == {"video_id": "v", "labelled": 4}
+
+
+def test_extrapolate_per_stage_hours():
+    # a teacher that tagged 1 h of a 10 h trial is costed per THAT hour, not spread over 10
+    c = TL.extrapolate({"vision": 3600.0, "tag x": 360.0}, {"vision": "L4", "tag x": "H100"},
+                       {"vision": 10.0, "tag x": 1.0}, 100.0)
+    assert c["tag x"]["per_footage_hour_$"] == pytest.approx(TL.stage_cost(360.0, "H100"), abs=1e-3)
+    assert c["vision"]["per_footage_hour_$"] == pytest.approx(TL.stage_cost(360.0, "L4"), abs=1e-3)
+    assert TL.extrapolate({"vision": 3600.0}, {"vision": "L4"}, 10.0, 100.0)["vision"] == c["vision"]

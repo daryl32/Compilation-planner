@@ -479,12 +479,14 @@ def stage_cost(seconds: float, gpu: str, cores: float = 4.0, mem_gib: float = 16
     return round(seconds * (GPU_RATE.get(gpu, 0.0) + cores * CPU_CORE_RATE + mem_gib * MEM_GIB_RATE), 4)
 
 
-def extrapolate(stage_seconds: dict, gpus: dict, trial_hours: float, library_hours: float,
+def extrapolate(stage_seconds: dict, gpus: dict, trial_hours, library_hours: float,
                 fixed: dict = None) -> dict:
     """{stage: {"trial_$", "per_footage_hour_$", "library_$", "library_gpu_hours"}} plus a total.
     stage_seconds: work that grows with the footage. fixed: {stage: (seconds, times)} — start-up
     work paid `times` over for the whole library (once per run for a teacher, once per video for
-    vision), so a short trial's start-up isn't wrongly spread over every hour of the library."""
+    vision), so a short trial's start-up isn't wrongly spread over every hour of the library.
+    trial_hours: one number, or {stage: footage hours that stage actually processed} — a teacher
+    that only tagged some of the videos is costed per hour of THOSE videos."""
     fixed = fixed or {}
     out, tot = {}, {"trial_$": 0.0, "library_$": 0.0}
     for stage, sec in stage_seconds.items():
@@ -492,9 +494,10 @@ def extrapolate(stage_seconds: dict, gpus: dict, trial_hours: float, library_hou
         f_sec, f_times = fixed.get(stage, (0.0, 1))
         c = stage_cost(sec, gpu)
         c_fixed = stage_cost(f_sec, gpu)
-        per_hour = c / trial_hours if trial_hours else 0.0
+        hours = trial_hours.get(stage, 0.0) if isinstance(trial_hours, dict) else trial_hours
+        per_hour = c / hours if hours else 0.0
         lib = per_hour * library_hours + c_fixed * f_times
-        lib_sec = (sec / trial_hours * library_hours if trial_hours else 0.0) + f_sec * f_times
+        lib_sec = (sec / hours * library_hours if hours else 0.0) + f_sec * f_times
         out[stage] = {"gpu": gpu, "trial_seconds": round(sec + f_sec, 1), "trial_$": round(c + c_fixed, 2),
                       "per_footage_hour_$": round(per_hour, 3), "library_$": round(lib, 2),
                       "library_gpu_hours": round(lib_sec / 3600, 2)}
