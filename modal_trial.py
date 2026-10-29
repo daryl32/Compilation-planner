@@ -1569,6 +1569,31 @@ def list_pack() -> list:
 
 # ---------------------------------------------------------------------------
 
+def _push_labels() -> None:
+    """Send your latest labels and vocabulary from this machine's catalogue folder to the Volume,
+    so prep (gold frames, worked examples), compare and the report use today's corrections — not
+    the copy uploaded with the last batch. Quietly does nothing where there's no catalogue."""
+    import shutil
+    import subprocess
+    try:
+        from pack_for_modal import newest_copy, VOLUME
+    except Exception:
+        return
+    if not shutil.which("modal"):
+        return
+    sent = []
+    for name in ("training_labels.json", "tag_vocabulary.csv"):
+        src = newest_copy(name)
+        if src is None:
+            continue
+        rc = subprocess.run(["modal", "volume", "put", "--force", VOLUME, str(src), f"/pack/library/{name}"],
+                            capture_output=True).returncode
+        if rc == 0:
+            sent.append(f"{name} (saved {time.strftime('%d %b %H:%M', time.localtime(src.stat().st_mtime))})")
+    if sent:
+        print("Sent your latest " + " and ".join(sent) + " to Modal.")
+
+
 def _run_vision(vids: list, max_seconds: float, redo: bool) -> None:
     """Vision in three steps: CPU (scene-cut frames) → GPU (cuts, pose, embeddings, frames) → CPU
     (tracking, movement, rhythm). The CPU steps run many videos at once."""
@@ -1610,6 +1635,8 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     if stage == "status":
         _print_status(status.remote(keys), keys)
         return
+    if stage in ("all", "prep", "tag", "report", "results", "compare", "fp8-check"):
+        _push_labels()
     if stage == "vision-check":
         # One command: re-run one finished video through the batched vision pipeline and compare.
         snap = vision_snapshot.remote(videos.strip())
