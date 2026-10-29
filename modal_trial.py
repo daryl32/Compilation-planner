@@ -500,7 +500,10 @@ def _example_pool() -> list:
         if it.get("type") == "tags" and not it.get("skipped") and it.get("t") is not None and it.get("video_id"):
             by_video.setdefault(it["video_id"], []).append(it)
     pool = []
-    for vid, items in by_video.items():
+    print(f"Gathering your labelled frames from {len(by_video)} videos…", flush=True)
+    for n_vid, (vid, items) in enumerate(by_video.items(), 1):
+        if n_vid % 10 == 0:
+            print(f"   {n_vid} of {len(by_video)} videos, {len(pool)} frames so far", flush=True)
         vis = _read_json(f"{OUT}/{vid}/vision.json")
         times, embs = _video_embeddings(vid)
         if not vis or times is None:
@@ -515,6 +518,42 @@ def _example_pool() -> list:
                          "corrected": set(it.get("tags") or []) != set(it.get("suggested") or []),
                          "emb": embs[j], "frame": str(frame)})
     return pool
+
+
+POOL_FILE = f"{OUT}/example_pool.npz"
+
+
+def _save_pool(pool: list) -> None:
+    import numpy as np
+    np.savez(POOL_FILE, video_ids=np.array([p["video_id"] for p in pool], dtype=object),
+             ts=np.array([p["t"] for p in pool], dtype=float),
+             embs=np.array([p["emb"] for p in pool], dtype=np.float16) if pool else np.zeros((0, 1), np.float16),
+             corrected=np.array([p["corrected"] for p in pool], dtype=bool),
+             frames=np.array([p["frame"] for p in pool], dtype=object),
+             tags=np.array([json.dumps(p["tags"]) for p in pool], dtype=object))
+
+
+def _load_pool():
+    """The pool build_example_pool saved, or None if there isn't one."""
+    import numpy as np
+    try:
+        z = np.load(POOL_FILE, allow_pickle=True)
+        return [{"video_id": str(v), "t": float(t), "emb": e, "corrected": bool(c), "frame": str(f),
+                 "tags": json.loads(str(g))}
+                for v, t, e, c, f, g in zip(z["video_ids"], z["ts"], z["embs"], z["corrected"], z["frames"], z["tags"])]
+    except (OSError, KeyError, ValueError):
+        return None
+
+
+@app.function(image=report_image, volumes={DATA: pack_vol}, timeout=1800, cpu=2)
+def build_example_pool() -> int:
+    """Gather your labelled frames for the teacher's worked examples into one file, on a cheap CPU
+    container — reading them one by one inside the H100 container took minutes of GPU time."""
+    pack_vol.reload()
+    pool = _example_pool()
+    _save_pool(pool)
+    pack_vol.commit()
+    return len(pool)
 
 
 def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False,
@@ -539,8 +578,14 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False,
     frames_dir = Path(f"{OUT}/{video_id}/frames")
     targets = vis["targets"][:max_prompts] if max_prompts else vis["targets"]
 
-    def img(path) -> dict:
-        b64 = base64.b64encode(Path(path).read_bytes()).decode()
+    def img(path, keep: bool = False) -> dict:
+        path = str(path)
+        cache = getattr(self, "frame_b64", None)
+        b64 = cache.get(path) if keep and cache is not None else None
+        if b64 is None:
+            b64 = base64.b64encode(Path(path).read_bytes()).decode()
+            if keep and cache is not None:
+                cache[path] = b64           # example frames come up again and again
         return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
 
     # Worked examples: for each moment, the most similar frames you've labelled in other videos.
@@ -548,7 +593,11 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False,
     pool, times, embs = [], None, None
     if examples:
         if getattr(self, "pool", None) is None:
-            self.pool = _example_pool()
+            self.pool = _load_pool()
+            if self.pool is None:       # no saved pool (e.g. --stage tag on its own): build it here
+                print(f"[{key} teacher] gathering your labelled frames for worked examples…", flush=True)
+                self.pool = _example_pool()
+            self.frame_b64 = {}
             print(f"[{key} teacher] {len(self.pool)} of your labelled frames available as examples.", flush=True)
         pool = self.pool
         times, embs = _video_embeddings(video_id)
@@ -562,7 +611,7 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False,
             if shots:
                 parts.append({"type": "text", "text": TL.examples_intro(len(shots))})
                 for n, ex in enumerate(shots, 1):
-                    parts += [img(ex["frame"]), {"type": "text", "text": TL.example_caption(n, ex["tags"], vocab)}]
+                    parts += [img(ex["frame"], keep=True), {"type": "text", "text": TL.example_caption(n, ex["tags"], vocab)}]
                 parts.append({"type": "text", "text": TL.EXAMPLES_OUTRO})
                 used_examples += len(shots)
         parts.append({"type": "text", "text": before})
@@ -1109,6 +1158,10 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         print(f"Vision on {len(todo_vision)} video(s) ({' / '.join(VISION_GPUS)}, first free)…")
         for r in vision.starmap([(v, max_seconds, redo) for v in todo_vision], return_exceptions=True):
             print("  ", r)
+    if "tag" in stages and examples and (smoke or any(todo_tags.values())):
+        t0 = time.time()
+        print("Gathering your labelled frames for the worked examples (CPU)…")
+        print(f"   {build_example_pool.remote()} frames ready in {time.time() - t0:.0f} s.")
     if "tag" in stages:
         for k in keys:
             if "vision" in stages and not smoke and not redo:
