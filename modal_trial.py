@@ -49,6 +49,7 @@ EMB_MODEL = "google/siglip2-so400m-patch14-384"
 # Medium pose model: about twice as fast as the large one, and closer to what the laptop's
 # RTX 4070 can run in its 5-minute-per-video budget.
 POSE_MODEL = "yolo11m-pose.pt"
+READ_AHEAD = 64         # decoded frames queued ahead of the pose model (~44 MB at 640×360)
 # First choice first; Modal falls back down the list when that GPU type is busy.
 VISION_GPUS = ["L4", "A10", "L40S", "A100-40GB"]
 VISION_GPU = VISION_GPUS[0]
@@ -273,6 +274,24 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
     cmd = ["ffmpeg", "-v", "error", "-i", path, "-vf", f"fps={TL.POSE_FPS},scale={w}:{h}",
            "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=w * h * 3 * 8)
+    # Read-ahead: a thread keeps up to READ_AHEAD decoded frames queued, so ffmpeg decodes while
+    # the GPU works instead of the GPU waiting for each frame (the pipe alone holds < 1 frame).
+    import queue
+    import threading
+    frames_q = queue.Queue(maxsize=READ_AHEAD)
+    frame_bytes = w * h * 3
+
+    def reader():
+        try:
+            while True:
+                buf = proc.stdout.read(frame_bytes)
+                if len(buf) < frame_bytes:
+                    break
+                frames_q.put(buf)
+        finally:
+            frames_q.put(None)
+
+    threading.Thread(target=reader, daemon=True).start()
     tracks, people, emb_times, emb_vecs, batch, batch_t = {}, [], [], [], [], []
     every = int(round(TL.POSE_FPS / 2))
     t_pose = t_emb = 0.0
@@ -296,8 +315,8 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
 
     idx = 0
     while True:
-        buf = proc.stdout.read(w * h * 3)
-        if len(buf) < w * h * 3:
+        buf = frames_q.get()
+        if buf is None:
             break
         frame = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
         t1 = time.time()
@@ -324,11 +343,6 @@ def vision(video_id: str, max_seconds: float = 0, redo: bool = False) -> dict:
         for t in need.get(idx, []):
             cv2.imwrite(str(frames_dir / TL.frame_name(t)), frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
         idx += 1
-        if idx % int(TL.POSE_FPS * 120) == 0:          # every 2 minutes of video
-            done_s, el = idx / TL.POSE_FPS, time.time() - started
-            left = el / done_s * max(duration - done_s, 0)
-            print(f"[vision] {video_id[:40]}: {done_s / 60:.0f} of {duration / 60:.0f} min of video · "
-                  f"about {left / 60:.1f} min left", flush=True)
         if idx % int(TL.POSE_FPS * 120) == 0:          # every 2 minutes of video
             done_s, el = idx / TL.POSE_FPS, time.time() - started
             left = el / done_s * max(duration - done_s, 0)
@@ -574,7 +588,7 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False,
         return {"video_id": video_id, "teacher": key, "skipped": True}
     started = time.time()
     vocab = TL.teacher_vocab(_vocab())         # tags switched off for the teacher aren't asked about
-    before, after = TL.build_prompt(vocab)
+    head, moment, tail = TL.build_prompt(vocab)
     frames_dir = Path(f"{OUT}/{video_id}/frames")
     targets = vis["targets"][:max_prompts] if max_prompts else vis["targets"]
 
@@ -604,7 +618,7 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False,
     used_examples = 0
     convs, keep = [], []
     for tg in targets:
-        parts = []
+        parts = [{"type": "text", "text": head}]        # same for every moment → prefix-cached
         if pool and times is not None:
             j = TL.nearest_index(times, tg["t"])
             shots = TL.pick_examples(embs[j], pool, examples, exclude_video=video_id) if j is not None else []
@@ -612,9 +626,8 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False,
                 parts.append({"type": "text", "text": TL.examples_intro(len(shots))})
                 for n, ex in enumerate(shots, 1):
                     parts += [img(ex["frame"], keep=True), {"type": "text", "text": TL.example_caption(n, ex["tags"], vocab)}]
-                parts.append({"type": "text", "text": TL.EXAMPLES_OUTRO})
                 used_examples += len(shots)
-        parts.append({"type": "text", "text": before})
+        parts.append({"type": "text", "text": moment})
         ok = True
         for t in TL.context_times(tg["t"], vis["duration"]):
             f = frames_dir / TL.frame_name(t)
@@ -623,7 +636,7 @@ def _tag_video(self, video_id: str, max_prompts: int = 0, redo: bool = False,
                 break
             parts.append(img(f))
         if ok:
-            parts.append({"type": "text", "text": after})
+            parts.append({"type": "text", "text": tail})
             convs.append([{"role": "user", "content": parts}])
             keep.append(tg)
     # Chunks the size of vLLM's batch (max_num_seqs), so progress shows every batch at no cost.

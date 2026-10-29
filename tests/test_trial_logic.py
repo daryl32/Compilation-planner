@@ -49,10 +49,11 @@ def test_tag_targets_and_frames():
 
 
 def test_prompt_and_parse():
-    before, after = TL.build_prompt(vocab())
-    assert "Frame 4" in before
-    assert "- close-up: Face fills the frame (not the same as: wide)" in after
-    assert "shot size: close-up, wide" in after and '"tags"' in after
+    head, moment, tail = TL.build_prompt(vocab())
+    assert "Frame 4" in head and "frame 4" in moment and "JSON" in tail
+    assert "- close-up: Face fills the frame (not the same as: wide)" in head
+    assert "shot size: close-up, wide" in head and '"tags"' in head
+    assert TL.build_prompt(vocab())[0] == head       # the same for every moment (prefix cache)
     ans = TL.parse_answer('Sure! {"tags": ["Close-Up", "wide", "dancing", "flying"], '
                           '"unsure": ["walking", "dancing"], "caption": "Two people."}', vocab())
     assert ans == {"tags": ["close-up", "dancing"], "unsure": ["walking"], "caption": "Two people.", "ok": True}
@@ -245,8 +246,8 @@ def test_status_and_pending(tmp_path, monkeypatch, capsys):
 def test_teacher_vocab_leaves_out_switched_off_tags():
     v = TL.teacher_vocab(vocab())
     assert [r["tag"] for r in v] == ["close-up", "wide", "dancing"]          # walking is teacher = no
-    before, after = TL.build_prompt(v)
-    assert "\n- walking" not in after and "\n- dancing" in after
+    head, _, _ = TL.build_prompt(v)
+    assert "\n- walking" not in head and "\n- dancing" in head
     assert TL.parse_answer('{"tags": ["walking", "dancing"]}', v)["tags"] == ["dancing"]
 
 

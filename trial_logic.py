@@ -130,7 +130,13 @@ def context_times(t: float, duration: float) -> list:
 # ---------------------------------------------------------------------------
 
 def build_prompt(vocab: list) -> tuple:
-    """(text before the images, text after) for one moment shown as 7 frames over 4 seconds."""
+    """(head, moment, tail) for one moment shown as 7 frames over 4 seconds.
+
+    head — everything that is the same for every moment (the task, the tag lists, the rules,
+           the reply format). It comes FIRST, before any picture, so vLLM's prefix cache keeps
+           it and the GPU reads it once per run instead of once per moment.
+    moment — the line just before the moment's 7 frames.
+    tail — the short line after them."""
     frame = [r for r in vocab if r["kind"] == "frame"]
     motion = [r for r in vocab if r["kind"] == "motion"]
 
@@ -146,21 +152,23 @@ def build_prompt(vocab: list) -> tuple:
     for r in vocab:
         if r["one_of"]:
             groups.setdefault(r["one_of"], []).append(r["tag"])
-    before = ("You are labelling footage for a video-editing library. You will see 7 frames "
-              "spanning about 4 seconds of one clip, in time order. Frame 4 (the middle one) is "
-              "the moment being labelled.")
-    after = ["", "Tags judged from frame 4 alone (what is visible in that frame):"]
-    after += [line(r) for r in frame] or ["(none)"]
-    after += ["", "Tags judged from the movement across all 7 frames:"]
-    after += [line(r) for r in motion] or ["(none)"]
+    head = ["You are labelling footage for a video-editing library. Each moment to label is shown "
+            "as 7 frames spanning about 4 seconds of one clip, in time order. Frame 4 (the middle "
+            "one) is the moment being labelled.",
+            "", "Tags judged from frame 4 alone (what is visible in that frame):"]
+    head += [line(r) for r in frame] or ["(none)"]
+    head += ["", "Tags judged from the movement across all 7 frames:"]
+    head += [line(r) for r in motion] or ["(none)"]
     if groups:
-        after += ["", "Pick at most one tag from each of these sets:"]
-        after += [f"- {name}: {', '.join(tags)}" for name, tags in groups.items()]
-    after += ["", "Only use tags from the lists above, spelled exactly as written. Choose every tag "
-              "that clearly applies; leave out anything you are not sure of, and list those under "
-              "\"unsure\" instead. Reply with JSON only, no other text:",
-              '{"tags": ["..."], "unsure": ["..."], "caption": "one short neutral sentence"}']
-    return before, "\n".join(after)
+        head += ["", "Pick at most one tag from each of these sets:"]
+        head += [f"- {name}: {', '.join(tags)}" for name, tags in groups.items()]
+    head += ["", "Only use tags from the lists above, spelled exactly as written. Choose every tag "
+             "that clearly applies; leave out anything you are not sure of, and list those under "
+             "\"unsure\" instead. Reply with JSON only, no other text:",
+             '{"tags": ["..."], "unsure": ["..."], "caption": "one short neutral sentence"}']
+    moment = "The moment to label — 7 frames in time order, frame 4 in the middle:"
+    tail = "Reply with the JSON for this moment only."
+    return "\n".join(head), moment, tail
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +231,6 @@ def example_caption(i: int, tags: list, vocab: list) -> str:
     mine = {str(t).strip().lower() for t in tags or []}
     shown = [allowed[t.lower()] for t in (r["tag"] for r in vocab) if t.lower() in mine]
     return f"Example {i} — correct tags: " + (", ".join(shown) if shown else "none of the listed tags")
-
-
-EXAMPLES_OUTRO = "Now the moment to label."
 
 
 def parse_answer(text: str, vocab: list) -> dict:
