@@ -111,6 +111,13 @@ tag_image = (modal.Image.from_registry("nvidia/cuda:12.9.0-devel-ubuntu22.04", a
                    "VLLM_USE_FLASHINFER_SAMPLER": "0"})
              .add_local_python_source("trial_logic"))
 report_image = base.pip_install("numpy").add_local_python_source("trial_logic")
+# LoRA training (QLoRA: the 32B in 4-bit, small trainable adapters on its language layers)
+lora_image = (base.pip_install("torch", "transformers>=4.57", "peft>=0.17", "bitsandbytes>=0.46", "accelerate",
+                               "numpy", "pillow", "huggingface_hub")
+              .add_local_python_source("trial_logic"))
+LORA_RANK, LORA_ALPHA = 16, 32
+# the language model's layers only (the vision part names its layers qkv / proj / linear_fc*)
+LORA_TARGET = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
 
 # ---------------------------------------------------------------------------
@@ -621,7 +628,7 @@ def _start_heartbeat(key: str, t0: float, done):
     threading.Thread(target=beat, daemon=True).start()
 
 
-def _load_teacher(self, key: str) -> None:
+def _load_teacher(self, key: str, lora: bool = False) -> None:
     # A failure here is caught, not raised: a container that fails to start is restarted by
     # Modal over and over (paying for the GPU each time). Instead every call reports the error.
     import threading
@@ -639,9 +646,10 @@ def _load_teacher(self, key: str) -> None:
     _start_heartbeat(key, t0, done)
     try:
         from vllm import LLM
+        extra = {"enable_lora": True, "max_lora_rank": LORA_RANK, "max_loras": 1} if lora else {}
         self.llm = LLM(model=TEACHERS[key], max_model_len=8192, gpu_memory_utilization=0.90,
                        limit_mm_per_prompt={"image": 7 + EXAMPLES_MAX, "video": 0}, max_num_seqs=32,
-                       enable_prefix_caching=True)
+                       enable_prefix_caching=True, **extra)
         note.unlink(missing_ok=True)
         try:
             cache_vol.commit()          # keep what start-up compiled for next time
@@ -810,7 +818,7 @@ def prepare_prompts(video_id: str, max_prompts: int = 0, examples: int = 0, dedu
             "seconds": round(time.time() - t0, 1)}
 
 
-def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "") -> dict:
+def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora_path: str = "") -> dict:
     """GPU: feed the prepared prompts.json through the teacher. Nothing is read but that one file.
     out_path: write the result there instead (a 🧪 test run) — the batch results stay untouched."""
     import trial_logic as TL
@@ -851,6 +859,10 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "") -> d
                               structured_outputs=StructuredOutputsParams(json=schema, disable_any_whitespace=True))
 
     outs, chunk, params = [], 32, sampling(TAG_MAX_TOKENS, TL.answer_schema(vocab))
+    lora_kw = {}
+    if lora_path:                         # 🧠 your fine-tuned adapter on top of the teacher
+        from vllm.lora.request import LoRARequest
+        lora_kw = {"lora_request": LoRARequest(Path(lora_path).name, 1, lora_path)}
     print(f"[{key} teacher] {video_id[:40]}: {len(convs)} moments to tag"
           + (f" (+{len(copies)} near-identical ones copy an answer)" if copies else "")
           + (f", ~{data['examples_used'] / max(len(convs), 1):.1f} worked examples each" if data.get("examples_used") else "")
@@ -859,7 +871,7 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "") -> d
     # prefix cache — the follow-up only pays for the new question and the short answer.
     answers, look_p_tok, look_o_tok, looks = [], 0, 0, 0
     for i in range(0, len(convs), chunk):
-        got = self.llm.chat(convs[i:i + chunk], params, use_tqdm=False)
+        got = self.llm.chat(convs[i:i + chunk], params, use_tqdm=False, **lora_kw)
         outs += got
         firsts = [TL.parse_answer(o.outputs[0].text, vocab) for o in got]
         asks = [TL.look_again(a, vocab) if a["ok"] else [] for a in firsts]
@@ -869,7 +881,7 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "") -> d
         if follow:
             seconds_out = self.llm.chat([c for _, c in follow],
                                         [sampling(160, TL.look_again_schema(asks[j])) for j, _ in follow],
-                                        use_tqdm=False)
+                                        use_tqdm=False, **lora_kw)
             looks += len(follow)
             for (j, _), o2 in zip(follow, seconds_out):
                 firsts[j] = TL.apply_look_again(firsts[j], o2.outputs[0].text, asks[j], vocab)
@@ -917,7 +929,8 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "") -> d
                                "moments_per_min": round(60 * len(convs) / max(seconds, 1e-6), 1),
                                "examples": data.get("examples", 0), "examples_used": data.get("examples_used", 0),
                                "dedup": data.get("dedup"), "vocab": vocab_names, "results": results,
-                               **({"vocab_csv": data.get("vocab_csv") or ""} if out_path else {})}),
+                               **({"vocab_csv": data.get("vocab_csv") or ""} if out_path else {}),
+                               **({"lora": Path(lora_path).name} if lora_path else {})}),
                    encoding="utf-8")
     pf.unlink(missing_ok=True)          # it's rebuilt by the prep step whenever needed
     pack_vol.commit()
@@ -967,6 +980,19 @@ class Tagger32BFP8:
     @modal.method()
     def tag_video(self, video_id: str, redo: bool = False, out_path: str = "") -> dict:
         return _tag_video(self, video_id, redo, out_path)
+
+
+@app.cls(image=tag_image, gpu=TEACHER_GPUS["32b-fp8"], volumes={DATA: pack_vol, CACHE: cache_vol},
+         timeout=4 * 3600, cpu=8, memory=65536, max_containers=1)
+class Tagger32BFP8LoRA:
+    """The FP8 teacher with LoRA switched on — tags with one of your trained adapters."""
+    @modal.enter()
+    def load(self):
+        _load_teacher(self, "32b-fp8", lora=True)
+
+    @modal.method()
+    def tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora_path: str = "") -> dict:
+        return _tag_video(self, video_id, redo, out_path, lora_path)
 
 
 TAGGERS = {"8b": Tagger8B, "32b": Tagger32B, "32b-fp8": Tagger32BFP8}
@@ -1461,7 +1487,7 @@ def _download_test_runs() -> str:
     return str(dest / "test_runs.json")
 
 
-def _run_test(keys: list, label: str, keep_vocab: bool, dedup: float) -> None:
+def _run_test(keys: list, label: str, keep_vocab: bool, dedup: float, lora: str = "") -> None:
     """--stage test: re-tag the fixed test set with today's settings (or, with --keep-vocab, the
     vocabulary already on Modal = what the last batch used) and compare with earlier test runs."""
     _push_labels(vocab=not keep_vocab)
@@ -1470,7 +1496,8 @@ def _run_test(keys: list, label: str, keep_vocab: bool, dedup: float) -> None:
     if not vids:
         print("No test set: no finished video has enough of your labelled frames yet.")
         return
-    k = keys[0]
+    k = "32b-fp8" if lora else keys[0]
+    label = label or (f"lora-{lora}" if lora else "")
     run_id = time.strftime("%Y-%m-%d_%H%M") + (f"_{label}" if label else "")
     print(f"🧪 Test run {run_id}: {len(vids)} videos, {ts['hours']} h of footage, {ts['labelled']} of your "
           f"labelled frames, teacher {k}" + (" — using the vocabulary already on Modal (the last batch's)"
@@ -1478,11 +1505,12 @@ def _run_test(keys: list, label: str, keep_vocab: bool, dedup: float) -> None:
     t0 = time.time()
     for r in prepare_prompts.starmap([(v, 0, 0, dedup) for v in vids], return_exceptions=True):
         print("  ", r)
-    tagger = TAGGERS[k]()
+    tagger = Tagger32BFP8LoRA() if lora else TAGGERS[k]()
     out = f"{OUT}/testset/runs/{run_id}"
-    for r in tagger.tag_video.starmap([(v, True, f"{out}/{v}.json") for v in vids], return_exceptions=True):
+    args = [(v, True, f"{out}/{v}.json") + ((f"{OUT}/lora/{lora}",) if lora else ()) for v in vids]
+    for r in tagger.tag_video.starmap(args, return_exceptions=True):
         print("  ", r)
-    meta = {"id": run_id, "label": label, "teacher": k, "model": TEACHERS[k],
+    meta = {"id": run_id, "label": label, "teacher": k, "model": TEACHERS[k], "lora": lora,
             "created": time.strftime("%Y-%m-%d %H:%M"), "keep_vocab": keep_vocab, "dedup": dedup,
             "minutes": round((time.time() - t0) / 60, 1)}
     text = finish_test_run.remote(run_id, meta)
@@ -1698,6 +1726,169 @@ def finish_test_run(run_id: str, meta: dict) -> str:
     return TL.test_runs_markdown(runs, gold, tags)
 
 
+# ---------------------------------------------------------------------------
+# 🧠 LoRA — fine-tune the teacher on your labelled frames (test-set videos held out)
+# ---------------------------------------------------------------------------
+
+def _lora_dir() -> Path:
+    return Path(f"{OUT}/lora")
+
+
+@app.function(image=report_image, volumes={DATA: pack_vol}, timeout=1800, cpu=2)
+def prepare_lora_data(val_share: float = 0.05, seed: int = 7) -> dict:
+    """CPU: one training example per labelled frame whose 7 frames are on the Volume, in exactly the
+    prompt the teacher sees (today's vocabulary), answered with YOUR tags (lora/data.json). The test
+    set's videos are left out; a few other whole videos are kept back to watch the loss (val)."""
+    import random
+    import trial_logic as TL
+    pack_vol.reload()
+    ts = _read_json(_test_dir() / "testset.json", {}) or {}
+    held = {x["video_id"] for x in ts.get("videos") or []}
+    vocab_csv = _vocab_text()
+    vocab = TL.teacher_vocab((TL.parse_vocabulary(vocab_csv) if vocab_csv else []) or _vocab())
+    head, moment, tail = TL.build_prompt(vocab)
+    gold = [i for i in _gold_items() if i.get("type") == "tags" and not i.get("skipped") and i.get("t") is not None]
+    recs, skipped_test, no_frames, vis_cache, cap_cache = [], 0, 0, {}, {}
+    for i in gold:
+        v = i["video_id"]
+        if v in held:
+            skipped_test += 1
+            continue
+        if v not in vis_cache:
+            vis_cache[v] = _read_json(f"{OUT}/{v}/vision.json") or {}
+            caps = {}
+            for k in TEACHERS:                       # the teacher's caption for the moment, if any
+                for r in ((_read_json(f"{OUT}/{v}/tags_{k}.json") or {}).get("results") or {}).values():
+                    if r.get("t") is not None and r.get("caption"):
+                        caps[round(float(r["t"]), 2)] = r["caption"]
+            cap_cache[v] = caps
+        vis = vis_cache[v]
+        if not vis.get("duration"):
+            no_frames += 1
+            continue
+        frames = [f"{OUT}/{v}/frames/{TL.frame_name(t)}" for t in TL.context_times(float(i["t"]), vis["duration"])]
+        if not all(Path(f).exists() for f in frames):
+            no_frames += 1
+            continue
+        target = TL.lora_target(i.get("tags") or [], vocab, cap_cache[v].get(round(float(i["t"]), 2), ""))
+        recs.append({"video_id": v, "t": i["t"], "frames": frames, "target": target})
+    vids = sorted({r["video_id"] for r in recs})
+    random.Random(seed).shuffle(vids)
+    val_vids = set(vids[:max(1, int(len(vids) * val_share))]) if len(vids) > 4 else set()
+    data = {"created": time.strftime("%Y-%m-%d %H:%M"), "head": head, "moment": moment, "tail": tail,
+            "vocab_csv": vocab_csv, "test_videos": sorted(held), "val_videos": sorted(val_vids),
+            "train": [r for r in recs if r["video_id"] not in val_vids],
+            "val": [r for r in recs if r["video_id"] in val_vids]}
+    d = _lora_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "data.json").write_text(json.dumps(data), encoding="utf-8")
+    pack_vol.commit()
+    return {"train": len(data["train"]), "val": len(data["val"]), "videos": len(vids),
+            "left_out_test_set": skipped_test, "no_frames": no_frames}
+
+
+def _lora_content(head: str, moment: str, tail: str, images: list) -> list:
+    """The user turn exactly as prepare_prompts builds it for vLLM (head, moment line, 7 frames,
+    tail) — in the transformers form."""
+    return ([{"type": "text", "text": head}, {"type": "text", "text": moment}]
+            + [{"type": "image", "image": im} for im in images] + [{"type": "text", "text": tail}])
+
+
+@app.function(image=lora_image, gpu="H100", volumes={DATA: pack_vol, CACHE: cache_vol}, timeout=6 * 3600,
+              cpu=8, memory=98304)
+def train_lora(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8, max_examples: int = 0) -> dict:
+    """GPU (H100): QLoRA on the 32B (4-bit, bf16 maths) — rank-16 adapters on the language layers
+    only (the vision part is left alone). Loss only on the answer. Saves lora/<name>/ (PEFT format,
+    which vLLM loads on top of the FP8 teacher)."""
+    import math
+    import random
+    import torch
+    from PIL import Image
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    from transformers import (AutoProcessor, BitsAndBytesConfig, Qwen3VLForConditionalGeneration,
+                              get_cosine_schedule_with_warmup)
+    import trial_logic as TL
+
+    pack_vol.reload()
+    data = _read_json(_lora_dir() / "data.json")
+    if not data or not data.get("train"):
+        return {"error": "no training data — the prepare step found no labelled frames with pictures"}
+    train = list(data["train"])
+    random.Random(1).shuffle(train)
+    if max_examples:
+        train = train[:max_examples]
+    t0 = time.time()
+    base_id = TEACHERS["32b"]                  # train on the full-precision weights, 4-bit in memory
+    print(f"[lora] loading {base_id} in 4-bit…", flush=True)
+    processor = AutoProcessor.from_pretrained(base_id)
+    model = Qwen3VLForConditionalGeneration.from_pretrained(
+        base_id, dtype=torch.bfloat16, device_map="auto", attn_implementation="sdpa",
+        quantization_config=BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                                               bnb_4bit_compute_dtype=torch.bfloat16,
+                                               bnb_4bit_use_double_quant=True))
+    model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+    model = get_peft_model(model, LoraConfig(r=LORA_RANK, lora_alpha=LORA_ALPHA, lora_dropout=0.05,
+                                             target_modules=LORA_TARGET, task_type="CAUSAL_LM"))
+    model.print_trainable_parameters()
+    print(f"[lora] ready after {(time.time() - t0) / 60:.1f} min · {len(train)} examples, {epochs} epoch(s)",
+          flush=True)
+
+    def encode(rec):
+        imgs = [Image.open(f).convert("RGB") for f in rec["frames"]]
+        user = {"role": "user", "content": _lora_content(data["head"], data["moment"], data["tail"], imgs)}
+        full = processor.apply_chat_template(
+            [user, {"role": "assistant", "content": [{"type": "text", "text": rec["target"]}]}],
+            tokenize=True, return_dict=True, return_tensors="pt")
+        plen = processor.apply_chat_template([user], tokenize=True, add_generation_prompt=True,
+                                             return_dict=True, return_tensors="pt")["input_ids"].shape[1]
+        labels = full["input_ids"].clone()
+        labels[:, :plen] = -100                 # learn the answer only, not the prompt
+        full["labels"] = labels
+        return {k: v.to(model.device) for k, v in full.items()}
+
+    steps = max(1, math.ceil(len(train) * epochs / accum))
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=0.0)
+    sched = get_cosine_schedule_with_warmup(opt, max(1, steps // 20), steps)
+    model.train()
+    seen, losses, t_train = 0, [], time.time()
+    order = [train[i % len(train)] for i in range(int(len(train) * epochs))]
+    for n, rec in enumerate(order, 1):
+        try:
+            out = model(**encode(rec))
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            print(f"[lora] skipped one example (out of memory) at {rec['video_id'][:30]} {rec['t']}", flush=True)
+            continue
+        (out.loss / accum).backward()
+        losses.append(float(out.loss))
+        seen += 1
+        if n % accum == 0 or n == len(order):
+            torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
+            opt.step()
+            sched.step()
+            opt.zero_grad(set_to_none=True)
+        if n % 50 == 0 or n == len(order):
+            el = time.time() - t_train
+            print(f"[lora] {n}/{len(order)} examples · loss {sum(losses[-50:]) / len(losses[-50:]):.3f} · "
+                  f"{el / 60:.0f} min so far, about {el / n * (len(order) - n) / 60:.0f} min left", flush=True)
+    model.eval()
+    val_loss = None
+    if data.get("val"):
+        with torch.no_grad():
+            vl = [float(model(**encode(r)).loss) for r in data["val"][:150]]
+        val_loss = round(sum(vl) / len(vl), 4)
+    out_dir = _lora_dir() / name
+    model.save_pretrained(str(out_dir))
+    sec = time.time() - t0
+    meta = {"name": name, "created": time.strftime("%Y-%m-%d %H:%M"), "base": base_id, "rank": LORA_RANK,
+            "epochs": epochs, "lr": lr, "examples": seen, "train_loss_end": round(sum(losses[-50:]) / max(1, len(losses[-50:])), 4),
+            "val_loss": val_loss, "minutes": round(sec / 60, 1), "cost": round(TL.stage_cost(sec, "H100"), 2),
+            "test_videos": data["test_videos"], "val_videos": data["val_videos"], "vocab_csv": data["vocab_csv"]}
+    (out_dir / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
+    pack_vol.commit()
+    return {k: v for k, v in meta.items() if k not in ("vocab_csv", "test_videos", "val_videos")}
+
+
 VISION_SNAPSHOT = ("vision.json", "person_curve.npy", "embeddings.npz")
 
 
@@ -1854,7 +2045,8 @@ def _run_vision(vids: list, max_seconds: float, redo: bool) -> None:
 
 @app.local_entrypoint()
 def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False, teacher: str = "",
-         examples: int = -1, dedup: float = -1.0, batch: int = 0, label: str = "", keep_vocab: bool = False):
+         examples: int = -1, dedup: float = -1.0, batch: int = 0, label: str = "", keep_vocab: bool = False,
+         lora: str = "", epochs: float = 1.0, max_examples: int = 0):
     """teacher: 8b, 32b, 32b-fp8 or both (= 8b + 32b). Default: 8b for --smoke, 32b-fp8 otherwise.
     examples: worked examples from your labels before each moment (default 0 = off, at most 6).
     dedup: near-identical moments in a scene are tagged once and the answer copied when their
@@ -1862,7 +2054,9 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     batch: only the videos of this batch (e.g. --batch 6), instead of typing their names.
     --stage test: re-tag the fixed 🧪 test set (~2 h) and compare with earlier test runs; --label names
     the run (e.g. --label positions-v2); --keep-vocab uses the vocabulary already on Modal (the last
-    batch's) instead of sending today's — for a baseline. --stage test-pick [--redo]: show / re-pick the set."""
+    batch's) instead of sending today's — for a baseline. --stage test-pick [--redo]: show / re-pick the set.
+    --stage lora-train --label <name> [--epochs 1]: fine-tune the teacher on your labels (test set held
+    out) → lora/<name>. Then --stage test --lora <name> tags the test set with it."""
     # No trial_logic import here: this runs on the machine you start it from, whose venv may
     # only have modal (trial_logic needs numpy).
     examples = EXAMPLES_DEFAULT if examples < 0 else min(examples, EXAMPLES_MAX)
@@ -1888,7 +2082,20 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
             print(f"   batch {x['batch']:>3} · {x['minutes']:5.1f} min · {x['labelled']:3} labelled · {x['video_id']}")
         return
     if stage == "test":
-        _run_test(keys, label.strip().replace(" ", "-"), keep_vocab, dedup)
+        _run_test(keys, label.strip().replace(" ", "-"), keep_vocab, dedup, lora.strip())
+        return
+    if stage == "lora-train":
+        name = label.strip().replace(" ", "-") or time.strftime("lora-%Y%m%d-%H%M")
+        _push_labels()
+        ts = pick_test_set.remote(TEST_HOURS, False)
+        print(f"🧠 LoRA '{name}': the {len(ts.get('videos') or [])} test-set videos are held out.")
+        print("Preparing training examples (CPU)…")
+        print("  ", prepare_lora_data.remote())
+        print(f"Training on an H100 ({epochs} epoch(s)) — progress every 50 examples…")
+        r = train_lora.remote(name, epochs, 1e-4, 8, max_examples)
+        print("  ", r)
+        if not r.get("error"):
+            print(f"\nNext: modal run modal_trial.py --stage test --lora {name}")
         return
     if stage in ("all", "prep", "tag", "report", "results", "compare", "fp8-check"):
         _push_labels()

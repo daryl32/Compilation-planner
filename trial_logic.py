@@ -988,3 +988,22 @@ def test_runs_markdown(runs: list, gold: list, tags: list, top: int = 15) -> str
     md += ["", f"On {n} frames, F1 moves by about ±{max(0.02, round(0.5 / max(n, 1) ** 0.5, 2)):.2f} from chance "
                "alone — trust bigger changes, and per-tag changes of several frames."]
     return "\n".join(md)
+
+
+# ---------------------------------------------------------------------------
+# 🧠 LoRA training answers
+# ---------------------------------------------------------------------------
+
+LORA_CONF = 90          # your tags are taught as "sure" (the teacher's answers use 0–100)
+
+
+def lora_target(tags: list, vocab: list, caption: str = "") -> str:
+    """The answer the teacher should have given for one of your labelled frames, in exactly the
+    shape its structured replies have (category order, compact JSON): your tags at LORA_CONF, each
+    under its category; tags it isn't asked about are left out."""
+    mine = {str(t).strip().lower() for t in tags or []}
+    out = {}
+    for name, rows, _ in categories(vocab):
+        out[category_key(name)] = [{"tag": r["tag"], "conf": LORA_CONF} for r in rows if r["tag"].lower() in mine]
+    out["caption"] = str(caption or "")[:200]
+    return json.dumps(out, separators=(",", ":"), ensure_ascii=False)

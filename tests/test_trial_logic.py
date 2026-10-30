@@ -908,3 +908,59 @@ def test_test_set_pick_and_run(tmp_path, monkeypatch):
     assert tr["runs"][0]["videos"] == 1 and len(tr["runs"][0]["frames"]) == len(rj["results"])
     M.export.local(False)
     assert (out / "export" / "test_runs.json").exists()                  # travels with the export
+
+
+def test_lora_target():
+    v = TL.teacher_vocab(TL.parse_vocabulary(ORDER_CSV))
+    t = TL.lora_target(["Kissing", "close-up", "not-a-tag"], v, "Two people.")
+    assert t == ('{"shot":[{"tag":"close-up","conf":90}],"position":[],"action":[{"tag":"kissing","conf":90}],'
+                 '"overlay":[],"caption":"Two people."}')
+    # it parses back to the same tags
+    assert TL.parse_answer(t, v)["tags"] == ["close-up", "kissing"]
+
+
+def test_lora_data_and_lora_tagging(tmp_path, monkeypatch):
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    vis = json.loads((out / "v" / "vision.json").read_text())
+    for tg in vis["targets"]:
+        for t in TL.context_times(tg["t"], 40.0):
+            (out / "v" / "frames" / TL.frame_name(t)).write_bytes(b"jpg")
+    # a second video "w" with one labelled frame, in the test set → left out of training
+    items = json.loads((pack / "library" / "training_labels.json").read_text())["items"]
+    items.append({"id": "tags:w:3.00", "type": "tags", "video_id": "w", "t": 3.0, "tags": ["wide"]})
+    (pack / "library" / "training_labels.json").write_text(json.dumps({"items": items}))
+    (out / "testset").mkdir()
+    (out / "testset" / "testset.json").write_text(json.dumps({"videos": [{"video_id": "w"}]}))
+    r = M.prepare_lora_data.local()
+    assert r["train"] + r["val"] == 4 and r["left_out_test_set"] == 1 and r["no_frames"] == 0
+    data = json.loads((out / "lora" / "data.json").read_text())
+    rec = data["train"][0]
+    assert len(rec["frames"]) == 7 and rec["target"].startswith('{"shot":[') and data["test_videos"] == ["w"]
+    assert "category by category" in data["head"]
+    content = M._lora_content(data["head"], data["moment"], data["tail"], ["img"] * 7)
+    assert [c["type"] for c in content] == ["text", "text"] + ["image"] * 7 + ["text"]
+
+    # tagging with an adapter passes the LoRA request to every call
+    M.prepare_prompts.local("v", 0, 0, 0)
+
+    class LoraLLM(_FakeLLM):
+        def chat(self, convs, params, use_tqdm=False, lora_request=None):
+            self.lora = lora_request
+            return super().chat(convs, params, use_tqdm)
+
+    class Self:
+        key, llm, load_error, load_seconds, first = "32b-fp8", LoraLLM(), None, 0.0, True
+    monkeypatch.setattr(M, "_gpu_name", lambda d: "H100")
+    import sys
+    import types
+    fake_vllm = types.ModuleType("vllm")
+    fake_vllm.SamplingParams = lambda **kw: kw
+    lr = types.ModuleType("vllm.lora.request")
+    lr.LoRARequest = lambda name, i, path: ("lora", name, i, path)
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    monkeypatch.setitem(sys.modules, "vllm.lora", types.ModuleType("vllm.lora"))
+    monkeypatch.setitem(sys.modules, "vllm.lora.request", lr)
+    dest = out / "testset" / "runs" / "r-lora" / "v.json"
+    M._tag_video(Self, "v", True, str(dest), f"{out}/lora/try1")
+    assert Self.llm.lora == ("lora", "try1", 1, f"{out}/lora/try1")
+    assert json.loads(dest.read_text())["lora"] == "try1"
