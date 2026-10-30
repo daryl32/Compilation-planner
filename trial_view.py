@@ -93,9 +93,10 @@ def _apply_rules(ids: list, rows: list) -> None:
 
 def _rules_panel(videos: dict, rows: list) -> None:
     """Your vocabulary rules against the frames you've already reviewed (in the batch shown): add the
-    missing always-with tags in one go; never-with clashes and pick-one doubles are for you to fix
-    (which tag is wrong?) — the ⚠️ filter shows them."""
-    if not any(r.get("never_with") or r.get("always_with") or r.get("one_of") for r in rows):
+    missing always-with tags in one go; never-with clashes, only-with misses and pick-one doubles are for
+    you to fix (which tag is wrong?) — the ⚠️ filter shows them."""
+    if not any(r.get("never_with") or r.get("always_with") or r.get("only_with") or r.get("one_of")
+               for r in rows):
         return
     fixable, broken = [], []
     for v, vd in videos.items():
@@ -121,8 +122,9 @@ def _rules_panel(videos: dict, rows: list) -> None:
                       on_click=_apply_rules, args=([i for i, *_ in fixable], rows),
                       help="Only adds tags — never one that would break a pick-one set or a never-with rule.")
         if broken:
-            st.markdown(f"**{len(broken)} frame(s)** break a **never-with** rule or have two tags from one "
-                        "**pick-one set** — only you can say which tag is wrong.")
+            st.markdown(f"**{len(broken)} frame(s)** break a **never-with** rule, have a tag without any of its "
+                        "**only-with** partners, or have two tags from one **pick-one set** — only you can say "
+                        "which tag is wrong.")
             st.button("⚠️ Show them", key="tr_rules_show",
                       on_click=lambda: st.session_state.update(tr_filter="rules", tr_page=1))
 

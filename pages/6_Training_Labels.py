@@ -263,7 +263,8 @@ def tag_editor() -> None:
     pick = st.selectbox("Tag to edit", [NEW_TAG] + names, key="tl_ed_pick")
     cur = next((r for r in vocab if r["tag"] == pick), None) or {
         "tag": "", "group": "", "kind": "frame", "one_of": "", "teacher": True, "description": "",
-        "not_to_be_confused_with": "", "never_with": "", "always_with": "", "search_words": []}
+        "not_to_be_confused_with": "", "never_with": "", "always_with": "", "only_with": "",
+        "search_words": []}
     groups = sorted({r["group"] for r in vocab if r["group"]}, key=str.lower)
     sets = sorted({r["one_of"] for r in vocab if r["one_of"]}, key=str.lower)
     k = f"tl_ed_{pick}"                       # fresh widgets for each tag picked
@@ -304,6 +305,18 @@ def tag_editor() -> None:
                                 help="One way: this tag → those tags (not the other way round). The teacher "
                                      "is told, and a missing one is added to its answer — unless it would break a "
                                      "pick-one set or a never-with rule.")
+        only_now = [x.strip() for x in str(cur.get("only_with") or "").split(";") if x.strip()]
+        only = st.multiselect("Only with — this tag is allowed only when at least one of these is there",
+                              [n for n in names if n != cur["tag"]],
+                              default=[x for x in only_now if x in names], key=f"{k}_only",
+                              help="One way, any one of them is enough (e.g. a position only with certain "
+                                   "actions). The teacher is told, and if it gives this tag without any of "
+                                   "them, this tag moves to unsure — the other tag is never added. Don't pick "
+                                   "the same tag here and in Always with.")
+        if set(only) & set(always):
+            st.warning("“" + "”, “".join(sorted(set(only) & set(always))) + "” is in both **Always with** and "
+                       "**Only with** — they'd fix a missing tag in opposite ways (add it / drop this one). "
+                       "Keep it in just one.")
         words = st.text_input("Search words (separated by ;)", "; ".join(cur["search_words"]), key=f"{k}_words")
         teacher = st.toggle("The big model may try this tag", cur["teacher"], key=f"{k}_teacher",
                             help="Off = learned only from your labels (for tags the 32B gets wrong).")
@@ -315,7 +328,8 @@ def tag_editor() -> None:
     if save:
         row = {"tag": name, "group": group, "kind": kind, "one_of": one_of, "teacher": teacher,
                "description": desc, "not_to_be_confused_with": "; ".join(alikes),
-               "never_with": "; ".join(never), "always_with": "; ".join(always), "search_words": words}
+               "never_with": "; ".join(never), "always_with": "; ".join(always), "only_with": "; ".join(only),
+               "search_words": words}
         try:
             rows = TL.upsert_tag(vocab, row, None if pick == NEW_TAG else pick)
             if pick != NEW_TAG:      # a rule taken off here comes off the other tag too
@@ -350,7 +364,9 @@ def vocab_view() -> None:
                "that can never be on the same moment as this one, separated by ; — it works both ways, the "
                "teacher is told, and if it still gives both, the second goes to unsure. **always_with**: tags "
                "that must also be there whenever this one is (one way), separated by ; — the teacher is told "
-               "and a missing one is added. **teacher**: may the big "
+               "and a missing one is added. **only_with**: this tag is allowed only when at least one of these is "
+               "there (one way), separated by ; — the teacher is told and, without one, this tag moves to unsure "
+               "(nothing is added). **teacher**: may the big "
                "model try this tag (off = learned only from your labels). **search_words**: words you'd type to "
                "find it, separated by ;")
     if vocab_source != TL.VOCAB_FILE.name:
@@ -375,12 +391,17 @@ def vocab_view() -> None:
         st.success(note)
     st.caption("Changes are used on the **next Modal run** (each run sends the latest tag list), and straight "
                "away on the 🎯 Label cards.")
-    unknown = sorted({x.strip() for r in vocab for col in ("never_with", "always_with")
+    unknown = sorted({x.strip() for r in vocab for col in ("never_with", "always_with", "only_with")
                       for x in str(r.get(col) or "").split(";") if x.strip()}
                      - {r["tag"] for r in vocab}, key=str.lower)
     if unknown:
-        st.warning("**never_with / always_with** name tags that aren't in the list (check the spelling): "
-                   + ", ".join(unknown))
+        st.warning("**never_with / always_with / only_with** name tags that aren't in the list (check the "
+                   "spelling): " + ", ".join(unknown))
+    clashes = TL.rule_clashes(vocab)
+    if clashes:
+        st.warning("These are in both **always_with** and **only_with** — they'd fix a missing tag in opposite "
+                   "ways, so keep each in just one: "
+                   + ", ".join(f"{a} → {b}" for a, b in clashes))
     st.subheader(f"All tags ({len(vocab)})")
     st.caption("Edit cells directly, add a row at the bottom, then 💾 Save table — or use the form below for one tag.")
     table = [{**r, "search_words": "; ".join(r["search_words"])} for r in vocab]

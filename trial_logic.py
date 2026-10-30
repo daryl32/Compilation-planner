@@ -57,7 +57,9 @@ def parse_vocabulary(text: str) -> list:
                      "never_with": [n.strip() for n in raw.get("never_with", "").replace(",", ";").split(";")
                                     if n.strip()],
                      "always_with": [n.strip() for n in raw.get("always_with", "").replace(",", ";").split(";")
-                                     if n.strip()]})
+                                     if n.strip()],
+                     "only_with": [n.strip() for n in (raw.get("only_with") or "").replace(",", ";").split(";")
+                                   if n.strip()]})
     return rows
 
 
@@ -88,6 +90,20 @@ def always_map(vocab: list) -> dict:
     return out
 
 
+def only_map(vocab: list) -> dict:
+    """{tag (lower case): [tags, at least one of which must be there for it to be allowed]} from
+    only_with — one way (A only with B or C). Only tags in this vocabulary count, so a rule whose
+    partners the teacher isn't asked about is simply ignored (it could never be met)."""
+    names = {r["tag"].lower(): r["tag"] for r in vocab}
+    out = {}
+    for r in vocab:
+        for other in r.get("only_with") or []:
+            o = names.get(str(other).strip().lower())
+            if o and o.lower() != r["tag"].lower() and o not in out.get(r["tag"].lower(), []):
+                out.setdefault(r["tag"].lower(), []).append(o)
+    return out
+
+
 def teacher_vocab(vocab: list) -> list:
     """The tags the teacher is asked about: the ones whose "teacher" switch is on. Tags switched
     off are learned from your labels only, so they're left out of its prompt altogether."""
@@ -100,7 +116,8 @@ def vocabulary_from_labels(labels) -> list:
         name = t if isinstance(t, str) else (t or {}).get("name") or (t or {}).get("label")
         if name:
             out.append({"tag": str(name), "group": "", "kind": "frame", "one_of": "", "teacher": True,
-                        "description": "", "not_to_be_confused_with": "", "never_with": [], "always_with": []})
+                        "description": "", "not_to_be_confused_with": "", "never_with": [], "always_with": [],
+                        "only_with": []})
     return out
 
 
@@ -290,6 +307,12 @@ def build_prompt(vocab: list) -> tuple:
     if amap:
         head += ["", "If you give the first tag, always give the second as well:"]
         head += [f"- {r['tag']} → {n}" for r in vocab for n in amap.get(r["tag"].lower(), [])]
+    omap = only_map(vocab)
+    if omap:
+        head += ["", "Only give the first tag if you also give at least one of the tags after it — "
+                     "otherwise leave it out:"]
+        head += [f"- {r['tag']}: only with {' or '.join(omap[r['tag'].lower()])}" for r in vocab
+                 if r["tag"].lower() in omap]
     head += ["", "Only use tags from the lists above, spelled exactly as written. Choose every tag "
              "that clearly applies; leave out anything you are not sure of, and list those under "
              "\"unsure\" instead. Reply with JSON only, no other text:",
@@ -413,10 +436,22 @@ def parse_answer(text: str, vocab: list) -> dict:
                 tags.append(n)
                 added.append(n)
                 grew = True
-    unsure = [t for t in clean(data.get("unsure")) + broke if t not in tags]
+    # only-with: a tag given without any of the tags it needs is dropped to unsure (the needed tag
+    # is the evidence, so it isn't added). Repeats, as dropping one can strand another.
+    omap, dropped, shrank = only_map(vocab), [], True
+    while shrank:
+        shrank = False
+        for t in list(tags):
+            needs = omap.get(t.lower())
+            if needs and not any(n in tags for n in needs):
+                tags.remove(t)
+                dropped.append(t)
+                shrank = True
+    added = [t for t in added if t in tags]
+    unsure = [t for t in clean(data.get("unsure")) + broke + dropped if t not in tags]
     unsure = list(dict.fromkeys(unsure))
     return {"tags": tags, "unsure": unsure, "caption": str(data.get("caption") or "")[:300], "ok": ok,
-            "rule_breaks": broke, "rule_adds": added}
+            "rule_breaks": broke, "rule_adds": added, "rule_drops": dropped}
 
 
 # ---------------------------------------------------------------------------

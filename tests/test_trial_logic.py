@@ -57,7 +57,7 @@ def test_prompt_and_parse():
     ans = TL.parse_answer('Sure! {"tags": ["Close-Up", "wide", "dancing", "flying"], '
                           '"unsure": ["walking", "dancing"], "caption": "Two people."}', vocab())
     assert ans == {"tags": ["close-up", "dancing"], "unsure": ["walking"], "caption": "Two people.", "ok": True,
-                   "rule_breaks": [], "rule_adds": []}
+                   "rule_breaks": [], "rule_adds": [], "rule_drops": []}
     bad = TL.parse_answer("no idea", vocab())
     assert bad["tags"] == [] and not bad["ok"]
 
@@ -642,3 +642,38 @@ def test_always_with_prompt_and_answers():
     assert ans["tags"] == ["wide", "kissing"] and ans["rule_adds"] == []
     # the other way round adds nothing (close-up doesn't need kissing)
     assert TL.parse_answer('{"tags": ["close-up"]}', v)["tags"] == ["close-up"]
+
+
+ONLY_CSV = ("tag,group,kind,one_of,teacher,description,not_to_be_confused_with,never_with,always_with,only_with,"
+            "search_words\n"
+            "close-up,shot,frame,shot size,yes,,,,,,\n"
+            "kneeling,position,frame,,yes,,,,,praying; proposing,\n"
+            "praying,action,frame,,yes,,,,,,\n"
+            "proposing,action,frame,,yes,,,,,,\n"
+            "ring,object,frame,,yes,,,,,proposing,\n"
+            "hug,action,frame,,yes,,,,ring,,\n"
+            "secret,action,frame,,no,,,,,,\n"
+            "hidden,position,frame,,yes,,,,,secret,\n")
+
+
+def test_only_with_prompt_and_answers():
+    v = TL.teacher_vocab(TL.parse_vocabulary(ONLY_CSV))
+    assert v[1]["only_with"] == ["praying", "proposing"]
+    # one way, and a rule whose only partner isn't a teacher tag is ignored
+    assert TL.only_map(v) == {"kneeling": ["praying", "proposing"], "ring": ["proposing"]}
+    head, _, _ = TL.build_prompt(v)
+    assert "only with praying or proposing" in head and "- ring: only with proposing" in head
+    assert "hidden: only" not in head
+    # any one partner is enough
+    assert TL.parse_answer('{"tags": ["kneeling", "proposing"]}', v)["tags"] == ["kneeling", "proposing"]
+    assert TL.parse_answer('{"tags": ["praying", "kneeling"]}', v)["tags"] == ["praying", "kneeling"]
+    # none there → the tag goes to unsure; the partner is NOT added
+    ans = TL.parse_answer('{"tags": ["close-up", "kneeling"], "unsure": []}', v)
+    assert ans["tags"] == ["close-up"] and ans["unsure"] == ["kneeling"] and ans["rule_drops"] == ["kneeling"]
+    # an always-with add that breaks its own only-with is dropped again, and not counted as added
+    ans = TL.parse_answer('{"tags": ["hug"]}', v)
+    assert ans["tags"] == ["hug"] and ans["rule_adds"] == [] and ans["rule_drops"] == ["ring"]
+    # the reverse needs nothing (proposing alone is fine)
+    assert TL.parse_answer('{"tags": ["proposing"]}', v)["tags"] == ["proposing"]
+    # no only_with column (older files) → no rule
+    assert TL.only_map(TL.parse_vocabulary(ALWAYS_CSV)) == {}

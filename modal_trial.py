@@ -829,12 +829,13 @@ def _tag_video(self, video_id: str, redo: bool = False) -> dict:
         print(f"[{key} teacher] {video_id[:40]}: {len(outs)}/{len(convs)} moments tagged · "
               f"{el / 60:.1f} min so far, about {left / 60:.1f} min left", flush=True)
     seconds = time.time() - started
-    results, bad, p_tok, o_tok, rule_fixes, rule_adds = {}, 0, 0, 0, 0, 0
+    results, bad, p_tok, o_tok, rule_fixes, rule_adds, rule_drops = {}, 0, 0, 0, 0, 0, 0
     for m, o in zip(moments, outs):
         ans = TL.parse_answer(o.outputs[0].text, vocab)
         bad += not ans["ok"]
         rule_fixes += len(ans.get("rule_breaks") or [])
         rule_adds += len(ans.get("rule_adds") or [])
+        rule_drops += len(ans.get("rule_drops") or [])
         p_tok += len(getattr(o, "prompt_token_ids", None) or [])
         o_tok += len(getattr(o.outputs[0], "token_ids", None) or [])
         results[m["key"]] = {**ans, "t": m["t"], "scene_id": m.get("scene_id"),
@@ -853,7 +854,7 @@ def _tag_video(self, video_id: str, redo: bool = False) -> dict:
                                "partial": bool(data.get("partial")), "targets": data["targets"],
                                "seconds": round(seconds, 1), "load_seconds": round(load, 1),
                                "prompts": len(convs), "copied": len(copies), "unreadable": bad,
-                               "rule_fixes": rule_fixes, "rule_adds": rule_adds,
+                               "rule_fixes": rule_fixes, "rule_adds": rule_adds, "rule_drops": rule_drops,
                                "prompt_tokens": p_tok, "output_tokens": o_tok,
                                "tokens_per_s": use["tokens_per_s"], "mfu": use["mfu"],
                                "moments_per_min": round(60 * len(convs) / max(seconds, 1e-6), 1),
@@ -862,9 +863,9 @@ def _tag_video(self, video_id: str, redo: bool = False) -> dict:
                    encoding="utf-8")
     pf.unlink(missing_ok=True)          # it's rebuilt by the prep step whenever needed
     pack_vol.commit()
-    if rule_fixes or rule_adds:
+    if rule_fixes or rule_adds or rule_drops:
         print(f"[{key} teacher] {video_id[:40]}: rules — {rule_fixes} tag(s) broke a never-with → unsure, "
-              f"{rule_adds} added by always-with.", flush=True)
+              f"{rule_adds} added by always-with, {rule_drops} dropped by only-with → unsure.", flush=True)
     print(f"[{key} teacher] {video_id[:40]}: {len(convs)} moments in {seconds / 60:.1f} min · "
           f"{use['tokens_per_s'] or 0:,} tokens/s · GPU maths used {100 * (use['mfu'] or 0):.0f}%", flush=True)
     return {"video_id": video_id, "teacher": key, "prompts": len(convs), "copied": len(copies),
@@ -1133,6 +1134,9 @@ def report() -> str:
             md.append(f"{k}: {fixes} tag(s) moved to unsure because they broke one of your never-with rules.")
         if adds:
             md.append(f"{k}: {adds} tag(s) added by your always-with rules.")
+        drops = sum(t.get("rule_drops", 0) for t in tagged_by[k].values())
+        if drops:
+            md.append(f"{k}: {drops} tag(s) moved to unsure because the tag your only-with rule needs wasn't there.")
     # How hard the tagging GPU worked (only runs that recorded tokens — from v1.32 on).
     speed = []
     for k in keys:

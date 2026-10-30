@@ -373,3 +373,23 @@ def test_always_with_problems_and_fixes(clean_files):
     rows = TL.upsert_tag(rows, {**rows[1], "tag": "long"}, "wide")
     rows = TL.upsert_tag(rows, {**rows[0], "tag": "close"}, "close-up")     # rename follows into always_with
     assert rows[2]["always_with"] == "close"
+
+
+def test_only_with_problems_and_renames(clean_files):
+    rows = TL.parse_vocabulary("tag,group,always_with,only_with\n"
+                               "kneeling,position,,praying; proposing\npraying,action,,\nproposing,action,,\n"
+                               "ring,object,,proposing\nhug,action,ring,\nbow,action,praying,praying\n")
+    assert rows[0]["only_with"] == "praying; proposing"
+    assert TL.only_map(rows)["kneeling"] == ["praying", "proposing"]
+    assert TL.rule_problems(["kneeling", "praying"], rows) == []
+    assert TL.rule_problems(["kneeling"], rows) == ["“kneeling” is only allowed with “praying” or “proposing”"]
+    # never fixed automatically (is kneeling wrong, or was the action forgotten?)
+    assert TL.fix_tags(["kneeling"], rows) == (["kneeling"], [])
+    # an always-with partner isn't added if it would break its own only-with rule
+    assert TL.fix_tags(["hug"], rows) == (["hug"], [])
+    assert TL.fix_tags(["hug", "proposing"], rows) == (["hug", "proposing", "ring"], ["ring"])
+    assert TL.rule_clashes(rows) == [("bow", "praying")]
+    rows = TL.upsert_tag(rows, {**rows[2], "tag": "proposal"}, "proposing")   # rename follows into only_with
+    assert rows[0]["only_with"] == "praying; proposal"
+    assert "only_with" in TL.vocabulary_csv(rows).splitlines()[0]
+    assert TL.parse_vocabulary(TL.vocabulary_csv(rows))[0]["only_with"] == "praying; proposal"

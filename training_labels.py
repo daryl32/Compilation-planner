@@ -16,7 +16,10 @@ Two files, both in CATALOGUE_DIR so they sync with the catalogues:
   never_with  "; "-separated tags that can never be on the same moment as this one, in any group
             (e.g. an action that rules out a position). Works both ways: listing B on A is enough.
   always_with "; "-separated tags that must also be there whenever this one is (one way: A → B
-            means A always comes with B, not the other way round).
+            means A always comes with B, not the other way round). Fixed by ADDING B.
+  only_with   "; "-separated tags, at least one of which must be there for this one to be allowed
+            (one way: a position only with certain actions). Fixed by DROPPING this tag — the
+            other tag is the evidence. Don't list the same tag in always_with and only_with.
   search_words  "; "-separated words you'd type when searching for it
   With no vocabulary file the Reviewer's labels.json is used (every tag kind=frame, teacher=yes).
 
@@ -58,7 +61,7 @@ LABELS_FILE = CATALOGUE_DIR / "training_labels.json"
 LABELS_STEM = LABELS_FILE.stem
 
 VOCAB_COLUMNS = ["tag", "group", "kind", "one_of", "teacher", "description",
-                 "not_to_be_confused_with", "never_with", "always_with", "search_words"]
+                 "not_to_be_confused_with", "never_with", "always_with", "only_with", "search_words"]
 KINDS = ("frame", "motion")
 
 LONG_SCENE_SEC = 20.0      # boundary "missed cut?" points come from scenes longer than this
@@ -102,6 +105,7 @@ def _row(raw: dict) -> dict | None:
         "not_to_be_confused_with": str(raw.get("not_to_be_confused_with") or "").strip(),
         "never_with": _names(raw.get("never_with")),
         "always_with": _names(raw.get("always_with")),
+        "only_with": _names(raw.get("only_with")),
         "search_words": [w for w in words if w],
     }
 
@@ -500,7 +504,7 @@ def upsert_tag(rows: list, row: dict, old_name: str | None = None) -> list:
         out.append(new)
     if old_name and old_name != new["tag"]:     # look-alike and never-with lists point at the new name too
         for r in out:
-            for col in ("not_to_be_confused_with", "never_with", "always_with"):
+            for col in ("not_to_be_confused_with", "never_with", "always_with", "only_with"):
                 r[col] = "; ".join(
                     new["tag"] if p.strip().lower() == old_name.lower() else p.strip()
                     for p in str(r.get(col) or "").split(";") if p.strip())
@@ -534,9 +538,31 @@ def always_map(rows: list) -> dict:
     return out
 
 
+def only_map(rows: list) -> dict:
+    """{tag (lower case): [tags, at least one of which must be there]} from only_with — one way,
+    only tags in the list."""
+    names = {r["tag"].lower(): r["tag"] for r in rows}
+    out = {}
+    for r in rows:
+        for other in str(r.get("only_with") or "").split(";"):
+            o = names.get(other.strip().lower())
+            if o and o.lower() != r["tag"].lower() and o not in out.get(r["tag"].lower(), []):
+                out.setdefault(r["tag"].lower(), []).append(o)
+    return out
+
+
+def rule_clashes(rows: list) -> list:
+    """[(tag, other)] where `other` is in both this tag's always_with and only_with — the two rules
+    would fix a missing `other` in opposite ways (add it / drop this tag)."""
+    amap, omap = always_map(rows), only_map(rows)
+    return [(r["tag"], o) for r in rows for o in omap.get(r["tag"].lower(), [])
+            if o in amap.get(r["tag"].lower(), [])]
+
+
 def rule_problems(tags, rows: list) -> list:
     """Everything in `tags` your vocabulary's rules don't allow, as readable lines:
-    two tags from one pick-one set, a never-with pair, a tag missing its always-with partner."""
+    two tags from one pick-one set, a never-with pair, a tag missing its always-with partner,
+    a tag without any of its only-with partners."""
     tags = list(dict.fromkeys(tags or []))
     lower = {t.lower(): t for t in tags}
     by_name = {r["tag"].lower(): r for r in rows}
@@ -551,16 +577,20 @@ def rule_problems(tags, rows: list) -> list:
     for a, needs in always_map(rows).items():
         if a in lower:
             out += [f"“{lower[a]}” should always come with “{n}”" for n in needs if n.lower() not in lower]
+    for a, needs in only_map(rows).items():
+        if a in lower and not any(n.lower() in lower for n in needs):
+            out.append(f"“{lower[a]}” is only allowed with “{'” or “'.join(needs)}”")
     return out
 
 
 def fix_tags(tags, rows: list) -> tuple:
     """(tags with every missing always-with partner added, the tags added). Only adds — and never a
-    tag that would break a pick-one set or a never-with rule with what's already there. Follows
+    tag that would break a pick-one set, a never-with rule or its own only-with rule. Only-with
+    problems are never fixed here (is the tag wrong, or was its partner forgotten?). Follows
     chains (A → B → C). Never-with clashes can't be fixed safely (which one is wrong?), so they're
     left for you."""
     tags = list(dict.fromkeys(tags or []))
-    amap, pairs = always_map(rows), never_pairs(rows)
+    amap, pairs, omap = always_map(rows), never_pairs(rows), only_map(rows)
     one_of = {r["tag"].lower(): r.get("one_of") for r in rows}
     added = []
     changed = True
@@ -575,6 +605,8 @@ def fix_tags(tags, rows: list) -> tuple:
                     continue
                 if one_of.get(n.lower()) and any(one_of.get(h) == one_of.get(n.lower()) for h in have):
                     continue
+                if omap.get(n.lower()) and not any(o.lower() in have for o in omap[n.lower()]):
+                    continue          # it would break its own only-with rule
                 tags.append(n)
                 added.append(n)
                 have.add(n.lower())
