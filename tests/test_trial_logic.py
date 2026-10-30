@@ -52,12 +52,14 @@ def test_prompt_and_parse():
     head, moment, tail = TL.build_prompt(vocab())
     assert "Frame 4" in head and "frame 4" in moment and "JSON" in tail
     assert "- close-up: Face fills the frame (not the same as: wide)" in head
-    assert "shot size: close-up, wide" in head and '"tags"' in head
+    assert "shot size: close-up, wide" in head and '"conf"' in head and "Category 1 — shot:" in head
+    assert "- dancing [movement]: People dancing" in head
     assert TL.build_prompt(vocab())[0] == head       # the same for every moment (prefix cache)
     ans = TL.parse_answer('Sure! {"tags": ["Close-Up", "wide", "dancing", "flying"], '
                           '"unsure": ["walking", "dancing"], "caption": "Two people."}', vocab())
     assert ans == {"tags": ["close-up", "dancing"], "unsure": ["walking"], "caption": "Two people.", "ok": True,
-                   "rule_breaks": [], "rule_adds": [], "rule_drops": []}
+                   "conf": {"close-up": 100, "wide": 100, "dancing": 100, "walking": 0},
+                   "rule_breaks": [], "rule_adds": [], "rule_drops": [], "rule_required": []}
     bad = TL.parse_answer("no idea", vocab())
     assert bad["tags"] == [] and not bad["ok"]
 
@@ -216,7 +218,8 @@ def test_export(tmp_path, monkeypatch):
     m = next(m for m in v["moments"] if m["key"] == "g_5.00")
     assert m["mine"] == ["close-up", "dancing"] and m["old"] == []
     assert m["teachers"] == {"32b": {"tags": ["close-up", "dancing"], "unsure": None, "caption": None,
-                                     "copied_from": None}}
+                                     "copied_from": None, "look_added": None, "look_removed": None,
+                                     "conf": None}}
     assert (out / "export" / m["frame"]).exists()
     plain = next(m for m in v["moments"] if m["key"] == "s1_0")
     assert plain["mine"] is None and plain["teachers"] == {}
@@ -372,7 +375,7 @@ def test_prep_then_tag_with_fake_model(tmp_path, monkeypatch):
     assert {m["key"] for m in data["moments"]} == {"g_5.00", "g_15.00", "g_25.00", "g_35.00"}
     assert {c["of"] for c in data["copies"].values()} == {"g_25.00"}
     first = data["moments"][0]["conv"][0]["content"]
-    assert first[0]["type"] == "text" and "Tags judged from frame 4" in first[0]["text"]   # head first
+    assert first[0]["type"] == "text" and "category by category" in first[0]["text"]   # head first
     assert sum(p["type"] == "image_url" for p in first) == 7
 
     class Self:
@@ -702,10 +705,12 @@ def test_usually_with_second_look():
     first = TL.parse_answer('{"tags": ["medium", "kissing"], "unsure": ["hands"]}', v)
     asks = TL.look_again(first, v)
     # a pick-one partner is asked against the one already chosen; an unsure one is asked again
-    assert asks == [{"tag": "close-up", "because": "kissing", "instead_of": "medium"},
-                    {"tag": "hands", "because": "kissing", "instead_of": None}]
+    assert asks == [{"tag": "close-up", "kind": "usually", "because": "kissing", "instead_of": "medium"},
+                    {"tag": "hands", "kind": "usually", "because": "kissing", "instead_of": None}]
     q = TL.look_again_prompt(asks)
-    assert "better fit than medium" in q and "hands (often with kissing): does it apply?" in q and '"yes"' in q
+    assert "better fit than medium" in q and "hands (often with kissing): does it apply?" in q
+    assert '"answers": {"close-up": true or false, "hands": true or false}' in q
+    assert TL.look_again_schema(asks)["properties"]["answers"]["required"] == ["close-up", "hands"]
     # yes to close-up → it replaces medium (medium goes to unsure); no to hands
     got = TL.apply_look_again(first, '{"yes": ["close-up"], "no": ["hands"]}', asks, v)
     assert got["tags"] == ["kissing", "close-up"] and "medium" in got["unsure"] and "hands" in got["unsure"]
@@ -725,3 +730,127 @@ def test_usually_with_second_look():
     plain = TL.teacher_vocab(TL.parse_vocabulary(ALWAYS_CSV))
     assert "often (not always)" not in TL.build_prompt(plain)[0]
     assert TL.look_again(TL.parse_answer('{"tags": ["kissing"]}', plain), plain) == []
+
+
+ORDER_CSV = ("tag,group,kind,one_of,teacher,description,not_to_be_confused_with,never_with,tell_apart,threshold,"
+             "double_check,group_order,group_required\n"
+             "dancing,action,motion,,yes,,,,,,,3,\n"
+             "close-up,shot,frame,shot size,yes,,medium,,shoulders hidden,,,1,yes\n"
+             "medium,shot,frame,shot size,yes,,close-up,,shoulders visible,,,1,yes\n"
+             "wide,shot,frame,shot size,yes,,,,,,,,\n"
+             "kissing,action,frame,,yes,,,,,70,yes,,\n"
+             "lying,position,frame,,yes,,,standing,,,,2,\n"
+             "standing,position,frame,,yes,,,,,,,,\n"
+             "logo,overlay,frame,,yes,,,,,,,,\n")
+
+
+def test_category_order_prompt_and_schema():
+    v = TL.teacher_vocab(TL.parse_vocabulary(ORDER_CSV))
+    assert v[4]["threshold"] == 70 and v[4]["double_check"] and v[1]["tell_apart"] == "shoulders hidden"
+    cats = TL.categories(v)
+    # ordered ones first (shot 1, position 2, action 3), then the rest as they appear; required from any row
+    assert [(n, req) for n, _, req in cats] == [("shot", True), ("position", False), ("action", False),
+                                                ("overlay", False)]
+    head, _, _ = TL.build_prompt(v)
+    assert head.index("Category 1 — shot (every moment needs at least one):") < head.index("Category 2 — position")
+    assert "- close-up: " not in head and "- close-up (not the same as: medium; how to tell: shoulders hidden)" in head
+    assert "shot must always have at least one tag" in head
+    assert head.index('"shot": [') < head.index('"position": [') < head.index('"caption"')
+    sch = TL.answer_schema(v)
+    assert list(sch["properties"]) == ["shot", "position", "action", "overlay", "caption"]
+    assert sch["properties"]["shot"]["minItems"] == 1 and sch["properties"]["action"]["minItems"] == 0
+    assert sch["properties"]["shot"]["items"]["properties"]["tag"]["enum"] == ["close-up", "medium", "wide"]
+    assert sch["required"] == ["shot", "position", "action", "overlay", "caption"]
+
+
+def test_confidence_thresholds_and_rules():
+    v = TL.teacher_vocab(TL.parse_vocabulary(ORDER_CSV))
+    reply = ('{"shot": [{"tag": "medium", "conf": 60}, {"tag": "close-up", "conf": 85}], '
+             '"position": [{"tag": "standing", "conf": 55}, {"tag": "lying", "conf": 80}], '
+             '"action": [{"tag": "kissing", "conf": 65}, {"tag": "dancing", "conf": 40}], "overlay": [], '
+             '"caption": "x"}')
+    ans = TL.parse_answer(reply, v)
+    # pick-one: most confident wins; never-with: the more confident stays; kissing below its own 70
+    assert ans["tags"] == ["close-up", "lying"]
+    assert ans["unsure"] == ["standing", "kissing", "dancing"] and ans["rule_breaks"] == ["standing"]
+    assert ans["conf"]["kissing"] == 65 and ans["ok"]
+    # required category with nothing over threshold → its most confident tag is taken
+    ans = TL.parse_answer('{"shot": [{"tag": "wide", "conf": 20}, {"tag": "medium", "conf": 35}], '
+                          '"position": [], "action": [], "overlay": [], "caption": ""}', v)
+    assert ans["tags"] == ["medium"] and ans["rule_required"] == ["medium"]
+    # nothing at all listed for a required category → nothing to take (no invention)
+    assert TL.parse_answer('{"shot": [], "caption": ""}', v)["tags"] == []
+    # out-of-range / text confidences are clamped / taken as sure
+    ans = TL.parse_answer('{"shot": [{"tag": "wide", "conf": 300}], "action": ["dancing"]}', v)
+    assert ans["conf"] == {"wide": 100, "dancing": 100} and ans["tags"] == ["wide", "dancing"]
+
+
+def test_double_check_second_look():
+    v = TL.teacher_vocab(TL.parse_vocabulary(ORDER_CSV))
+    first = TL.parse_answer('{"shot": [{"tag": "close-up", "conf": 90}, {"tag": "medium", "conf": 30}], '
+                            '"action": [{"tag": "kissing", "conf": 95}]}', v)
+    assert first["tags"] == ["close-up", "kissing"]
+    asks = TL.look_again(first, v)
+    assert asks == [{"tag": "kissing", "kind": "check"}]
+    assert "kissing: is it clearly there?" in TL.look_again_prompt(asks)
+    got = TL.apply_look_again(first, '{"answers": {"kissing": false}}', asks, v)
+    assert got["tags"] == ["close-up"] and "kissing" in got["unsure"] and got["look_removed"] == ["kissing"]
+    assert TL.apply_look_again(first, '{"answers": {"kissing": true}}', asks, v)["tags"] == first["tags"]
+    # a "no" on the only tag of a required category keeps it (it must have one) — the next best if listed
+    v2 = [dict(r, double_check=r["tag"] in ("close-up", "medium")) for r in v]
+    only = TL.parse_answer('{"shot": [{"tag": "close-up", "conf": 90}]}', v2)
+    got = TL.apply_look_again(only, '{"answers": {"close-up": false}}', TL.look_again(only, v2), v2)
+    assert got["tags"] == ["close-up"]
+    both = TL.parse_answer('{"shot": [{"tag": "close-up", "conf": 90}, {"tag": "medium", "conf": 20}]}', v2)
+    got = TL.apply_look_again(both, '{"answers": {"close-up": false}}', TL.look_again(both, v2), v2)
+    assert got["tags"] == ["medium"] and "close-up" in got["unsure"]
+
+
+class _CategoryLLM:
+    """Answers in the new per-category shape; on a second look says kissing isn't there."""
+    def __init__(self):
+        self.calls = []
+
+    def chat(self, convs, params, use_tqdm=False):
+        self.calls.append((convs, params))
+        if len(convs[0]) == 1:          # first look
+            return [_FakeOut('{"shot":[{"tag":"close-up","conf":90}],"action":[{"tag":"dancing","conf":80},'
+                             '{"tag":"kissing","conf":75}],"caption":"c"}', 3000) for _ in convs]
+        return [_FakeOut('{"answers":{"kissing":false}}', 3100) for _ in convs]
+
+
+def test_tag_with_categories_and_second_look(tmp_path, monkeypatch):
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    (pack / "library" / "tag_vocabulary.csv").write_text(
+        "tag,group,kind,one_of,teacher,double_check,group_order,group_required\n"
+        "close-up,shot,frame,shot size,yes,,1,yes\nwide,shot,frame,shot size,yes,,1,yes\n"
+        "dancing,action,motion,,yes,,2,\nkissing,action,frame,,yes,yes,2,\n")
+    vis = json.loads((out / "v" / "vision.json").read_text())
+    for tg in vis["targets"]:
+        for t in TL.context_times(tg["t"], 40.0):
+            (out / "v" / "frames" / TL.frame_name(t)).write_bytes(b"jpg")
+    M.prepare_prompts.local("v", 0, 0, 0)
+
+    class Self:
+        key, llm, load_error, load_seconds, first = "32b-fp8", _CategoryLLM(), None, 0.0, True
+    monkeypatch.setattr(M, "_gpu_name", lambda d: "H100")
+    import sys
+    import types
+    fake_vllm = types.ModuleType("vllm")
+    fake_vllm.SamplingParams = lambda **kw: kw
+    sp = types.ModuleType("vllm.sampling_params")
+    sp.StructuredOutputsParams = lambda **kw: kw
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    monkeypatch.setitem(sys.modules, "vllm.sampling_params", sp)
+    M._tag_video(Self, "v", redo=True)
+    first_convs, first_params = Self.llm.calls[0]
+    schema = first_params["structured_outputs"]["json"]
+    assert list(schema["properties"]) == ["shot", "action", "caption"]          # your category order
+    follow_convs, follow_params = Self.llm.calls[1]
+    assert follow_convs[0][1]["role"] == "assistant" and "kissing: is it clearly there?" in follow_convs[0][2]["content"]
+    assert isinstance(follow_params, list) and follow_params[0]["structured_outputs"]["json"]["required"] == ["answers"]
+    tj = json.loads((out / "v" / "tags_32b-fp8.json").read_text())
+    r = next(iter(tj["results"].values()))
+    assert r["tags"] == ["close-up", "dancing"] and "kissing" in r["unsure"] and r["look_removed"] == ["kissing"]
+    assert r["conf"]["dancing"] == 80 and tj["looks"] == len(follow_convs) and tj["structured"]
+    assert tj["look_removed"] == len(follow_convs)

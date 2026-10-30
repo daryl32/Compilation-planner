@@ -23,6 +23,14 @@ Two files, both in CATALOGUE_DIR so they sync with the catalogues:
   usually_with "; "-separated tags that often (not always) come with this one. Soft: nothing is
             added or dropped — when the teacher gives this tag without them, it's asked to take a
             second look at each one (a pick-one partner: "is it a better fit than the one you gave?").
+  threshold   0–100: how sure the teacher must be for the tag to count (empty = 50). Below it, the
+            tag goes to unsure. Raise it for tags the teacher over-gives, lower it for ones it misses.
+  double_check  yes / no — every time the teacher gives this tag it's asked again "is it clearly
+            there?", and a "no" takes it out (for tags it often gives wrongly).
+  tell_apart  a short "how to tell it from its look-alikes" line, shown to the teacher with the tag.
+  group_order, group_required  per group (the same on every row of a group; set in 🗂️ Category
+            order): the order the teacher works through the categories, and whether every moment
+            must have a tag from it (then its most confident tag is taken even below threshold).
   search_words  "; "-separated words you'd type when searching for it
   With no vocabulary file the Reviewer's labels.json is used (every tag kind=frame, teacher=yes).
 
@@ -63,8 +71,11 @@ VOCAB_PENDING = f"cat:{VOCAB_FILE.name}"
 LABELS_FILE = CATALOGUE_DIR / "training_labels.json"
 LABELS_STEM = LABELS_FILE.stem
 
-VOCAB_COLUMNS = ["tag", "group", "kind", "one_of", "teacher", "description",
-                 "not_to_be_confused_with", "never_with", "always_with", "only_with", "usually_with", "search_words"]
+VOCAB_COLUMNS = ["tag", "group", "kind", "one_of", "teacher", "threshold", "double_check", "description",
+                 "not_to_be_confused_with", "tell_apart", "never_with", "always_with", "only_with", "usually_with",
+                 "search_words", "group_order", "group_required"]
+GROUP_COLUMNS = ("group_order", "group_required")      # one value per group, set in 🗂️ Category order
+DEFAULT_THRESHOLD = 50
 KINDS = ("frame", "motion")
 
 LONG_SCENE_SEC = 20.0      # boundary "missed cut?" points come from scenes longer than this
@@ -111,7 +122,25 @@ def _row(raw: dict) -> dict | None:
         "only_with": _names(raw.get("only_with")),
         "usually_with": _names(raw.get("usually_with")),
         "search_words": [w for w in words if w],
+        "threshold": _int_or_none(raw.get("threshold"), 0, 100),
+        "double_check": _flag(raw.get("double_check")),
+        "tell_apart": str(raw.get("tell_apart") or "").strip(),
+        "group_order": _int_or_none(raw.get("group_order"), 0, 999),
+        "group_required": _flag(raw.get("group_required")),
     }
+
+
+def _flag(v) -> bool:
+    return v if isinstance(v, bool) else _yes(v or "")
+
+
+def _int_or_none(v, lo: int, hi: int):
+    if v is None or (isinstance(v, float) and v != v):          # empty / NaN from the table
+        return None
+    try:
+        return max(lo, min(hi, int(float(str(v).strip()))))
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_vocabulary(text: str) -> list:
@@ -178,6 +207,10 @@ def vocabulary_csv(rows: list) -> str:
         r = _row(r)
         if r:
             w.writerow({**r, "teacher": "yes" if r["teacher"] else "no",
+                        "double_check": "yes" if r["double_check"] else "",
+                        "group_required": "yes" if r["group_required"] else "",
+                        "threshold": "" if r["threshold"] is None else r["threshold"],
+                        "group_order": "" if r["group_order"] is None else r["group_order"],
                         "search_words": "; ".join(r["search_words"])})
     return buf.getvalue()
 
@@ -192,6 +225,41 @@ def save_vocabulary(rows: list) -> int:
     return len(clean)
 
 
+def group_settings(rows: list) -> list:
+    """[{"group", "order", "required", "tags"}] in the order the teacher answers (the same rule as
+    trial_logic.categories): groups with an order first, lowest first, then the rest as they appear.
+    A tag with no group is in "other"."""
+    cats = {}
+    for i, r in enumerate(rows):
+        name = r.get("group") or "other"
+        c = cats.setdefault(name, {"group": name, "order": None, "required": False, "tags": 0, "first": i})
+        c["tags"] += 1
+        if r.get("group_order") is not None:
+            c["order"] = r["group_order"] if c["order"] is None else min(c["order"], r["group_order"])
+        c["required"] = c["required"] or bool(r.get("group_required"))
+    out = sorted(cats.values(), key=lambda c: (c["order"] is None, c["order"] or 0, c["first"]))
+    return [{k: c[k] for k in ("group", "order", "required", "tags")} for c in out]
+
+
+def set_group_settings(rows: list, settings: list) -> list:
+    """Rows with each group's order / required written onto every tag of that group.
+    settings: [{"group", "order", "required"}]; groups not mentioned keep what they have."""
+    by = {str(s["group"]): s for s in settings}
+    out = []
+    for r in rows:
+        s = by.get(r.get("group") or "other")
+        out.append({**r, "group_order": _int_or_none(s.get("order"), 0, 999), "group_required": bool(s.get("required"))}
+                   if s else dict(r))
+    return out
+
+
+def set_thresholds(rows: list, thresholds: dict) -> list:
+    """Rows with these tags' thresholds set ({tag: 0–100 or None})."""
+    low = {k.lower(): v for k, v in thresholds.items()}
+    return [{**r, "threshold": _int_or_none(low[r["tag"].lower()], 0, 100)} if r["tag"].lower() in low else dict(r)
+            for r in rows]
+
+
 def chip_groups(rows: list, extra: list = ()) -> list:
     """How a card shows the tags: [(title, single_choice, [tags])]. Tags sharing a one_of are
     one single-choice row each; the rest are grouped by "group" (multi-choice). extra: tags
@@ -202,8 +270,16 @@ def chip_groups(rows: list, extra: list = ()) -> list:
             exclusive.setdefault(r["one_of"], []).append(r["tag"])
         else:
             groups.setdefault(r["group"] or "Tags", []).append(r["tag"])
-    out = [(name, True, tags) for name, tags in exclusive.items()]
-    out += [(name, False, tags) for name, tags in groups.items()]
+    # in your category order (🗂️), a group's pick-one rows first
+    rank = {g["group"]: i for i, g in enumerate(group_settings(rows))}
+    first_group = {}
+    for r in rows:
+        if r["one_of"]:
+            first_group.setdefault(r["one_of"], r.get("group") or "other")
+    out = [(rank.get(first_group[name], 0), 0, i, (name, True, tags)) for i, (name, tags) in enumerate(exclusive.items())]
+    out += [(rank.get("other" if name == "Tags" else name, 0), 1, i, (name, False, tags))
+            for i, (name, tags) in enumerate(groups.items())]
+    out = [x[-1] for x in sorted(out, key=lambda x: x[:3])]
     known = {r["tag"].lower() for r in rows}
     rest = [t for t in dict.fromkeys(extra) if t.lower() not in known]
     if rest:

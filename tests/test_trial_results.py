@@ -397,3 +397,21 @@ def test_rules_panel_fixes_and_filters(bundle, no_labels):
             TLB.VOCAB_FILE.unlink(missing_ok=True)
         else:
             TLB.VOCAB_FILE.write_bytes(backup)
+
+
+def test_suggest_thresholds():
+    import trial_results as TRS
+    rows = [{"tag": "dance", "threshold": None}, {"tag": "kiss", "threshold": 60}, {"tag": "rare", "threshold": None}]
+    # dance: right when conf ≥ 80, wrong at 55–60 → suggested 65–80 beats 50
+    ms = [{"mine": ["dance"], "teachers": {"32b": {"conf": {"dance": c}}}} for c in (80, 85, 90, 95)]
+    ms += [{"mine": [], "teachers": {"32b": {"conf": {"dance": c}}}} for c in (55, 60)]
+    ms += [{"mine": ["kiss"], "teachers": {"32b": {"conf": {"kiss": c}}}} for c in (65, 70, 75)]
+    ms += [{"mine": ["rare"], "teachers": {"32b": {"conf": {}}}}]
+    ms += [{"mine": None, "teachers": {"32b": {"conf": {"dance": 10}}}},          # not labelled → ignored
+           {"mine": ["dance"], "teachers": {"32b": {"tags": ["dance"]}}}]         # no confidences → ignored
+    got = {x["tag"]: x for x in TRS.suggest_thresholds(ms, "32b", rows, 50)}
+    assert set(got) == {"dance", "kiss"}                      # rare: too few of your frames
+    assert got["dance"]["current"] == 50 and got["dance"]["f1_now"] < 1.0
+    assert got["dance"]["suggested"] == 80 and got["dance"]["f1_best"] == 1.0   # ties → the higher one
+    assert got["kiss"]["current"] == 60 and got["kiss"]["f1_now"] == 1.0 and got["kiss"]["suggested"] == 65
+    assert list(got)[0] == "dance"                            # biggest gain first

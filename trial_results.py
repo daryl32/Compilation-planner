@@ -245,6 +245,48 @@ def tag_scores(moments: list, teacher: str) -> list:
     return sorted(out, key=lambda r: (-r["yours"], r["tag"].lower()))
 
 
+THRESHOLD_STEPS = tuple(range(10, 100, 5))
+MIN_FRAMES_FOR_THRESHOLD = 3       # need at least this many of your frames WITH the tag to suggest one
+
+
+def suggest_thresholds(moments: list, teacher: str, rows: list, default: int = 50) -> list:
+    """Per tag, the threshold that would have matched your labels best on the frames you've
+    labelled (only moments tagged with confidences, from v1.32 on):
+    [{"tag", "frames", "yours", "current", "suggested", "f1_now", "f1_best"}], biggest gain first.
+    A tag the teacher didn't list counts as confidence -1 (no threshold can bring it in). Ties go to
+    the higher threshold (fewer wrong tags)."""
+    by_name = {r["tag"].lower(): r for r in rows}
+    data = {}
+    for m in moments:
+        r = (m.get("teachers") or {}).get(teacher) or {}
+        conf = r.get("conf")
+        if m.get("mine") is None or not isinstance(conf, dict):
+            continue
+        mine = {norm(t) for t in m["mine"]}
+        cl = {norm(k): v for k, v in conf.items()}
+        for k in set(mine) | set(cl):
+            if k in by_name:
+                data.setdefault(k, []).append((cl.get(k, -1), k in mine))
+
+    def f1(pairs, t):
+        tp = sum(1 for c, y in pairs if c >= t and y)
+        fp = sum(1 for c, y in pairs if c >= t and not y)
+        fn = sum(1 for c, y in pairs if c < t and y)
+        return 2 * tp / (2 * tp + fp + fn) if tp + fp + fn else 0.0
+
+    out = []
+    for k, pairs in data.items():
+        yours = sum(1 for _, y in pairs if y)
+        if yours < MIN_FRAMES_FOR_THRESHOLD:
+            continue
+        r = by_name[k]
+        cur = default if r.get("threshold") is None else int(r["threshold"])
+        best = max(THRESHOLD_STEPS, key=lambda t: (round(f1(pairs, t), 4), t))
+        out.append({"tag": r["tag"], "frames": len(pairs), "yours": yours, "current": cur, "suggested": best,
+                    "f1_now": round(f1(pairs, cur), 2), "f1_best": round(f1(pairs, best), 2)})
+    return sorted(out, key=lambda x: (-(x["f1_best"] - x["f1_now"]), x["tag"].lower()))
+
+
 # ---------------------------------------------------------------------------
 # Per-batch report
 # ---------------------------------------------------------------------------

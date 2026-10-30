@@ -264,6 +264,7 @@ def tag_editor() -> None:
     cur = next((r for r in vocab if r["tag"] == pick), None) or {
         "tag": "", "group": "", "kind": "frame", "one_of": "", "teacher": True, "description": "",
         "not_to_be_confused_with": "", "never_with": "", "always_with": "", "only_with": "", "usually_with": "",
+        "tell_apart": "", "threshold": None, "double_check": False, "group_order": None, "group_required": False,
         "search_words": []}
     groups = sorted({r["group"] for r in vocab if r["group"]}, key=str.lower)
     sets = sorted({r["one_of"] for r in vocab if r["one_of"]}, key=str.lower)
@@ -291,6 +292,20 @@ def tag_editor() -> None:
         alikes_now = [x.strip() for x in str(cur["not_to_be_confused_with"]).split(";") if x.strip()]
         alikes = st.multiselect("Not to be confused with", [n for n in names if n != cur["tag"]],
                                 default=[x for x in alikes_now if x in names], key=f"{k}_alike")
+        tell = st.text_input("How to tell it apart from those", cur.get("tell_apart") or "", key=f"{k}_tell",
+                             placeholder="e.g. shoulders hidden — if you can see shoulders it's medium",
+                             help="One short, visual rule the teacher reads next to the tag.")
+        a, b = st.columns(2)
+        thr = a.number_input("Threshold — how sure the teacher must be (0–100)", 0, 100,
+                             int(cur["threshold"]) if cur.get("threshold") is not None else TL.DEFAULT_THRESHOLD,
+                             step=5, key=f"{k}_thr",
+                             help=f"Below this the tag goes to unsure. {TL.DEFAULT_THRESHOLD} = the default. Raise it "
+                                  "for tags the teacher gives wrongly, lower it for ones it misses. 🧪 Trial results → "
+                                  "📊 Scores suggests values from your labels.")
+        dcheck = b.toggle("🔍 Double-check — ask again every time it's given", bool(cur.get("double_check")),
+                          key=f"{k}_dcheck",
+                          help="The teacher is asked \"is it clearly there?\" on a second look; a no takes it out. "
+                               "For tags it over-gives. Costs a little GPU time on moments with this tag.")
         # never-with: show the rules from both sides (B listed on A shows on B too), save on this tag
         both = TL.never_pairs(vocab).get(cur["tag"].lower(), set())
         never = st.multiselect("Never with — tags that can't be on the same moment as this one",
@@ -337,7 +352,11 @@ def tag_editor() -> None:
         row = {"tag": name, "group": group, "kind": kind, "one_of": one_of, "teacher": teacher,
                "description": desc, "not_to_be_confused_with": "; ".join(alikes),
                "never_with": "; ".join(never), "always_with": "; ".join(always), "only_with": "; ".join(only),
-               "usually_with": "; ".join(usually), "search_words": words}
+               "usually_with": "; ".join(usually), "search_words": words, "tell_apart": tell,
+               "threshold": None if thr == TL.DEFAULT_THRESHOLD and cur.get("threshold") is None else thr,
+               "double_check": dcheck}
+        gs = {g["group"]: g for g in TL.group_settings(vocab)}.get(group or "other")
+        row.update({"group_order": gs["order"] if gs else None, "group_required": bool(gs and gs["required"])})
         try:
             rows = TL.upsert_tag(vocab, row, None if pick == NEW_TAG else pick)
             if pick != NEW_TAG:      # a rule taken off here comes off the other tag too
@@ -365,6 +384,33 @@ def tag_editor() -> None:
         st.rerun()
 
 
+def _save_order(settings: list) -> None:
+    rows, _ = TL.load_vocabulary()
+    TL.save_vocabulary(TL.set_group_settings(rows, settings))
+    st.session_state["tl_vocab_note"] = "Saved the category order."
+
+
+def category_order() -> None:
+    """🗂️ The order the teacher works through the categories (groups), and which must always get a tag."""
+    gs = TL.group_settings(vocab)
+    with st.expander("🗂️ Category order — the order the teacher tags in", expanded=False):
+        st.caption("The teacher answers category by category in this order (lowest number first; empty = after "
+                   "the numbered ones). **Needs a tag**: every moment must get one from this category — if nothing "
+                   "reaches its threshold, the teacher's most confident tag in it is taken (e.g. shot, camera). "
+                   "Used from the next Modal run, and for the order of the rows on the 🎯 cards.")
+        table = [{"category": g["group"], "order": g["order"], "needs a tag": g["required"], "tags": g["tags"]}
+                 for g in gs]
+        edited = st.data_editor(table, hide_index=True, width="stretch", key="tl_cat_order",
+                                disabled=["category", "tags"],
+                                column_config={"order": st.column_config.NumberColumn("order", min_value=0,
+                                                                                      max_value=999, step=1),
+                                               "needs a tag": st.column_config.CheckboxColumn("needs a tag")})
+        st.button("💾 Save category order", type="primary", key="tl_cat_save", width="stretch",
+                  on_click=_save_order,
+                  args=([{"group": e["category"], "order": e["order"], "required": bool(e["needs a tag"])}
+                         for e in edited],))
+
+
 def vocab_view() -> None:
     st.caption("The tag list the new models learn. **kind**: *frame* = visible in one still, *motion* = "
                "needs a few seconds of movement. **one_of**: a name shared by tags that can't both be true "
@@ -374,7 +420,9 @@ def vocab_view() -> None:
                "that must also be there whenever this one is (one way), separated by ; — the teacher is told "
                "and a missing one is added. **only_with**: this tag is allowed only when at least one of these is "
                "there (one way), separated by ; — the teacher is told and, without one, this tag moves to unsure "
-               "(nothing is added). **usually_with**: tags that often (not always) come with this one — when the "
+               "(nothing is added). **threshold**: how sure (0–100) the teacher must be for the tag to count "
+               "(empty = 50). **double_check**: ask the teacher again every time it gives the tag. **tell_apart**: a "
+               "short rule for telling it from its look-alikes. **usually_with**: tags that often (not always) come with this one — when the "
                "teacher gives this tag without them, it takes a second look at each. **teacher**: may the big "
                "model try this tag (off = learned only from your labels). **search_words**: words you'd type to "
                "find it, separated by ;")
@@ -411,19 +459,24 @@ def vocab_view() -> None:
         st.warning("These are in both **always_with** and **only_with** — they'd fix a missing tag in opposite "
                    "ways, so keep each in just one: "
                    + ", ".join(f"{a} → {b}" for a, b in clashes))
+    category_order()
     st.subheader(f"All tags ({len(vocab)})")
     st.caption("Edit cells directly, add a row at the bottom, then 💾 Save table — or use the form below for one tag.")
     table = [{**r, "search_words": "; ".join(r["search_words"])} for r in vocab]
     edited = st.data_editor(
         table, num_rows="dynamic", hide_index=True, width="stretch", key="tl_vocab_editor",
-        column_order=TL.VOCAB_COLUMNS,
+        column_order=[c for c in TL.VOCAB_COLUMNS if c not in TL.GROUP_COLUMNS],
         column_config={
             "tag": st.column_config.TextColumn("tag", required=True),
             "kind": st.column_config.SelectboxColumn("kind", options=list(TL.KINDS), default="frame"),
             "teacher": st.column_config.CheckboxColumn("teacher", default=True),
+            "threshold": st.column_config.NumberColumn("threshold", min_value=0, max_value=100, step=5,
+                                                       help=f"Empty = {TL.DEFAULT_THRESHOLD}"),
+            "double_check": st.column_config.CheckboxColumn("double_check", default=False),
         })
     if st.button("💾 Save table", type="primary", key="tl_vocab_save", width="stretch"):
-        n = TL.save_vocabulary(list(edited))
+        # the category order isn't in the table — every group keeps its settings (new groups: none)
+        n = TL.save_vocabulary(TL.set_group_settings(list(edited), TL.group_settings(vocab)))
         st.session_state["tl_vocab_note"] = f"Saved {n} tags."
         st.rerun()
 

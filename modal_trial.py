@@ -79,6 +79,7 @@ VISION_GPU = VISION_GPUS[0]
 EXAMPLES_DEFAULT, EXAMPLES_MAX = 0, 6
 # Near-identical moments in a scene are tagged once and the answer copied (--dedup 0 = tag all).
 DEDUP_DEFAULT = 0.96
+TAG_MAX_TOKENS = 800        # the reply lists every tag that might apply, with a confidence — room for ~50
 
 DATA, CACHE = "/data", "/cache"
 PACK, OUT = f"{DATA}/pack", f"{DATA}/trial"
@@ -817,14 +818,26 @@ def _tag_video(self, video_id: str, redo: bool = False) -> dict:
     vocab = [r for r in TL.teacher_vocab(_vocab()) if r["tag"] in set(vocab_names)] or TL.teacher_vocab(_vocab())
     convs = [m["conv"] for m in moments]
     # Chunks the size of vLLM's batch (max_num_seqs), so progress shows every batch at no cost.
-    outs, chunk, params = [], 32, SamplingParams(temperature=0.0, max_tokens=256)
+    # Replies are held to your tag list and category order (vLLM structured output): no typos or
+    # invented tags, required categories always answered. Older vLLM without it → plain replies.
+    try:
+        from vllm.sampling_params import StructuredOutputsParams
+    except ImportError:
+        StructuredOutputsParams = None
+
+    def sampling(max_tokens, schema):
+        if StructuredOutputsParams is None:
+            return SamplingParams(temperature=0.0, max_tokens=max_tokens)
+        return SamplingParams(temperature=0.0, max_tokens=max_tokens,
+                              structured_outputs=StructuredOutputsParams(json=schema, disable_any_whitespace=True))
+
+    outs, chunk, params = [], 32, sampling(TAG_MAX_TOKENS, TL.answer_schema(vocab))
     print(f"[{key} teacher] {video_id[:40]}: {len(convs)} moments to tag"
           + (f" (+{len(copies)} near-identical ones copy an answer)" if copies else "")
           + (f", ~{data['examples_used'] / max(len(convs), 1):.1f} worked examples each" if data.get("examples_used") else "")
           + f" — progress every {chunk}…", flush=True)
     # Second look (usually_with): straight after each chunk, so its frames are still in vLLM's
     # prefix cache — the follow-up only pays for the new question and the short answer.
-    look_params = SamplingParams(temperature=0.0, max_tokens=128)
     answers, look_p_tok, look_o_tok, looks = [], 0, 0, 0
     for i in range(0, len(convs), chunk):
         got = self.llm.chat(convs[i:i + chunk], params, use_tqdm=False)
@@ -835,7 +848,9 @@ def _tag_video(self, video_id: str, redo: bool = False) -> dict:
                                       {"role": "user", "content": TL.look_again_prompt(asks[j])}])
                   for j in range(len(got)) if asks[j]]
         if follow:
-            seconds_out = self.llm.chat([c for _, c in follow], look_params, use_tqdm=False)
+            seconds_out = self.llm.chat([c for _, c in follow],
+                                        [sampling(160, TL.look_again_schema(asks[j])) for j, _ in follow],
+                                        use_tqdm=False)
             looks += len(follow)
             for (j, _), o2 in zip(follow, seconds_out):
                 firsts[j] = TL.apply_look_again(firsts[j], o2.outputs[0].text, asks[j], vocab)
@@ -848,10 +863,12 @@ def _tag_video(self, video_id: str, redo: bool = False) -> dict:
               f"{el / 60:.1f} min so far, about {left / 60:.1f} min left", flush=True)
     seconds = time.time() - started
     results, bad, p_tok, o_tok, rule_fixes, rule_adds, rule_drops = {}, 0, look_p_tok, look_o_tok, 0, 0, 0
-    look_added = 0
+    look_added = look_removed = required = 0
     for m, o, ans in zip(moments, outs, answers):
         bad += not ans["ok"]
         look_added += len(ans.get("look_added") or [])
+        look_removed += len(ans.get("look_removed") or [])
+        required += len(ans.get("rule_required") or [])
         rule_fixes += len(ans.get("rule_breaks") or [])
         rule_adds += len(ans.get("rule_adds") or [])
         rule_drops += len(ans.get("rule_drops") or [])
@@ -862,7 +879,7 @@ def _tag_video(self, video_id: str, redo: bool = False) -> dict:
     for k, c in copies.items():
         src = results.get(c["of"])
         if src:
-            results[k] = {**{f: src[f] for f in ("tags", "unsure", "caption", "ok")}, "t": c["t"],
+            results[k] = {**{f: src.get(f) for f in ("tags", "unsure", "caption", "ok", "conf")}, "t": c["t"],
                           "scene_id": c.get("scene_id"), "gold_id": c.get("gold_id"),
                           "copied_from": c["of"], "similarity": c.get("similarity")}
     gpu = _gpu_name(TEACHER_GPUS[key][0])
@@ -874,7 +891,8 @@ def _tag_video(self, video_id: str, redo: bool = False) -> dict:
                                "seconds": round(seconds, 1), "load_seconds": round(load, 1),
                                "prompts": len(convs), "copied": len(copies), "unreadable": bad,
                                "rule_fixes": rule_fixes, "rule_adds": rule_adds, "rule_drops": rule_drops,
-                               "looks": looks, "look_added": look_added,
+                               "looks": looks, "look_added": look_added, "look_removed": look_removed,
+                               "required_fills": required, "structured": StructuredOutputsParams is not None,
                                "prompt_tokens": p_tok, "output_tokens": o_tok,
                                "tokens_per_s": use["tokens_per_s"], "mfu": use["mfu"],
                                "moments_per_min": round(60 * len(convs) / max(seconds, 1e-6), 1),
@@ -887,8 +905,8 @@ def _tag_video(self, video_id: str, redo: bool = False) -> dict:
         print(f"[{key} teacher] {video_id[:40]}: rules — {rule_fixes} tag(s) broke a never-with → unsure, "
               f"{rule_adds} added by always-with, {rule_drops} dropped by only-with → unsure.", flush=True)
     if looks:
-        print(f"[{key} teacher] {video_id[:40]}: second look (usually-with) on {looks} moment(s) → "
-              f"{look_added} tag(s) added.", flush=True)
+        print(f"[{key} teacher] {video_id[:40]}: second look on {looks} moment(s) → {look_added} tag(s) "
+              f"added (usually-with), {look_removed} taken out (double-check).", flush=True)
     print(f"[{key} teacher] {video_id[:40]}: {len(convs)} moments in {seconds / 60:.1f} min · "
           f"{use['tokens_per_s'] or 0:,} tokens/s · GPU maths used {100 * (use['mfu'] or 0):.0f}%", flush=True)
     return {"video_id": video_id, "teacher": key, "prompts": len(convs), "copied": len(copies),
@@ -1163,8 +1181,12 @@ def report() -> str:
         looks = sum(t.get("looks", 0) for t in tagged_by[k].values())
         if looks:
             added = sum(t.get("look_added", 0) for t in tagged_by[k].values())
-            md.append(f"{k}: took a second look (your usually-with rules) at {looks} moment(s) and added "
-                      f"{added} tag(s).")
+            removed = sum(t.get("look_removed", 0) for t in tagged_by[k].values())
+            md.append(f"{k}: took a second look at {looks} moment(s) — {added} tag(s) added by your usually-with "
+                      f"rules, {removed} taken out by double-check.")
+        fills = sum(t.get("required_fills", 0) for t in tagged_by[k].values())
+        if fills:
+            md.append(f"{k}: {fills} tag(s) were below their threshold but taken because their category needs a tag.")
     # How hard the tagging GPU worked (only runs that recorded tokens — from v1.32 on).
     speed = []
     for k in keys:
@@ -1322,7 +1344,8 @@ def export(smoke: bool = False) -> dict:
                 "key": tg["key"], "t": tg["t"], "scene_id": tg.get("scene_id"), "frame": frame,
                 "mine": None if g is None else list(g.get("tags") or []),
                 "old": list(sc.get("corrected_tags") if sc.get("corrected_tags") is not None else sc.get("tags") or []),
-                "teachers": {k: {f: r[tg["key"]].get(f) for f in ("tags", "unsure", "caption", "copied_from", "look_added")}
+                "teachers": {k: {f: r[tg["key"]].get(f) for f in ("tags", "unsure", "caption", "copied_from", "look_added",
+                                                               "look_removed", "conf")}
                              for k, r in teachers.items() if tg["key"] in r},
             })
         old_curve, old_fps = [], 0.0

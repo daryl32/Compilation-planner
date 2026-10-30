@@ -403,3 +403,64 @@ def test_usually_with_column(clean_files):
     rows = TL.upsert_tag(rows, {**rows[1], "tag": "close"}, "close-up")
     assert rows[0]["usually_with"] == "close"
     assert TL.parse_vocabulary(TL.vocabulary_csv(rows))[0]["usually_with"] == "close"
+
+
+def test_new_teacher_columns_and_category_order(clean_files):
+    rows = TL.parse_vocabulary("tag,group,one_of,threshold,double_check,tell_apart,group_order,group_required\n"
+                               "dance,action,,70,yes,,2,\nclose-up shot,shot,shot size,,,shoulders hidden,1,yes\n"
+                               "wide shot,shot,shot size,abc,,,,\nlogo,overlay,,150,,,,\n")
+    assert rows[0]["threshold"] == 70 and rows[0]["double_check"] and rows[2]["threshold"] is None
+    assert rows[3]["threshold"] == 100 and rows[1]["tell_apart"] == "shoulders hidden"
+    gs = TL.group_settings(rows)
+    assert [(g["group"], g["order"], g["required"], g["tags"]) for g in gs] == [
+        ("shot", 1, True, 2), ("action", 2, False, 1), ("overlay", None, False, 1)]
+    # cards follow the category order
+    assert [t for t, _, _ in TL.chip_groups(rows)] == ["shot size", "action", "overlay"]
+    rows = TL.set_group_settings(rows, [{"group": "overlay", "order": 0, "required": False},
+                                        {"group": "shot", "order": 5, "required": True}])
+    assert [g["group"] for g in TL.group_settings(rows)] == ["overlay", "action", "shot"]
+    assert all(r["group_order"] == 5 and r["group_required"] for r in rows if r["group"] == "shot")
+    rows = TL.set_thresholds(rows, {"Dance": 85, "logo": None})
+    assert rows[0]["threshold"] == 85 and rows[3]["threshold"] is None
+    again = TL.parse_vocabulary(TL.vocabulary_csv(rows))
+    assert again == rows
+    TL.save_vocabulary(rows)
+    assert TL.load_vocabulary()[0] == rows
+    # the teacher's parser reads the same file the same way
+    import trial_logic as TLG
+    tv = TLG.parse_vocabulary(TL.vocabulary_csv(rows))
+    assert [(n, req) for n, _, req in TLG.categories(tv)] == [("overlay", False), ("action", False), ("shot", True)]
+    assert tv[0]["threshold"] == 85 and tv[0]["double_check"] and tv[1]["tell_apart"] == "shoulders hidden"
+
+
+def test_page_category_order_threshold_and_double_check(clean_files):
+    from tests.apptest_util import errors, page_app
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "📒 Vocabulary"
+    at.run()
+    assert not errors(at), errors(at)
+    TL.save_vocabulary(TL.load_vocabulary()[0])           # start from a real file
+    at.run()
+    # 🗂️ category order: save it (the editor's current rows), then it survives a 💾 Save table
+    rows = TL.load_vocabulary()[0]
+    groups = [g["group"] for g in TL.group_settings(rows)]
+    TL.save_vocabulary(TL.set_group_settings(rows, [{"group": groups[-1], "order": 1, "required": True}]))
+    at.run()
+    next(b for b in at.button if b.key == "tl_cat_save").click().run()
+    assert not errors(at), errors(at)
+    g0 = TL.group_settings(TL.load_vocabulary()[0])[0]
+    assert (g0["group"], g0["order"], g0["required"]) == (groups[-1], 1, True)
+    next(b for b in at.button if b.label == "💾 Save table").click().run()
+    assert not errors(at), errors(at)
+    assert TL.group_settings(TL.load_vocabulary()[0])[0]["group"] == groups[-1]
+    # tag form: threshold + double-check + tell-apart
+    at.session_state["tl_ed_pick"] = "dance"
+    at.run()
+    at.number_input(key="tl_ed_dance_thr").set_value(75)
+    at.toggle(key="tl_ed_dance_dcheck").set_value(True)
+    at.text_input(key="tl_ed_dance_tell").set_value("feet moving to a beat")
+    next(b for b in at.button if b.label == "💾 Save tag").click().run()
+    assert not errors(at), errors(at)
+    r = next(r for r in TL.load_vocabulary()[0] if r["tag"] == "dance")
+    assert r["threshold"] == 75 and r["double_check"] and r["tell_apart"] == "feet moving to a beat"
+    assert TL.group_settings(TL.load_vocabulary()[0])[0]["group"] == groups[-1]   # order kept

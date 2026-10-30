@@ -225,7 +225,9 @@ def _compare(data: dict) -> None:
                         caps.append(f"**{label(v, k)}:** {r['caption']}"
                                     + (" · ↩ copied from a near-identical moment" if r.get("copied_from") else "")
                                     + (f" · 👀 added on a second look: {', '.join(r['look_added'])}"
-                                       if r.get("look_added") else ""))
+                                       if r.get("look_added") else "")
+                                    + (f" · 🔍 taken out on double-check: {', '.join(r['look_removed'])}"
+                                       if r.get("look_removed") else ""))
                 if caps:
                     st.caption("  \n".join(caps))
                 # ✏️ Correct: your tags for this frame go to your training labels (the gold set).
@@ -347,6 +349,37 @@ def _scores(data: dict) -> None:
                      hide_index=True, width="stretch", key=f"tr_scores_{k}",
                      column_config={"F1": st.column_config.ProgressColumn("F1", min_value=0.0, max_value=1.0,
                                                                          format="%.2f")})
+        _thresholds(moments, k)
+
+
+def _use_thresholds(picks: dict) -> None:
+    rows, _ = TLB.load_vocabulary()
+    TLB.save_vocabulary(TLB.set_thresholds(rows, picks))
+    st.session_state["tr_saved_note"] = f"Thresholds set for {len(picks)} tag(s) — used from the next Modal run."
+
+
+def _thresholds(moments: list, teacher: str) -> None:
+    """🎚️ The threshold per tag that would have matched your labels best (needs confidences —
+    batches tagged from v1.32 on)."""
+    rows, _ = TLB.load_vocabulary()
+    sug = TR.suggest_thresholds(moments, teacher, rows, TLB.DEFAULT_THRESHOLD)
+    better = [x for x in sug if x["suggested"] != x["current"] and x["f1_best"] > x["f1_now"]]
+    with st.expander(f"🎚️ Thresholds from your labels — {len(better)} tag(s) would do better", expanded=False):
+        if not sug:
+            st.caption("Needs frames you've labelled from a batch tagged with confidences (from v1.32 on), and at "
+                       f"least {TR.MIN_FRAMES_FOR_THRESHOLD} of your frames with the tag.")
+            return
+        st.caption("How sure the teacher must be (0–100) for a tag to count. **Suggested** is the threshold that "
+                   "would have matched your labels best on these frames. Raise = fewer wrong tags, lower = fewer "
+                   "missed. Small numbers of frames can mislead — set them yourself in 📒 Vocabulary any time.")
+        st.dataframe([{"Tag": x["tag"], "Frames": x["frames"], "Your frames with it": x["yours"],
+                       "Now": x["current"], "F1 now": x["f1_now"], "Suggested": x["suggested"],
+                       "F1 suggested": x["f1_best"]} for x in sug],
+                     hide_index=True, width="stretch", key=f"tr_thr_{teacher}")
+        if better:
+            st.button(f"🎚️ Use the suggested thresholds for {len(better)} tag(s)", type="primary",
+                      key=f"tr_thr_use_{teacher}", on_click=_use_thresholds,
+                      args=({x["tag"]: x["suggested"] for x in better},))
 
 
 def _report(data: dict, batch) -> None:

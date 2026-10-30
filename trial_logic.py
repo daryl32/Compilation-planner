@@ -61,8 +61,51 @@ def parse_vocabulary(text: str) -> list:
                      "only_with": [n.strip() for n in (raw.get("only_with") or "").replace(",", ";").split(";")
                                    if n.strip()],
                      "usually_with": [n.strip() for n in (raw.get("usually_with") or "").replace(",", ";").split(";")
-                                      if n.strip()]})
+                                      if n.strip()],
+                     "tell_apart": (raw.get("tell_apart") or "").strip(),
+                     "threshold": _int_or_none(raw.get("threshold"), 0, 100),
+                     "double_check": (raw.get("double_check") or "").strip().lower() in ("yes", "y", "true", "1", "x"),
+                     "group_order": _int_or_none(raw.get("group_order"), 0, 999),
+                     "group_required": (raw.get("group_required") or "").strip().lower()
+                     in ("yes", "y", "true", "1", "x")})
     return rows
+
+
+def _int_or_none(v, lo: int, hi: int):
+    try:
+        return max(lo, min(hi, int(float(str(v).strip()))))
+    except (TypeError, ValueError):
+        return None
+
+
+DEFAULT_THRESHOLD = 50          # a tag counts when the teacher is at least this sure (0–100)
+MAX_PER_CATEGORY = 8            # most tags the teacher may list in one category (keeps replies short)
+
+
+def categories(vocab: list) -> list:
+    """[(name, [rows], required)] in the order the teacher answers them: categories with a
+    group_order first (lowest first), then the rest in the order they first appear. A tag with no
+    group is in "other". required = any of its tags says group_required (every moment needs one)."""
+    cats = {}
+    for i, r in enumerate(vocab):
+        name = r.get("group") or "other"
+        c = cats.setdefault(name, {"rows": [], "first": i, "order": None, "required": False})
+        c["rows"].append(r)
+        if r.get("group_order") is not None:
+            c["order"] = r["group_order"] if c["order"] is None else min(c["order"], r["group_order"])
+        c["required"] = c["required"] or bool(r.get("group_required"))
+    ranked = sorted(cats.items(), key=lambda kv: (kv[1]["order"] is None, kv[1]["order"] or 0, kv[1]["first"]))
+    return [(name, c["rows"], c["required"]) for name, c in ranked]
+
+
+def category_key(name: str) -> str:
+    """The category's key in the reply (never clashes with "caption")."""
+    return f"{name} tags" if name.strip().lower() == "caption" else name
+
+
+def tag_threshold(r: dict) -> int:
+    t = r.get("threshold")
+    return DEFAULT_THRESHOLD if t is None else int(t)
 
 
 def never_pairs(vocab: list) -> dict:
@@ -286,16 +329,20 @@ def build_prompt(vocab: list) -> tuple:
            it and the GPU reads it once per run instead of once per moment.
     moment — the line just before the moment's 7 frames.
     tail — the short line after them."""
-    frame = [r for r in vocab if r["kind"] == "frame"]
-    motion = [r for r in vocab if r["kind"] == "motion"]
-
     def line(r):
-        bits = [f"- {r['tag']}"]
+        bits = [f"- {r['tag']}" + (" [movement]" if r["kind"] == "motion" else "")]
         if r["description"]:
             bits.append(f": {r['description']}")
+        notes = []
         if r["not_to_be_confused_with"]:
-            bits.append(f" (not the same as: {r['not_to_be_confused_with']})")
+            notes.append(f"not the same as: {r['not_to_be_confused_with']}")
+        if r.get("tell_apart"):
+            notes.append(f"how to tell: {r['tell_apart']}")
+        if notes:
+            bits.append(f" ({'; '.join(notes)})")
         return "".join(bits)
+
+    cats = categories(vocab)
 
     groups = {}
     for r in vocab:
@@ -304,12 +351,15 @@ def build_prompt(vocab: list) -> tuple:
     head = ["You are labelling footage for a video-editing library. Each moment to label is shown "
             "as 7 frames spanning about 4 seconds of one clip, in time order. Frame 4 (the middle "
             "one) is the moment being labelled.",
-            "", "Tags judged from frame 4 alone (what is visible in that frame):"]
-    head += [line(r) for r in frame] or ["(none)"]
-    head += ["", "Tags judged from the movement across all 7 frames:"]
-    head += [line(r) for r in motion] or ["(none)"]
+            "", "The tags, category by category. Judge each tag from frame 4 alone (what is visible in "
+                "that frame), except tags marked [movement]: judge those from the movement across all 7 "
+                "frames."]
+    for i, (name, rows, required) in enumerate(cats, 1):
+        head += ["", f"Category {i} — {name}" + (" (every moment needs at least one)" if required else "") + ":"]
+        head += [line(r) for r in rows]
     if groups:
-        head += ["", "Pick at most one tag from each of these sets:"]
+        head += ["", "Only one tag from each of these sets can be true — give your best one the highest number "
+                     "(you may list another with a lower number if you're torn):"]
         head += [f"- {name}: {', '.join(tags)}" for name, tags in groups.items()]
     pairs = never_pairs(vocab)
     if pairs:
@@ -335,10 +385,16 @@ def build_prompt(vocab: list) -> tuple:
                      "at whether the others apply too, and only give them if they do:"]
         head += [f"- {r['tag']}: often with {', '.join(umap[r['tag'].lower()])}" for r in vocab
                  if r["tag"].lower() in umap]
-    head += ["", "Only use tags from the lists above, spelled exactly as written. Choose every tag "
-             "that clearly applies; leave out anything you are not sure of, and list those under "
-             "\"unsure\" instead. Reply with JSON only, no other text:",
-             '{"tags": ["..."], "unsure": ["..."], "caption": "one short neutral sentence"}']
+    need = [name for name, _, required in cats if required]
+    shape = ", ".join(f'"{category_key(name)}": [{{"tag": "...", "conf": 0-100}}]' for name, _, _ in cats)
+    head += ["", "Work through the categories in order. In each one, list the tags that might apply, each "
+                 "with how sure you are that it is clearly there, from 0 to 100. Give a tag you are not "
+                 "sure about a low number rather than leaving it out; leave out tags that clearly don't "
+                 "apply; use [] when nothing in a category applies."
+             + (f" {', '.join(need)} must always have at least one tag — give your best guess." if need else ""),
+             "Only use tags from that category's list, spelled exactly as written. Reply with JSON only, "
+             "no other text:",
+             "{" + shape + ', "caption": "one short neutral sentence"}']
     moment = "The moment to label — 7 frames in time order, frame 4 in the middle:"
     tail = "Reply with the JSON for this moment only."
     return "\n".join(head), moment, tail
@@ -406,52 +462,114 @@ def example_caption(i: int, tags: list, vocab: list) -> str:
     return f"Example {i} — correct tags: " + (", ".join(shown) if shown else "none of the listed tags")
 
 
-def parse_answer(text: str, vocab: list) -> dict:
-    """{"tags", "unsure", "caption", "ok"} from the model's reply — tags kept only if they're in
-    the vocabulary (any case), at most one per one_of set (the first named wins)."""
-    lookup = {r["tag"].lower(): r for r in vocab}
+def _json_in(text: str):
     m = re.search(r"\{.*\}", text or "", re.S)
-    data, ok = {}, False
-    if m:
-        try:
-            data = json.loads(m.group(0))
-            ok = isinstance(data, dict)
-        except ValueError:
-            data = {}
-    if not isinstance(data, dict):
-        data = {}
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
 
-    def clean(names):
-        out, sets = [], set()
-        for n in names if isinstance(names, list) else []:
-            r = lookup.get(str(n).strip().lower())
-            if not r or r["tag"] in out:
-                continue
-            if r["one_of"]:
-                if r["one_of"] in sets:
-                    continue
-                sets.add(r["one_of"])
-            out.append(r["tag"])
-        return out
 
-    tags = clean(data.get("tags"))
-    # your never-with rules: a tag that clashes with one named before it goes to "unsure"
-    pairs, kept, broke = never_pairs(vocab), [], []
-    for t in tags:
+def _conf(v) -> int:
+    try:
+        return max(0, min(100, int(round(float(v)))))
+    except (TypeError, ValueError):
+        return 100
+
+
+def parse_answer(text: str, vocab: list) -> dict:
+    """{"tags", "unsure", "caption", "ok", "conf", "rule_*"} from the teacher's reply.
+
+    The reply lists tags per category with a confidence ({"shot": [{"tag", "conf"}], …}); the
+    older shape {"tags": [...], "unsure": [...]} is read too (tags = 100, unsure = 0). Then
+    finalize() decides: per-tag thresholds, pick-one sets and never-with by confidence, required
+    categories, always-with and only-with."""
+    lookup = {r["tag"].lower(): r for r in vocab}
+    data = _json_in(text)
+    ok = data is not None
+    data = data or {}
+    conf = {}
+
+    def put(name, c):
+        r = lookup.get(str(name).strip().lower())
+        if r:
+            conf[r["tag"]] = max(conf.get(r["tag"], -1), c)
+
+    for k, val in data.items():
+        if k in ("caption", "tags", "unsure") or not isinstance(val, list):
+            continue
+        for it in val:
+            if isinstance(it, dict):
+                put(it.get("tag", ""), _conf(it.get("conf", 100)))
+            elif isinstance(it, str):
+                put(it, 100)
+    for n in data.get("tags") if isinstance(data.get("tags"), list) else []:
+        put(n, 100)
+    for n in data.get("unsure") if isinstance(data.get("unsure"), list) else []:
+        put(n, 0)
+    out = finalize(conf, vocab)
+    return {"tags": out["tags"], "unsure": out["unsure"], "caption": str(data.get("caption") or "")[:300],
+            "ok": ok, **{k: v for k, v in out.items() if k not in ("tags", "unsure")}}
+
+
+def finalize(conf: dict, vocab: list, rejected=()) -> dict:
+    """The final tags from {tag: confidence} (in the order named):
+    1. a tag counts when its confidence reaches its threshold (default 50) and it wasn't rejected
+       (a "no" on a second look);
+    2. pick-one sets: the most confident wins (ties: the first named) — the others are dropped;
+    3. never-with: the more confident stays, the other goes to unsure (rule_breaks);
+    4. a required category with nothing: its most confident listed tag is taken (rule_required);
+    5. always-with adds (rule_adds), only-with drops (rule_drops), as before.
+    Unsure = listed below threshold, rejected, broke a rule — at most one per pick-one set."""
+    lookup = {r["tag"].lower(): r for r in vocab}
+    rejected = {t.lower() for t in rejected}
+    order = {t: i for i, t in enumerate(conf)}
+    ranked = sorted(conf, key=lambda t: (-conf[t], order[t]))
+    pairs, sets = never_pairs(vocab), {r["tag"]: r["one_of"] for r in vocab}
+    kept, broke, used = [], [], set()
+
+    def fits(t):
+        if sets.get(t) and sets[t] in used:
+            return False
+        return not any(o in kept for o in pairs.get(t.lower(), ()))
+
+    for t in ranked:
+        r = lookup[t.lower()]
+        if t.lower() in rejected or conf[t] < tag_threshold(r):
+            continue
+        if sets.get(t) and sets[t] in used:
+            continue
         if any(o in kept for o in pairs.get(t.lower(), ())):
             broke.append(t)
-        else:
-            kept.append(t)
-    tags = kept
+            continue
+        kept.append(t)
+        if sets.get(t):
+            used.add(sets[t])
+    required_adds = []
+    for name, rows, required in categories(vocab):
+        names = {r["tag"] for r in rows}
+        if not required or any(t in names for t in kept):
+            continue
+        pool = [t for t in ranked if t in names and fits(t)]
+        pick = next((t for t in pool if t.lower() not in rejected), None) or next(iter(pool), None)
+        if pick:
+            kept.append(pick)
+            required_adds.append(pick)
+            if sets.get(pick):
+                used.add(sets[pick])
+    tags = sorted(kept, key=lambda t: order[t])
+    broke = [t for t in broke if t not in tags]
     # always-with: add a missing partner — unless it would clash with a pick-one set or a never-with
     amap = always_map(vocab)
-    sets = {r["tag"]: r["one_of"] for r in vocab}
     added, grew = [], True
     while grew:
         grew = False
         for t in list(tags):
             for n in amap.get(t.lower(), []):
-                if n in tags or any(o in tags for o in pairs.get(n.lower(), ())):
+                if n in tags or n.lower() in rejected or any(o in tags for o in pairs.get(n.lower(), ())):
                     continue
                 if sets.get(n) and any(sets.get(x) == sets.get(n) for x in tags):
                     continue
@@ -470,10 +588,35 @@ def parse_answer(text: str, vocab: list) -> dict:
                 dropped.append(t)
                 shrank = True
     added = [t for t in added if t in tags]
-    unsure = [t for t in clean(data.get("unsure")) + broke + dropped if t not in tags]
-    unsure = list(dict.fromkeys(unsure))
-    return {"tags": tags, "unsure": unsure, "caption": str(data.get("caption") or "")[:300], "ok": ok,
-            "rule_breaks": broke, "rule_adds": added, "rule_drops": dropped}
+    required_adds = [t for t in required_adds if t in tags]
+    low = [t for t in conf if t not in tags and (conf[t] < tag_threshold(lookup[t.lower()]) or t.lower() in rejected)]
+    unsure, uset = [], set()
+    for t in sorted(dict.fromkeys(low + broke + dropped), key=lambda t: (-conf.get(t, 0), order.get(t, 1e9))):
+        if t in tags or (sets.get(t) and sets[t] in uset):
+            continue
+        unsure.append(t)
+        if sets.get(t):
+            uset.add(sets[t])
+    unsure.sort(key=lambda t: order.get(t, 1e9))
+    return {"tags": tags, "unsure": unsure, "conf": dict(conf), "rule_breaks": broke, "rule_adds": added,
+            "rule_drops": dropped, "rule_required": required_adds}
+
+
+def answer_schema(vocab: list) -> dict:
+    """JSON schema the teacher's reply is held to (vLLM structured output): one list per category,
+    in your category order, each item a tag from THAT category with a 0–100 confidence; required
+    categories need at least one item; then the caption. Typos and invented tags can't happen."""
+    props, req = {}, []
+    for name, rows, required in categories(vocab):
+        key = category_key(name)
+        props[key] = {"type": "array", "minItems": 1 if required else 0,
+                      "maxItems": max(1, min(len(rows), MAX_PER_CATEGORY)),
+                      "items": {"type": "object", "additionalProperties": False, "required": ["tag", "conf"],
+                                "properties": {"tag": {"type": "string", "enum": [r["tag"] for r in rows]},
+                                               "conf": {"type": "integer", "minimum": 0, "maximum": 100}}}}
+        req.append(key)
+    props["caption"] = {"type": "string", "maxLength": 200}
+    return {"type": "object", "additionalProperties": False, "required": req + ["caption"], "properties": props}
 
 
 # ---------------------------------------------------------------------------
@@ -701,16 +844,15 @@ def extrapolate(stage_seconds: dict, gpus: dict, trial_hours, library_hours: flo
 # ---------------------------------------------------------------------------
 
 def look_again(ans: dict, vocab: list) -> list:
-    """[{"tag", "because", "instead_of"}] — tags to ask the teacher about a second time: for every
-    tag it gave, the usually-with partners it didn't give. "instead_of" is the tag it already chose
-    from the same pick-one set (then the question is "is this a better fit?"). Never a partner that
-    would break a never-with or its own only-with rule with what's there."""
-    umap = usually_map(vocab)
-    if not umap:
-        return []
+    """What to ask the teacher on a second look, as [{"tag", "kind", ...}]:
+    kind "usually" — {"because", "instead_of"}: a usually-with partner of a tag it gave that it
+        didn't give ("instead_of" = the tag it chose from the same pick-one set → "is this a better
+        fit?"). Never one that would break a never-with or its own only-with rule.
+    kind "check" — a tag it gave whose double_check switch is on: "is it clearly there?"."""
     tags = list(ans.get("tags") or [])
     have = {t.lower() for t in tags}
-    pairs, omap = never_pairs(vocab), only_map(vocab)
+    by_name = {r["tag"].lower(): r for r in vocab}
+    umap, pairs, omap = usually_map(vocab), never_pairs(vocab), only_map(vocab)
     sets = {r["tag"].lower(): r.get("one_of") for r in vocab}
     out, seen = [], set()
     for t in tags:
@@ -724,46 +866,71 @@ def look_again(ans: dict, vocab: list) -> list:
                 continue
             same = next((x for x in tags if sets.get(n.lower()) and sets.get(x.lower()) == sets.get(n.lower())),
                         None)
-            out.append({"tag": n, "because": t, "instead_of": same})
+            out.append({"tag": n, "kind": "usually", "because": t, "instead_of": same})
             seen.add(n.lower())
+    out += [{"tag": t, "kind": "check"} for t in tags if (by_name.get(t.lower()) or {}).get("double_check")]
     return out
 
 
 def look_again_prompt(asks: list) -> str:
-    lines = ["Take a second, careful look at frame 4 (and the movement across the frames). These tags "
-             "often go with ones you gave, so check each one properly — but they don't always apply:"]
-    for a in asks:
-        if a["instead_of"]:
-            lines.append(f"- {a['tag']} (often with {a['because']}): is it a better fit than {a['instead_of']}, "
-                         f"which you gave?")
-        else:
-            lines.append(f"- {a['tag']} (often with {a['because']}): does it apply?")
-    lines += ["Answer yes only if you can clearly see it. Reply with JSON only, no other text:",
-              '{"yes": ["..."], "no": ["..."]}']
+    usual = [a for a in asks if a["kind"] == "usually"]
+    check = [a for a in asks if a["kind"] == "check"]
+    lines = ["Take a second, careful look at frame 4 (and at the movement across the frames for tags "
+             "marked [movement])."]
+    if usual:
+        lines.append("These often go with tags you gave — check each one properly, they don't always apply:")
+        for a in usual:
+            if a["instead_of"]:
+                lines.append(f"- {a['tag']} (often with {a['because']}): is it a better fit than "
+                             f"{a['instead_of']}, which you gave?")
+            else:
+                lines.append(f"- {a['tag']} (often with {a['because']}): does it apply?")
+    if check:
+        lines.append("Check these tags you gave again — they are often given when they aren't really there:")
+        lines += [f"- {a['tag']}: is it clearly there?" for a in check]
+    lines += ["Answer true only if you can clearly see it. Reply with JSON only, no other text — one "
+              "answer for every tag above:",
+              '{"answers": {' + ", ".join(f'"{a["tag"]}": true or false' for a in asks) + "}}"]
     return "\n".join(lines)
 
 
+def look_again_schema(asks: list) -> dict:
+    names = list(dict.fromkeys(a["tag"] for a in asks))
+    return {"type": "object", "additionalProperties": False, "required": ["answers"],
+            "properties": {"answers": {"type": "object", "additionalProperties": False, "required": names,
+                                       "properties": {n: {"type": "boolean"} for n in names}}}}
+
+
 def apply_look_again(first: dict, text: str, asks: list, vocab: list) -> dict:
-    """The first answer updated with the second look: each "yes" is added (a pick-one "yes"
-    replaces the tag it was asked against, which goes to unsure); your rules are applied again.
-    Adds "look_asked" and "look_added". An unreadable second reply changes nothing."""
-    m = re.search(r"\{.*\}", text or "", re.S)
-    try:
-        data = json.loads(m.group(0)) if m else {}
-    except ValueError:
-        data = {}
-    yes_raw = data.get("yes") if isinstance(data, dict) else None
-    yes_l = {str(y).strip().lower() for y in yes_raw} if isinstance(yes_raw, list) else set()
-    yes = [a for a in asks if a["tag"].lower() in yes_l]
-    out = {**first, "look_asked": [a["tag"] for a in asks], "look_added": []}
-    if not yes:
+    """The first answer updated by the second look: a "usually" yes is added (a pick-one yes
+    replaces the tag it was asked against); a "check" no takes the tag out (to unsure — unless it's
+    the only possible tag of a required category). Then finalize() runs again on the confidences.
+    Adds "look_asked", "look_added", "look_removed". An unreadable reply changes nothing."""
+    data = _json_in(text) or {}
+    said = {}
+    if isinstance(data.get("answers"), dict):
+        said = {str(k).strip().lower(): v for k, v in data["answers"].items() if isinstance(v, bool)}
+    else:                                   # the older {"yes": [...], "no": [...]} shape
+        for k, v in (("yes", True), ("no", False)):
+            if isinstance(data.get(k), list):
+                said.update({str(x).strip().lower(): v for x in data[k]})
+    out = {**first, "look_asked": [a["tag"] for a in asks], "look_added": [], "look_removed": []}
+    conf, rejected = dict(first.get("conf") or {}), set()
+    for t in first.get("tags") or []:       # tags added by rules have no confidence of their own
+        conf.setdefault(t, 100)
+    yes = [a for a in asks if a["kind"] == "usually" and said.get(a["tag"].lower()) is True]
+    no = [a for a in asks if a["kind"] == "check" and said.get(a["tag"].lower()) is False]
+    if not yes and not no:
         return out
-    gone = {a["instead_of"] for a in yes if a["instead_of"]}
-    tags = [t for t in first["tags"] if t not in gone] + [a["tag"] for a in yes]
-    unsure = [t for t in first.get("unsure") or [] if t not in tags] + sorted(gone)
-    again = parse_answer(json.dumps({"tags": tags, "unsure": unsure}), vocab)
-    out.update({"tags": again["tags"], "unsure": again["unsure"],
-                "look_added": [a["tag"] for a in yes if a["tag"] in again["tags"]]})
-    for k in ("rule_breaks", "rule_adds", "rule_drops"):
+    for a in yes:
+        conf[a["tag"]] = 100
+        if a.get("instead_of"):
+            rejected.add(a["instead_of"])
+    rejected |= {a["tag"] for a in no}
+    again = finalize(conf, vocab, rejected)
+    out.update({"tags": again["tags"], "unsure": again["unsure"], "conf": again["conf"],
+                "look_added": [a["tag"] for a in yes if a["tag"] in again["tags"]],
+                "look_removed": [a["tag"] for a in no if a["tag"] not in again["tags"]]})
+    for k in ("rule_breaks", "rule_adds", "rule_drops", "rule_required"):
         out[k] = list(dict.fromkeys((first.get(k) or []) + (again.get(k) or [])))
     return out
