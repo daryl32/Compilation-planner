@@ -57,7 +57,7 @@ def test_prompt_and_parse():
     ans = TL.parse_answer('Sure! {"tags": ["Close-Up", "wide", "dancing", "flying"], '
                           '"unsure": ["walking", "dancing"], "caption": "Two people."}', vocab())
     assert ans == {"tags": ["close-up", "dancing"], "unsure": ["walking"], "caption": "Two people.", "ok": True,
-                   "rule_breaks": []}
+                   "rule_breaks": [], "rule_adds": []}
     bad = TL.parse_answer("no idea", vocab())
     assert bad["tags"] == [] and not bad["ok"]
 
@@ -616,3 +616,29 @@ def test_never_with_prompt_and_answers():
     assert ans["tags"] == ["lying"] and ans["unsure"] == ["jumping"]
     # no rules → no rules section, nothing moved
     assert "never apply" not in TL.build_prompt(TL.teacher_vocab(vocab()))[0]
+
+
+ALWAYS_CSV = ("tag,group,kind,one_of,teacher,description,not_to_be_confused_with,never_with,always_with,search_words\n"
+              "close-up,shot,frame,shot size,yes,,,,,\n"
+              "wide,shot,frame,shot size,yes,,,,,\n"
+              "kissing,action,frame,,yes,,,,close-up,\n"
+              "face,body,frame,,yes,,,,,\n"
+              "lips,body,frame,,yes,,,,face,\n"
+              "talking,action,frame,,yes,,,,lips,\n"
+              "standing,position,frame,,yes,,,,,\n"
+              "lying,position,frame,,yes,,,standing,,\n")
+
+
+def test_always_with_prompt_and_answers():
+    v = TL.teacher_vocab(TL.parse_vocabulary(ALWAYS_CSV))
+    assert TL.always_map(v) == {"kissing": ["close-up"], "lips": ["face"], "talking": ["lips"]}   # one way
+    head, _, _ = TL.build_prompt(v)
+    assert "always give the second as well" in head and "- kissing → close-up" in head
+    # a missing partner is added, following chains (talking → lips → face)
+    ans = TL.parse_answer('{"tags": ["talking"]}', v)
+    assert ans["tags"] == ["talking", "lips", "face"] and ans["rule_adds"] == ["lips", "face"]
+    # ...but never one that breaks a pick-one set (wide already chosen for shot size)
+    ans = TL.parse_answer('{"tags": ["wide", "kissing"]}', v)
+    assert ans["tags"] == ["wide", "kissing"] and ans["rule_adds"] == []
+    # the other way round adds nothing (close-up doesn't need kissing)
+    assert TL.parse_answer('{"tags": ["close-up"]}', v)["tags"] == ["close-up"]

@@ -75,15 +75,56 @@ def _editor(vid: str, m: dict, teachers: list, ekey: str) -> None:
         else:
             picked += list(st.pills(title, tags, selection_mode="multi", default=default,
                                     wrap=True, width="stretch", key=wkey) or [])
-    for x, y in TLB.rule_breaks(picked, vocab):
-        st.warning(f"“{x}” and “{y}” are set as never-together in your vocabulary — save anyway if this "
-                   "frame really has both (then the rule may need changing).")
+    for p in TLB.rule_problems(picked, vocab):
+        st.warning(f"{p} — save anyway if this frame really is like that (then the rule may need changing).")
     card = TR.correction_card(vid, m, start)
     c1, c2 = st.columns(2)
     c1.button("💾 Save my tags", type="primary", key=f"{ekey}_save", width="stretch",
               on_click=_save, args=(card, picked, ekey))
     c2.button("Cancel", key=f"{ekey}_cancel", width="stretch",
               on_click=lambda: st.session_state.pop(ekey, None))
+
+
+def _apply_rules(ids: list, rows: list) -> None:
+    done = TLB.apply_rules_to_labels(ids, rows)
+    n = sum(len(a) for _, a in done)
+    st.session_state["tr_saved_note"] = f"Added {n} always-with tag(s) to {len(done)} of your frames."
+
+
+def _rules_panel(videos: dict, rows: list) -> None:
+    """Your vocabulary rules against the frames you've already reviewed (in the batch shown): add the
+    missing always-with tags in one go; never-with clashes and pick-one doubles are for you to fix
+    (which tag is wrong?) — the ⚠️ filter shows them."""
+    if not any(r.get("never_with") or r.get("always_with") or r.get("one_of") for r in rows):
+        return
+    fixable, broken = [], []
+    for v, vd in videos.items():
+        for m in vd["moments"]:
+            if m.get("mine") is None:
+                continue
+            new, added = TLB.fix_tags(m["mine"], rows)
+            if added:
+                fixable.append((m.get("gold_id") or TR.moment_id(v, m), v, m, added))
+            if TLB.rule_problems(new, rows):
+                broken.append((v, m))
+    if not fixable and not broken:
+        st.caption("🧩 Your reviewed frames here all follow your vocabulary rules.")
+        return
+    with st.expander(f"🧩 Your rules on frames you've reviewed — {len(fixable)} can be fixed automatically, "
+                     f"{len(broken)} need you", expanded=False):
+        if fixable:
+            st.markdown(f"**{len(fixable)} frame(s)** are missing a tag an **always-with** rule says must be there:")
+            st.caption("  \n".join(f"{v[:40]} · {format_mmss(m['t'])} → add {', '.join(a)}"
+                                    for _, v, m, a in fixable[:8])
+                       + (f"  \n… and {len(fixable) - 8} more" if len(fixable) > 8 else ""))
+            st.button(f"🧩 Add the missing tags to {len(fixable)} frame(s)", type="primary", key="tr_rules_apply",
+                      on_click=_apply_rules, args=([i for i, *_ in fixable], rows),
+                      help="Only adds tags — never one that would break a pick-one set or a never-with rule.")
+        if broken:
+            st.markdown(f"**{len(broken)} frame(s)** break a **never-with** rule or have two tags from one "
+                        "**pick-one set** — only you can say which tag is wrong.")
+            st.button("⚠️ Show them", key="tr_rules_show",
+                      on_click=lambda: st.session_state.update(tr_filter="rules", tr_page=1))
 
 
 def _compare(data: dict) -> None:
@@ -110,8 +151,10 @@ def _compare(data: dict) -> None:
                       key=str.lower)
     tag = c[2].selectbox("Tag", ["(any tag)"] + all_tags, key="tr_tag")
     pool = [(v, m) for v in (sorted(videos) if vid == "(all videos)" else [vid]) for m in videos[v]["moments"]]
+    vocab_rows, _ = TLB.load_vocabulary()
+    problems = (lambda tags: TLB.rule_problems(tags, vocab_rows))
     moments = [(v, m) for v, m in pool
-               if TR.filter_moments([m], how, None if tag == "(any tag)" else tag)]
+               if TR.filter_moments([m], how, None if tag == "(any tag)" else tag, problems)]
     if order == "random":
         def _reshuffle():
             st.session_state["tr_seed"] = st.session_state.get("tr_seed", 0) + 1
@@ -120,6 +163,7 @@ def _compare(data: dict) -> None:
                   help="A new random sample. Frames you save drop out of “Not reviewed by me yet”.")
         moments = TR.ordered(moments, "random", st.session_state.get("tr_seed", 0))
 
+    _rules_panel(videos, vocab_rows)
     agr = TR.agreement([m for _, m in pool])
     if agr:
         bits = []
@@ -169,6 +213,9 @@ def _compare(data: dict) -> None:
                     rows.append(_row(label(v, k), r.get("tags") if r else [], mine, r.get("unsure") if r else ())
                                 if r else f'<div style="opacity:.55;font-size:.86rem">{label(v, k)}: not tagged</div>')
                 st.markdown("".join(rows), unsafe_allow_html=True)
+                if mine is not None:
+                    for p in problems(mine):
+                        st.caption(f"⚠️ {p}")
                 caps = []
                 for k in here:
                     r = (m.get("teachers") or {}).get(k) or {}

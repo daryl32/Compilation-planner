@@ -135,9 +135,8 @@ def tag_card(card: dict) -> None:
                            help="  \n".join(notes) or None)
             picked += list(val or [])
 
-    for x, y in TL.rule_breaks(picked, vocab):
-        st.warning(f"“{x}” and “{y}” are set as never-together in your vocabulary — save anyway if this "
-                   "frame really has both.")
+    for p in TL.rule_problems(picked, vocab):
+        st.warning(f"{p} — save anyway if this frame really is like that (then the rule may need changing).")
     with st.container(key="tl_wrap_act"):
         c1, c2, c3 = st.columns([2, 1, 1])
         c1.button("✅ Save & next", type="primary", width="stretch", key=f"tl_save_{card['id']}",
@@ -264,7 +263,7 @@ def tag_editor() -> None:
     pick = st.selectbox("Tag to edit", [NEW_TAG] + names, key="tl_ed_pick")
     cur = next((r for r in vocab if r["tag"] == pick), None) or {
         "tag": "", "group": "", "kind": "frame", "one_of": "", "teacher": True, "description": "",
-        "not_to_be_confused_with": "", "never_with": "", "search_words": []}
+        "not_to_be_confused_with": "", "never_with": "", "always_with": "", "search_words": []}
     groups = sorted({r["group"] for r in vocab if r["group"]}, key=str.lower)
     sets = sorted({r["one_of"] for r in vocab if r["one_of"]}, key=str.lower)
     k = f"tl_ed_{pick}"                       # fresh widgets for each tag picked
@@ -298,6 +297,13 @@ def tag_editor() -> None:
                                default=[n for n in names if n in both], key=f"{k}_never",
                                help="Any group. Works both ways: the teacher is told, and if it still gives "
                                     "both, the one it named first stays and the other moves to unsure.")
+        always_now = [x.strip() for x in str(cur.get("always_with") or "").split(";") if x.strip()]
+        always = st.multiselect("Always with — tags that must also be there whenever this one is",
+                                [n for n in names if n != cur["tag"]],
+                                default=[x for x in always_now if x in names], key=f"{k}_always",
+                                help="One way: this tag → those tags (not the other way round). The teacher "
+                                     "is told, and a missing one is added to its answer — unless it would break a "
+                                     "pick-one set or a never-with rule.")
         words = st.text_input("Search words (separated by ;)", "; ".join(cur["search_words"]), key=f"{k}_words")
         teacher = st.toggle("The big model may try this tag", cur["teacher"], key=f"{k}_teacher",
                             help="Off = learned only from your labels (for tags the 32B gets wrong).")
@@ -309,7 +315,7 @@ def tag_editor() -> None:
     if save:
         row = {"tag": name, "group": group, "kind": kind, "one_of": one_of, "teacher": teacher,
                "description": desc, "not_to_be_confused_with": "; ".join(alikes),
-               "never_with": "; ".join(never), "search_words": words}
+               "never_with": "; ".join(never), "always_with": "; ".join(always), "search_words": words}
         try:
             rows = TL.upsert_tag(vocab, row, None if pick == NEW_TAG else pick)
             if pick != NEW_TAG:      # a rule taken off here comes off the other tag too
@@ -342,7 +348,9 @@ def vocab_view() -> None:
                "needs a few seconds of movement. **one_of**: a name shared by tags that can't both be true "
                "(e.g. shot size) — they become a pick-one row on the cards. **never_with**: tags in any group "
                "that can never be on the same moment as this one, separated by ; — it works both ways, the "
-               "teacher is told, and if it still gives both, the second goes to unsure. **teacher**: may the big "
+               "teacher is told, and if it still gives both, the second goes to unsure. **always_with**: tags "
+               "that must also be there whenever this one is (one way), separated by ; — the teacher is told "
+               "and a missing one is added. **teacher**: may the big "
                "model try this tag (off = learned only from your labels). **search_words**: words you'd type to "
                "find it, separated by ;")
     if vocab_source != TL.VOCAB_FILE.name:
@@ -367,10 +375,12 @@ def vocab_view() -> None:
         st.success(note)
     st.caption("Changes are used on the **next Modal run** (each run sends the latest tag list), and straight "
                "away on the 🎯 Label cards.")
-    unknown = sorted({x.strip() for r in vocab for x in str(r.get("never_with") or "").split(";") if x.strip()}
+    unknown = sorted({x.strip() for r in vocab for col in ("never_with", "always_with")
+                      for x in str(r.get(col) or "").split(";") if x.strip()}
                      - {r["tag"] for r in vocab}, key=str.lower)
     if unknown:
-        st.warning("**never_with** names tags that aren't in the list (check the spelling): " + ", ".join(unknown))
+        st.warning("**never_with / always_with** name tags that aren't in the list (check the spelling): "
+                   + ", ".join(unknown))
     st.subheader(f"All tags ({len(vocab)})")
     st.caption("Edit cells directly, add a row at the bottom, then 💾 Save table — or use the form below for one tag.")
     table = [{**r, "search_words": "; ".join(r["search_words"])} for r in vocab]

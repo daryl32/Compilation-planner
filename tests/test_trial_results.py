@@ -360,3 +360,40 @@ def test_editor_warns_on_never_with(bundle, no_labels, monkeypatch):
             TLB.VOCAB_FILE.unlink(missing_ok=True)
         else:
             TLB.VOCAB_FILE.write_bytes(backup)
+
+
+def test_rules_panel_fixes_and_filters(bundle, no_labels):
+    """Your saved label on vid_a at 5 s is close-up shot + dance. Rules: dance → always with crowd;
+    night never with dance. The panel adds crowd in one go; a frame breaking never-with is found by
+    the ⚠️ filter."""
+    import training_labels as TLB
+    from tests.apptest_util import errors, page_app
+    backup = TLB.VOCAB_FILE.read_bytes() if TLB.VOCAB_FILE.exists() else None
+    TLB.save_vocabulary(TLB.parse_vocabulary(
+        "tag,group,never_with,always_with\nclose-up shot,shot,,\ndance,action,,crowd\ncrowd,people,,\n"
+        "night,light,dance,\n"))
+    TLB.save_label({"id": TLB.card_id("tags", "vid_a", 5.0), "type": "tags", "video_id": "vid_a", "t": 5.0},
+                   tags=["close-up shot", "dance"])
+    TLB.save_label({"id": TLB.card_id("tags", "vid_a", 20.0), "type": "tags", "video_id": "vid_a", "t": 20.0},
+                   tags=["night", "dance", "crowd"])
+    try:
+        at = page_app("pages/6_Training_Labels.py")
+        at.session_state["tl_view"] = "🧪 Trial results"
+        at.session_state["tr_sub"] = "🖼️ Compare tags"
+        at.run()
+        assert not errors(at), errors(at)
+        assert any("1 can be fixed automatically, 1 need you" in e.label for e in at.expander)
+        next(b for b in at.button if b.key == "tr_rules_apply").click().run()
+        assert not errors(at), errors(at)
+        got = {i["id"]: i["tags"] for i in TLB.load_labels()}
+        assert got[TLB.card_id("tags", "vid_a", 5.0)] == ["close-up shot", "dance", "crowd"]
+        next(b for b in at.button if b.key == "tr_rules_show").click().run()
+        assert at.session_state["tr_filter"] == "rules"
+        caps = " ".join(c.value for c in at.caption)
+        assert "“night” and “dance” are never-together" in caps or "“dance” and “night” are never-together" in caps
+        assert "20" in caps or "0:20" in caps
+    finally:
+        if backup is None:
+            TLB.VOCAB_FILE.unlink(missing_ok=True)
+        else:
+            TLB.VOCAB_FILE.write_bytes(backup)

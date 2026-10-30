@@ -346,3 +346,30 @@ def test_never_with_column_and_rename():
     assert "never_with" in TL.vocabulary_csv(rows).splitlines()[0]
     again = TL.parse_vocabulary(TL.vocabulary_csv(rows))
     assert again[2]["never_with"] == "stood; lying"
+
+
+def test_always_with_problems_and_fixes(clean_files):
+    rows = TL.parse_vocabulary("tag,group,one_of,never_with,always_with\n"
+                               "close-up,shot,shot size,,\nwide,shot,shot size,,\n"
+                               "kissing,action,,,close-up\nface,body,,,\nlips,body,,,face\n"
+                               "talking,action,,,lips\nstanding,position,,,\nlying,position,,standing,\n")
+    assert rows[2]["always_with"] == "close-up"
+    probs = TL.rule_problems(["wide", "close-up", "kissing", "lying", "standing", "talking"], rows)
+    assert "“wide” and “close-up” are all in the pick-one set “shot size”" in probs
+    assert "“lying” and “standing” are never-together" in probs
+    assert "“talking” should always come with “lips”" in probs
+    assert TL.rule_problems(["kissing", "close-up"], rows) == []
+    assert TL.fix_tags(["talking"], rows) == (["talking", "lips", "face"], ["lips", "face"])
+    assert TL.fix_tags(["wide", "kissing"], rows) == (["wide", "kissing"], [])    # won't break shot size
+    # bulk fix of saved labels: only the ids asked for, one write
+    for i, (tags, t) in enumerate([(["talking"], 1.0), (["kissing"], 2.0), (["talking"], 3.0)]):
+        TL.save_label({"id": f"tags:v:{t:.2f}", "type": "tags", "video_id": "v", "t": t}, tags=tags)
+    changed = TL.apply_rules_to_labels(["tags:v:1.00", "tags:v:2.00"], rows)
+    assert changed == [("tags:v:1.00", ["lips", "face"]), ("tags:v:2.00", ["close-up"])]
+    got = {i["id"]: i for i in TL.load_labels()}
+    assert got["tags:v:1.00"]["tags"] == ["talking", "lips", "face"] and got["tags:v:1.00"]["rules_added"] == ["face", "lips"]
+    assert got["tags:v:3.00"]["tags"] == ["talking"]                        # not asked for → untouched
+    assert TL.apply_rules_to_labels(["tags:v:1.00"], rows) == []            # nothing more to add
+    rows = TL.upsert_tag(rows, {**rows[1], "tag": "long"}, "wide")
+    rows = TL.upsert_tag(rows, {**rows[0], "tag": "close"}, "close-up")     # rename follows into always_with
+    assert rows[2]["always_with"] == "close"

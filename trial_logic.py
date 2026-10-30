@@ -55,7 +55,9 @@ def parse_vocabulary(text: str) -> list:
                      "description": raw.get("description", "").strip(),
                      "not_to_be_confused_with": raw.get("not_to_be_confused_with", "").strip(),
                      "never_with": [n.strip() for n in raw.get("never_with", "").replace(",", ";").split(";")
-                                    if n.strip()]})
+                                    if n.strip()],
+                     "always_with": [n.strip() for n in raw.get("always_with", "").replace(",", ";").split(";")
+                                     if n.strip()]})
     return rows
 
 
@@ -73,6 +75,19 @@ def never_pairs(vocab: list) -> dict:
     return out
 
 
+def always_map(vocab: list) -> dict:
+    """{tag (lower case): [tags that must come with it]} from always_with — one way (A → B), only
+    tags in this vocabulary."""
+    names = {r["tag"].lower(): r["tag"] for r in vocab}
+    out = {}
+    for r in vocab:
+        for other in r.get("always_with") or []:
+            o = names.get(str(other).strip().lower())
+            if o and o.lower() != r["tag"].lower():
+                out.setdefault(r["tag"].lower(), []).append(o)
+    return out
+
+
 def teacher_vocab(vocab: list) -> list:
     """The tags the teacher is asked about: the ones whose "teacher" switch is on. Tags switched
     off are learned from your labels only, so they're left out of its prompt altogether."""
@@ -85,7 +100,7 @@ def vocabulary_from_labels(labels) -> list:
         name = t if isinstance(t, str) else (t or {}).get("name") or (t or {}).get("label")
         if name:
             out.append({"tag": str(name), "group": "", "kind": "frame", "one_of": "", "teacher": True,
-                        "description": "", "not_to_be_confused_with": "", "never_with": []})
+                        "description": "", "not_to_be_confused_with": "", "never_with": [], "always_with": []})
     return out
 
 
@@ -271,6 +286,10 @@ def build_prompt(vocab: list) -> tuple:
         head += ["", "These tags never apply to the same moment — if both seem to, give only the one that "
                      "fits best:"]
         head += [f"- {a} / {b}" for a, b in rules]
+    amap = always_map(vocab)
+    if amap:
+        head += ["", "If you give the first tag, always give the second as well:"]
+        head += [f"- {r['tag']} → {n}" for r in vocab for n in amap.get(r["tag"].lower(), [])]
     head += ["", "Only use tags from the lists above, spelled exactly as written. Choose every tag "
              "that clearly applies; leave out anything you are not sure of, and list those under "
              "\"unsure\" instead. Reply with JSON only, no other text:",
@@ -379,10 +398,25 @@ def parse_answer(text: str, vocab: list) -> dict:
         else:
             kept.append(t)
     tags = kept
+    # always-with: add a missing partner — unless it would clash with a pick-one set or a never-with
+    amap = always_map(vocab)
+    sets = {r["tag"]: r["one_of"] for r in vocab}
+    added, grew = [], True
+    while grew:
+        grew = False
+        for t in list(tags):
+            for n in amap.get(t.lower(), []):
+                if n in tags or any(o in tags for o in pairs.get(n.lower(), ())):
+                    continue
+                if sets.get(n) and any(sets.get(x) == sets.get(n) for x in tags):
+                    continue
+                tags.append(n)
+                added.append(n)
+                grew = True
     unsure = [t for t in clean(data.get("unsure")) + broke if t not in tags]
     unsure = list(dict.fromkeys(unsure))
     return {"tags": tags, "unsure": unsure, "caption": str(data.get("caption") or "")[:300], "ok": ok,
-            "rule_breaks": broke}
+            "rule_breaks": broke, "rule_adds": added}
 
 
 # ---------------------------------------------------------------------------

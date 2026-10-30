@@ -128,6 +128,7 @@ FILTERS = {
     "mine": "Only frames I labelled",
     "wrong": "A model differs from me",
     "disagree": "The models disagree",
+    "rules": "⚠️ My tags break a rule",
 }
 # The teacher picked after batch 1 — the view shows only it when its tags are there.
 MAIN_TEACHER = "32b"
@@ -150,9 +151,13 @@ def ordered(items: list, how: str = "video", seed: int = 0) -> list:
     return items
 
 
-def filter_moments(moments: list, how: str = "all", tag: str | None = None) -> list:
+def filter_moments(moments: list, how: str = "all", tag: str | None = None, problems=None) -> list:
+    """problems: tags -> list of rule problems (training_labels.rule_problems with your vocabulary),
+    for the "rules" filter — your labelled frames whose tags break a rule."""
     out = []
     for m in moments:
+        if how == "rules" and (m.get("mine") is None or not problems or not problems(m["mine"])):
+            continue
         if how == "mine" and m.get("mine") is None:
             continue
         if how == "todo" and m.get("mine") is not None:

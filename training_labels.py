@@ -8,12 +8,15 @@ Two files, both in CATALOGUE_DIR so they sync with the catalogues:
 
 * tag_vocabulary.csv — the tag list and what each tag means (Daryl edits it, in Excel or on
   the page). Columns:
-      tag, group, kind, one_of, teacher, description, not_to_be_confused_with, never_with, search_words
+      tag, group, kind, one_of, teacher, description, not_to_be_confused_with, never_with, always_with,
+      search_words
   kind      "frame" (visible in one still) or "motion" (needs a few seconds of movement)
   one_of    a name shared by tags that can't both be true (e.g. "shot size") — empty if none
   teacher   yes / no — may the big model try this tag, or is it learned only from your labels
   never_with  "; "-separated tags that can never be on the same moment as this one, in any group
             (e.g. an action that rules out a position). Works both ways: listing B on A is enough.
+  always_with "; "-separated tags that must also be there whenever this one is (one way: A → B
+            means A always comes with B, not the other way round).
   search_words  "; "-separated words you'd type when searching for it
   With no vocabulary file the Reviewer's labels.json is used (every tag kind=frame, teacher=yes).
 
@@ -55,7 +58,7 @@ LABELS_FILE = CATALOGUE_DIR / "training_labels.json"
 LABELS_STEM = LABELS_FILE.stem
 
 VOCAB_COLUMNS = ["tag", "group", "kind", "one_of", "teacher", "description",
-                 "not_to_be_confused_with", "never_with", "search_words"]
+                 "not_to_be_confused_with", "never_with", "always_with", "search_words"]
 KINDS = ("frame", "motion")
 
 LONG_SCENE_SEC = 20.0      # boundary "missed cut?" points come from scenes longer than this
@@ -71,6 +74,13 @@ FRAME_CACHE = Path(tempfile.gettempdir()) / "mp_training_frames"
 
 def _yes(v) -> bool:
     return str(v).strip().lower() in ("yes", "y", "true", "1", "x")
+
+
+def _names(value) -> str:
+    """'a; b' from a ;- or ,-separated cell (or a list)."""
+    if isinstance(value, (list, tuple, set)):
+        value = ";".join(map(str, value))
+    return "; ".join(n for n in (x.strip() for x in str(value or "").replace(",", ";").split(";")) if n)
 
 
 def _row(raw: dict) -> dict | None:
@@ -90,8 +100,8 @@ def _row(raw: dict) -> dict | None:
         "teacher": True if teacher in (None, "") else (teacher if isinstance(teacher, bool) else _yes(teacher)),
         "description": str(raw.get("description") or "").strip(),
         "not_to_be_confused_with": str(raw.get("not_to_be_confused_with") or "").strip(),
-        "never_with": "; ".join(n for n in (x.strip() for x in str(raw.get("never_with") or "")
-                                                                  .replace(",", ";").split(";")) if n),
+        "never_with": _names(raw.get("never_with")),
+        "always_with": _names(raw.get("always_with")),
         "search_words": [w for w in words if w],
     }
 
@@ -490,7 +500,7 @@ def upsert_tag(rows: list, row: dict, old_name: str | None = None) -> list:
         out.append(new)
     if old_name and old_name != new["tag"]:     # look-alike and never-with lists point at the new name too
         for r in out:
-            for col in ("not_to_be_confused_with", "never_with"):
+            for col in ("not_to_be_confused_with", "never_with", "always_with"):
                 r[col] = "; ".join(
                     new["tag"] if p.strip().lower() == old_name.lower() else p.strip()
                     for p in str(r.get(col) or "").split(";") if p.strip())
@@ -509,6 +519,86 @@ def never_pairs(rows: list) -> dict:
                 out.setdefault(r["tag"].lower(), set()).add(o)
                 out.setdefault(o.lower(), set()).add(r["tag"])
     return out
+
+
+def always_map(rows: list) -> dict:
+    """{tag (lower case): [tags that must come with it]} from always_with — one way, only tags in
+    the list."""
+    names = {r["tag"].lower(): r["tag"] for r in rows}
+    out = {}
+    for r in rows:
+        for other in str(r.get("always_with") or "").split(";"):
+            o = names.get(other.strip().lower())
+            if o and o.lower() != r["tag"].lower():
+                out.setdefault(r["tag"].lower(), []).append(o)
+    return out
+
+
+def rule_problems(tags, rows: list) -> list:
+    """Everything in `tags` your vocabulary's rules don't allow, as readable lines:
+    two tags from one pick-one set, a never-with pair, a tag missing its always-with partner."""
+    tags = list(dict.fromkeys(tags or []))
+    lower = {t.lower(): t for t in tags}
+    by_name = {r["tag"].lower(): r for r in rows}
+    out = []
+    sets = {}
+    for t in tags:
+        r = by_name.get(t.lower())
+        if r and r.get("one_of"):
+            sets.setdefault(r["one_of"], []).append(t)
+    out += [f"“{'” and “'.join(ts)}” are all in the pick-one set “{name}”" for name, ts in sets.items() if len(ts) > 1]
+    out += [f"“{a}” and “{b}” are never-together" for a, b in rule_breaks(tags, rows)]
+    for a, needs in always_map(rows).items():
+        if a in lower:
+            out += [f"“{lower[a]}” should always come with “{n}”" for n in needs if n.lower() not in lower]
+    return out
+
+
+def fix_tags(tags, rows: list) -> tuple:
+    """(tags with every missing always-with partner added, the tags added). Only adds — and never a
+    tag that would break a pick-one set or a never-with rule with what's already there. Follows
+    chains (A → B → C). Never-with clashes can't be fixed safely (which one is wrong?), so they're
+    left for you."""
+    tags = list(dict.fromkeys(tags or []))
+    amap, pairs = always_map(rows), never_pairs(rows)
+    one_of = {r["tag"].lower(): r.get("one_of") for r in rows}
+    added = []
+    changed = True
+    while changed:
+        changed = False
+        have = {t.lower() for t in tags}
+        for t in list(tags):
+            for n in amap.get(t.lower(), []):
+                if n.lower() in have:
+                    continue
+                if any(o.lower() in have for o in pairs.get(n.lower(), ())):
+                    continue
+                if one_of.get(n.lower()) and any(one_of.get(h) == one_of.get(n.lower()) for h in have):
+                    continue
+                tags.append(n)
+                added.append(n)
+                have.add(n.lower())
+                changed = True
+    return tags, added
+
+
+def apply_rules_to_labels(ids, rows: list) -> list:
+    """Add missing always-with tags to your saved labels with these ids (one write). Returns
+    [(label id, tags added)] for the ones changed."""
+    ids = set(ids)
+    items = load_labels()
+    changed = []
+    for it in items:
+        if it["id"] not in ids or it.get("type") != "tags" or it.get("skipped"):
+            continue
+        new, added = fix_tags(it.get("tags") or [], rows)
+        if added:
+            it["tags"] = new
+            it["rules_added"] = sorted(set(it.get("rules_added") or []) | set(added))
+            changed.append((it["id"], added))
+    if changed:
+        _write_labels(items)
+    return changed
 
 
 def rule_breaks(tags, rows: list) -> list:
