@@ -77,6 +77,10 @@ VISION_GPU = VISION_GPUS[0]
 # Worked examples from your labels shown to the teacher before each moment (--examples N).
 # Off by default since batch 5: they cost 30–40% more per moment for no clear gain.
 EXAMPLES_DEFAULT, EXAMPLES_MAX = 0, 6
+# 🧪 Test set: the same ~2 h of already-processed videos re-tagged after every settings change,
+# so runs are compared on identical frames. Picked once (--stage test-pick --redo picks again).
+TEST_HOURS = 2.0
+TEST_MIN_LABELLED = 5           # a test video needs at least this many of your labelled frames
 # Near-identical moments in a scene are tagged once and the answer copied (--dedup 0 = tag all).
 DEDUP_DEFAULT = 0.96
 TAG_MAX_TOKENS = 800        # the reply lists every tag that might apply, with a confidence — room for ~50
@@ -123,6 +127,14 @@ def _read_json(path, default=None):
 def _gold_items() -> list:
     return [i for i in (_read_json(f"{PACK}/library/training_labels.json", {}) or {}).get("items") or []
             if isinstance(i, dict)]
+
+
+def _vocab_text() -> str:
+    p = Path(f"{PACK}/library/tag_vocabulary.csv")
+    try:
+        return p.read_text(encoding="utf-8-sig")
+    except OSError:
+        return ""
 
 
 def _vocab() -> list:
@@ -739,7 +751,9 @@ def prepare_prompts(video_id: str, max_prompts: int = 0, examples: int = 0, dedu
     if not vis:
         return {"video_id": video_id, "error": "no vision.json — run the vision stage first"}
     t0 = time.time()
-    vocab = TL.teacher_vocab(_vocab())         # tags switched off for the teacher aren't asked about
+    vocab_csv = _vocab_text()
+    vocab = TL.teacher_vocab((TL.parse_vocabulary(vocab_csv) if vocab_csv else []) or _vocab())
+    # (tags switched off for the teacher aren't asked about)
     head, moment, tail = TL.build_prompt(vocab)
     targets = vis["targets"][:max_prompts] if max_prompts else vis["targets"]
     by_key = {tg["key"]: tg for tg in targets}
@@ -784,7 +798,8 @@ def prepare_prompts(video_id: str, max_prompts: int = 0, examples: int = 0, dedu
     copies = {k: c for k, c in copies.items() if c["of"] in sent}      # a copy needs its original
     data = {"video_id": video_id, "created": time.time(), "targets": len(vis["targets"]),
             "partial": bool(max_prompts) or bool(vis.get("partial")),
-            "vocab": [r["tag"] for r in vocab], "examples": examples, "examples_used": used_examples,
+            "vocab": [r["tag"] for r in vocab], "vocab_csv": vocab_csv,
+            "examples": examples, "examples_used": used_examples,
             "dedup": dedup, "copies": copies, "moments": moments}
     pf = prompts_file(video_id)
     pf.write_text(json.dumps(data), encoding="utf-8")
@@ -795,8 +810,9 @@ def prepare_prompts(video_id: str, max_prompts: int = 0, examples: int = 0, dedu
             "seconds": round(time.time() - t0, 1)}
 
 
-def _tag_video(self, video_id: str, redo: bool = False) -> dict:
-    """GPU: feed the prepared prompts.json through the teacher. Nothing is read but that one file."""
+def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "") -> dict:
+    """GPU: feed the prepared prompts.json through the teacher. Nothing is read but that one file.
+    out_path: write the result there instead (a 🧪 test run) — the batch results stay untouched."""
     import trial_logic as TL
     from vllm import SamplingParams
 
@@ -804,18 +820,21 @@ def _tag_video(self, video_id: str, redo: bool = False) -> dict:
     if self.llm is None:
         return {"video_id": video_id, "teacher": key, "error": f"the {key} model didn't load — {self.load_error}"}
     pack_vol.reload()
-    out = tags_file(video_id, key)
-    if not redo and _tags_done(video_id, key):
+    out = Path(out_path) if out_path else tags_file(video_id, key)
+    if not out_path and not redo and _tags_done(video_id, key):
         return {"video_id": video_id, "teacher": key, "skipped": True}
     pf = prompts_file(video_id)
     data = _read_json(pf)
     if not data:
         return {"video_id": video_id, "teacher": key, "error": "no prompts.json — the prep step didn't run"}
-    if out.exists():        # a --redo: keep the earlier run so --stage compare can set them side by side
+    if out.exists() and not out_path:   # a --redo: keep the earlier run so --stage compare can set them side by side
         out.replace(out.with_name(f"tags_{key}_before.json"))
+    out.parent.mkdir(parents=True, exist_ok=True)
     started = time.time()
     moments, copies, vocab_names = data["moments"], data.get("copies") or {}, data.get("vocab") or []
-    vocab = [r for r in TL.teacher_vocab(_vocab()) if r["tag"] in set(vocab_names)] or TL.teacher_vocab(_vocab())
+    # the exact vocabulary prep used (rules, thresholds, order) — so a run is consistent with itself
+    full = (TL.parse_vocabulary(data["vocab_csv"]) if data.get("vocab_csv") else []) or _vocab()
+    vocab = [r for r in TL.teacher_vocab(full) if r["tag"] in set(vocab_names)] or TL.teacher_vocab(full)
     convs = [m["conv"] for m in moments]
     # Chunks the size of vLLM's batch (max_num_seqs), so progress shows every batch at no cost.
     # Replies are held to your tag list and category order (vLLM structured output): no typos or
@@ -897,7 +916,8 @@ def _tag_video(self, video_id: str, redo: bool = False) -> dict:
                                "tokens_per_s": use["tokens_per_s"], "mfu": use["mfu"],
                                "moments_per_min": round(60 * len(convs) / max(seconds, 1e-6), 1),
                                "examples": data.get("examples", 0), "examples_used": data.get("examples_used", 0),
-                               "dedup": data.get("dedup"), "vocab": vocab_names, "results": results}),
+                               "dedup": data.get("dedup"), "vocab": vocab_names, "results": results,
+                               **({"vocab_csv": data.get("vocab_csv") or ""} if out_path else {})}),
                    encoding="utf-8")
     pf.unlink(missing_ok=True)          # it's rebuilt by the prep step whenever needed
     pack_vol.commit()
@@ -921,8 +941,8 @@ class Tagger8B:
         _load_teacher(self, "8b")
 
     @modal.method()
-    def tag_video(self, video_id: str, redo: bool = False) -> dict:
-        return _tag_video(self, video_id, redo)
+    def tag_video(self, video_id: str, redo: bool = False, out_path: str = "") -> dict:
+        return _tag_video(self, video_id, redo, out_path)
 
 
 @app.cls(image=tag_image, gpu=TEACHER_GPUS["32b"], volumes={DATA: pack_vol, CACHE: cache_vol},
@@ -933,8 +953,8 @@ class Tagger32B:
         _load_teacher(self, "32b")
 
     @modal.method()
-    def tag_video(self, video_id: str, redo: bool = False) -> dict:
-        return _tag_video(self, video_id, redo)
+    def tag_video(self, video_id: str, redo: bool = False, out_path: str = "") -> dict:
+        return _tag_video(self, video_id, redo, out_path)
 
 
 @app.cls(image=tag_image, gpu=TEACHER_GPUS["32b-fp8"], volumes={DATA: pack_vol, CACHE: cache_vol},
@@ -945,8 +965,8 @@ class Tagger32BFP8:
         _load_teacher(self, "32b-fp8")
 
     @modal.method()
-    def tag_video(self, video_id: str, redo: bool = False) -> dict:
-        return _tag_video(self, video_id, redo)
+    def tag_video(self, video_id: str, redo: bool = False, out_path: str = "") -> dict:
+        return _tag_video(self, video_id, redo, out_path)
 
 
 TAGGERS = {"8b": Tagger8B, "32b": Tagger32B, "32b-fp8": Tagger32BFP8}
@@ -1389,6 +1409,8 @@ def export(smoke: bool = False) -> dict:
                "teachers": {k: ", ".join(sorted(v)) for k, v in models.items()},
                "report": report_json, "videos": videos}
     Path(f"{EXPORT}/results.json").write_text(json.dumps(results), encoding="utf-8")
+    if Path(f"{OUT}/testset/test_runs.json").exists():         # 🧪 test runs travel with the export
+        shutil.copyfile(f"{OUT}/testset/test_runs.json", f"{EXPORT}/test_runs.json")
     if Path(f"{OUT}/report.md").exists():
         shutil.copyfile(f"{OUT}/report.md", f"{EXPORT}/report.md")
     pack_vol.commit()
@@ -1419,6 +1441,54 @@ def _download_export(dest_name: str = "trial_results") -> str:
     shutil.copytree(found[0].parent, dest)
     shutil.rmtree(tmp, ignore_errors=True)
     return str(dest)
+
+
+def _download_test_runs() -> str:
+    """Laptop / server side: fetch testset/test_runs.json into the catalogue's trial_results folder."""
+    import subprocess
+    import sys
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from config import CATALOGUE_DIR
+    except Exception as e:
+        return f"couldn't read CATALOGUE_DIR from config.py ({e}) — results stay on Modal"
+    dest = Path(CATALOGUE_DIR) / "trial_results"
+    dest.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(["modal", "volume", "get", "--force", "media-train", "/trial/testset/test_runs.json",
+                        str(dest / "test_runs.json")], capture_output=True, text=True)
+    if r.returncode != 0:
+        return f"download failed: {(r.stderr or r.stdout).strip()[-400:]}"
+    return str(dest / "test_runs.json")
+
+
+def _run_test(keys: list, label: str, keep_vocab: bool, dedup: float) -> None:
+    """--stage test: re-tag the fixed test set with today's settings (or, with --keep-vocab, the
+    vocabulary already on Modal = what the last batch used) and compare with earlier test runs."""
+    _push_labels(vocab=not keep_vocab)
+    ts = pick_test_set.remote(TEST_HOURS, False)
+    vids = [x["video_id"] for x in ts.get("videos") or []]
+    if not vids:
+        print("No test set: no finished video has enough of your labelled frames yet.")
+        return
+    k = keys[0]
+    run_id = time.strftime("%Y-%m-%d_%H%M") + (f"_{label}" if label else "")
+    print(f"🧪 Test run {run_id}: {len(vids)} videos, {ts['hours']} h of footage, {ts['labelled']} of your "
+          f"labelled frames, teacher {k}" + (" — using the vocabulary already on Modal (the last batch's)"
+                                             if keep_vocab else "") + ".")
+    t0 = time.time()
+    for r in prepare_prompts.starmap([(v, 0, 0, dedup) for v in vids], return_exceptions=True):
+        print("  ", r)
+    tagger = TAGGERS[k]()
+    out = f"{OUT}/testset/runs/{run_id}"
+    for r in tagger.tag_video.starmap([(v, True, f"{out}/{v}.json") for v in vids], return_exceptions=True):
+        print("  ", r)
+    meta = {"id": run_id, "label": label, "teacher": k, "model": TEACHERS[k],
+            "created": time.strftime("%Y-%m-%d %H:%M"), "keep_vocab": keep_vocab, "dedup": dedup,
+            "minutes": round((time.time() - t0) / 60, 1)}
+    text = finish_test_run.remote(run_id, meta)
+    Path("test_report.md").write_text(text, encoding="utf-8")
+    print("\n" + text + f"\n\nSaved {Path('test_report.md').resolve()}")
+    print(f"   Test runs → {_download_test_runs()}\n   In the app: 🧪 Trial results → 📋 Summary → 🧪 Test set.")
 
 
 @app.function(image=report_image, volumes={DATA: pack_vol})
@@ -1523,6 +1593,109 @@ def compare_runs(video_ids: list, key: str) -> str:
     md += ["", "Your corrections in these videos started from the BEFORE run's tags, which can flatter it "
                "slightly. A gain of a few points of F1 is noise on under ~100 frames."]
     return "\n".join(md)
+
+
+# ---------------------------------------------------------------------------
+# 🧪 Test set — the same videos re-tagged after each settings change
+# ---------------------------------------------------------------------------
+
+def _test_dir() -> Path:
+    return Path(f"{OUT}/testset")
+
+
+@app.function(image=report_image, volumes={DATA: pack_vol})
+def pick_test_set(hours: float = TEST_HOURS, redo: bool = False) -> dict:
+    """The fixed test set (testset/testset.json), picked once: finished videos with plenty of your
+    labelled frames, taken in turn from each batch (most labelled frames per minute first) until
+    about `hours` of footage. These videos are held out of any future teacher fine-tune."""
+    import trial_logic as TL
+    pack_vol.reload()
+    f = _test_dir() / "testset.json"
+    old = _read_json(f)
+    if old and not redo:
+        return old
+    gold = [i for i in _gold_items() if i.get("type") == "tags" and not i.get("skipped")]
+    batches = _read_json(f"{PACK}/batches.json", {}) or {}
+    batch_of = {v: str(b) for b, ids in batches.items() for v in ids}
+    cands = {}
+    for p in Path(OUT).iterdir():
+        v = p.name
+        if p.name in ("testset", "export") or not _vision_done(v):
+            continue
+        vis = _read_json(p / "vision.json")
+        best = 0
+        for k in TEACHERS:
+            tj = _read_json(p / f"tags_{k}.json")
+            if tj:
+                best = max(best, len(_match_labels(v, tj.get("results") or {}, gold)))
+        if best >= TEST_MIN_LABELLED and vis.get("duration"):
+            cands[v] = {"minutes": vis["duration"] / 60, "labelled": best, "batch": batch_of.get(v, "?")}
+    by_batch = {}
+    for v, c in sorted(cands.items(), key=lambda kv: -kv[1]["labelled"] / kv[1]["minutes"]):
+        by_batch.setdefault(c["batch"], []).append(v)
+    picked, total = [], 0.0
+    limit = hours * 60
+    while any(by_batch.values()) and total < limit * 0.9:
+        for b in sorted(by_batch, key=lambda b: (len(b), b)):
+            for v in list(by_batch[b]):
+                by_batch[b].remove(v)
+                if total + cands[v]["minutes"] <= limit * 1.1:
+                    picked.append(v)
+                    total += cands[v]["minutes"]
+                    break
+            if total >= limit * 0.9:
+                break
+    out = {"created": time.strftime("%Y-%m-%d %H:%M"), "hours": round(total / 60, 2),
+           "labelled": sum(cands[v]["labelled"] for v in picked),
+           "videos": [{"video_id": v, **{k: (round(c, 1) if k == "minutes" else c) for k, c in cands[v].items()}}
+                      for v in picked], "holdout": True}
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(out, indent=1), encoding="utf-8")
+    pack_vol.commit()
+    return out
+
+
+def _run_summary(run_dir: Path) -> dict | None:
+    meta = _read_json(run_dir / "run.json")
+    if not meta:
+        return None
+    frames, sec, moments, gpu, vocab_csv = [], 0.0, 0, None, ""
+    counts = {"looks": 0, "look_added": 0, "look_removed": 0, "required_fills": 0, "unreadable": 0}
+    for f in sorted(run_dir.glob("*.json")):
+        if f.name == "run.json":
+            continue
+        tj = _read_json(f) or {}
+        v = f.stem
+        sec += float(tj.get("seconds") or 0.0)
+        moments += int(tj.get("prompts") or 0)
+        gpu = gpu or tj.get("gpu")
+        for k in counts:
+            counts[k] += int(tj.get(k) or 0)
+        vocab_csv = vocab_csv or tj.get("vocab_csv") or ""
+        frames += [{"v": v, "t": r.get("t"), "g": r.get("gold_id"), "tags": r.get("tags") or [],
+                    "unsure": r.get("unsure") or []} for r in (tj.get("results") or {}).values()]
+    import trial_logic as TL
+    return {**meta, "seconds": round(sec, 1), "moments": moments, "gpu": gpu,
+            "cost": round(TL.stage_cost(sec, gpu or "H100"), 2), **counts, "vocab_csv": vocab_csv,
+            "videos": len([f for f in run_dir.glob("*.json") if f.name != "run.json"]), "frames": frames}
+
+
+@app.function(image=report_image, volumes={DATA: pack_vol}, timeout=1800)
+def finish_test_run(run_id: str, meta: dict) -> str:
+    """After a test run: save its details, rebuild testset/test_runs.json (every run, for the app)
+    and return the table of runs scored on your latest labels, plus the per-tag changes since the
+    run before."""
+    import trial_logic as TL
+    pack_vol.reload()
+    d = _test_dir()
+    (d / "runs" / run_id / "run.json").write_text(json.dumps(meta), encoding="utf-8")
+    runs = [r for r in (_run_summary(p) for p in sorted((d / "runs").iterdir()) if p.is_dir()) if r]
+    ts = _read_json(d / "testset.json", {}) or {}
+    (d / "test_runs.json").write_text(json.dumps({"set": ts, "runs": runs}), encoding="utf-8")
+    pack_vol.commit()
+    gold = [i for i in _gold_items() if i.get("type") == "tags" and not i.get("skipped")]
+    tags = [r["tag"] for r in _vocab()]
+    return TL.test_runs_markdown(runs, gold, tags)
 
 
 VISION_SNAPSHOT = ("vision.json", "person_curve.npy", "embeddings.npz")
@@ -1637,7 +1810,7 @@ def list_pack() -> list:
 
 # ---------------------------------------------------------------------------
 
-def _push_labels() -> None:
+def _push_labels(vocab: bool = True) -> None:
     """Send your latest labels and vocabulary from this machine's catalogue folder to the Volume,
     so prep (gold frames, worked examples), compare and the report use today's corrections — not
     the copy uploaded with the last batch. Quietly does nothing where there's no catalogue."""
@@ -1650,7 +1823,7 @@ def _push_labels() -> None:
     if not shutil.which("modal"):
         return
     sent = []
-    for name in ("training_labels.json", "tag_vocabulary.csv"):
+    for name in ("training_labels.json",) + (("tag_vocabulary.csv",) if vocab else ()):
         src = newest_copy(name)
         if src is None:
             continue
@@ -1681,12 +1854,15 @@ def _run_vision(vids: list, max_seconds: float, redo: bool) -> None:
 
 @app.local_entrypoint()
 def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False, teacher: str = "",
-         examples: int = -1, dedup: float = -1.0, batch: int = 0):
+         examples: int = -1, dedup: float = -1.0, batch: int = 0, label: str = "", keep_vocab: bool = False):
     """teacher: 8b, 32b, 32b-fp8 or both (= 8b + 32b). Default: 8b for --smoke, 32b-fp8 otherwise.
     examples: worked examples from your labels before each moment (default 0 = off, at most 6).
     dedup: near-identical moments in a scene are tagged once and the answer copied when their
     picture similarity is above this (default 0.96; 0 = tag every moment).
-    batch: only the videos of this batch (e.g. --batch 6), instead of typing their names."""
+    batch: only the videos of this batch (e.g. --batch 6), instead of typing their names.
+    --stage test: re-tag the fixed 🧪 test set (~2 h) and compare with earlier test runs; --label names
+    the run (e.g. --label positions-v2); --keep-vocab uses the vocabulary already on Modal (the last
+    batch's) instead of sending today's — for a baseline. --stage test-pick [--redo]: show / re-pick the set."""
     # No trial_logic import here: this runs on the machine you start it from, whose venv may
     # only have modal (trial_logic needs numpy).
     examples = EXAMPLES_DEFAULT if examples < 0 else min(examples, EXAMPLES_MAX)
@@ -1702,6 +1878,17 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         stages.insert(stages.index("tag"), "prep")      # the GPU only ever reads what prep wrote
     if stage == "status":
         _print_status(status.remote(keys), keys)
+        return
+    if stage == "test-pick":
+        _push_labels(vocab=False)
+        ts = pick_test_set.remote(TEST_HOURS, redo)
+        print(f"🧪 Test set ({ts.get('created')}): {len(ts.get('videos') or [])} videos, {ts.get('hours')} h, "
+              f"{ts.get('labelled')} of your labelled frames. Held out of any teacher fine-tune.")
+        for x in ts.get("videos") or []:
+            print(f"   batch {x['batch']:>3} · {x['minutes']:5.1f} min · {x['labelled']:3} labelled · {x['video_id']}")
+        return
+    if stage == "test":
+        _run_test(keys, label.strip().replace(" ", "-"), keep_vocab, dedup)
         return
     if stage in ("all", "prep", "tag", "report", "results", "compare", "fp8-check"):
         _push_labels()

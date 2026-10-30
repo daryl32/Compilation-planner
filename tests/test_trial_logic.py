@@ -854,3 +854,57 @@ def test_tag_with_categories_and_second_look(tmp_path, monkeypatch):
     assert r["tags"] == ["close-up", "dancing"] and "kissing" in r["unsure"] and r["look_removed"] == ["kissing"]
     assert r["conf"]["dancing"] == 80 and tj["looks"] == len(follow_convs) and tj["structured"]
     assert tj["look_removed"] == len(follow_convs)
+
+
+def test_run_pairs_and_test_markdown():
+    gold = [{"id": "tags:v:5.00", "video_id": "v", "t": 5.0, "tags": ["close-up"]},
+            {"id": "tags:v:9.00", "video_id": "v", "t": 9.0, "tags": ["wide", "dancing"]},
+            {"id": "tags:w:1.00", "video_id": "w", "t": 1.0, "tags": ["wide"]}]          # not in the run
+    a = {"id": "run-a", "frames": [{"v": "v", "t": 5.0, "g": "tags:v:5.00", "tags": ["close-up", "dancing"]},
+                                   {"v": "v", "t": 9.0, "g": None, "tags": ["wide"]}], "cost": 0.5, "looks": 2,
+         "look_added": 1, "look_removed": 1, "required_fills": 3}
+    b = {"id": "run-b", "frames": [{"v": "v", "t": 5.0, "g": "tags:v:5.00", "tags": ["close-up"]},
+                                   {"v": "v", "t": 9.0, "g": None, "tags": ["wide", "dancing"]}], "cost": 0.6}
+    assert TL.run_pairs(a["frames"], gold) == [(["close-up", "dancing"], ["close-up"]), (["wide"], ["wide", "dancing"])]
+    md = TL.test_runs_markdown([a, b], gold, ["close-up", "wide", "dancing"])
+    assert "| run-a | 2 | 0.67 |" in md and "| run-b | 2 | 1.00 |" in md and "2 (+1 / −1)" in md
+    assert "| dancing | 1 → 0 | 1 → 0 | -2 |" in md
+    assert TL.test_runs_markdown([], gold, []) == "No test runs yet."
+
+
+def test_test_set_pick_and_run(tmp_path, monkeypatch):
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    monkeypatch.setattr(M, "TEST_MIN_LABELLED", 1)
+    vis = json.loads((out / "v" / "vision.json").read_text())
+    vis["models"] = {"pose": M.POSE_MODEL}
+    (out / "v" / "vision.json").write_text(json.dumps(vis))
+    for tg in vis["targets"]:
+        for t in TL.context_times(tg["t"], 40.0):
+            (out / "v" / "frames" / TL.frame_name(t)).write_bytes(b"jpg")
+    ts = M.pick_test_set.local(2.0, False)
+    assert [x["video_id"] for x in ts["videos"]] == ["v"] and ts["labelled"] == 4 and ts["holdout"]
+    assert M.pick_test_set.local(2.0, False)["created"] == ts["created"]        # fixed once picked
+    M.prepare_prompts.local("v", 0, 0, 0)
+
+    class Self:
+        key, llm, load_error, load_seconds, first = "32b-fp8", _FakeLLM(), None, 0.0, True
+    monkeypatch.setattr(M, "_gpu_name", lambda d: "H100")
+    import sys
+    import types
+    fake_vllm = types.ModuleType("vllm")
+    fake_vllm.SamplingParams = lambda **kw: kw
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    before = (out / "v" / "tags_32b.json").read_text()
+    run_dir = out / "testset" / "runs" / "r1"
+    M._tag_video(Self, "v", True, str(run_dir / "v.json"))
+    assert (out / "v" / "tags_32b.json").read_text() == before            # batch results untouched
+    assert not (out / "v" / "tags_32b-fp8_before.json").exists()
+    rj = json.loads((run_dir / "v.json").read_text())
+    assert "close-up" in rj["vocab_csv"] and rj["results"]
+    md = M.finish_test_run.local("r1", {"id": "r1", "label": "", "teacher": "32b-fp8"})
+    assert "| r1 | 4 |" in md
+    tr = json.loads((out / "testset" / "test_runs.json").read_text())
+    assert tr["set"]["videos"][0]["video_id"] == "v" and tr["runs"][0]["id"] == "r1"
+    assert tr["runs"][0]["videos"] == 1 and len(tr["runs"][0]["frames"]) == len(rj["results"])
+    M.export.local(False)
+    assert (out / "export" / "test_runs.json").exists()                  # travels with the export

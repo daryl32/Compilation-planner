@@ -288,6 +288,64 @@ def suggest_thresholds(moments: list, teacher: str, rows: list, default: int = 5
 
 
 # ---------------------------------------------------------------------------
+# 🧪 Test set runs
+# ---------------------------------------------------------------------------
+
+def load_test_runs() -> dict | None:
+    """test_runs.json from the last test run / export: {"set": {...}, "runs": [...]}, or None."""
+    try:
+        data = json.loads((RESULTS_DIR / "test_runs.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get("runs") else None
+
+
+def test_run_scores(runs: list, labels: list, tags: list) -> list:
+    """Each run scored on your labels as they are now: [{"run", "score"}] (score as
+    trial_logic.score_tags: "n", "overall", "per_tag")."""
+    import trial_logic as TLG
+    gold = [i for i in labels if i.get("type") == "tags" and not i.get("skipped")]
+    return [{"run": r, "score": TLG.score_tags(TLG.run_pairs(r.get("frames") or [], gold), tags)} for r in runs]
+
+
+def tag_changes(a: dict, b: dict) -> list:
+    """Per tag, run A → run B: [{"tag", "wrong_a", "wrong_b", "missed_a", "missed_b", "change"}] for
+    the tags whose errors changed, biggest change first (change < 0 = fewer errors in B)."""
+    out = []
+    for t, pa in a["per_tag"].items():
+        pb = b["per_tag"].get(t) or {"fp": 0, "fn": 0}
+        if (pa["fp"], pa["fn"]) != (pb["fp"], pb["fn"]):
+            out.append({"tag": t, "wrong_a": pa["fp"], "wrong_b": pb["fp"], "missed_a": pa["fn"],
+                        "missed_b": pb["fn"], "change": (pb["fp"] + pb["fn"]) - (pa["fp"] + pa["fn"])})
+    return sorted(out, key=lambda x: (-abs(x["change"]), x["tag"].lower()))
+
+
+VOCAB_FIELDS = ("group", "kind", "one_of", "teacher", "threshold", "double_check", "description",
+                "not_to_be_confused_with", "tell_apart", "never_with", "always_with", "only_with",
+                "usually_with", "group_order", "group_required")
+
+
+def vocab_changes(old_csv: str, new_csv: str) -> list:
+    """What changed in the vocabulary between two runs, as readable lines."""
+    import training_labels as TLB
+    if not old_csv or not new_csv:
+        return []
+    a = {r["tag"].lower(): r for r in TLB.parse_vocabulary(old_csv)}
+    b = {r["tag"].lower(): r for r in TLB.parse_vocabulary(new_csv)}
+    out = [f"➕ {b[k]['tag']} added" for k in b if k not in a]
+    out += [f"➖ {a[k]['tag']} removed" for k in a if k not in b]
+    for k in b:
+        if k not in a:
+            continue
+        for fld in VOCAB_FIELDS:
+            x, y = a[k].get(fld), b[k].get(fld)
+            if x != y and not (x in (None, "", False) and y in (None, "", False)):
+                show = lambda v: "—" if v in (None, "", False) else ("yes" if v is True else str(v))
+                out.append(f"{b[k]['tag']} · {fld}: {show(x)} → {show(y)}")
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Per-batch report
 # ---------------------------------------------------------------------------
 

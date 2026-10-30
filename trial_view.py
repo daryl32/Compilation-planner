@@ -382,6 +382,53 @@ def _thresholds(moments: list, teacher: str) -> None:
                       args=({x["tag"]: x["suggested"] for x in better},))
 
 
+def _test_set() -> None:
+    """🧪 The same videos re-tagged after each settings change — the fair before / after."""
+    data = TR.load_test_runs()
+    if not data:
+        return
+    st.markdown("#### 🧪 Test set — the same videos every run")
+    ts = data.get("set") or {}
+    st.caption(f"{len(ts.get('videos') or [])} videos · {ts.get('hours')} h of footage · picked {ts.get('created')} · "
+               "held out of any teacher fine-tune. Scored on your labels as they are now. On the server: "
+               "`modal run modal_trial.py --stage test --label <name>` after changing settings.")
+    rows, _ = TLB.load_vocabulary()
+    scored = TR.test_run_scores(data["runs"], TLB.load_labels(), [r["tag"] for r in rows])
+    pct = lambda x: None if x is None else round(x * 100)
+    st.dataframe([{"Run": x["run"]["id"], "Your frames": x["score"]["n"],
+                   "F1": x["score"]["overall"]["f1"], "Right %": pct(x["score"]["overall"]["precision"]),
+                   "Found %": pct(x["score"]["overall"]["recall"]), "Wrong": x["score"]["overall"]["fp"],
+                   "Missed": x["score"]["overall"]["fn"],
+                   "2nd looks (+/−)": f"{x['run'].get('looks', 0)} (+{x['run'].get('look_added', 0)}/"
+                                      f"−{x['run'].get('look_removed', 0)})",
+                   "Needs-a-tag fills": x["run"].get("required_fills", 0), "Tagging $": x["run"].get("cost")}
+                  for x in scored], hide_index=True, width="stretch", key="tr_test_runs",
+                 column_config={"F1": st.column_config.ProgressColumn("F1", min_value=0.0, max_value=1.0, format="%.2f"),
+                                "Tagging $": st.column_config.NumberColumn(format="$%.2f")})
+    if len(scored) < 2:
+        st.caption("Run it again after your next settings change to see the per-tag difference here.")
+        return
+    ids = [x["run"]["id"] for x in scored]
+    with st.expander("🔀 Compare two runs — per tag, and what changed in the vocabulary", expanded=True):
+        a, b = st.columns(2)
+        ia = a.selectbox("Before", ids, index=len(ids) - 2, key="tr_test_a")
+        ib = b.selectbox("After", ids, index=len(ids) - 1, key="tr_test_b")
+        ra = next(x for x in scored if x["run"]["id"] == ia)
+        rb = next(x for x in scored if x["run"]["id"] == ib)
+        ch = TR.tag_changes(ra["score"], rb["score"])
+        if ch:
+            st.dataframe([{"Tag": c["tag"], "Wrong": f"{c['wrong_a']} → {c['wrong_b']}",
+                           "Missed": f"{c['missed_a']} → {c['missed_b']}",
+                           "Errors": ("✅ " if c["change"] < 0 else "⚠️ ") + f"{c['change']:+d}"} for c in ch],
+                         hide_index=True, width="stretch", key="tr_test_changes")
+        else:
+            st.caption("No tag changed.")
+        lines = TR.vocab_changes(ra["run"].get("vocab_csv") or "", rb["run"].get("vocab_csv") or "")
+        st.markdown("**Vocabulary changes between them**")
+        st.caption("  \n".join(lines[:60]) + (f"  \n… and {len(lines) - 60} more" if len(lines) > 60 else "")
+                   if lines else "None — same vocabulary (so any difference is from the code or chance).")
+
+
 def _report(data: dict, batch) -> None:
     """Every batch side by side, plus all of them together: footage, time and cost per step, the
     32B against your labels, scene cuts — to compare batches run with different settings."""
@@ -410,6 +457,7 @@ def _report(data: dict, batch) -> None:
                  column_config={"F1": st.column_config.ProgressColumn("F1", min_value=0.0, max_value=1.0, format="%.2f"),
                                 "$ / footage h": st.column_config.NumberColumn(format="$%.2f")})
     st.caption("Per-tag detail for a batch: pick it above, then 📊 Scores.")
+    _test_set()
 
     # 2. The detail, folded away.
     with st.expander("💷 Cost and time per batch"):

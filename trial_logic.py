@@ -934,3 +934,57 @@ def apply_look_again(first: dict, text: str, asks: list, vocab: list) -> dict:
     for k in ("rule_breaks", "rule_adds", "rule_drops", "rule_required"):
         out[k] = list(dict.fromkeys((first.get(k) or []) + (again.get(k) or [])))
     return out
+
+
+# ---------------------------------------------------------------------------
+# 🧪 Test runs (the same videos re-tagged after each settings change)
+# ---------------------------------------------------------------------------
+
+def run_pairs(frames: list, gold: list) -> list:
+    """[(run tags, your tags)] for your labelled frames that the run tagged — 🎯 cards by their id,
+    ✏️ corrections by video and time. frames: [{"v", "t", "g", "tags"}]."""
+    by_id = {f["g"]: f for f in frames if f.get("g")}
+    by_t = {(f["v"], round(float(f["t"]), 2)): f for f in frames if f.get("t") is not None}
+    pairs = []
+    for i in gold:
+        f = by_id.get(i.get("id")) or (by_t.get((i.get("video_id"), round(float(i["t"]), 2)))
+                                       if i.get("t") is not None else None)
+        if f is not None:
+            pairs.append((f.get("tags") or [], i.get("tags") or []))
+    return pairs
+
+
+def test_runs_markdown(runs: list, gold: list, tags: list, top: int = 15) -> str:
+    """Every test run scored on your labels as they are now (oldest first), then the per-tag
+    changes between the last two runs."""
+    if not runs:
+        return "No test runs yet."
+
+    def f(x):
+        return "–" if x is None else f"{x:.2f}"
+    scored = [(r, score_tags(run_pairs(r.get("frames") or [], gold), tags)) for r in runs]
+    md = ["🧪 Test set — the same videos every run, scored on your labelled frames as they are now:", "",
+          "| Run | Your frames | F1 | Right (precision) | Found (recall) | Wrong | Missed | 2nd looks (+ / −) | "
+          "Needs-a-tag fills | Tagging $ |",
+          "|---|---|---|---|---|---|---|---|---|---|"]
+    for r, sc in scored:
+        o = sc["overall"]
+        md.append(f"| {r['id']} | {sc['n']} | {f(o['f1'])} | {f(o['precision'])} | {f(o['recall'])} | {o['fp']} | "
+                  f"{o['fn']} | {r.get('looks', 0)} (+{r.get('look_added', 0)} / −{r.get('look_removed', 0)}) | "
+                  f"{r.get('required_fills', 0)} | ${r.get('cost', 0):.2f} |")
+    if len(scored) >= 2:
+        (ra, a), (rb, b) = scored[-2], scored[-1]
+        rows = []
+        for t in tags:
+            pa, pb = a["per_tag"][t], b["per_tag"][t]
+            if (pa["fp"], pa["fn"]) != (pb["fp"], pb["fn"]):
+                rows.append((t, pa, pb, (pb["fp"] + pb["fn"]) - (pa["fp"] + pa["fn"])))
+        rows.sort(key=lambda x: (-abs(x[3]), x[0].lower()))
+        md += ["", f"Per tag, {ra['id']} → {rb['id']} (biggest changes first; fewer errors = better):", "",
+               "| Tag | Wrong | Missed | Errors |", "|---|---|---|---|"]
+        md += [f"| {t} | {pa['fp']} → {pb['fp']} | {pa['fn']} → {pb['fn']} | {'+' if d > 0 else ''}{d} |"
+               for t, pa, pb, d in rows[:top]] or ["| (no change) | | | |"]
+    n = scored[-1][1]["n"]
+    md += ["", f"On {n} frames, F1 moves by about ±{max(0.02, round(0.5 / max(n, 1) ** 0.5, 2)):.2f} from chance "
+               "alone — trust bigger changes, and per-tag changes of several frames."]
+    return "\n".join(md)

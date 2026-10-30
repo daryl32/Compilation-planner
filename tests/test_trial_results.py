@@ -415,3 +415,50 @@ def test_suggest_thresholds():
     assert got["dance"]["suggested"] == 80 and got["dance"]["f1_best"] == 1.0   # ties → the higher one
     assert got["kiss"]["current"] == 60 and got["kiss"]["f1_now"] == 1.0 and got["kiss"]["suggested"] == 65
     assert list(got)[0] == "dance"                            # biggest gain first
+
+
+def _test_runs():
+    v1 = "tag,group,threshold\nclose-up shot,shot,\ndance,action,\ncrowd,people,\n"
+    v2 = "tag,group,threshold,double_check\nclose-up shot,shot,,\ndance,action,80,yes\nnight,light,,\n"
+    frames_a = [{"v": "vid_a", "t": 5.0, "g": None, "tags": ["close-up shot", "dance", "crowd"]},
+                {"v": "vid_a", "t": 12.0, "g": None, "tags": ["dance"]}]
+    frames_b = [{"v": "vid_a", "t": 5.0, "g": None, "tags": ["close-up shot", "dance"]},
+                {"v": "vid_a", "t": 12.0, "g": None, "tags": []}]
+    return {"set": {"videos": [{"video_id": "vid_a"}], "hours": 0.1, "created": "2026-10-30 18:30"},
+            "runs": [{"id": "2026-10-30_1830_baseline", "vocab_csv": v1, "frames": frames_a, "cost": 0.6,
+                      "looks": 3, "look_added": 1, "look_removed": 0},
+                     {"id": "2026-10-30_1900_step1", "vocab_csv": v2, "frames": frames_b, "cost": 0.7}]}
+
+
+def test_test_run_scoring_and_vocab_changes():
+    import training_labels as TLB
+    data = _test_runs()
+    labels = [{"id": TLB.card_id("tags", "vid_a", 5.0), "type": "tags", "video_id": "vid_a", "t": 5.0,
+               "tags": ["close-up shot", "dance"]},
+              {"id": TLB.card_id("tags", "vid_a", 12.0), "type": "tags", "video_id": "vid_a", "t": 12.0,
+               "tags": []}]
+    sc = TR.test_run_scores(data["runs"], labels, ["close-up shot", "dance", "crowd", "night"])
+    assert sc[0]["score"]["overall"]["fp"] == 2 and sc[1]["score"]["overall"]["fp"] == 0
+    ch = {c["tag"]: c for c in TR.tag_changes(sc[0]["score"], sc[1]["score"])}
+    assert ch["dance"]["wrong_a"] == 1 and ch["dance"]["wrong_b"] == 0 and ch["dance"]["change"] == -1
+    assert set(ch) == {"dance", "crowd"}
+    lines = TR.vocab_changes(data["runs"][0]["vocab_csv"], data["runs"][1]["vocab_csv"])
+    assert "➕ night added" in lines and "➖ crowd removed" in lines
+    assert "dance · threshold: — → 80" in lines and "dance · double_check: — → yes" in lines
+    assert TR.vocab_changes("", "x") == []
+
+
+def test_summary_shows_test_runs(bundle, no_labels):
+    import training_labels as TLB
+    from tests.apptest_util import errors, page_app
+    (TR.RESULTS_DIR / "test_runs.json").write_text(json.dumps(_test_runs()))
+    TLB.save_label({"id": TLB.card_id("tags", "vid_a", 5.0), "type": "tags", "video_id": "vid_a", "t": 5.0},
+                   tags=["close-up shot", "dance"])
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.run()
+    assert not errors(at), errors(at)
+    assert any("Test set" in m.value for m in at.markdown)
+    assert any("Needs-a-tag fills" in d.value.columns for d in at.dataframe)          # the runs table
+    assert any("Errors" in d.value.columns for d in at.dataframe)                     # per-tag changes
+    assert any("dance · threshold" in c.value for c in at.caption)
