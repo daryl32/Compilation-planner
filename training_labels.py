@@ -8,10 +8,12 @@ Two files, both in CATALOGUE_DIR so they sync with the catalogues:
 
 * tag_vocabulary.csv — the tag list and what each tag means (Daryl edits it, in Excel or on
   the page). Columns:
-      tag, group, kind, one_of, teacher, description, not_to_be_confused_with, search_words
+      tag, group, kind, one_of, teacher, description, not_to_be_confused_with, never_with, search_words
   kind      "frame" (visible in one still) or "motion" (needs a few seconds of movement)
   one_of    a name shared by tags that can't both be true (e.g. "shot size") — empty if none
   teacher   yes / no — may the big model try this tag, or is it learned only from your labels
+  never_with  "; "-separated tags that can never be on the same moment as this one, in any group
+            (e.g. an action that rules out a position). Works both ways: listing B on A is enough.
   search_words  "; "-separated words you'd type when searching for it
   With no vocabulary file the Reviewer's labels.json is used (every tag kind=frame, teacher=yes).
 
@@ -53,7 +55,7 @@ LABELS_FILE = CATALOGUE_DIR / "training_labels.json"
 LABELS_STEM = LABELS_FILE.stem
 
 VOCAB_COLUMNS = ["tag", "group", "kind", "one_of", "teacher", "description",
-                 "not_to_be_confused_with", "search_words"]
+                 "not_to_be_confused_with", "never_with", "search_words"]
 KINDS = ("frame", "motion")
 
 LONG_SCENE_SEC = 20.0      # boundary "missed cut?" points come from scenes longer than this
@@ -88,6 +90,8 @@ def _row(raw: dict) -> dict | None:
         "teacher": True if teacher in (None, "") else (teacher if isinstance(teacher, bool) else _yes(teacher)),
         "description": str(raw.get("description") or "").strip(),
         "not_to_be_confused_with": str(raw.get("not_to_be_confused_with") or "").strip(),
+        "never_with": "; ".join(n for n in (x.strip() for x in str(raw.get("never_with") or "")
+                                                                  .replace(",", ";").split(";")) if n),
         "search_words": [w for w in words if w],
     }
 
@@ -484,11 +488,39 @@ def upsert_tag(rows: list, row: dict, old_name: str | None = None) -> list:
             out.append(r)
     if not done:
         out.append(new)
-    if old_name and old_name != new["tag"]:     # look-alike lists point at the new name too
+    if old_name and old_name != new["tag"]:     # look-alike and never-with lists point at the new name too
         for r in out:
-            r["not_to_be_confused_with"] = "; ".join(
-                new["tag"] if p.strip().lower() == old_name.lower() else p.strip()
-                for p in str(r.get("not_to_be_confused_with") or "").split(";") if p.strip())
+            for col in ("not_to_be_confused_with", "never_with"):
+                r[col] = "; ".join(
+                    new["tag"] if p.strip().lower() == old_name.lower() else p.strip()
+                    for p in str(r.get(col) or "").split(";") if p.strip())
+    return out
+
+
+def never_pairs(rows: list) -> dict:
+    """{tag (lower case): {tags it can never go with}} from the never_with column, both ways, and
+    only between tags in the list."""
+    names = {r["tag"].lower(): r["tag"] for r in rows}
+    out = {}
+    for r in rows:
+        for other in str(r.get("never_with") or "").split(";"):
+            o = names.get(other.strip().lower())
+            if o and o.lower() != r["tag"].lower():
+                out.setdefault(r["tag"].lower(), set()).add(o)
+                out.setdefault(o.lower(), set()).add(r["tag"])
+    return out
+
+
+def rule_breaks(tags, rows: list) -> list:
+    """[(a, b)] pairs in `tags` that your never-with rules say can't go together."""
+    pairs = never_pairs(rows)
+    tags = list(dict.fromkeys(tags or []))
+    lower = {t.lower() for t in tags}
+    out = []
+    for i, a in enumerate(tags):
+        for b in pairs.get(a.lower(), ()):
+            if b.lower() in lower and tags.index(next(t for t in tags if t.lower() == b.lower())) > i:
+                out.append((a, b))
     return out
 
 

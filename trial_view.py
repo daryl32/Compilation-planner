@@ -75,6 +75,9 @@ def _editor(vid: str, m: dict, teachers: list, ekey: str) -> None:
         else:
             picked += list(st.pills(title, tags, selection_mode="multi", default=default,
                                     wrap=True, width="stretch", key=wkey) or [])
+    for x, y in TLB.rule_breaks(picked, vocab):
+        st.warning(f"“{x}” and “{y}” are set as never-together in your vocabulary — save anyway if this "
+                   "frame really has both (then the rule may need changing).")
     card = TR.correction_card(vid, m, start)
     c1, c2 = st.columns(2)
     c1.button("💾 Save my tags", type="primary", key=f"{ekey}_save", width="stretch",

@@ -338,3 +338,25 @@ def test_fp8_only_batch_shows_one_named_row(no_labels):
     finally:
         shutil.rmtree(TR.RESULTS_DIR, ignore_errors=True)
         TR._CACHE.clear()
+
+
+def test_editor_warns_on_never_with(bundle, no_labels, monkeypatch):
+    import training_labels as TLB
+    from tests.apptest_util import errors, page_app
+    backup = TLB.VOCAB_FILE.read_bytes() if TLB.VOCAB_FILE.exists() else None
+    rows = TLB.parse_vocabulary("tag,group,never_with\nclose-up shot,shot,\ndance,action,close-up shot\n"
+                                "crowd,people,\nnight,light,\n")
+    TLB.save_vocabulary(rows)
+    try:
+        at = page_app("pages/6_Training_Labels.py")
+        at.session_state["tl_view"] = "🧪 Trial results"
+        at.session_state["tr_sub"] = "🖼️ Compare tags"
+        at.run()
+        next(b for b in at.button if b.label == "✏️ Correct").click().run()   # your tags: close-up + dance
+        assert not errors(at), errors(at)
+        assert any("never-together" in w.value for w in at.warning)
+    finally:
+        if backup is None:
+            TLB.VOCAB_FILE.unlink(missing_ok=True)
+        else:
+            TLB.VOCAB_FILE.write_bytes(backup)

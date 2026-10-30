@@ -332,3 +332,17 @@ def test_tag_form_adds_renames_and_deletes(clean_files):
     next(b for b in at.button if b.label == "🗑️ Delete tag").click().run()
     assert not errors(at), errors(at)
     assert "kiss" not in [r["tag"] for r in TL.load_vocabulary()[0]]
+
+
+def test_never_with_column_and_rename():
+    rows = TL.parse_vocabulary("tag,group,never_with\nstanding,position,\nlying,position,\n"
+                               "jumping,action,\"standing, lying\"\n")
+    assert rows[2]["never_with"] == "standing; lying"
+    assert TL.never_pairs(rows)["standing"] == {"jumping"}
+    assert TL.rule_breaks(["jumping", "dancing", "standing"], rows) == [("jumping", "standing")]
+    assert TL.rule_breaks(["standing"], rows) == []
+    rows = TL.upsert_tag(rows, {**rows[0], "tag": "stood"}, "standing")      # rename follows into never_with
+    assert rows[2]["never_with"] == "stood; lying"
+    assert "never_with" in TL.vocabulary_csv(rows).splitlines()[0]
+    again = TL.parse_vocabulary(TL.vocabulary_csv(rows))
+    assert again[2]["never_with"] == "stood; lying"

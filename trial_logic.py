@@ -53,8 +53,24 @@ def parse_vocabulary(text: str) -> list:
                      "one_of": " ".join(raw.get("one_of", "").split()),
                      "teacher": teacher in ("", "yes", "y", "true", "1", "x"),
                      "description": raw.get("description", "").strip(),
-                     "not_to_be_confused_with": raw.get("not_to_be_confused_with", "").strip()})
+                     "not_to_be_confused_with": raw.get("not_to_be_confused_with", "").strip(),
+                     "never_with": [n.strip() for n in raw.get("never_with", "").replace(",", ";").split(";")
+                                    if n.strip()]})
     return rows
+
+
+def never_pairs(vocab: list) -> dict:
+    """{tag (lower case): {tags it can never go with}} from never_with, both ways, only between tags
+    in this vocabulary (so a rule naming a tag the teacher isn't asked about is simply ignored)."""
+    names = {r["tag"].lower(): r["tag"] for r in vocab}
+    out = {}
+    for r in vocab:
+        for other in r.get("never_with") or []:
+            o = names.get(str(other).strip().lower())
+            if o and o.lower() != r["tag"].lower():
+                out.setdefault(r["tag"].lower(), set()).add(o)
+                out.setdefault(o.lower(), set()).add(r["tag"])
+    return out
 
 
 def teacher_vocab(vocab: list) -> list:
@@ -69,7 +85,7 @@ def vocabulary_from_labels(labels) -> list:
         name = t if isinstance(t, str) else (t or {}).get("name") or (t or {}).get("label")
         if name:
             out.append({"tag": str(name), "group": "", "kind": "frame", "one_of": "", "teacher": True,
-                        "description": "", "not_to_be_confused_with": ""})
+                        "description": "", "not_to_be_confused_with": "", "never_with": []})
     return out
 
 
@@ -247,6 +263,14 @@ def build_prompt(vocab: list) -> tuple:
     if groups:
         head += ["", "Pick at most one tag from each of these sets:"]
         head += [f"- {name}: {', '.join(tags)}" for name, tags in groups.items()]
+    pairs = never_pairs(vocab)
+    if pairs:
+        order = {r["tag"]: i for i, r in enumerate(vocab)}
+        rules = sorted({tuple(sorted((r["tag"], o), key=order.get)) for r in vocab
+                        for o in pairs.get(r["tag"].lower(), ())}, key=lambda p: (order[p[0]], order[p[1]]))
+        head += ["", "These tags never apply to the same moment — if both seem to, give only the one that "
+                     "fits best:"]
+        head += [f"- {a} / {b}" for a, b in rules]
     head += ["", "Only use tags from the lists above, spelled exactly as written. Choose every tag "
              "that clearly applies; leave out anything you are not sure of, and list those under "
              "\"unsure\" instead. Reply with JSON only, no other text:",
@@ -347,8 +371,18 @@ def parse_answer(text: str, vocab: list) -> dict:
         return out
 
     tags = clean(data.get("tags"))
-    unsure = [t for t in clean(data.get("unsure")) if t not in tags]
-    return {"tags": tags, "unsure": unsure, "caption": str(data.get("caption") or "")[:300], "ok": ok}
+    # your never-with rules: a tag that clashes with one named before it goes to "unsure"
+    pairs, kept, broke = never_pairs(vocab), [], []
+    for t in tags:
+        if any(o in kept for o in pairs.get(t.lower(), ())):
+            broke.append(t)
+        else:
+            kept.append(t)
+    tags = kept
+    unsure = [t for t in clean(data.get("unsure")) + broke if t not in tags]
+    unsure = list(dict.fromkeys(unsure))
+    return {"tags": tags, "unsure": unsure, "caption": str(data.get("caption") or "")[:300], "ok": ok,
+            "rule_breaks": broke}
 
 
 # ---------------------------------------------------------------------------

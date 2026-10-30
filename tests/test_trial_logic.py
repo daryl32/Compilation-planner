@@ -56,7 +56,8 @@ def test_prompt_and_parse():
     assert TL.build_prompt(vocab())[0] == head       # the same for every moment (prefix cache)
     ans = TL.parse_answer('Sure! {"tags": ["Close-Up", "wide", "dancing", "flying"], '
                           '"unsure": ["walking", "dancing"], "caption": "Two people."}', vocab())
-    assert ans == {"tags": ["close-up", "dancing"], "unsure": ["walking"], "caption": "Two people.", "ok": True}
+    assert ans == {"tags": ["close-up", "dancing"], "unsure": ["walking"], "caption": "Two people.", "ok": True,
+                   "rule_breaks": []}
     bad = TL.parse_answer("no idea", vocab())
     assert bad["tags"] == [] and not bad["ok"]
 
@@ -587,3 +588,31 @@ def test_vision_motion_writes_done_marker(tmp_path, monkeypatch):
     # the report costs vision from the batched video and lists the CPU share
     text = M.report.local()
     assert "| vision CPU | CPU |" in text and "batched pipeline" in text and "Pose (GPU, batched)" in text
+
+
+NEVER_CSV = ("tag,group,kind,one_of,teacher,description,not_to_be_confused_with,never_with,search_words\n"
+             "standing,position,frame,,yes,,,,\n"
+             "lying,position,frame,,yes,,,,\n"
+             "jumping,action,motion,,yes,,,standing; lying,\n"
+             "dancing,action,motion,,yes,,,lying,\n"
+             "waving,action,motion,,no,,,standing,\n")
+
+
+def test_never_with_prompt_and_answers():
+    v = TL.parse_vocabulary(NEVER_CSV)
+    assert v[2]["never_with"] == ["standing", "lying"]
+    pairs = TL.never_pairs(v)
+    assert pairs["lying"] == {"jumping", "dancing"} and pairs["standing"] == {"jumping", "waving"}  # both ways
+    tv = TL.teacher_vocab(v)                     # waving is teacher = no → its rule isn't the teacher's
+    assert "waving" not in str(TL.never_pairs(tv))
+    head, _, _ = TL.build_prompt(tv)
+    assert "never apply to the same moment" in head
+    assert "- standing / jumping" in head and "- lying / jumping" in head and "- lying / dancing" in head
+    # the first-named of a clashing pair stays; the other goes to unsure
+    ans = TL.parse_answer('{"tags": ["jumping", "standing", "dancing", "lying"], "unsure": []}', tv)
+    assert ans["tags"] == ["jumping", "dancing"] and ans["unsure"] == ["standing", "lying"]
+    assert ans["rule_breaks"] == ["standing", "lying"]
+    ans = TL.parse_answer('{"tags": ["lying", "jumping"], "unsure": ["jumping"]}', tv)
+    assert ans["tags"] == ["lying"] and ans["unsure"] == ["jumping"]
+    # no rules → no rules section, nothing moved
+    assert "never apply" not in TL.build_prompt(TL.teacher_vocab(vocab()))[0]
