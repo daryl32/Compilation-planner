@@ -677,3 +677,51 @@ def test_only_with_prompt_and_answers():
     assert TL.parse_answer('{"tags": ["proposing"]}', v)["tags"] == ["proposing"]
     # no only_with column (older files) → no rule
     assert TL.only_map(TL.parse_vocabulary(ALWAYS_CSV)) == {}
+
+
+USUALLY_CSV = ("tag,group,kind,one_of,teacher,never_with,only_with,usually_with\n"
+               "close-up,shot,frame,shot size,yes,,,\n"
+               "medium,shot,frame,shot size,yes,,,\n"
+               "wide,shot,frame,shot size,yes,,,\n"
+               "kissing,action,frame,,yes,,,close-up; hands\n"
+               "hands,body,frame,,yes,,,\n"
+               "night,light,frame,,yes,,,\n"
+               "running,action,frame,,yes,,,night; sweat\n"
+               "sweat,body,frame,,yes,running,,\n"
+               "ring,object,frame,,yes,,proposing,\n"
+               "proposing,action,frame,,yes,,,\n"
+               "hug,action,frame,,yes,,,ring\n")
+
+
+def test_usually_with_second_look():
+    import json as _json
+    v = TL.teacher_vocab(TL.parse_vocabulary(USUALLY_CSV))
+    assert TL.usually_map(v) == {"kissing": ["close-up", "hands"], "running": ["night", "sweat"], "hug": ["ring"]}
+    head, _, _ = TL.build_prompt(v)
+    assert "often (not always) go together" in head and "- kissing: often with close-up, hands" in head
+    first = TL.parse_answer('{"tags": ["medium", "kissing"], "unsure": ["hands"]}', v)
+    asks = TL.look_again(first, v)
+    # a pick-one partner is asked against the one already chosen; an unsure one is asked again
+    assert asks == [{"tag": "close-up", "because": "kissing", "instead_of": "medium"},
+                    {"tag": "hands", "because": "kissing", "instead_of": None}]
+    q = TL.look_again_prompt(asks)
+    assert "better fit than medium" in q and "hands (often with kissing): does it apply?" in q and '"yes"' in q
+    # yes to close-up → it replaces medium (medium goes to unsure); no to hands
+    got = TL.apply_look_again(first, '{"yes": ["close-up"], "no": ["hands"]}', asks, v)
+    assert got["tags"] == ["kissing", "close-up"] and "medium" in got["unsure"] and "hands" in got["unsure"]
+    assert got["look_asked"] == ["close-up", "hands"] and got["look_added"] == ["close-up"]
+    # all no / unreadable → nothing changes
+    for reply in ('{"yes": [], "no": ["close-up", "hands"]}', "hmm"):
+        same = TL.apply_look_again(first, reply, asks, v)
+        assert same["tags"] == first["tags"] and same["look_added"] == []
+    # never asked: sweat (never-with running) or breaks its own only-with; nothing to ask if all given
+    assert [a["tag"] for a in TL.look_again(TL.parse_answer('{"tags": ["running"]}', v), v)] == ["night"]
+    assert TL.look_again(TL.parse_answer('{"tags": ["hug"]}', v), v) == []          # ring needs proposing
+    assert TL.look_again(TL.parse_answer('{"tags": ["kissing", "close-up", "hands"]}', v), v) == []
+    # a "yes" the rules don't allow isn't kept (said yes to something not asked → ignored)
+    got = TL.apply_look_again(first, _json.dumps({"yes": ["wide"]}), asks, v)
+    assert got["tags"] == first["tags"]
+    # no usually_with anywhere → no section, nothing to ask
+    plain = TL.teacher_vocab(TL.parse_vocabulary(ALWAYS_CSV))
+    assert "often (not always)" not in TL.build_prompt(plain)[0]
+    assert TL.look_again(TL.parse_answer('{"tags": ["kissing"]}', plain), plain) == []

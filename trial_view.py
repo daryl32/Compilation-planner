@@ -223,7 +223,9 @@ def _compare(data: dict) -> None:
                     r = (m.get("teachers") or {}).get(k) or {}
                     if r.get("caption"):
                         caps.append(f"**{label(v, k)}:** {r['caption']}"
-                                    + (" · ↩ copied from a near-identical moment" if r.get("copied_from") else ""))
+                                    + (" · ↩ copied from a near-identical moment" if r.get("copied_from") else "")
+                                    + (f" · 👀 added on a second look: {', '.join(r['look_added'])}"
+                                       if r.get("look_added") else ""))
                 if caps:
                     st.caption("  \n".join(caps))
                 # ✏️ Correct: your tags for this frame go to your training labels (the gold set).

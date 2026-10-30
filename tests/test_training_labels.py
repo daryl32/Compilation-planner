@@ -393,3 +393,13 @@ def test_only_with_problems_and_renames(clean_files):
     assert rows[0]["only_with"] == "praying; proposal"
     assert "only_with" in TL.vocabulary_csv(rows).splitlines()[0]
     assert TL.parse_vocabulary(TL.vocabulary_csv(rows))[0]["only_with"] == "praying; proposal"
+
+
+def test_usually_with_column(clean_files):
+    rows = TL.parse_vocabulary("tag,group,usually_with\nkissing,action,close-up\nclose-up,shot,\n")
+    assert rows[0]["usually_with"] == "close-up"
+    assert TL.rule_problems(["kissing"], rows) == []          # soft — never a rule problem
+    assert TL.fix_tags(["kissing"], rows) == (["kissing"], [])
+    rows = TL.upsert_tag(rows, {**rows[1], "tag": "close"}, "close-up")
+    assert rows[0]["usually_with"] == "close"
+    assert TL.parse_vocabulary(TL.vocabulary_csv(rows))[0]["usually_with"] == "close"

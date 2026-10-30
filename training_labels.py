@@ -20,6 +20,9 @@ Two files, both in CATALOGUE_DIR so they sync with the catalogues:
   only_with   "; "-separated tags, at least one of which must be there for this one to be allowed
             (one way: a position only with certain actions). Fixed by DROPPING this tag — the
             other tag is the evidence. Don't list the same tag in always_with and only_with.
+  usually_with "; "-separated tags that often (not always) come with this one. Soft: nothing is
+            added or dropped — when the teacher gives this tag without them, it's asked to take a
+            second look at each one (a pick-one partner: "is it a better fit than the one you gave?").
   search_words  "; "-separated words you'd type when searching for it
   With no vocabulary file the Reviewer's labels.json is used (every tag kind=frame, teacher=yes).
 
@@ -61,7 +64,7 @@ LABELS_FILE = CATALOGUE_DIR / "training_labels.json"
 LABELS_STEM = LABELS_FILE.stem
 
 VOCAB_COLUMNS = ["tag", "group", "kind", "one_of", "teacher", "description",
-                 "not_to_be_confused_with", "never_with", "always_with", "only_with", "search_words"]
+                 "not_to_be_confused_with", "never_with", "always_with", "only_with", "usually_with", "search_words"]
 KINDS = ("frame", "motion")
 
 LONG_SCENE_SEC = 20.0      # boundary "missed cut?" points come from scenes longer than this
@@ -106,6 +109,7 @@ def _row(raw: dict) -> dict | None:
         "never_with": _names(raw.get("never_with")),
         "always_with": _names(raw.get("always_with")),
         "only_with": _names(raw.get("only_with")),
+        "usually_with": _names(raw.get("usually_with")),
         "search_words": [w for w in words if w],
     }
 
@@ -504,7 +508,7 @@ def upsert_tag(rows: list, row: dict, old_name: str | None = None) -> list:
         out.append(new)
     if old_name and old_name != new["tag"]:     # look-alike and never-with lists point at the new name too
         for r in out:
-            for col in ("not_to_be_confused_with", "never_with", "always_with", "only_with"):
+            for col in ("not_to_be_confused_with", "never_with", "always_with", "only_with", "usually_with"):
                 r[col] = "; ".join(
                     new["tag"] if p.strip().lower() == old_name.lower() else p.strip()
                     for p in str(r.get(col) or "").split(";") if p.strip())

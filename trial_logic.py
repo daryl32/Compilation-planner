@@ -59,7 +59,9 @@ def parse_vocabulary(text: str) -> list:
                      "always_with": [n.strip() for n in raw.get("always_with", "").replace(",", ";").split(";")
                                      if n.strip()],
                      "only_with": [n.strip() for n in (raw.get("only_with") or "").replace(",", ";").split(";")
-                                   if n.strip()]})
+                                   if n.strip()],
+                     "usually_with": [n.strip() for n in (raw.get("usually_with") or "").replace(",", ";").split(";")
+                                      if n.strip()]})
     return rows
 
 
@@ -104,6 +106,20 @@ def only_map(vocab: list) -> dict:
     return out
 
 
+def usually_map(vocab: list) -> dict:
+    """{tag (lower case): [tags that often — not always — come with it]} from usually_with, one
+    way, only tags in this vocabulary. Soft: nothing is added or dropped by it; it makes the
+    teacher take a second look (look_again_*)."""
+    names = {r["tag"].lower(): r["tag"] for r in vocab}
+    out = {}
+    for r in vocab:
+        for other in r.get("usually_with") or []:
+            o = names.get(str(other).strip().lower())
+            if o and o.lower() != r["tag"].lower() and o not in out.get(r["tag"].lower(), []):
+                out.setdefault(r["tag"].lower(), []).append(o)
+    return out
+
+
 def teacher_vocab(vocab: list) -> list:
     """The tags the teacher is asked about: the ones whose "teacher" switch is on. Tags switched
     off are learned from your labels only, so they're left out of its prompt altogether."""
@@ -117,7 +133,7 @@ def vocabulary_from_labels(labels) -> list:
         if name:
             out.append({"tag": str(name), "group": "", "kind": "frame", "one_of": "", "teacher": True,
                         "description": "", "not_to_be_confused_with": "", "never_with": [], "always_with": [],
-                        "only_with": []})
+                        "only_with": [], "usually_with": []})
     return out
 
 
@@ -313,6 +329,12 @@ def build_prompt(vocab: list) -> tuple:
                      "otherwise leave it out:"]
         head += [f"- {r['tag']}: only with {' or '.join(omap[r['tag'].lower()])}" for r in vocab
                  if r["tag"].lower() in omap]
+    umap = usually_map(vocab)
+    if umap:
+        head += ["", "These often (not always) go together — if you give the first tag, look carefully "
+                     "at whether the others apply too, and only give them if they do:"]
+        head += [f"- {r['tag']}: often with {', '.join(umap[r['tag'].lower()])}" for r in vocab
+                 if r["tag"].lower() in umap]
     head += ["", "Only use tags from the lists above, spelled exactly as written. Choose every tag "
              "that clearly applies; leave out anything you are not sure of, and list those under "
              "\"unsure\" instead. Reply with JSON only, no other text:",
@@ -671,4 +693,77 @@ def extrapolate(stage_seconds: dict, gpus: dict, trial_hours, library_hours: flo
         tot["trial_$"] += c + c_fixed
         tot["library_$"] += lib
     out["total"] = {k: round(v, 2) for k, v in tot.items()}
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Second look (usually_with)
+# ---------------------------------------------------------------------------
+
+def look_again(ans: dict, vocab: list) -> list:
+    """[{"tag", "because", "instead_of"}] — tags to ask the teacher about a second time: for every
+    tag it gave, the usually-with partners it didn't give. "instead_of" is the tag it already chose
+    from the same pick-one set (then the question is "is this a better fit?"). Never a partner that
+    would break a never-with or its own only-with rule with what's there."""
+    umap = usually_map(vocab)
+    if not umap:
+        return []
+    tags = list(ans.get("tags") or [])
+    have = {t.lower() for t in tags}
+    pairs, omap = never_pairs(vocab), only_map(vocab)
+    sets = {r["tag"].lower(): r.get("one_of") for r in vocab}
+    out, seen = [], set()
+    for t in tags:
+        for n in umap.get(t.lower(), []):
+            if n.lower() in have or n.lower() in seen:
+                continue
+            if any(o.lower() in have for o in pairs.get(n.lower(), ())):
+                continue
+            needs = omap.get(n.lower())
+            if needs and not any(x.lower() in have for x in needs):
+                continue
+            same = next((x for x in tags if sets.get(n.lower()) and sets.get(x.lower()) == sets.get(n.lower())),
+                        None)
+            out.append({"tag": n, "because": t, "instead_of": same})
+            seen.add(n.lower())
+    return out
+
+
+def look_again_prompt(asks: list) -> str:
+    lines = ["Take a second, careful look at frame 4 (and the movement across the frames). These tags "
+             "often go with ones you gave, so check each one properly — but they don't always apply:"]
+    for a in asks:
+        if a["instead_of"]:
+            lines.append(f"- {a['tag']} (often with {a['because']}): is it a better fit than {a['instead_of']}, "
+                         f"which you gave?")
+        else:
+            lines.append(f"- {a['tag']} (often with {a['because']}): does it apply?")
+    lines += ["Answer yes only if you can clearly see it. Reply with JSON only, no other text:",
+              '{"yes": ["..."], "no": ["..."]}']
+    return "\n".join(lines)
+
+
+def apply_look_again(first: dict, text: str, asks: list, vocab: list) -> dict:
+    """The first answer updated with the second look: each "yes" is added (a pick-one "yes"
+    replaces the tag it was asked against, which goes to unsure); your rules are applied again.
+    Adds "look_asked" and "look_added". An unreadable second reply changes nothing."""
+    m = re.search(r"\{.*\}", text or "", re.S)
+    try:
+        data = json.loads(m.group(0)) if m else {}
+    except ValueError:
+        data = {}
+    yes_raw = data.get("yes") if isinstance(data, dict) else None
+    yes_l = {str(y).strip().lower() for y in yes_raw} if isinstance(yes_raw, list) else set()
+    yes = [a for a in asks if a["tag"].lower() in yes_l]
+    out = {**first, "look_asked": [a["tag"] for a in asks], "look_added": []}
+    if not yes:
+        return out
+    gone = {a["instead_of"] for a in yes if a["instead_of"]}
+    tags = [t for t in first["tags"] if t not in gone] + [a["tag"] for a in yes]
+    unsure = [t for t in first.get("unsure") or [] if t not in tags] + sorted(gone)
+    again = parse_answer(json.dumps({"tags": tags, "unsure": unsure}), vocab)
+    out.update({"tags": again["tags"], "unsure": again["unsure"],
+                "look_added": [a["tag"] for a in yes if a["tag"] in again["tags"]]})
+    for k in ("rule_breaks", "rule_adds", "rule_drops"):
+        out[k] = list(dict.fromkeys((first.get(k) or []) + (again.get(k) or [])))
     return out

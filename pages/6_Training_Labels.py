@@ -263,7 +263,7 @@ def tag_editor() -> None:
     pick = st.selectbox("Tag to edit", [NEW_TAG] + names, key="tl_ed_pick")
     cur = next((r for r in vocab if r["tag"] == pick), None) or {
         "tag": "", "group": "", "kind": "frame", "one_of": "", "teacher": True, "description": "",
-        "not_to_be_confused_with": "", "never_with": "", "always_with": "", "only_with": "",
+        "not_to_be_confused_with": "", "never_with": "", "always_with": "", "only_with": "", "usually_with": "",
         "search_words": []}
     groups = sorted({r["group"] for r in vocab if r["group"]}, key=str.lower)
     sets = sorted({r["one_of"] for r in vocab if r["one_of"]}, key=str.lower)
@@ -313,6 +313,14 @@ def tag_editor() -> None:
                                    "actions). The teacher is told, and if it gives this tag without any of "
                                    "them, this tag moves to unsure — the other tag is never added. Don't pick "
                                    "the same tag here and in Always with.")
+        usually_now = [x.strip() for x in str(cur.get("usually_with") or "").split(";") if x.strip()]
+        usually = st.multiselect("Usually with — tags that often (not always) come with this one",
+                                 [n for n in names if n != cur["tag"]],
+                                 default=[x for x in usually_now if x in names], key=f"{k}_usually",
+                                 help="Soft, one way. Nothing is added or dropped: when the teacher gives this "
+                                      "tag without them, it's asked to take a second, careful look at each one. "
+                                      "For a pick-one tag (e.g. a shot size) it's asked whether it's a better fit "
+                                      "than the one it gave. Costs a little extra GPU time on those moments only.")
         if set(only) & set(always):
             st.warning("“" + "”, “".join(sorted(set(only) & set(always))) + "” is in both **Always with** and "
                        "**Only with** — they'd fix a missing tag in opposite ways (add it / drop this one). "
@@ -329,7 +337,7 @@ def tag_editor() -> None:
         row = {"tag": name, "group": group, "kind": kind, "one_of": one_of, "teacher": teacher,
                "description": desc, "not_to_be_confused_with": "; ".join(alikes),
                "never_with": "; ".join(never), "always_with": "; ".join(always), "only_with": "; ".join(only),
-               "search_words": words}
+               "usually_with": "; ".join(usually), "search_words": words}
         try:
             rows = TL.upsert_tag(vocab, row, None if pick == NEW_TAG else pick)
             if pick != NEW_TAG:      # a rule taken off here comes off the other tag too
@@ -366,7 +374,8 @@ def vocab_view() -> None:
                "that must also be there whenever this one is (one way), separated by ; — the teacher is told "
                "and a missing one is added. **only_with**: this tag is allowed only when at least one of these is "
                "there (one way), separated by ; — the teacher is told and, without one, this tag moves to unsure "
-               "(nothing is added). **teacher**: may the big "
+               "(nothing is added). **usually_with**: tags that often (not always) come with this one — when the "
+               "teacher gives this tag without them, it takes a second look at each. **teacher**: may the big "
                "model try this tag (off = learned only from your labels). **search_words**: words you'd type to "
                "find it, separated by ;")
     if vocab_source != TL.VOCAB_FILE.name:
@@ -391,11 +400,11 @@ def vocab_view() -> None:
         st.success(note)
     st.caption("Changes are used on the **next Modal run** (each run sends the latest tag list), and straight "
                "away on the 🎯 Label cards.")
-    unknown = sorted({x.strip() for r in vocab for col in ("never_with", "always_with", "only_with")
+    unknown = sorted({x.strip() for r in vocab for col in ("never_with", "always_with", "only_with", "usually_with")
                       for x in str(r.get(col) or "").split(";") if x.strip()}
                      - {r["tag"] for r in vocab}, key=str.lower)
     if unknown:
-        st.warning("**never_with / always_with / only_with** name tags that aren't in the list (check the "
+        st.warning("**never_with / always_with / only_with / usually_with** name tags that aren't in the list (check the "
                    "spelling): " + ", ".join(unknown))
     clashes = TL.rule_clashes(vocab)
     if clashes:
