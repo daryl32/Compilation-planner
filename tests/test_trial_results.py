@@ -462,3 +462,58 @@ def test_summary_shows_test_runs(bundle, no_labels):
     assert any("Needs-a-tag fills" in d.value.columns for d in at.dataframe)          # the runs table
     assert any("Errors" in d.value.columns for d in at.dataframe)                     # per-tag changes
     assert any("dance · threshold" in c.value for c in at.caption)
+
+
+def test_suspect_labels():
+    vids = {"vid_a": {"moments": [{"t": 5.0, "mine": ["close-up shot", "dance"]},
+                                  {"t": 12.0, "mine": ["crowd"]},
+                                  {"t": 20.0, "mine": None},
+                                  {"t": 30.0, "mine": ["night"]}]}}
+    data = {"runs": [
+        {"id": "r1", "created": "2026-10-31 10:00",
+         "frames": [{"v": "vid_a", "t": 5.0, "tags": ["close-up shot", "crowd"]},
+                    {"v": "vid_a", "t": 12.0, "tags": ["crowd"]},
+                    {"v": "vid_a", "t": 20.0, "tags": ["dance"]},
+                    {"v": "vid_a", "t": 30.0, "tags": []}]},
+        {"id": "r2", "created": "2026-10-31 11:00",
+         "frames": [{"v": "vid_a", "t": 5.0, "tags": ["Close-Up Shot", "crowd"]},
+                    {"v": "vid_a", "t": 12.0, "tags": []},
+                    {"v": "vid_a", "t": 30.0, "tags": []}]}]}
+    sus = TR.suspect_labels(data, ["r1", "r2"], vids, {})
+    # 5 s: both see crowd (you don't); neither sees dance (you do). 12 s: only r1 agrees with you → not suspect.
+    assert sus[("vid_a", 5.0)]["there"] == ["crowd"] and sus[("vid_a", 5.0)]["not_there"] == ["dance"]
+    assert ("vid_a", 12.0) not in sus and ("vid_a", 20.0) not in sus
+    assert sus[("vid_a", 30.0)]["not_there"] == ["night"]
+    # saved after the newest run → checked, left out; saved before it → still listed
+    assert ("vid_a", 30.0) not in TR.suspect_labels(data, ["r1", "r2"], vids, {("vid_a", 30.0): "2026-10-31T11:05:00"})
+    assert ("vid_a", 30.0) in TR.suspect_labels(data, ["r1", "r2"], vids, {("vid_a", 30.0): "2026-10-31T09:00:00"})
+    assert TR.suspect_labels(data, ["r1"], vids, {}) == {}                     # needs two runs
+
+
+def test_check_my_label_filter(bundle, no_labels):
+    import training_labels as TLB
+    from tests.apptest_util import errors, page_app
+    data = _bundle()
+    m = data["videos"]["vid_a"]["moments"][0]
+    runs = {"runs": [{"id": f"2026-10-31_100{i}_r{i}", "created": f"2026-10-31 10:0{i}",
+                      "frames": [{"v": "vid_a", "t": m["t"], "tags": ["night"]}]} for i in (1, 2)],
+            "set": {"videos": [{"video_id": "vid_a"}], "hours": 0.1}}
+    (TR.RESULTS_DIR / "test_runs.json").write_text(json.dumps(runs))
+    TLB.save_label({"id": TLB.card_id("tags", "vid_a", m["t"]), "type": "tags", "video_id": "vid_a",
+                    "t": m["t"]}, tags=["dance"])
+    # pretend the label is older than the runs
+    items = TLB.load_labels()
+    items[0]["labelled_at"] = "2026-10-30T09:00:00"
+    TLB._write_labels(items)
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_sub"] = "🖼️ Compare tags"
+    at.session_state["tr_filter"] = "suspect"
+    at.run()
+    assert not errors(at), errors(at)
+    caps = " ".join(c.value for c in at.caption)
+    assert "they all see **night**" in caps and "none of them see **dance**" in caps
+    next(b for b in at.button if b.label == "✅ My label is right").click().run()
+    assert not errors(at), errors(at)
+    assert TLB.load_labels()[0]["tags"] == ["dance"]                       # unchanged, but now checked
+    assert not any(b.label == "✅ My label is right" for b in at.button)    # gone from the list

@@ -135,7 +135,10 @@ def _compare(data: dict) -> None:
     if note:
         st.toast(note, icon="💾")
     teachers = TR.shown_teachers(data.get("teachers") or {})
-    filters = {k: v for k, v in TR.FILTERS.items() if k != "disagree" or len(teachers) > 1}
+    test = TR.load_test_runs()
+    test_ids = [r["id"] for r in (test or {}).get("runs") or []]
+    filters = {k: v for k, v in TR.FILTERS.items()
+               if (k != "disagree" or len(teachers) > 1) and (k != "suspect" or len(test_ids) >= 2)}
     if st.session_state.get("tr_filter") not in filters:
         st.session_state["tr_filter"] = "all"
     with st.container(key="tl_wrap_tr_filters"):
@@ -157,6 +160,26 @@ def _compare(data: dict) -> None:
     problems = (lambda tags: TLB.rule_problems(tags, vocab_rows))
     moments = [(v, m) for v, m in pool
                if TR.filter_moments([m], how, None if tag == "(any tag)" else tag, problems)]
+    sus, sus_runs = {}, []
+    if how == "suspect":
+        # 🔍 your labels that every chosen test run disagrees with — the likeliest mislabels
+        sus_runs = st.multiselect("Test runs that must all disagree with your label", test_ids,
+                                  default=test_ids[-2:], key="tr_sus_runs",
+                                  help="Two different runs (e.g. the plain teacher and the LoRA) both "
+                                       "disagreeing with you is a strong hint the label needs a second look.")
+        when = {(i.get("video_id"), round(float(i["t"]), 2)): i.get("labelled_at")
+                for i in TLB.load_labels() if i.get("t") is not None}
+        sus = TR.suspect_labels(test, sus_runs, videos, when)
+        tn = None if tag == "(any tag)" else TR.norm(tag)
+        moments = [(v, m) for v, m in moments if (v, round(float(m["t"]), 2)) in sus
+                   and (tn is None or tn in {TR.norm(x) for x in sus[(v, round(float(m["t"]), 2))]["there"]
+                                             + sus[(v, round(float(m["t"]), 2))]["not_there"]})]
+        moments.sort(key=lambda vm: -len(sus[(vm[0], round(float(vm[1]["t"]), 2))]["there"])
+                     - len(sus[(vm[0], round(float(vm[1]["t"]), 2))]["not_there"]))
+        st.caption(f"**{len(moments)}** of your labelled frames where every chosen run disagrees with you on at "
+                   "least one tag, most disagreements first (pick a tag above to focus, e.g. a position). If your "
+                   "label is wrong, ✏️ Correct it; if it's right, save it unchanged — either way it's marked "
+                   "checked and leaves this list.")
     if order == "random":
         def _reshuffle():
             st.session_state["tr_seed"] = st.session_state.get("tr_seed", 0) + 1
@@ -214,7 +237,20 @@ def _compare(data: dict) -> None:
                     r = (m.get("teachers") or {}).get(k)
                     rows.append(_row(label(v, k), r.get("tags") if r else [], mine, r.get("unsure") if r else ())
                                 if r else f'<div style="opacity:.55;font-size:.86rem">{label(v, k)}: not tagged</div>')
+                sk = (v, round(float(m["t"]), 2))
+                if sk in sus:
+                    rows += [_row(f"🧪 {rid.split('_', 2)[-1]}", tags, mine) for rid, tags in sus[sk]["runs"].items()]
                 st.markdown("".join(rows), unsafe_allow_html=True)
+                if sk in sus:
+                    bits = []
+                    if sus[sk]["there"]:
+                        bits.append("they all see **" + ", ".join(sus[sk]["there"]) + "** (you don't)")
+                    if sus[sk]["not_there"]:
+                        bits.append("none of them see **" + ", ".join(sus[sk]["not_there"]) + "** (you do)")
+                    st.caption("🔍 " + " · ".join(bits))
+                    st.button("✅ My label is right", key=f"tr_sus_ok_{_k(v, m)}", on_click=_save,
+                              args=(TR.correction_card(v, m, mine), list(mine), f"tr_edit_{_k(v, m)}"),
+                              help="Keeps your tags as they are and marks the frame checked.")
                 if mine is not None:
                     for p in problems(mine):
                         st.caption(f"⚠️ {p}")

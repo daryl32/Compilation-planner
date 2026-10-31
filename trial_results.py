@@ -129,6 +129,7 @@ FILTERS = {
     "wrong": "A model differs from me",
     "disagree": "The models disagree",
     "rules": "⚠️ My tags break a rule",
+    "suspect": "🔍 Check my label — the test runs all disagree with it",
 }
 # The teacher picked after batch 1 — the view shows only it when its tags are there.
 MAIN_TEACHER = "32b"
@@ -318,6 +319,39 @@ def tag_changes(a: dict, b: dict) -> list:
             out.append({"tag": t, "wrong_a": pa["fp"], "wrong_b": pb["fp"], "missed_a": pa["fn"],
                         "missed_b": pb["fn"], "change": (pb["fp"] + pb["fn"]) - (pa["fp"] + pa["fn"])})
     return sorted(out, key=lambda x: (-abs(x["change"]), x["tag"].lower()))
+
+
+def suspect_labels(test_data: dict, run_ids: list, videos: dict, labelled_at: dict) -> dict:
+    """Your labelled frames that every chosen test run disagrees with, on at least one tag:
+    {(video_id, t rounded to 2): {"there": tags all runs gave that you didn't, "not_there": tags you
+    gave that no run did, "runs": {run id: its tags}}}. A frame you've saved since the newest chosen
+    run (labelled_at, "YYYY-MM-DDTHH:MM:SS") counts as checked and is left out. videos: the results'
+    videos with your labels overlaid (with_saved_labels)."""
+    runs = [r for r in (test_data or {}).get("runs") or [] if r["id"] in run_ids]
+    if len(runs) < 2:
+        return {}
+    since = max(str(r.get("created") or "") for r in runs)
+    tags_by = [{(f["v"], round(float(f["t"]), 2)): f.get("tags") or [] for f in r.get("frames") or []
+                if f.get("t") is not None} for r in runs]
+    out = {}
+    for v, vd in videos.items():
+        for m in vd["moments"]:
+            if m.get("mine") is None:
+                continue
+            key = (v, round(float(m["t"]), 2))
+            if not all(key in tb for tb in tags_by):
+                continue
+            when = str(labelled_at.get(key) or "").replace("T", " ")[:16]
+            if since and when and when > since:
+                continue
+            mine = {norm(t): t for t in m["mine"]}
+            sets = [{norm(t): t for t in tb[key]} for tb in tags_by]
+            there = [sets[0][k] for k in sets[0] if k not in mine and all(k in s for s in sets[1:])]
+            not_there = [mine[k] for k in mine if not any(k in s for s in sets)]
+            if there or not_there:
+                out[key] = {"there": there, "not_there": not_there,
+                            "runs": {r["id"]: tb[key] for r, tb in zip(runs, tags_by)}}
+    return out
 
 
 VOCAB_FIELDS = ("group", "kind", "one_of", "teacher", "threshold", "double_check", "description",
