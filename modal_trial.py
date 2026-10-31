@@ -117,6 +117,8 @@ lora_image = (base.pip_install("torch", "torchvision", "transformers>=4.57", "pe
               .add_local_python_source("trial_logic"))
 LORA_RANK, LORA_ALPHA = 16, 32
 LORA_SAVE_EVERY = 200          # examples between checkpoints (a multiple of the 8-example step)
+LORA_MICRO = 8                 # examples through the GPU at once (8 ≈ 55 GB of the H100's 80; halves itself on OOM)
+LORA_MARKER = "<|im_start|>assistant\n"   # the answer starts right after this in every example
 # the language model's layers only (the vision part names its layers qkv / proj / linear_fc*)
 LORA_TARGET = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
@@ -1808,6 +1810,27 @@ def lora_status(name: str) -> dict:
             "checkpoint": _read_json(d / "checkpoint" / "progress.json")}
 
 
+def _answer_loss(model, batch: dict, starts: list):
+    """(summed loss, answer tokens) for a LEFT-padded batch whose answers start at `starts` (index of
+    each row's first answer token). Only the answer positions are scored: the model is asked for
+    the last K positions' logits instead of all ~4,500 (the vocabulary is ~150k wide, so full logits
+    cost ~4 GB per example — this is what lets 8 examples fit at once)."""
+    import torch
+    import torch.nn.functional as F
+    ids = batch["input_ids"]
+    T = ids.shape[1]
+    K = min(T, max(T - s for s in starts) + 1)
+    out = model(**{k: v for k, v in batch.items() if k != "labels"}, logits_to_keep=K)
+    logits = out.logits[:, :-1].float()                     # positions T-K .. T-2 → tokens T-K+1 .. T-1
+    target = ids[:, T - K + 1:].clone()
+    pos = torch.arange(T - K + 1, T, device=ids.device)
+    for i, s0 in enumerate(starts):
+        target[i, pos < s0] = -100
+    loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), target.reshape(-1), ignore_index=-100,
+                           reduction="sum")
+    return loss, (target != -100).sum()
+
+
 def _lora_content(head: str, moment: str, tail: str, images: list) -> list:
     """The user turn exactly as prepare_prompts builds it for vLLM (head, moment line, 7 frames,
     tail) — in the transformers form."""
@@ -1818,10 +1841,13 @@ def _lora_content(head: str, moment: str, tail: str, images: list) -> list:
 @app.function(image=lora_image, gpu="H100", volumes={DATA: pack_vol, CACHE: cache_vol}, timeout=6 * 3600,
               cpu=8, memory=98304)
 def train_lora(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8, max_examples: int = 0,
-               fresh: bool = True) -> dict:
+               fresh: bool = True, micro: int = LORA_MICRO) -> dict:
     """GPU (H100): QLoRA on the 32B (4-bit, bf16 maths) — rank-16 adapters on the language layers
     only (the vision part is left alone). Loss only on the answer. Saves lora/<name>/ (PEFT format,
-    which vLLM loads on top of the FP8 teacher).
+    which vLLM loads on top of the FP8 teacher). GPU kept busy: `micro` examples per forward pass
+    (left-padded, answer-only logits), the next batch's images prepared on the CPU while the GPU
+    trains, and one optimiser step per `accum` examples whatever the micro-batch (so halving it after
+    an out-of-memory error doesn't change the training).
     Save and resume: the run keeps its own copy of the examples (lora/<name>/data.json) and saves a
     checkpoint (adapter + optimiser) every LORA_SAVE_EVERY examples; fresh=False carries on from it."""
     import math
@@ -1865,18 +1891,25 @@ def train_lora(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8,
     print(f"[lora] ready after {(time.time() - t0) / 60:.1f} min · {len(train)} examples, {epochs} epoch(s)",
           flush=True)
 
-    def encode(rec):
-        imgs = [Image.open(f).convert("RGB") for f in rec["frames"]]
-        user = {"role": "user", "content": _lora_content(data["head"], data["moment"], data["tail"], imgs)}
-        full = processor.apply_chat_template(
-            [user, {"role": "assistant", "content": [{"type": "text", "text": rec["target"]}]}],
-            tokenize=True, return_dict=True, return_tensors="pt")
-        plen = processor.apply_chat_template([user], tokenize=True, add_generation_prompt=True,
-                                             return_dict=True, return_tensors="pt")["input_ids"].shape[1]
-        labels = full["input_ids"].clone()
-        labels[:, :plen] = -100                 # learn the answer only, not the prompt
-        full["labels"] = labels
-        return {k: v.to(model.device) for k, v in full.items()}
+    processor.tokenizer.padding_side = "left"          # answers stay at the end of every row
+    marker = processor.tokenizer.encode(LORA_MARKER, add_special_tokens=False)
+
+    def encode(recs: list) -> tuple:
+        """CPU: one left-padded batch (tensors on the CPU) + each row's answer start."""
+        convs = []
+        for rec in recs:
+            imgs = [Image.open(f).convert("RGB") for f in rec["frames"]]
+            convs.append([{"role": "user", "content": _lora_content(data["head"], data["moment"], data["tail"], imgs)},
+                          {"role": "assistant", "content": [{"type": "text", "text": rec["target"]}]}])
+        b = processor.apply_chat_template(convs, tokenize=True, return_dict=True, return_tensors="pt", padding=True)
+        starts = [TL.answer_start(row.tolist(), marker) for row in b["input_ids"]]
+        return dict(b), starts
+
+    def encode_group(recs: list, mb: int) -> list:
+        return [encode(recs[i:i + mb]) for i in range(0, len(recs), mb)]
+
+    def to_gpu(b: dict) -> dict:
+        return {k: (v.to(model.device, non_blocking=True) if hasattr(v, "to") else v) for k, v in b.items()}
 
     steps = max(1, math.ceil(len(train) * epochs / accum))
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=0.0)
@@ -1911,43 +1944,80 @@ def train_lora(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8,
         pack_vol.commit()
         print(f"[lora] checkpoint saved at {n}/{len(order)}", flush=True)
 
+    from concurrent.futures import ThreadPoolExecutor
+    params = [p for p in model.parameters() if p.requires_grad]
+    groups = [order[i:i + accum] for i in range(0, len(order), accum)]
+    first = start // accum                      # checkpoints are on whole steps
+    mb = max(1, min(int(micro), accum))
+    pool = ThreadPoolExecutor(max_workers=1)    # prepares the next batch's images while the GPU works
+    nxt = pool.submit(encode_group, groups[first], mb) if first < len(groups) else None
     model.train()
-    t_train = time.time()
-    for n, rec in enumerate(order, 1):
-        if n <= start:
+    t_train, tokens, reported = time.time(), 0, False
+    n = start
+    for gi in range(first, len(groups)):
+        recs = groups[gi]
+        enc, used_mb = nxt.result(), mb
+        nxt = pool.submit(encode_group, groups[gi + 1], mb) if gi + 1 < len(groups) else None
+        while True:
+            if used_mb != mb:
+                enc = encode_group(recs, mb)
+            total = sum(sum(b["input_ids"].shape[1] - s0 for s0 in st) for b, st in enc)
+            try:
+                opt.zero_grad(set_to_none=True)
+                step_loss = 0.0
+                for b, st in enc:
+                    loss_sum, ntok = _answer_loss(model, to_gpu(b), st)
+                    (loss_sum / max(1, total)).backward()
+                    step_loss += float(loss_sum)
+                    tokens += int(b["attention_mask"].sum())
+                break
+            except torch.cuda.OutOfMemoryError:
+                opt.zero_grad(set_to_none=True)
+                torch.cuda.empty_cache()
+                if mb == 1:
+                    print(f"[lora] skipped a step (out of memory even one example at a time)", flush=True)
+                    step_loss = None
+                    break
+                mb = max(1, mb // 2)
+                used_mb = None
+                print(f"[lora] out of GPU memory — now {mb} example(s) at a time", flush=True)
+        n = min(len(order), (gi + 1) * accum)
+        if step_loss is None:
             continue
-        try:
-            out = model(**encode(rec))
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            print(f"[lora] skipped one example (out of memory) at {rec['video_id'][:30]} {rec['t']}", flush=True)
-            continue
-        (out.loss / accum).backward()
-        losses.append(float(out.loss))
-        seen += 1
-        if n % accum == 0 or n == len(order):
-            torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
-            opt.step()
-            sched.step()
-            opt.zero_grad(set_to_none=True)
-        if n % 50 == 0 or n == len(order):
+        torch.nn.utils.clip_grad_norm_(params, 1.0)
+        opt.step()
+        sched.step()
+        opt.zero_grad(set_to_none=True)
+        losses.append(step_loss / max(1, total))
+        seen += len(recs)
+        if not reported:
+            reported = True
+            print(f"[lora] {mb} example(s) at a time · peak GPU memory "
+                  f"{torch.cuda.max_memory_allocated() / 1e9:.0f} GB of "
+                  f"{torch.cuda.get_device_properties(0).total_memory / 1e9:.0f}", flush=True)
+        if n % 48 == 0 or n == len(order):
             el = time.time() - t_train
-            print(f"[lora] {n}/{len(order)} examples · loss {sum(losses[-50:]) / max(1, len(losses[-50:])):.3f} · "
-                  f"{(el + prior_s) / 60:.0f} min so far, about {el / (n - start) * (len(order) - n) / 60:.0f} min left",
-                  flush=True)
+            print(f"[lora] {n}/{len(order)} examples · loss {sum(losses[-6:]) / max(1, len(losses[-6:])):.3f} · "
+                  f"{tokens / max(el, 1e-6):,.0f} tokens/s · {(el + prior_s) / 60:.0f} min so far, about "
+                  f"{el / max(1, n - start) * (len(order) - n) / 60:.0f} min left", flush=True)
         if n % LORA_SAVE_EVERY == 0 and n < len(order):
             save_checkpoint(n, prior_s + time.time() - t_train)
+    pool.shutdown(wait=False)
     model.eval()
     val_loss = None
     if data.get("val"):
+        vs, vn = 0.0, 0
         with torch.no_grad():
-            vl = [float(model(**encode(r)).loss) for r in data["val"][:150]]
-        val_loss = round(sum(vl) / len(vl), 4)
+            for b, st in encode_group(data["val"][:150], mb):
+                ls, nt = _answer_loss(model, to_gpu(b), st)
+                vs, vn = vs + float(ls), vn + int(nt)
+        val_loss = round(vs / max(1, vn), 4)
     model.save_pretrained(str(out_dir))
     shutil.rmtree(ck, ignore_errors=True)             # finished — the checkpoint isn't needed any more
     sec = time.time() - t0 + prior_s
     meta = {"name": name, "created": time.strftime("%Y-%m-%d %H:%M"), "base": base_id, "rank": LORA_RANK,
-            "epochs": epochs, "lr": lr, "examples": seen, "train_loss_end": round(sum(losses[-50:]) / max(1, len(losses[-50:])), 4),
+            "epochs": epochs, "lr": lr, "examples": seen, "micro_batch": mb,
+            "peak_gpu_gb": round(torch.cuda.max_memory_allocated() / 1e9, 1), "train_loss_end": round(sum(losses[-50:]) / max(1, len(losses[-50:])), 4),
             "val_loss": val_loss, "minutes": round(sec / 60, 1), "cost": round(TL.stage_cost(sec, "H100"), 2),
             "test_videos": data["test_videos"], "val_videos": data["val_videos"], "vocab_csv": data["vocab_csv"]}
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")

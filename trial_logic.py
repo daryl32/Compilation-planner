@@ -1007,3 +1007,13 @@ def lora_target(tags: list, vocab: list, caption: str = "") -> str:
         out[category_key(name)] = [{"tag": r["tag"], "conf": LORA_CONF} for r in rows if r["tag"].lower() in mine]
     out["caption"] = str(caption or "")[:200]
     return json.dumps(out, separators=(",", ":"), ensure_ascii=False)
+
+
+def answer_start(ids: list, marker: list) -> int:
+    """Index of the first answer token: just after the LAST occurrence of `marker` (the assistant
+    turn's opening tokens) in a row of token ids. len(ids) if it isn't there (nothing to learn)."""
+    m = len(marker)
+    for i in range(len(ids) - m, -1, -1):
+        if ids[i:i + m] == marker:
+            return i + m
+    return len(ids)
