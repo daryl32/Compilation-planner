@@ -840,6 +840,7 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora
     from vllm import SamplingParams
 
     key = self.key
+    who = key + (f" + LoRA {Path(lora_path).name}" if lora_path else "")   # the log label only
     if self.llm is None:
         return {"video_id": video_id, "teacher": key, "error": f"the {key} model didn't load — {self.load_error}"}
     pack_vol.reload()
@@ -878,7 +879,7 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora
     if lora_path:                         # 🧠 your fine-tuned adapter on top of the teacher
         from vllm.lora.request import LoRARequest
         lora_kw = {"lora_request": LoRARequest(Path(lora_path).name, 1, lora_path)}
-    print(f"[{key} teacher] {video_id[:40]}: {len(convs)} moments to tag"
+    print(f"[{who} teacher] {video_id[:40]}: {len(convs)} moments to tag"
           + (f" (+{len(copies)} near-identical ones copy an answer)" if copies else "")
           + (f", ~{data['examples_used'] / max(len(convs), 1):.1f} worked examples each" if data.get("examples_used") else "")
           + f" — progress every {chunk}…", flush=True)
@@ -905,7 +906,7 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora
         answers += firsts
         el = time.time() - started
         left = el / len(outs) * (len(convs) - len(outs))
-        print(f"[{key} teacher] {video_id[:40]}: {len(outs)}/{len(convs)} moments tagged · "
+        print(f"[{who} teacher] {video_id[:40]}: {len(outs)}/{len(convs)} moments tagged · "
               f"{el / 60:.1f} min so far, about {left / 60:.1f} min left", flush=True)
     seconds = time.time() - started
     results, bad, p_tok, o_tok, rule_fixes, rule_adds, rule_drops = {}, 0, look_p_tok, look_o_tok, 0, 0, 0
@@ -950,12 +951,12 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora
     pf.unlink(missing_ok=True)          # it's rebuilt by the prep step whenever needed
     pack_vol.commit()
     if rule_fixes or rule_adds or rule_drops:
-        print(f"[{key} teacher] {video_id[:40]}: rules — {rule_fixes} tag(s) broke a never-with → unsure, "
+        print(f"[{who} teacher] {video_id[:40]}: rules — {rule_fixes} tag(s) broke a never-with → unsure, "
               f"{rule_adds} added by always-with, {rule_drops} dropped by only-with → unsure.", flush=True)
     if looks:
-        print(f"[{key} teacher] {video_id[:40]}: second look on {looks} moment(s) → {look_added} tag(s) "
+        print(f"[{who} teacher] {video_id[:40]}: second look on {looks} moment(s) → {look_added} tag(s) "
               f"added (usually-with), {look_removed} taken out (double-check).", flush=True)
-    print(f"[{key} teacher] {video_id[:40]}: {len(convs)} moments in {seconds / 60:.1f} min · "
+    print(f"[{who} teacher] {video_id[:40]}: {len(convs)} moments in {seconds / 60:.1f} min · "
           f"{use['tokens_per_s'] or 0:,} tokens/s · GPU maths used {100 * (use['mfu'] or 0):.0f}%", flush=True)
     return {"video_id": video_id, "teacher": key, "prompts": len(convs), "copied": len(copies),
             "seconds": round(seconds, 1), "unreadable": bad, "tokens_per_s": use["tokens_per_s"], "mfu": use["mfu"]}
