@@ -610,7 +610,8 @@ def test_never_with_prompt_and_answers():
     assert "waving" not in str(TL.never_pairs(tv))
     head, _, _ = TL.build_prompt(tv)
     assert "never apply to the same moment" in head
-    assert "- standing / jumping" in head and "- lying / jumping" in head and "- lying / dancing" in head
+    # each pair once, grouped under its first tag (vocabulary order)
+    assert "- standing: never with jumping" in head and "- lying: never with jumping, dancing" in head
     # the first-named of a clashing pair stays; the other goes to unsure
     ans = TL.parse_answer('{"tags": ["jumping", "standing", "dancing", "lying"], "unsure": []}', tv)
     assert ans["tags"] == ["jumping", "dancing"] and ans["unsure"] == ["standing", "lying"]
@@ -1015,3 +1016,12 @@ def test_check_labels_prep_and_finish(tmp_path, monkeypatch):
     assert M.labelled_videos.local([]) == ["v"] and M.labelled_videos.local(["v"]) == []
     M.export.local(False)
     assert (out / "export" / "check_runs.json").exists()
+
+
+
+def test_never_with_inside_pick_one_set_left_out():
+    v = TL.teacher_vocab(TL.parse_vocabulary(
+        "tag,group,one_of,never_with\nstanding,position,position,lying; kissing\nlying,position,position,\n"
+        "kissing,action,,\n"))
+    head = TL.build_prompt(v)[0]
+    assert "- standing: never with kissing" in head and "lying" not in head.split("never apply")[1].split("\n\n")[0]

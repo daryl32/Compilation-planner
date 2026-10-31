@@ -115,6 +115,10 @@ report_image = base.pip_install("numpy").add_local_python_source("trial_logic")
 lora_image = (base.pip_install("torch", "torchvision", "transformers>=4.57", "peft>=0.17", "bitsandbytes>=0.46", "accelerate",
                                "numpy", "pillow", "huggingface_hub")
               .add_local_python_source("trial_logic"))
+# Unsloth (hand-written GPU kernels + activation offloading): the default trainer from try2 on;
+# --trainer hf is the plain transformers/PEFT path try1 was trained with.
+lora_unsloth_image = (base.pip_install("unsloth", "unsloth_zoo", "torchvision", "numpy", "pillow", "huggingface_hub")
+                      .add_local_python_source("trial_logic"))
 LORA_RANK, LORA_ALPHA = 16, 32
 LORA_SAVE_EVERY = 200          # examples between checkpoints (a multiple of the 8-example step)
 LORA_MICRO = 8                 # examples through the GPU at once (8 ≈ 55 GB of the H100's 80; halves itself on OOM)
@@ -1846,6 +1850,30 @@ def prepare_lora_data(val_share: float = 0.05, seed: int = 7) -> dict:
             "left_out_test_set": skipped_test, "no_frames": no_frames}
 
 
+def _answer_loss_labels(model, batch: dict, starts: list):
+    """(summed loss, answer tokens) like _answer_loss, but by handing the model labels (prompt and
+    padding masked) — for Unsloth, whose own fused loss never builds the full logits."""
+    import torch
+    ids = batch["input_ids"]
+    labels = ids.clone()
+    pos = torch.arange(ids.shape[1], device=ids.device)
+    for i, s0 in enumerate(starts):
+        labels[i, pos < s0] = -100
+    labels[batch["attention_mask"] == 0] = -100
+    out = model(**batch, labels=labels)
+    n = (labels[:, 1:] != -100).sum()
+    return out.loss * n, n
+
+
+def _plain_target_modules(cfg_path: Path) -> None:
+    """Write the adapter's target modules as the plain list of layer names (Unsloth stores a regex);
+    the weights are unchanged — it only keeps vLLM's adapter loading on its simplest path."""
+    cfg = _read_json(cfg_path)
+    if cfg is not None:
+        cfg["target_modules"] = list(LORA_TARGET)
+        cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
 def _lora_resume_point(progress, data_created, total: int, epochs: float, lr: float) -> int:
     """Where a training run carries on from: the checkpoint's example count, if the checkpoint is for
     these same examples and settings and not already at the end; else 0 (start over)."""
@@ -1895,9 +1923,21 @@ def _lora_content(head: str, moment: str, tail: str, images: list) -> list:
 
 
 @app.function(image=lora_image, gpu="H100", volumes={DATA: pack_vol, CACHE: cache_vol}, timeout=6 * 3600,
-              cpu=8, memory=98304)
+              cpu=8, memory=49152)          # (was 98 GB: ~$0.45/h of unused RAM)
 def train_lora(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8, max_examples: int = 0,
                fresh: bool = True, micro: int = LORA_MICRO) -> dict:
+    return _train_lora(name, epochs, lr, accum, max_examples, fresh, micro, "hf")
+
+
+@app.function(image=lora_unsloth_image, gpu="H100", volumes={DATA: pack_vol, CACHE: cache_vol}, timeout=6 * 3600,
+              cpu=8, memory=65536)          # Unsloth parks activations in RAM — a little more headroom
+def train_lora_unsloth(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8, max_examples: int = 0,
+                       fresh: bool = True, micro: int = LORA_MICRO) -> dict:
+    return _train_lora(name, epochs, lr, accum, max_examples, fresh, micro, "unsloth")
+
+
+def _train_lora(name: str, epochs: float, lr: float, accum: int, max_examples: int, fresh: bool, micro: int,
+                trainer: str = "hf") -> dict:
     """GPU (H100): QLoRA on the 32B (4-bit, bf16 maths) — rank-16 adapters on the language layers
     only (the vision part is left alone). Loss only on the answer. Saves lora/<name>/ (PEFT format,
     which vLLM loads on top of the FP8 teacher). GPU kept busy: `micro` examples per forward pass
@@ -1905,14 +1945,16 @@ def train_lora(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8,
     trains, and one optimiser step per `accum` examples whatever the micro-batch (so halving it after
     an out-of-memory error doesn't change the training).
     Save and resume: the run keeps its own copy of the examples (lora/<name>/data.json) and saves a
-    checkpoint (adapter + optimiser) every LORA_SAVE_EVERY examples; fresh=False carries on from it."""
+    checkpoint (adapter + optimiser) every LORA_SAVE_EVERY examples; fresh=False carries on from it.
+    trainer "unsloth": the same loop on Unsloth's model (its 4-bit kernels, offloaded checkpointing,
+    and its own memory-light loss — so the loss is taken from labels, not sliced logits)."""
+    if trainer == "unsloth":
+        import unsloth  # noqa: F401 — must come before transformers / peft so it can patch them
     import math
     import random
     import torch
     from PIL import Image
-    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-    from transformers import (AutoProcessor, BitsAndBytesConfig, Qwen3VLForConditionalGeneration,
-                              get_cosine_schedule_with_warmup)
+    from transformers import get_cosine_schedule_with_warmup
     import trial_logic as TL
 
     import shutil
@@ -1933,16 +1975,30 @@ def train_lora(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8,
         train = train[:max_examples]
     t0 = time.time()
     base_id = TEACHERS["32b"]                  # train on the full-precision weights, 4-bit in memory
-    print(f"[lora] loading {base_id} in 4-bit…", flush=True)
-    processor = AutoProcessor.from_pretrained(base_id)
-    model = Qwen3VLForConditionalGeneration.from_pretrained(
-        base_id, dtype=torch.bfloat16, device_map="auto", attn_implementation="sdpa",
-        quantization_config=BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
-                                               bnb_4bit_compute_dtype=torch.bfloat16,
-                                               bnb_4bit_use_double_quant=True))
-    model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
-    model = get_peft_model(model, LoraConfig(r=LORA_RANK, lora_alpha=LORA_ALPHA, lora_dropout=0.05,
-                                             target_modules=LORA_TARGET, task_type="CAUSAL_LM"))
+    print(f"[lora] loading {base_id} in 4-bit ({trainer})…", flush=True)
+    if trainer == "unsloth":
+        from unsloth import FastVisionModel
+        model, processor = FastVisionModel.from_pretrained(base_id, load_in_4bit=True,
+                                                           use_gradient_checkpointing="unsloth")
+        model = FastVisionModel.get_peft_model(
+            model, finetune_vision_layers=False, finetune_language_layers=True, finetune_attention_modules=True,
+            finetune_mlp_modules=True, r=LORA_RANK, lora_alpha=LORA_ALPHA, lora_dropout=0, bias="none",
+            random_state=1)
+        FastVisionModel.for_training(model)
+        loss_fn = _answer_loss_labels
+    else:
+        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        from transformers import AutoProcessor, BitsAndBytesConfig, Qwen3VLForConditionalGeneration
+        processor = AutoProcessor.from_pretrained(base_id)
+        model = Qwen3VLForConditionalGeneration.from_pretrained(
+            base_id, dtype=torch.bfloat16, device_map="auto", attn_implementation="sdpa",
+            quantization_config=BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                                                   bnb_4bit_compute_dtype=torch.bfloat16,
+                                                   bnb_4bit_use_double_quant=True))
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+        model = get_peft_model(model, LoraConfig(r=LORA_RANK, lora_alpha=LORA_ALPHA, lora_dropout=0.05,
+                                                 target_modules=LORA_TARGET, task_type="CAUSAL_LM"))
+        loss_fn = _answer_loss
     model.print_trainable_parameters()
     print(f"[lora] ready after {(time.time() - t0) / 60:.1f} min · {len(train)} examples, {epochs} epoch(s)",
           flush=True)
@@ -2022,7 +2078,7 @@ def train_lora(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8,
                 opt.zero_grad(set_to_none=True)
                 step_loss = 0.0
                 for b, st in enc:
-                    loss_sum, ntok = _answer_loss(model, to_gpu(b), st)
+                    loss_sum, ntok = loss_fn(model, to_gpu(b), st)
                     (loss_sum / max(1, total)).backward()
                     step_loss += float(loss_sum)
                     tokens += int(b["attention_mask"].sum())
@@ -2064,15 +2120,16 @@ def train_lora(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8,
     if data.get("val"):
         vs, vn = 0.0, 0
         with torch.no_grad():
-            for b, st in encode_group(data["val"][:150], mb):
-                ls, nt = _answer_loss(model, to_gpu(b), st)
+            for b, st in encode_group(data["val"][:(32 if max_examples else 150)], mb):
+                ls, nt = loss_fn(model, to_gpu(b), st)
                 vs, vn = vs + float(ls), vn + int(nt)
         val_loss = round(vs / max(1, vn), 4)
     model.save_pretrained(str(out_dir))
+    _plain_target_modules(out_dir / "adapter_config.json")
     shutil.rmtree(ck, ignore_errors=True)             # finished — the checkpoint isn't needed any more
     sec = time.time() - t0 + prior_s
     meta = {"name": name, "created": time.strftime("%Y-%m-%d %H:%M"), "base": base_id, "rank": LORA_RANK,
-            "epochs": epochs, "lr": lr, "examples": seen, "micro_batch": mb,
+            "epochs": epochs, "lr": lr, "examples": seen, "micro_batch": mb, "trainer": trainer,
             "peak_gpu_gb": round(torch.cuda.max_memory_allocated() / 1e9, 1), "train_loss_end": round(sum(losses[-50:]) / max(1, len(losses[-50:])), 4),
             "val_loss": val_loss, "minutes": round(sec / 60, 1), "cost": round(TL.stage_cost(sec, "H100"), 2),
             "test_videos": data["test_videos"], "val_videos": data["val_videos"], "vocab_csv": data["vocab_csv"]}
@@ -2238,7 +2295,7 @@ def _run_vision(vids: list, max_seconds: float, redo: bool) -> None:
 @app.local_entrypoint()
 def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False, teacher: str = "",
          examples: int = -1, dedup: float = -1.0, batch: int = 0, label: str = "", keep_vocab: bool = False,
-         lora: str = "", epochs: float = 1.0, max_examples: int = 0):
+         lora: str = "", epochs: float = 1.0, max_examples: int = 0, trainer: str = "unsloth"):
     """teacher: 8b, 32b, 32b-fp8 or both (= 8b + 32b). Default: 8b for --smoke, 32b-fp8 otherwise.
     examples: worked examples from your labels before each moment (default 0 = off, at most 6).
     dedup: near-identical moments in a scene are tagged once and the answer copied when their
@@ -2249,7 +2306,8 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     batch's) instead of sending today's — for a baseline. --stage test-pick [--redo]: show / re-pick the set.
     --stage lora-train --label <name> [--epochs 1]: fine-tune the teacher on your labels (test set held
     out) → lora/<name>. Then --stage test --lora <name> tags the test set with it.
-    --stage check-labels --lora <name>: tag only your labelled training frames, plain + LoRA, for 🔍."""
+    --stage check-labels --lora <name>: tag only your labelled training frames, plain + LoRA, for 🔍.
+    --trainer unsloth (default) or hf; --max-examples 16 --label smoke = a quick ~$1 check that training runs."""
     # No trial_logic import here: this runs on the machine you start it from, whose venv may
     # only have modal (trial_logic needs numpy).
     examples = EXAMPLES_DEFAULT if examples < 0 else min(examples, EXAMPLES_MAX)
@@ -2303,7 +2361,8 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
             print("  ", prepare_lora_data.remote())
         print(f"Training on an H100 ({epochs} epoch(s)) — progress every 50 examples, a checkpoint every "
               f"{LORA_SAVE_EVERY}…")
-        r = train_lora.remote(name, epochs, 1e-4, 8, max_examples, not resume)
+        fn = train_lora_unsloth if trainer == "unsloth" else train_lora
+        r = fn.remote(name, epochs, 1e-4, 8, max_examples, not resume)
         print("  ", r)
         if not r.get("error"):
             print(f"\nNext: modal run modal_trial.py --stage test --lora {name}")

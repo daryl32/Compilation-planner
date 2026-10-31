@@ -119,3 +119,27 @@ def test_train_lora_cpu(tmp_path, monkeypatch):
     assert not (out / "lora" / "t1" / "checkpoint").exists()          # removed once finished
     meta = json.loads((out / "lora" / "t1" / "meta.json").read_text())
     assert meta["train_loss_end"] > 0
+
+
+def test_labels_loss_matches_sliced_loss(tmp_path, monkeypatch):
+    """The Unsloth path takes the loss from labels; it must equal the answer-only sliced loss."""
+    M, *_ = _fake_trial(tmp_path, monkeypatch)
+    m = _tiny().eval()
+    r0, r1 = torch.randint(1, 200, (12,)), torch.randint(1, 200, (9,))
+    ids = torch.stack([r0, torch.cat([torch.zeros(3, dtype=torch.long), r1])])
+    mask = torch.stack([torch.ones(12, dtype=torch.long),
+                        torch.cat([torch.zeros(3, dtype=torch.long), torch.ones(9, dtype=torch.long)])])
+    with torch.no_grad():
+        a, na = M._answer_loss(m, {"input_ids": ids, "attention_mask": mask}, [8, 9])
+        b, nb = M._answer_loss_labels(m, {"input_ids": ids, "attention_mask": mask}, [8, 9])
+    assert int(na) == int(nb) == 7
+    assert abs(float(a) - float(b)) < 1e-3
+
+
+def test_plain_target_modules(tmp_path, monkeypatch):
+    M, *_ = _fake_trial(tmp_path, monkeypatch)
+    f = tmp_path / "adapter_config.json"
+    f.write_text(json.dumps({"r": 16, "target_modules": "(?:.*?language.*?(q_proj|v_proj).*?)"}))
+    M._plain_target_modules(f)
+    cfg = json.loads(f.read_text())
+    assert cfg["target_modules"] == M.LORA_TARGET and cfg["r"] == 16

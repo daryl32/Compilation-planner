@@ -363,12 +363,21 @@ def build_prompt(vocab: list) -> tuple:
         head += [f"- {name}: {', '.join(tags)}" for name, tags in groups.items()]
     pairs = never_pairs(vocab)
     if pairs:
+        # each pair once, grouped under its first tag; pairs inside one pick-one set are left out
+        # (the set already says only one can be true) — a shorter prompt is cheaper on every moment
         order = {r["tag"]: i for i, r in enumerate(vocab)}
+        sets = {r["tag"]: r["one_of"] for r in vocab}
         rules = sorted({tuple(sorted((r["tag"], o), key=order.get)) for r in vocab
-                        for o in pairs.get(r["tag"].lower(), ())}, key=lambda p: (order[p[0]], order[p[1]]))
-        head += ["", "These tags never apply to the same moment — if both seem to, give only the one that "
-                     "fits best:"]
-        head += [f"- {a} / {b}" for a, b in rules]
+                        for o in pairs.get(r["tag"].lower(), ())
+                        if not (sets.get(r["tag"]) and sets.get(r["tag"]) == sets.get(o))},
+                       key=lambda p: (order[p[0]], order[p[1]]))
+        grouped = {}
+        for a, b in rules:
+            grouped.setdefault(a, []).append(b)
+        if grouped:
+            head += ["", "These never apply to the same moment as the first tag — if both seem to, give the "
+                         "one that fits best the higher number:"]
+            head += [f"- {a}: never with {', '.join(bs)}" for a, bs in grouped.items()]
     amap = always_map(vocab)
     if amap:
         head += ["", "If you give the first tag, always give the second as well:"]
