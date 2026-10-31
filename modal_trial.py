@@ -116,6 +116,7 @@ lora_image = (base.pip_install("torch", "torchvision", "transformers>=4.57", "pe
                                "numpy", "pillow", "huggingface_hub")
               .add_local_python_source("trial_logic"))
 LORA_RANK, LORA_ALPHA = 16, 32
+LORA_SAVE_EVERY = 200          # examples between checkpoints (a multiple of the 8-example step)
 # the language model's layers only (the vision part names its layers qkv / proj / linear_fc*)
 LORA_TARGET = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
@@ -1787,6 +1788,26 @@ def prepare_lora_data(val_share: float = 0.05, seed: int = 7) -> dict:
             "left_out_test_set": skipped_test, "no_frames": no_frames}
 
 
+def _lora_resume_point(progress, data_created, total: int, epochs: float, lr: float) -> int:
+    """Where a training run carries on from: the checkpoint's example count, if the checkpoint is for
+    these same examples and settings and not already at the end; else 0 (start over)."""
+    if not progress:
+        return 0
+    same = (progress.get("data_created") == data_created and progress.get("total") == total
+            and progress.get("epochs") == epochs and progress.get("lr") == lr)
+    n = int(progress.get("n") or 0)
+    return n if same and 0 < n < total else 0
+
+
+@app.function(image=report_image, volumes={DATA: pack_vol})
+def lora_status(name: str) -> dict:
+    """{"done": finished adapter there, "checkpoint": its progress.json or None}."""
+    pack_vol.reload()
+    d = _lora_dir() / name
+    return {"done": (d / "adapter_model.safetensors").exists() and (d / "meta.json").exists(),
+            "checkpoint": _read_json(d / "checkpoint" / "progress.json")}
+
+
 def _lora_content(head: str, moment: str, tail: str, images: list) -> list:
     """The user turn exactly as prepare_prompts builds it for vLLM (head, moment line, 7 frames,
     tail) — in the transformers form."""
@@ -1796,10 +1817,13 @@ def _lora_content(head: str, moment: str, tail: str, images: list) -> list:
 
 @app.function(image=lora_image, gpu="H100", volumes={DATA: pack_vol, CACHE: cache_vol}, timeout=6 * 3600,
               cpu=8, memory=98304)
-def train_lora(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8, max_examples: int = 0) -> dict:
+def train_lora(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8, max_examples: int = 0,
+               fresh: bool = True) -> dict:
     """GPU (H100): QLoRA on the 32B (4-bit, bf16 maths) — rank-16 adapters on the language layers
     only (the vision part is left alone). Loss only on the answer. Saves lora/<name>/ (PEFT format,
-    which vLLM loads on top of the FP8 teacher)."""
+    which vLLM loads on top of the FP8 teacher).
+    Save and resume: the run keeps its own copy of the examples (lora/<name>/data.json) and saves a
+    checkpoint (adapter + optimiser) every LORA_SAVE_EVERY examples; fresh=False carries on from it."""
     import math
     import random
     import torch
@@ -1809,8 +1833,16 @@ def train_lora(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8,
                               get_cosine_schedule_with_warmup)
     import trial_logic as TL
 
+    import shutil
     pack_vol.reload()
-    data = _read_json(_lora_dir() / "data.json")
+    out_dir = _lora_dir() / name
+    ck = out_dir / "checkpoint"
+    if fresh:
+        shutil.rmtree(out_dir, ignore_errors=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not (out_dir / "data.json").exists() and (_lora_dir() / "data.json").exists():
+        shutil.copyfile(_lora_dir() / "data.json", out_dir / "data.json")      # this run's own copy
+    data = _read_json(out_dir / "data.json")
     if not data or not data.get("train"):
         return {"error": "no training data — the prepare step found no labelled frames with pictures"}
     train = list(data["train"])
@@ -1849,10 +1881,41 @@ def train_lora(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8,
     steps = max(1, math.ceil(len(train) * epochs / accum))
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=0.0)
     sched = get_cosine_schedule_with_warmup(opt, max(1, steps // 20), steps)
-    model.train()
-    seen, losses, t_train = 0, [], time.time()
     order = [train[i % len(train)] for i in range(int(len(train) * epochs))]
+    seen, losses, start, prior_s = 0, [], 0, 0.0
+    progress = _read_json(ck / "progress.json")
+    start = _lora_resume_point(progress, data.get("created"), len(order), epochs, lr)
+    if start:                                   # carry on from the last checkpoint
+        from peft import set_peft_model_state_dict
+        from safetensors.torch import load_file
+        set_peft_model_state_dict(model, load_file(str(ck / "adapter_model.safetensors")))
+        st = torch.load(ck / "optim.pt", map_location="cpu")
+        opt.load_state_dict(st["opt"])
+        sched.load_state_dict(st["sched"])
+        seen, losses, prior_s = progress["seen"], list(progress.get("losses") or []), float(progress.get("train_s") or 0)
+        print(f"[lora] resuming from the checkpoint at {start}/{len(order)} examples", flush=True)
+    elif progress:
+        print("[lora] a checkpoint exists but was for different examples or settings — starting over", flush=True)
+
+    def save_checkpoint(n: int, train_s: float) -> None:
+        tmp = out_dir / "checkpoint_tmp"
+        shutil.rmtree(tmp, ignore_errors=True)
+        model.save_pretrained(str(tmp))
+        torch.save({"opt": opt.state_dict(), "sched": sched.state_dict()}, tmp / "optim.pt")
+        (tmp / "progress.json").write_text(json.dumps({
+            "n": n, "total": len(order), "seen": seen, "losses": losses[-200:], "train_s": train_s,
+            "data_created": data.get("created"), "epochs": epochs, "lr": lr,
+            "saved": time.strftime("%Y-%m-%d %H:%M")}), encoding="utf-8")
+        shutil.rmtree(ck, ignore_errors=True)
+        tmp.rename(ck)
+        pack_vol.commit()
+        print(f"[lora] checkpoint saved at {n}/{len(order)}", flush=True)
+
+    model.train()
+    t_train = time.time()
     for n, rec in enumerate(order, 1):
+        if n <= start:
+            continue
         try:
             out = model(**encode(rec))
         except torch.cuda.OutOfMemoryError:
@@ -1869,17 +1932,20 @@ def train_lora(name: str, epochs: float = 1.0, lr: float = 1e-4, accum: int = 8,
             opt.zero_grad(set_to_none=True)
         if n % 50 == 0 or n == len(order):
             el = time.time() - t_train
-            print(f"[lora] {n}/{len(order)} examples · loss {sum(losses[-50:]) / len(losses[-50:]):.3f} · "
-                  f"{el / 60:.0f} min so far, about {el / n * (len(order) - n) / 60:.0f} min left", flush=True)
+            print(f"[lora] {n}/{len(order)} examples · loss {sum(losses[-50:]) / max(1, len(losses[-50:])):.3f} · "
+                  f"{(el + prior_s) / 60:.0f} min so far, about {el / (n - start) * (len(order) - n) / 60:.0f} min left",
+                  flush=True)
+        if n % LORA_SAVE_EVERY == 0 and n < len(order):
+            save_checkpoint(n, prior_s + time.time() - t_train)
     model.eval()
     val_loss = None
     if data.get("val"):
         with torch.no_grad():
             vl = [float(model(**encode(r)).loss) for r in data["val"][:150]]
         val_loss = round(sum(vl) / len(vl), 4)
-    out_dir = _lora_dir() / name
     model.save_pretrained(str(out_dir))
-    sec = time.time() - t0
+    shutil.rmtree(ck, ignore_errors=True)             # finished — the checkpoint isn't needed any more
+    sec = time.time() - t0 + prior_s
     meta = {"name": name, "created": time.strftime("%Y-%m-%d %H:%M"), "base": base_id, "rank": LORA_RANK,
             "epochs": epochs, "lr": lr, "examples": seen, "train_loss_end": round(sum(losses[-50:]) / max(1, len(losses[-50:])), 4),
             "val_loss": val_loss, "minutes": round(sec / 60, 1), "cost": round(TL.stage_cost(sec, "H100"), 2),
@@ -2086,13 +2152,25 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         return
     if stage == "lora-train":
         name = label.strip().replace(" ", "-") or time.strftime("lora-%Y%m%d-%H%M")
-        _push_labels()
-        ts = pick_test_set.remote(TEST_HOURS, False)
-        print(f"🧠 LoRA '{name}': the {len(ts.get('videos') or [])} test-set videos are held out.")
-        print("Preparing training examples (CPU)…")
-        print("  ", prepare_lora_data.remote())
-        print(f"Training on an H100 ({epochs} epoch(s)) — progress every 50 examples…")
-        r = train_lora.remote(name, epochs, 1e-4, 8, max_examples)
+        st = lora_status.remote(name)
+        ck = st.get("checkpoint")
+        if st.get("done") and not redo:
+            print(f"🧠 LoRA '{name}' is already trained. Test it: modal run modal_trial.py --stage test --lora {name}"
+                  f"\n   (or --redo to train it again from scratch)")
+            return
+        resume = bool(ck) and not redo
+        if resume:
+            print(f"🧠 LoRA '{name}': carrying on from the checkpoint at {ck['n']}/{ck['total']} examples "
+                  f"(saved {ck.get('saved')}) — same examples as before. (--redo starts over.)")
+        else:
+            _push_labels()
+            ts = pick_test_set.remote(TEST_HOURS, False)
+            print(f"🧠 LoRA '{name}': the {len(ts.get('videos') or [])} test-set videos are held out.")
+            print("Preparing training examples (CPU)…")
+            print("  ", prepare_lora_data.remote())
+        print(f"Training on an H100 ({epochs} epoch(s)) — progress every 50 examples, a checkpoint every "
+              f"{LORA_SAVE_EVERY}…")
+        r = train_lora.remote(name, epochs, 1e-4, 8, max_examples, not resume)
         print("  ", r)
         if not r.get("error"):
             print(f"\nNext: modal run modal_trial.py --stage test --lora {name}")

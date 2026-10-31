@@ -964,3 +964,21 @@ def test_lora_data_and_lora_tagging(tmp_path, monkeypatch):
     M._tag_video(Self, "v", True, str(dest), f"{out}/lora/try1")
     assert Self.llm.lora == ("lora", "try1", 1, f"{out}/lora/try1")
     assert json.loads(dest.read_text())["lora"] == "try1"
+
+
+def test_lora_resume_point_and_status(tmp_path, monkeypatch):
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    p = {"n": 400, "total": 1300, "seen": 400, "data_created": "2026-10-31 08:00", "epochs": 1.0, "lr": 1e-4}
+    assert M._lora_resume_point(p, "2026-10-31 08:00", 1300, 1.0, 1e-4) == 400
+    assert M._lora_resume_point(None, "x", 1300, 1.0, 1e-4) == 0
+    assert M._lora_resume_point(p, "2026-11-01 09:00", 1300, 1.0, 1e-4) == 0      # different examples
+    assert M._lora_resume_point(p, "2026-10-31 08:00", 1300, 2.0, 1e-4) == 0      # different settings
+    assert M._lora_resume_point({**p, "n": 1300}, "2026-10-31 08:00", 1300, 1.0, 1e-4) == 0
+    assert M.lora_status.local("try1") == {"done": False, "checkpoint": None}
+    ck = out / "lora" / "try1" / "checkpoint"
+    ck.mkdir(parents=True)
+    (ck / "progress.json").write_text(json.dumps(p))
+    assert M.lora_status.local("try1")["checkpoint"]["n"] == 400
+    (out / "lora" / "try1" / "adapter_model.safetensors").write_bytes(b"x")
+    (out / "lora" / "try1" / "meta.json").write_text("{}")
+    assert M.lora_status.local("try1")["done"]
