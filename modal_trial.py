@@ -749,11 +749,13 @@ def prompts_file(video_id: str) -> Path:
 
 
 @app.function(image=report_image, volumes={DATA: pack_vol}, timeout=1800, cpu=2, memory=6144)
-def prepare_prompts(video_id: str, max_prompts: int = 0, examples: int = 0, dedup: float = DEDUP_DEFAULT) -> dict:
+def prepare_prompts(video_id: str, max_prompts: int = 0, examples: int = 0, dedup: float = DEDUP_DEFAULT,
+                    only_labelled: bool = False) -> dict:
     """CPU, before the teacher starts: everything the GPU needs for one video in ONE file
     (prompts.json) — which moments to send, the full prompt for each with its frames already
     read and base64-encoded, and which near-identical moments just copy another's answer. The
-    teacher container then reads one file and feeds the GPU; it opens no frames itself."""
+    teacher container then reads one file and feeds the GPU; it opens no frames itself.
+    only_labelled: just the moments you've labelled (🔍 label checks), none copied."""
     import base64
     import trial_logic as TL
 
@@ -767,6 +769,12 @@ def prepare_prompts(video_id: str, max_prompts: int = 0, examples: int = 0, dedu
     # (tags switched off for the teacher aren't asked about)
     head, moment, tail = TL.build_prompt(vocab)
     targets = vis["targets"][:max_prompts] if max_prompts else vis["targets"]
+    if only_labelled:
+        gold = [i for i in _gold_items() if i.get("type") == "tags" and not i.get("skipped")
+                and i.get("video_id") == video_id and i.get("t") is not None]
+        ids, ts = {i["id"] for i in gold}, {round(float(i["t"]), 2) for i in gold}
+        targets = [tg for tg in targets if tg.get("gold_id") in ids or round(float(tg["t"]), 2) in ts]
+        dedup = 0
     by_key = {tg["key"]: tg for tg in targets}
     times, embs = _video_embeddings(video_id)
     keep, copies = TL.dedup_targets(targets, times, embs, dedup)
@@ -986,7 +994,8 @@ class Tagger32BFP8:
 
 
 @app.cls(image=tag_image, gpu=TEACHER_GPUS["32b-fp8"], volumes={DATA: pack_vol, CACHE: cache_vol},
-         timeout=4 * 3600, cpu=8, memory=65536, max_containers=1)
+         timeout=4 * 3600, cpu=8, memory=65536, max_containers=1,
+         scaledown_window=300)          # stays warm between a check's plain and LoRA runs (one model load)
 class Tagger32BFP8LoRA:
     """The FP8 teacher with LoRA switched on — tags with one of your trained adapters."""
     @modal.enter()
@@ -1440,6 +1449,8 @@ def export(smoke: bool = False) -> dict:
     Path(f"{EXPORT}/results.json").write_text(json.dumps(results), encoding="utf-8")
     if Path(f"{OUT}/testset/test_runs.json").exists():         # 🧪 test runs travel with the export
         shutil.copyfile(f"{OUT}/testset/test_runs.json", f"{EXPORT}/test_runs.json")
+    if Path(f"{OUT}/checks/check_runs.json").exists():         # 🔍 and the label-check runs
+        shutil.copyfile(f"{OUT}/checks/check_runs.json", f"{EXPORT}/check_runs.json")
     if Path(f"{OUT}/report.md").exists():
         shutil.copyfile(f"{OUT}/report.md", f"{EXPORT}/report.md")
     pack_vol.commit()
@@ -1472,8 +1483,9 @@ def _download_export(dest_name: str = "trial_results") -> str:
     return str(dest)
 
 
-def _download_test_runs() -> str:
-    """Laptop / server side: fetch testset/test_runs.json into the catalogue's trial_results folder."""
+def _download_test_runs(src: str = "/trial/testset/test_runs.json", name: str = "test_runs.json") -> str:
+    """Laptop / server side: fetch testset/test_runs.json (or the check runs) into the catalogue's
+    trial_results folder."""
     import subprocess
     import sys
     try:
@@ -1483,11 +1495,54 @@ def _download_test_runs() -> str:
         return f"couldn't read CATALOGUE_DIR from config.py ({e}) — results stay on Modal"
     dest = Path(CATALOGUE_DIR) / "trial_results"
     dest.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(["modal", "volume", "get", "--force", "media-train", "/trial/testset/test_runs.json",
-                        str(dest / "test_runs.json")], capture_output=True, text=True)
+    r = subprocess.run(["modal", "volume", "get", "--force", "media-train", src, str(dest / name)],
+                       capture_output=True, text=True)
     if r.returncode != 0:
         return f"download failed: {(r.stderr or r.stdout).strip()[-400:]}"
-    return str(dest / "test_runs.json")
+    return str(dest / name)
+
+
+@app.function(image=report_image, volumes={DATA: pack_vol})
+def labelled_videos(exclude: list) -> list:
+    """Finished videos with labelled frames (🎯 tags), minus `exclude` (the test set)."""
+    pack_vol.reload()
+    vids = {i["video_id"] for i in _gold_items() if i.get("type") == "tags" and not i.get("skipped")}
+    return sorted(v for v in vids if v not in set(exclude) and _vision_done(v))
+
+
+def _run_check(lora: str, dedup: float) -> None:
+    """--stage check-labels: tag ONLY your labelled frames in the training videos (the test set is
+    left out), once with the plain teacher and once with the adapter — one GPU container, model
+    loaded once — so 🔍 Check my label can list the training frames both disagree with you on."""
+    _push_labels()
+    ts = pick_test_set.remote(TEST_HOURS, False)
+    vids = labelled_videos.remote([x["video_id"] for x in ts.get("videos") or []])
+    if not vids:
+        print("No labelled frames outside the test set.")
+        return
+    print(f"🔍 Label check: your labelled frames in {len(vids)} training videos, plain teacher + LoRA '{lora}'.")
+    tagger = Tagger32BFP8LoRA()
+    stamp = time.strftime("%Y-%m-%d_%H%M")
+    texts = []
+    for label, lpath in (("check-plain", ""), (f"check-lora-{lora}", f"{OUT}/lora/{lora}")):
+        t0 = time.time()
+        res = list(prepare_prompts.starmap([(v, 0, 0, 0, True) for v in vids], return_exceptions=True))
+        n = sum(r.get("prompts", 0) for r in res if isinstance(r, dict))
+        print(f"   {label}: {n} labelled frames to tag…")
+        run_id = f"{stamp}_{label}"
+        out = f"{OUT}/checks/runs/{run_id}"
+        args = [(v, True, f"{out}/{v}.json", lpath) for v in vids]
+        bad = [r for r in tagger.tag_video.starmap(args, return_exceptions=True)
+               if not isinstance(r, dict) or r.get("error")]
+        for r in bad[:5]:
+            print("  ", r)
+        meta = {"id": run_id, "label": label, "teacher": "32b-fp8", "model": TEACHERS["32b-fp8"],
+                "lora": lora if lpath else "", "created": time.strftime("%Y-%m-%d %H:%M"), "kind": "check",
+                "minutes": round((time.time() - t0) / 60, 1)}
+        texts.append(finish_test_run.remote(run_id, meta, "check"))
+    print("\n" + texts[-1])
+    print(f"   Check runs → {_download_test_runs('/trial/checks/check_runs.json', 'check_runs.json')}\n"
+          "   In the app: 🧪 Trial results → 🖼️ Compare tags → Show: 🔍 Check my label.")
 
 
 def _run_test(keys: list, label: str, keep_vocab: bool, dedup: float, lora: str = "") -> None:
@@ -1712,17 +1767,18 @@ def _run_summary(run_dir: Path) -> dict | None:
 
 
 @app.function(image=report_image, volumes={DATA: pack_vol}, timeout=1800)
-def finish_test_run(run_id: str, meta: dict) -> str:
-    """After a test run: save its details, rebuild testset/test_runs.json (every run, for the app)
-    and return the table of runs scored on your latest labels, plus the per-tag changes since the
-    run before."""
+def finish_test_run(run_id: str, meta: dict, kind: str = "test") -> str:
+    """After a test run (kind "test") or a 🔍 label-check run ("check"): save its details, rebuild
+    testset/test_runs.json or checks/check_runs.json (every run, for the app) and return the table
+    of runs scored on your latest labels, plus the per-tag changes since the run before."""
     import trial_logic as TL
     pack_vol.reload()
-    d = _test_dir()
+    d = _test_dir() if kind == "test" else Path(f"{OUT}/checks")
     (d / "runs" / run_id / "run.json").write_text(json.dumps(meta), encoding="utf-8")
     runs = [r for r in (_run_summary(p) for p in sorted((d / "runs").iterdir()) if p.is_dir()) if r]
     ts = _read_json(d / "testset.json", {}) or {}
-    (d / "test_runs.json").write_text(json.dumps({"set": ts, "runs": runs}), encoding="utf-8")
+    name = "test_runs.json" if kind == "test" else "check_runs.json"
+    (d / name).write_text(json.dumps({"set": ts, "runs": runs}), encoding="utf-8")
     pack_vol.commit()
     gold = [i for i in _gold_items() if i.get("type") == "tags" and not i.get("skipped")]
     tags = [r["tag"] for r in _vocab()]
@@ -2192,7 +2248,8 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     the run (e.g. --label positions-v2); --keep-vocab uses the vocabulary already on Modal (the last
     batch's) instead of sending today's — for a baseline. --stage test-pick [--redo]: show / re-pick the set.
     --stage lora-train --label <name> [--epochs 1]: fine-tune the teacher on your labels (test set held
-    out) → lora/<name>. Then --stage test --lora <name> tags the test set with it."""
+    out) → lora/<name>. Then --stage test --lora <name> tags the test set with it.
+    --stage check-labels --lora <name>: tag only your labelled training frames, plain + LoRA, for 🔍."""
     # No trial_logic import here: this runs on the machine you start it from, whose venv may
     # only have modal (trial_logic needs numpy).
     examples = EXAMPLES_DEFAULT if examples < 0 else min(examples, EXAMPLES_MAX)
@@ -2216,6 +2273,12 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
               f"{ts.get('labelled')} of your labelled frames. Held out of any teacher fine-tune.")
         for x in ts.get("videos") or []:
             print(f"   batch {x['batch']:>3} · {x['minutes']:5.1f} min · {x['labelled']:3} labelled · {x['video_id']}")
+        return
+    if stage == "check-labels":
+        if not lora.strip():
+            print("--lora <name> is needed (e.g. --lora try1).")
+            return
+        _run_check(lora.strip(), dedup)
         return
     if stage == "test":
         _run_test(keys, label.strip().replace(" ", "-"), keep_vocab, dedup, lora.strip())

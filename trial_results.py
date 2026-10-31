@@ -301,6 +301,15 @@ def load_test_runs() -> dict | None:
     return data if isinstance(data, dict) and data.get("runs") else None
 
 
+def load_check_runs() -> dict | None:
+    """check_runs.json — 🔍 label-check runs over your labelled training frames, or None."""
+    try:
+        data = json.loads((RESULTS_DIR / "check_runs.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get("runs") else None
+
+
 def test_run_scores(runs: list, labels: list, tags: list) -> list:
     """Each run scored on your labels as they are now: [{"run", "score"}] (score as
     trial_logic.score_tags: "n", "overall", "per_tag")."""

@@ -135,8 +135,12 @@ def _compare(data: dict) -> None:
     if note:
         st.toast(note, icon="💾")
     teachers = TR.shown_teachers(data.get("teachers") or {})
-    test = TR.load_test_runs()
-    test_ids = [r["id"] for r in (test or {}).get("runs") or []]
+    # 🧪 test runs (the test set) and 🔍 check runs (your labelled training frames) both feed the
+    # "Check my label" filter; the newest two are picked by default
+    test = {"runs": sorted(((TR.load_test_runs() or {}).get("runs") or [])
+                           + ((TR.load_check_runs() or {}).get("runs") or []),
+                           key=lambda r: str(r.get("created") or ""))}
+    test_ids = [r["id"] for r in test["runs"]]
     filters = {k: v for k, v in TR.FILTERS.items()
                if (k != "disagree" or len(teachers) > 1) and (k != "suspect" or len(test_ids) >= 2)}
     if st.session_state.get("tr_filter") not in filters:

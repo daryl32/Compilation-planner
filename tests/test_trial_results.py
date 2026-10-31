@@ -517,3 +517,26 @@ def test_check_my_label_filter(bundle, no_labels):
     assert not errors(at), errors(at)
     assert TLB.load_labels()[0]["tags"] == ["dance"]                       # unchanged, but now checked
     assert not any(b.label == "✅ My label is right" for b in at.button)    # gone from the list
+
+
+def test_check_runs_feed_the_filter(bundle, no_labels):
+    """🔍 check runs (training frames) show in Check my label like test runs do."""
+    import training_labels as TLB
+    from tests.apptest_util import errors, page_app
+    m = _bundle()["videos"]["vid_a"]["moments"][0]
+    runs = {"runs": [{"id": f"2026-10-31_130{i}_check-{n}", "created": f"2026-10-31 13:0{i}",
+                      "frames": [{"v": "vid_a", "t": m["t"], "tags": ["crowd"]}]}
+                     for i, n in ((1, "plain"), (2, "lora-try1"))]}
+    (TR.RESULTS_DIR / "check_runs.json").write_text(json.dumps(runs))
+    TLB.save_label({"id": TLB.card_id("tags", "vid_a", m["t"]), "type": "tags", "video_id": "vid_a",
+                    "t": m["t"]}, tags=["dance"])
+    items = TLB.load_labels()
+    items[0]["labelled_at"] = "2026-10-30T09:00:00"
+    TLB._write_labels(items)
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_sub"] = "🖼️ Compare tags"
+    at.session_state["tr_filter"] = "suspect"
+    at.run()
+    assert not errors(at), errors(at)
+    assert "they all see **crowd**" in " ".join(c.value for c in at.caption)

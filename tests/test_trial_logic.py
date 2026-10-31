@@ -982,3 +982,36 @@ def test_lora_resume_point_and_status(tmp_path, monkeypatch):
     (out / "lora" / "try1" / "adapter_model.safetensors").write_bytes(b"x")
     (out / "lora" / "try1" / "meta.json").write_text("{}")
     assert M.lora_status.local("try1")["done"]
+
+
+def test_check_labels_prep_and_finish(tmp_path, monkeypatch):
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    vis = json.loads((out / "v" / "vision.json").read_text())
+    vis["targets"].append({"key": "s1_9", "t": 33.0, "scene_id": 1})        # an unlabelled moment
+    (out / "v" / "vision.json").write_text(json.dumps(vis))
+    for tg in vis["targets"]:
+        for t in TL.context_times(tg["t"], 40.0):
+            (out / "v" / "frames" / TL.frame_name(t)).write_bytes(b"jpg")
+    r = M.prepare_prompts.local("v", 0, 0, 0.96, True)
+    data = json.loads((out / "v" / "prompts.json").read_text())
+    assert r["prompts"] == 4 and r["copied"] == 0                          # only your 4 labelled frames
+    assert {m["key"] for m in data["moments"]} == {"g_5.00", "g_15.00", "g_25.00", "g_35.00"}
+
+    class Self:
+        key, llm, load_error, load_seconds, first = "32b-fp8", _FakeLLM(), None, 0.0, True
+    monkeypatch.setattr(M, "_gpu_name", lambda d: "H100")
+    import sys
+    import types
+    fake_vllm = types.ModuleType("vllm")
+    fake_vllm.SamplingParams = lambda **kw: kw
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    M._tag_video(Self, "v", True, str(out / "checks" / "runs" / "c1" / "v.json"), "")
+    M.finish_test_run.local("c1", {"id": "c1", "created": "2026-10-31 13:00", "kind": "check"}, "check")
+    cr = json.loads((out / "checks" / "check_runs.json").read_text())
+    assert cr["runs"][0]["id"] == "c1" and len(cr["runs"][0]["frames"]) == 4
+    assert not (out / "testset" / "test_runs.json").exists()            # test runs untouched
+    vis["models"] = {"pose": M.POSE_MODEL}
+    (out / "v" / "vision.json").write_text(json.dumps(vis))
+    assert M.labelled_videos.local([]) == ["v"] and M.labelled_videos.local(["v"]) == []
+    M.export.local(False)
+    assert (out / "export" / "check_runs.json").exists()
