@@ -112,7 +112,7 @@ tag_image = (modal.Image.from_registry("nvidia/cuda:12.9.0-devel-ubuntu22.04", a
              .add_local_python_source("trial_logic"))
 report_image = base.pip_install("numpy").add_local_python_source("trial_logic")
 # LoRA training (QLoRA: the 32B in 4-bit, small trainable adapters on its language layers)
-lora_image = (base.pip_install("torch", "transformers>=4.57", "peft>=0.17", "bitsandbytes>=0.46", "accelerate",
+lora_image = (base.pip_install("torch", "torchvision", "transformers>=4.57", "peft>=0.17", "bitsandbytes>=0.46", "accelerate",
                                "numpy", "pillow", "huggingface_hub")
               .add_local_python_source("trial_logic"))
 LORA_RANK, LORA_ALPHA = 16, 32
