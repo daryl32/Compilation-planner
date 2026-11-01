@@ -129,6 +129,7 @@ FILTERS = {
     "wrong": "A model differs from me",
     "disagree": "The models disagree",
     "rules": "⚠️ My tags break a rule",
+    "neighbours": "↔️ Filled in from the moments either side",
     "suspect": "🔍 Check my label — the test runs all disagree with it",
 }
 # The teacher picked after batch 1 — the view shows only it when its tags are there.
@@ -166,6 +167,8 @@ def filter_moments(moments: list, how: str = "all", tag: str | None = None, prob
         if how == "wrong" and not any_wrong(m):
             continue
         if how == "disagree" and not teachers_disagree(m):
+            continue
+        if how == "neighbours" and not any((r or {}).get("neighbour_added") for r in (m.get("teachers") or {}).values()):
             continue
         if tag and not any(norm(tag) in s for s in tag_sets(m).values()):
             continue

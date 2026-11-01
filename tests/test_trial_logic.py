@@ -219,7 +219,7 @@ def test_export(tmp_path, monkeypatch):
     assert m["mine"] == ["close-up", "dancing"] and m["old"] == []
     assert m["teachers"] == {"32b": {"tags": ["close-up", "dancing"], "unsure": None, "caption": None,
                                      "copied_from": None, "look_added": None, "look_removed": None,
-                                     "conf": None}}
+                                     "neighbour_added": None, "conf": None}}
     assert (out / "export" / m["frame"]).exists()
     plain = next(m for m in v["moments"] if m["key"] == "s1_0")
     assert plain["mine"] is None and plain["teachers"] == {}
@@ -1065,3 +1065,50 @@ def test_lora_batch_tagging_and_second_look_switch(tmp_path, monkeypatch):
     assert calls > 0 and tj["second_looks"] is True
     calls, tj = run("", "auto")                             # no adapter: on as before
     assert calls > 0 and tj["model"].endswith("FP8")
+
+
+NEIGHBOUR_CSV = ("tag,group,kind,one_of,teacher,never_with,only_with\n"
+                 "penetration,action,frame,,yes,Blowjob,\n"
+                 "Blowjob,action,frame,,yes,penetration,\n"
+                 "Cowgirl position,Position,frame,,yes,Missionary; Blowjob,penetration\n"
+                 "Missionary,Position,frame,,yes,Cowgirl position; Blowjob,penetration\n")
+
+
+def _m(t, tags, scene=1, unsure=(), ok=True):
+    return {"t": t, "scene_id": scene, "tags": list(tags), "unsure": list(unsure), "ok": ok}
+
+
+def test_neighbour_fill_carries_a_position_over_a_hidden_moment():
+    v = TL.parse_vocabulary(NEIGHBOUR_CSV)
+    both = ["penetration", "Cowgirl position"]
+    res = {"a": _m(10, both), "b": _m(18, [], unsure=["Cowgirl position"]), "c": _m(26, both)}
+    assert TL.neighbour_fill(res, v) == 1
+    assert res["b"]["tags"] == ["Cowgirl position"]          # the position, not penetration
+    assert res["b"]["unsure"] == [] and res["b"]["neighbour_added"] == ["Cowgirl position"]
+    assert "neighbour_added" not in res["a"] and "neighbour_added" not in res["c"]
+
+
+def test_neighbour_fill_needs_both_sides_to_agree():
+    v = TL.parse_vocabulary(NEIGHBOUR_CSV)
+    cow, mis = ["penetration", "Cowgirl position"], ["penetration", "Missionary"]
+    cases = [
+        {"a": _m(10, cow), "b": _m(18, []), "c": _m(26, mis)},                 # the position changes
+        {"a": _m(10, cow), "b": _m(18, [])},                                   # nothing after
+        {"a": _m(10, cow), "b": _m(18, []), "c": _m(26, cow, scene=2)},        # after is another scene
+        {"a": _m(2, cow), "b": _m(18, []), "c": _m(26, cow)},                  # before is too far away
+        {"a": _m(10, ["Cowgirl position"]), "b": _m(18, []), "c": _m(26, cow)},  # a side without penetration
+        {"a": _m(10, cow), "b": _m(18, ["Blowjob"]), "c": _m(26, cow)},        # a never-with tag here
+        {"a": _m(10, cow), "b": _m(18, ["Missionary"]), "c": _m(26, cow)},     # another position here
+        {"a": _m(10, cow), "b": _m(18, [], ok=False), "c": _m(26, cow)},       # unreadable answer
+        {"a": _m(17.5, cow), "b": _m(18, []), "c": _m(18.5, cow)},             # sides are the same frame
+    ]
+    for res in cases:
+        assert TL.neighbour_fill(res, v) == 0, res
+        assert res["b"]["tags"] in ([], ["Blowjob"], ["Missionary"])
+
+
+def test_neighbour_fill_never_chains_from_its_own_fills():
+    v = TL.parse_vocabulary(NEIGHBOUR_CSV)
+    cow = ["penetration", "Cowgirl position"]
+    res = {"a": _m(10, cow), "b": _m(18, []), "c": _m(26, []), "d": _m(34, cow)}
+    assert TL.neighbour_fill(res, v) == 0       # b's after (c) and c's before (b) have nothing

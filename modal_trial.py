@@ -933,6 +933,8 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora
             results[k] = {**{f: src.get(f) for f in ("tags", "unsure", "caption", "ok", "conf")}, "t": c["t"],
                           "scene_id": c.get("scene_id"), "gold_id": c.get("gold_id"),
                           "copied_from": c["of"], "similarity": c.get("similarity")}
+    # a position the view hid for a moment, carried over when the moments either side agree
+    neighbour_adds = TL.neighbour_fill(results, vocab)
     gpu = _gpu_name(TEACHER_GPUS[key][0])
     use = TL.gpu_use(key, gpu, p_tok + o_tok, seconds)
     load = self.load_seconds if self.first else 0.0
@@ -945,7 +947,8 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora
                                "prompts": len(convs), "copied": len(copies), "unreadable": bad,
                                "rule_fixes": rule_fixes, "rule_adds": rule_adds, "rule_drops": rule_drops,
                                "looks": looks, "look_added": look_added, "look_removed": look_removed,
-                               "required_fills": required, "structured": StructuredOutputsParams is not None,
+                               "required_fills": required, "neighbour_adds": neighbour_adds,
+                               "structured": StructuredOutputsParams is not None,
                                "prompt_tokens": p_tok, "output_tokens": o_tok,
                                "tokens_per_s": use["tokens_per_s"], "mfu": use["mfu"],
                                "moments_per_min": round(60 * len(convs) / max(seconds, 1e-6), 1),
@@ -959,6 +962,9 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora
     if rule_fixes or rule_adds or rule_drops:
         print(f"[{who} teacher] {video_id[:40]}: rules — {rule_fixes} tag(s) broke a never-with → unsure, "
               f"{rule_adds} added by always-with, {rule_drops} dropped by only-with → unsure.", flush=True)
+    if neighbour_adds:
+        print(f"[{who} teacher] {video_id[:40]}: {neighbour_adds} position(s) filled in from the moments "
+              f"either side.", flush=True)
     if looks:
         print(f"[{who} teacher] {video_id[:40]}: second look on {looks} moment(s) → {look_added} tag(s) "
               f"added (usually-with), {look_removed} taken out (double-check).", flush=True)
@@ -1415,7 +1421,7 @@ def export(smoke: bool = False) -> dict:
                 "mine": None if g is None else list(g.get("tags") or []),
                 "old": list(sc.get("corrected_tags") if sc.get("corrected_tags") is not None else sc.get("tags") or []),
                 "teachers": {k: {f: r[tg["key"]].get(f) for f in ("tags", "unsure", "caption", "copied_from", "look_added",
-                                                               "look_removed", "conf")}
+                                                               "look_removed", "neighbour_added", "conf")}
                              for k, r in teachers.items() if tg["key"] in r},
             })
         old_curve, old_fps = [], 0.0
@@ -1759,7 +1765,8 @@ def _run_summary(run_dir: Path) -> dict | None:
     if not meta:
         return None
     frames, sec, moments, gpu, vocab_csv = [], 0.0, 0, None, ""
-    counts = {"looks": 0, "look_added": 0, "look_removed": 0, "required_fills": 0, "unreadable": 0}
+    counts = {"looks": 0, "look_added": 0, "look_removed": 0, "required_fills": 0, "unreadable": 0,
+              "neighbour_adds": 0}
     for f in sorted(run_dir.glob("*.json")):
         if f.name == "run.json":
             continue
@@ -1777,6 +1784,45 @@ def _run_summary(run_dir: Path) -> dict | None:
     return {**meta, "seconds": round(sec, 1), "moments": moments, "gpu": gpu,
             "cost": round(TL.stage_cost(sec, gpu or "H100"), 2), **counts, "vocab_csv": vocab_csv,
             "videos": len([f for f in run_dir.glob("*.json") if f.name != "run.json"]), "frames": frames}
+
+
+@app.function(image=report_image, volumes={DATA: pack_vol}, timeout=1800, cpu=2)
+def neighbour_test_run(run_id: str) -> dict:
+    """CPU, no GPU: copy an earlier 🧪 test run with the neighbour rule applied (positions the
+    view hid for a moment, filled in from the moments either side) — the same model answers with
+    and without the rule, so the two runs compare like for like. Returns the new run's meta, or
+    {"error"}."""
+    import shutil
+    import trial_logic as TL
+    pack_vol.reload()
+    src = _test_dir() / "runs" / run_id
+    meta = _read_json(src / "run.json")
+    if not meta:
+        have = sorted(p.name for p in (_test_dir() / "runs").iterdir() if p.is_dir())
+        return {"error": f"no test run '{run_id}'. Runs: " + ", ".join(have[-8:])}
+    new_id = f"{run_id}_neighbours"
+    dst = _test_dir() / "runs" / new_id
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True)
+    added = 0
+    for f in sorted(src.glob("*.json")):
+        if f.name == "run.json":
+            continue
+        tj = _read_json(f) or {}
+        rows = (TL.parse_vocabulary(tj["vocab_csv"]) if tj.get("vocab_csv") else []) or _vocab()
+        vocab = TL.teacher_vocab(rows)
+        results = tj.get("results") or {}
+        for r in results.values():                  # start from the answers as given (a re-run is the same)
+            for t in r.pop("neighbour_added", None) or []:
+                r["tags"] = [x for x in r.get("tags") or [] if x != t]
+        n = TL.neighbour_fill(results, vocab)
+        added += n
+        (dst / f.name).write_text(json.dumps({**tj, "results": results, "neighbour_adds": n}), encoding="utf-8")
+    pack_vol.commit()
+    label = (meta.get("label") or run_id) + "-neighbours"
+    return {**meta, "id": new_id, "label": label, "neighbours_from": run_id, "neighbour_adds": added,
+            "created": time.strftime("%Y-%m-%d %H:%M")}
 
 
 @app.function(image=report_image, volumes={DATA: pack_vol}, timeout=1800)
@@ -2305,7 +2351,7 @@ def _run_vision(vids: list, max_seconds: float, redo: bool) -> None:
 def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False, teacher: str = "",
          examples: int = -1, dedup: float = -1.0, batch: int = 0, label: str = "", keep_vocab: bool = False,
          lora: str = "", epochs: float = 1.0, max_examples: int = 0, trainer: str = "unsloth",
-         second_look: str = "auto"):
+         second_look: str = "auto", run: str = ""):
     """teacher: 8b, 32b, 32b-fp8 or both (= 8b + 32b). Default: 8b for --smoke, 32b-fp8 otherwise.
     examples: worked examples from your labels before each moment (default 0 = off, at most 6).
     dedup: near-identical moments in a scene are tagged once and the answer copied when their
@@ -2317,6 +2363,9 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     --stage lora-train --label <name> [--epochs 1]: fine-tune the teacher on your labels (test set held
     out) → lora/<name>. Then --stage test --lora <name> tags the test set with it.
     --stage check-labels --lora <name>: tag only your labelled training frames, plain + LoRA, for 🔍.
+    --stage neighbours --run <test run id>: copy that test run with the neighbour rule applied
+    (positions filled in from the moments either side; CPU only, pennies) to compare like for like.
+    New batches and test runs apply the rule themselves.
     --trainer unsloth (default) or hf; --max-examples 16 --label smoke = a quick ~$1 check that training runs.
     --lora <name> on a normal / --batch run: tag with the FP8 teacher + that adapter (second looks off
     unless --second-look on)."""
@@ -2354,6 +2403,22 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         return
     if stage == "test":
         _run_test(keys, label.strip().replace(" ", "-"), keep_vocab, dedup, lora.strip(), second_look)
+        return
+    if stage == "neighbours":
+        if not run.strip():
+            print("--run <test run id> is needed, e.g. --run 2026-11-01_2239_positions-v2 "
+                  "(the names are in 📋 Summary → 🧪 Test set).")
+            return
+        meta = neighbour_test_run.remote(run.strip())
+        if meta.get("error"):
+            print(meta["error"])
+            return
+        print(f"↔️ {meta['neighbour_adds']} position(s) filled in from the moments either side → test run "
+              f"{meta['id']} (no GPU used).")
+        text = finish_test_run.remote(meta["id"], meta)
+        Path("test_report.md").write_text(text, encoding="utf-8")
+        print("\n" + text + f"\n\nSaved {Path('test_report.md').resolve()}")
+        print(f"   Test runs → {_download_test_runs()}\n   In the app: 🧪 Trial results → 📋 Summary → 🧪 Test set.")
         return
     if stage == "lora-train":
         name = label.strip().replace(" ", "-") or time.strftime("lora-%Y%m%d-%H%M")

@@ -267,7 +267,9 @@ def _compare(data: dict) -> None:
                                     + (f" · 👀 added on a second look: {', '.join(r['look_added'])}"
                                        if r.get("look_added") else "")
                                     + (f" · 🔍 taken out on double-check: {', '.join(r['look_removed'])}"
-                                       if r.get("look_removed") else ""))
+                                       if r.get("look_removed") else "")
+                                    + (f" · ↔️ filled in from the moments either side: {', '.join(r['neighbour_added'])}"
+                                       if r.get("neighbour_added") else ""))
                 if caps:
                     st.caption("  \n".join(caps))
                 # ✏️ Correct: your tags for this frame go to your training labels (the gold set).

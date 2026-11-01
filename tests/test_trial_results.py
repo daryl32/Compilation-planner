@@ -546,3 +546,9 @@ def test_teacher_label_with_lora():
     assert TR.teacher_label("Qwen/Qwen3-VL-32B-Instruct-FP8") == "32B FP8"
     assert TR.teacher_label("Qwen/Qwen3-VL-32B-Instruct-FP8 + LoRA try2") == "32B FP8 + LoRA try2"
     assert TR.teacher_label("Qwen/Qwen3-VL-8B-Instruct") == "8B"
+
+
+def test_neighbours_filter():
+    filled = {"key": "a", "teachers": {"32b": {"tags": ["x"], "neighbour_added": ["x"]}}}
+    plain = {"key": "b", "teachers": {"32b": {"tags": ["x"]}}}
+    assert [m["key"] for m in TR.filter_moments([filled, plain], "neighbours")] == ["a"]

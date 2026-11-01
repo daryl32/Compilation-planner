@@ -28,6 +28,8 @@ CONTEXT_OFFSETS = (-2.0, -1.33, -0.67, 0.67, 1.33, 2.0)   # extra frames around 
 LONG_SCENE_EVERY = 10.0                                   # one more moment every 10 s in long scenes
 MAX_PER_SCENE = 6
 POSE_FPS = 15.0
+NEIGHBOUR_GAP = 12.0       # s: a moment either side further away than this doesn't count as a neighbour
+NEIGHBOUR_MIN = 1.0        # s: …nor one closer than this (practically the same frame)
 
 
 # ---------------------------------------------------------------------------
@@ -837,6 +839,62 @@ def extrapolate(stage_seconds: dict, gpus: dict, trial_hours, library_hours: flo
         tot["library_$"] += lib
     out["total"] = {k: round(v, 2) for k, v in tot.items()}
     return out
+
+
+# ---------------------------------------------------------------------------
+# Neighbours: a tag the view hid for a moment, filled in from the moments either side
+# ---------------------------------------------------------------------------
+
+def neighbour_fill(results: dict, vocab: list, gap: float = NEIGHBOUR_GAP, closest: float = NEIGHBOUR_MIN) -> int:
+    """After a whole video is tagged: a tag with an only-with rule (the positions — only with
+    penetration / Anal Sex) is added to a moment that hasn't got it when the nearest moment before
+    AND the nearest after, in the same scene and within `gap` seconds, both have it together with
+    one of its only-with partners — e.g. the camera lost sight of the penetration for a second
+    while the position carried on. The partner itself (penetration) isn't added: your labels give
+    it only when it's visible. Never added when the moment has a never-with tag of it (another
+    position, Blowjob…) or its answer was unreadable. Decided from the answers as the teacher gave
+    them, so one fill never leads to another. Changes `results` in place: the tag joins "tags",
+    leaves "unsure" and is listed in "neighbour_added". Returns how many tags were added."""
+    omap, pairs = only_map(vocab), never_pairs(vocab)
+    names = {r["tag"].lower(): r["tag"] for r in vocab}
+    fillable = [names[t] for t in omap if t in names]
+    if not fillable:
+        return 0
+    before = {k: list(r.get("tags") or []) for k, r in results.items()}
+    scenes = {}
+    for k, r in results.items():
+        if r.get("t") is None or r.get("scene_id") is None:
+            continue
+        scenes.setdefault(r["scene_id"], []).append((float(r["t"]), k))
+
+    def has(k, tag):
+        return tag.lower() in {x.lower() for x in before[k]}
+
+    def holds(k, tag):              # the tag and one of its only-with partners
+        return results[k].get("ok", True) and has(k, tag) and any(has(k, n) for n in omap[tag.lower()])
+
+    added = 0
+    for ms in scenes.values():
+        ms.sort()
+        for t, k in ms:
+            r = results[k]
+            if not r.get("ok", True):
+                continue
+            prev = next((m for m in reversed(ms) if t - gap <= m[0] <= t - closest), None)
+            nxt = next((m for m in ms if t + closest <= m[0] <= t + gap), None)
+            if prev is None or nxt is None:
+                continue
+            for tag in fillable:
+                if has(k, tag) or not (holds(prev[1], tag) and holds(nxt[1], tag)):
+                    continue
+                now = {x.lower() for x in r.get("tags") or []}
+                if any(o.lower() in now for o in pairs.get(tag.lower(), ())):
+                    continue
+                r["tags"] = list(r.get("tags") or []) + [tag]
+                r["unsure"] = [u for u in r.get("unsure") or [] if u.lower() != tag.lower()]
+                r["neighbour_added"] = list(r.get("neighbour_added") or []) + [tag]
+                added += 1
+    return added
 
 
 # ---------------------------------------------------------------------------
