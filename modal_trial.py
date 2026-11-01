@@ -833,7 +833,8 @@ def prepare_prompts(video_id: str, max_prompts: int = 0, examples: int = 0, dedu
             "seconds": round(time.time() - t0, 1)}
 
 
-def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora_path: str = "") -> dict:
+def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora_path: str = "",
+               second_look: str = "auto") -> dict:
     """GPU: feed the prepared prompts.json through the teacher. Nothing is read but that one file.
     out_path: write the result there instead (a 🧪 test run) — the batch results stay untouched."""
     import trial_logic as TL
@@ -875,6 +876,9 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora
                               structured_outputs=StructuredOutputsParams(json=schema, disable_any_whitespace=True))
 
     outs, chunk, params = [], 32, sampling(TAG_MAX_TOKENS, TL.answer_schema(vocab))
+    # second looks (usually-with / double-check): off by default with an adapter — on the test set
+    # try2 they ran on 460 moments and changed 13 tags, not worth the GPU time
+    looks_on = second_look == "on" or (second_look == "auto" and not lora_path)
     lora_kw = {}
     if lora_path:                         # 🧠 your fine-tuned adapter on top of the teacher
         from vllm.lora.request import LoRARequest
@@ -890,7 +894,7 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora
         got = self.llm.chat(convs[i:i + chunk], params, use_tqdm=False, **lora_kw)
         outs += got
         firsts = [TL.parse_answer(o.outputs[0].text, vocab) for o in got]
-        asks = [TL.look_again(a, vocab) if a["ok"] else [] for a in firsts]
+        asks = [TL.look_again(a, vocab) if a["ok"] and looks_on else [] for a in firsts]
         follow = [(j, convs[i + j] + [{"role": "assistant", "content": got[j].outputs[0].text},
                                       {"role": "user", "content": TL.look_again_prompt(asks[j])}])
                   for j in range(len(got)) if asks[j]]
@@ -933,7 +937,9 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora
     use = TL.gpu_use(key, gpu, p_tok + o_tok, seconds)
     load = self.load_seconds if self.first else 0.0
     self.first = False
-    out.write_text(json.dumps({"video_id": video_id, "teacher": key, "model": TEACHERS[key], "gpu": gpu,
+    model_name = TEACHERS[key] + (f" + LoRA {Path(lora_path).name}" if lora_path else "")
+    out.write_text(json.dumps({"video_id": video_id, "teacher": key, "model": model_name, "gpu": gpu,
+                               "second_looks": looks_on,
                                "partial": bool(data.get("partial")), "targets": data["targets"],
                                "seconds": round(seconds, 1), "load_seconds": round(load, 1),
                                "prompts": len(convs), "copied": len(copies), "unreadable": bad,
@@ -1008,8 +1014,9 @@ class Tagger32BFP8LoRA:
         _load_teacher(self, "32b-fp8", lora=True)
 
     @modal.method()
-    def tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora_path: str = "") -> dict:
-        return _tag_video(self, video_id, redo, out_path, lora_path)
+    def tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora_path: str = "",
+                  second_look: str = "auto") -> dict:
+        return _tag_video(self, video_id, redo, out_path, lora_path, second_look)
 
 
 TAGGERS = {"8b": Tagger8B, "32b": Tagger32B, "32b-fp8": Tagger32BFP8}
@@ -1550,7 +1557,8 @@ def _run_check(lora: str, dedup: float) -> None:
           "   In the app: 🧪 Trial results → 🖼️ Compare tags → Show: 🔍 Check my label.")
 
 
-def _run_test(keys: list, label: str, keep_vocab: bool, dedup: float, lora: str = "") -> None:
+def _run_test(keys: list, label: str, keep_vocab: bool, dedup: float, lora: str = "",
+              second_look: str = "auto") -> None:
     """--stage test: re-tag the fixed test set with today's settings (or, with --keep-vocab, the
     vocabulary already on Modal = what the last batch used) and compare with earlier test runs."""
     _push_labels(vocab=not keep_vocab)
@@ -1570,7 +1578,7 @@ def _run_test(keys: list, label: str, keep_vocab: bool, dedup: float, lora: str 
         print("  ", r)
     tagger = Tagger32BFP8LoRA() if lora else TAGGERS[k]()
     out = f"{OUT}/testset/runs/{run_id}"
-    args = [(v, True, f"{out}/{v}.json") + ((f"{OUT}/lora/{lora}",) if lora else ()) for v in vids]
+    args = [(v, True, f"{out}/{v}.json") + ((f"{OUT}/lora/{lora}", second_look) if lora else ()) for v in vids]
     for r in tagger.tag_video.starmap(args, return_exceptions=True):
         print("  ", r)
     meta = {"id": run_id, "label": label, "teacher": k, "model": TEACHERS[k], "lora": lora,
@@ -2296,7 +2304,8 @@ def _run_vision(vids: list, max_seconds: float, redo: bool) -> None:
 @app.local_entrypoint()
 def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False, teacher: str = "",
          examples: int = -1, dedup: float = -1.0, batch: int = 0, label: str = "", keep_vocab: bool = False,
-         lora: str = "", epochs: float = 1.0, max_examples: int = 0, trainer: str = "unsloth"):
+         lora: str = "", epochs: float = 1.0, max_examples: int = 0, trainer: str = "unsloth",
+         second_look: str = "auto"):
     """teacher: 8b, 32b, 32b-fp8 or both (= 8b + 32b). Default: 8b for --smoke, 32b-fp8 otherwise.
     examples: worked examples from your labels before each moment (default 0 = off, at most 6).
     dedup: near-identical moments in a scene are tagged once and the answer copied when their
@@ -2308,13 +2317,17 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     --stage lora-train --label <name> [--epochs 1]: fine-tune the teacher on your labels (test set held
     out) → lora/<name>. Then --stage test --lora <name> tags the test set with it.
     --stage check-labels --lora <name>: tag only your labelled training frames, plain + LoRA, for 🔍.
-    --trainer unsloth (default) or hf; --max-examples 16 --label smoke = a quick ~$1 check that training runs."""
+    --trainer unsloth (default) or hf; --max-examples 16 --label smoke = a quick ~$1 check that training runs.
+    --lora <name> on a normal / --batch run: tag with the FP8 teacher + that adapter (second looks off
+    unless --second-look on)."""
     # No trial_logic import here: this runs on the machine you start it from, whose venv may
     # only have modal (trial_logic needs numpy).
     examples = EXAMPLES_DEFAULT if examples < 0 else min(examples, EXAMPLES_MAX)
     dedup = DEDUP_DEFAULT if dedup < 0 else dedup
     teacher = (teacher or ("8b" if smoke else TEACHERS_DEFAULT)).lower()
     keys = ["8b", "32b"] if teacher == "both" else [teacher]
+    if lora.strip() and stage not in ("test", "check-labels", "lora-train"):
+        keys = ["32b-fp8"]                     # an adapter runs on the FP8 teacher
     if any(k not in TEACHERS for k in keys):
         print(f"--teacher must be one of: {', '.join(TEACHERS)}, both")
         return
@@ -2340,7 +2353,7 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         _run_check(lora.strip(), dedup)
         return
     if stage == "test":
-        _run_test(keys, label.strip().replace(" ", "-"), keep_vocab, dedup, lora.strip())
+        _run_test(keys, label.strip().replace(" ", "-"), keep_vocab, dedup, lora.strip(), second_look)
         return
     if stage == "lora-train":
         name = label.strip().replace(" ", "-") or time.strftime("lora-%Y%m%d-%H%M")
@@ -2458,9 +2471,14 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
             if not todo_tags[k]:
                 print(f"{k}: every video already tagged.")
                 continue
-            print(f"Tagging {len(todo_tags[k])} video(s) with {TEACHERS[k]} ({' / '.join(TEACHER_GPUS[k])}, first free)…")
-            tagger = TAGGERS[k]()
-            for r in tagger.tag_video.starmap([(v, redo) for v in todo_tags[k]], return_exceptions=True):
+            lp = f"{OUT}/lora/{lora.strip()}" if lora.strip() else ""
+            print(f"Tagging {len(todo_tags[k])} video(s) with {TEACHERS[k]}" + (f" + LoRA {lora.strip()}" if lp else "")
+                  + f" ({' / '.join(TEACHER_GPUS[k])}, first free)"
+                  + (", second looks " + ("on" if second_look == "on" or (second_look == "auto" and not lp) else "off"))
+                  + "…")
+            tagger = Tagger32BFP8LoRA() if lp else TAGGERS[k]()
+            args = [(v, redo, "", lp, second_look) if lp else (v, redo) for v in todo_tags[k]]
+            for r in tagger.tag_video.starmap(args, return_exceptions=True):
                 print("  ", r)
                 if isinstance(r, dict) and "didn't load" in str(r.get("error", "")):
                     print(f"Stopping {k}: the model couldn't start (see the error above).")

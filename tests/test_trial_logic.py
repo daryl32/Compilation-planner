@@ -1016,3 +1016,52 @@ def test_check_labels_prep_and_finish(tmp_path, monkeypatch):
     M.export.local(False)
     assert (out / "export" / "check_runs.json").exists()
 
+
+
+class _AskingLLM(_FakeLLM):
+    """First look gives kissing (double-check on); counts the second-look calls."""
+    def __init__(self):
+        super().__init__()
+        self.follow_calls = 0
+
+    def chat(self, convs, params, use_tqdm=False, lora_request=None):
+        if len(convs[0]) == 1:
+            return [_FakeOut('{"shot":[{"tag":"close-up","conf":90}],"action":[{"tag":"kissing","conf":90}],'
+                             '"caption":"c"}', 3000) for _ in convs]
+        self.follow_calls += 1
+        return [_FakeOut('{"answers":{"kissing":false}}', 3100) for _ in convs]
+
+
+def test_lora_batch_tagging_and_second_look_switch(tmp_path, monkeypatch):
+    M, pack, out, gold = _fake_trial(tmp_path, monkeypatch)
+    (pack / "library" / "tag_vocabulary.csv").write_text(
+        "tag,group,double_check\nclose-up,shot,\nkissing,action,yes\n")
+    vis = json.loads((out / "v" / "vision.json").read_text())
+    for tg in vis["targets"]:
+        for t in TL.context_times(tg["t"], 40.0):
+            (out / "v" / "frames" / TL.frame_name(t)).write_bytes(b"jpg")
+    monkeypatch.setattr(M, "_gpu_name", lambda d: "H100")
+    import sys
+    import types
+    fake_vllm = types.ModuleType("vllm")
+    fake_vllm.SamplingParams = lambda **kw: kw
+    lr = types.ModuleType("vllm.lora.request")
+    lr.LoRARequest = lambda name, i, path: ("lora", name)
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    monkeypatch.setitem(sys.modules, "vllm.lora", types.ModuleType("vllm.lora"))
+    monkeypatch.setitem(sys.modules, "vllm.lora.request", lr)
+
+    def run(lora_path, second_look):
+        M.prepare_prompts.local("v", 0, 0, 0)
+
+        class Self:
+            key, llm, load_error, load_seconds, first = "32b-fp8", _AskingLLM(), None, 0.0, True
+        M._tag_video(Self, "v", True, "", lora_path, second_look)
+        return Self.llm.follow_calls, json.loads((out / "v" / "tags_32b-fp8.json").read_text())
+    calls, tj = run(f"{out}/lora/try2", "auto")             # adapter: second looks off by default
+    assert calls == 0 and tj["second_looks"] is False and tj["model"].endswith("FP8 + LoRA try2")
+    assert all("kissing" in r["tags"] for r in tj["results"].values())
+    calls, tj = run(f"{out}/lora/try2", "on")               # forced on
+    assert calls > 0 and tj["second_looks"] is True
+    calls, tj = run("", "auto")                             # no adapter: on as before
+    assert calls > 0 and tj["model"].endswith("FP8")

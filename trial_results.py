@@ -397,10 +397,14 @@ def _cut_near(times, t: float, window: float = 0.5) -> bool:
 
 
 def teacher_label(model) -> str:
-    """'32B' / '32B FP8' / '8B' from a model name like Qwen/Qwen3-VL-32B-Instruct-FP8."""
-    m = str(model or "").upper()
-    size = "32B" if "32B" in m else "8B" if "8B" in m else (m.split("/")[-1] or "?")
-    return f"{size} FP8" if "FP8" in m else size
+    """'32B' / '32B FP8' / '8B' from a model name like Qwen/Qwen3-VL-32B-Instruct-FP8, plus
+    ' + LoRA try2' when an adapter tagged it ("…-FP8 + LoRA try2")."""
+    raw = str(model or "")
+    lora = raw.split("+ LoRA", 1)[1].strip() if "+ LoRA" in raw else ""
+    m = raw.split("+ LoRA", 1)[0].upper()
+    size = "32B" if "32B" in m else "8B" if "8B" in m else (m.split("/")[-1].strip() or "?")
+    name = f"{size} FP8" if "FP8" in m else size
+    return f"{name} + LoRA {lora}" if lora else name
 
 
 def batch_report(videos: dict, teacher: str = MAIN_TEACHER) -> list:

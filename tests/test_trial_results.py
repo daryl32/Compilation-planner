@@ -540,3 +540,9 @@ def test_check_runs_feed_the_filter(bundle, no_labels):
     at.run()
     assert not errors(at), errors(at)
     assert "they all see **crowd**" in " ".join(c.value for c in at.caption)
+
+
+def test_teacher_label_with_lora():
+    assert TR.teacher_label("Qwen/Qwen3-VL-32B-Instruct-FP8") == "32B FP8"
+    assert TR.teacher_label("Qwen/Qwen3-VL-32B-Instruct-FP8 + LoRA try2") == "32B FP8 + LoRA try2"
+    assert TR.teacher_label("Qwen/Qwen3-VL-8B-Instruct") == "8B"
