@@ -361,15 +361,18 @@ def tag_changes(a: dict, b: dict) -> list:
 def suspect_labels(test_data: dict, run_ids: list, videos: dict, labelled_at: dict) -> dict:
     """Your labelled frames that every chosen test run disagrees with, on at least one tag:
     {(video_id, t rounded to 2): {"there": tags all runs gave that you didn't, "not_there": tags you
-    gave that no run did, "runs": {run id: its tags}}}. A frame you've saved since the newest chosen
+    gave that no run did, "runs": {run id: its tags}, "detail": {run id: {"look", "nb" (filled in from
+    the moments either side), "ld" (dropped by the look check)} — only what the run recorded}}}.
+    One run is enough (e.g. to read a look run's answers on your frames). A frame you've saved since the newest chosen
     run (labelled_at, "YYYY-MM-DDTHH:MM:SS") counts as checked and is left out. videos: the results'
     videos with your labels overlaid (with_saved_labels)."""
     runs = [r for r in (test_data or {}).get("runs") or [] if r["id"] in run_ids]
-    if len(runs) < 2:
+    if not runs:
         return {}
     since = max(str(r.get("created") or "") for r in runs)
-    tags_by = [{(f["v"], round(float(f["t"]), 2)): f.get("tags") or [] for f in r.get("frames") or []
-                if f.get("t") is not None} for r in runs]
+    frames_by = [{(f["v"], round(float(f["t"]), 2)): f for f in r.get("frames") or [] if f.get("t") is not None}
+                 for r in runs]
+    tags_by = [{k: f.get("tags") or [] for k, f in fb.items()} for fb in frames_by]
     out = {}
     for v, vd in videos.items():
         for m in vd["moments"]:
@@ -386,8 +389,11 @@ def suspect_labels(test_data: dict, run_ids: list, videos: dict, labelled_at: di
             there = [sets[0][k] for k in sets[0] if k not in mine and all(k in s for s in sets[1:])]
             not_there = [mine[k] for k in mine if not any(k in s for s in sets)]
             if there or not_there:
+                detail = {r["id"]: {x: fb[key][x] for x in ("look", "nb", "ld") if fb[key].get(x)}
+                          for r, fb in zip(runs, frames_by)}
                 out[key] = {"there": there, "not_there": not_there,
-                            "runs": {r["id"]: tb[key] for r, tb in zip(runs, tags_by)}}
+                            "runs": {r["id"]: tb[key] for r, tb in zip(runs, tags_by)},
+                            "detail": {k: d for k, d in detail.items() if d}}
     return out
 
 

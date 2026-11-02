@@ -1785,7 +1785,10 @@ def _run_summary(run_dir: Path) -> dict | None:
             counts[k] += int(tj.get(k) or 0)
         vocab_csv = vocab_csv or tj.get("vocab_csv") or ""
         frames += [{"v": v, "t": r.get("t"), "g": r.get("gold_id"), "tags": r.get("tags") or [],
-                    "unsure": r.get("unsure") or []} for r in (tj.get("results") or {}).values()]
+                    "unsure": r.get("unsure") or [],
+                    **{short: r[long] for short, long in (("look", "look"), ("nb", "neighbour_added"),
+                                                          ("ld", "look_dropped")) if r.get(long)}}
+                   for r in (tj.get("results") or {}).values()]
     import trial_logic as TL
     return {**meta, "seconds": round(sec, 1), "moments": moments, "gpu": gpu,
             "cost": round(TL.stage_cost(sec, gpu or "H100"), 2), **counts, "vocab_csv": vocab_csv,
@@ -1845,7 +1848,8 @@ def finish_test_run(run_id: str, meta: dict, kind: str = "test") -> str:
     import trial_logic as TL
     pack_vol.reload()
     d = _test_dir() if kind == "test" else Path(f"{OUT}/checks")
-    (d / "runs" / run_id / "run.json").write_text(json.dumps(meta), encoding="utf-8")
+    if run_id:                      # (no run id = just rebuild the summary, e.g. --stage test-refresh)
+        (d / "runs" / run_id / "run.json").write_text(json.dumps(meta), encoding="utf-8")
     runs = [r for r in (_run_summary(p) for p in sorted((d / "runs").iterdir()) if p.is_dir()) if r]
     ts = _read_json(d / "testset.json", {}) or {}
     name = "test_runs.json" if kind == "test" else "check_runs.json"
@@ -2381,6 +2385,7 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     --stage test --look on: the teacher answers the look steps (people, penetration, bodies, who's on
     top, facing…) before tagging. --stage look-check --run <that run>: CPU-only copy with the tags its
     own look contradicts dropped to unsure.
+    --stage test-refresh: rebuild and download the test-run summary the app reads (no GPU).
     --trainer unsloth (default) or hf; --max-examples 16 --label smoke = a quick ~$1 check that training runs.
     --lora <name> on a normal / --batch run: tag with the FP8 teacher + that adapter (second looks off
     unless --second-look on)."""
@@ -2419,6 +2424,10 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     if stage == "test":
         _run_test(keys, label.strip().replace(" ", "-"), keep_vocab, dedup, lora.strip(), second_look,
                   look.strip().lower() in ("on", "yes", "true", "1"))
+        return
+    if stage == "test-refresh":
+        text = finish_test_run.remote("", {})
+        print(text + f"\n\n   Test runs → {_download_test_runs()}\n   In the app: 🧪 Trial results → 📋 Summary → 🧪 Test set.")
         return
     if stage in ("neighbours", "look-check"):
         if not run.strip():

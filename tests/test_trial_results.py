@@ -487,7 +487,13 @@ def test_suspect_labels():
     # saved after the newest run → checked, left out; saved before it → still listed
     assert ("vid_a", 30.0) not in TR.suspect_labels(data, ["r1", "r2"], vids, {("vid_a", 30.0): "2026-10-31T11:05:00"})
     assert ("vid_a", 30.0) in TR.suspect_labels(data, ["r1", "r2"], vids, {("vid_a", 30.0): "2026-10-31T09:00:00"})
-    assert TR.suspect_labels(data, ["r1"], vids, {}) == {}                     # needs two runs
+    one = TR.suspect_labels(data, ["r1"], vids, {})                            # one run: its own disagreements
+    assert one[("vid_a", 5.0)]["there"] == ["crowd"] and one[("vid_a", 5.0)]["detail"] == {}
+    assert TR.suspect_labels(data, [], vids, {}) == {}
+    # what a look run recorded travels with the frame
+    data["runs"][0]["frames"][0].update({"look": {"on_top": "her", "facing": "towards"}, "nb": ["crowd"]})
+    d = TR.suspect_labels(data, ["r1"], vids, {})[("vid_a", 5.0)]["detail"]["r1"]
+    assert d == {"look": {"on_top": "her", "facing": "towards"}, "nb": ["crowd"]}
 
 
 def test_check_my_label_filter(bundle, no_labels):

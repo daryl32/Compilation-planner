@@ -142,7 +142,7 @@ def _compare(data: dict) -> None:
                            key=lambda r: str(r.get("created") or ""))}
     test_ids = [r["id"] for r in test["runs"]]
     filters = {k: v for k, v in TR.FILTERS.items()
-               if (k != "disagree" or len(teachers) > 1) and (k != "suspect" or len(test_ids) >= 2)}
+               if (k != "disagree" or len(teachers) > 1) and (k != "suspect" or test_ids)}
     if st.session_state.get("tr_filter") not in filters:
         st.session_state["tr_filter"] = "all"
     with st.container(key="tl_wrap_tr_filters"):
@@ -170,7 +170,9 @@ def _compare(data: dict) -> None:
         sus_runs = st.multiselect("Test runs that must all disagree with your label", test_ids,
                                   default=test_ids[-2:], key="tr_sus_runs",
                                   help="Two different runs (e.g. the plain teacher and the LoRA) both "
-                                       "disagreeing with you is a strong hint the label needs a second look.")
+                                       "disagreeing with you is a strong hint the label needs a second look. "
+                                       "Pick just one run to read its answers on your frames (e.g. a look run: "
+                                       "each card then shows what it saw).")
         when = {(i.get("video_id"), round(float(i["t"]), 2)): i.get("labelled_at")
                 for i in TLB.load_labels() if i.get("t") is not None}
         sus = TR.suspect_labels(test, sus_runs, videos, when)
@@ -252,6 +254,17 @@ def _compare(data: dict) -> None:
                     if sus[sk]["not_there"]:
                         bits.append("none of them see **" + ", ".join(sus[sk]["not_there"]) + "** (you do)")
                     st.caption("🔍 " + " · ".join(bits))
+                    for rid, d in (sus[sk].get("detail") or {}).items():
+                        extra = []
+                        if d.get("nb"):
+                            extra.append("↔️ filled in from the moments either side: " + ", ".join(d["nb"]))
+                        if d.get("ld"):
+                            extra.append("👁️ dropped — its look disagrees: " + ", ".join(d["ld"]))
+                        if d.get("look"):
+                            extra.append(f"👁️ *{TR.look_line(d['look'])}*"
+                                         + (f" — “{d['look']['summary']}”" if d["look"].get("summary") else ""))
+                        if extra:
+                            st.caption(f"🧪 {rid.split('_', 2)[-1]}: " + "  \n".join(extra))
                     st.button("✅ My label is right", key=f"tr_sus_ok_{_k(v, m)}", on_click=_save,
                               args=(TR.correction_card(v, m, mine), list(mine), f"tr_edit_{_k(v, m)}"),
                               help="Keeps your tags as they are and marks the frame checked.")
