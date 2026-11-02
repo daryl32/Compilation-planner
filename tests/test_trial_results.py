@@ -567,6 +567,11 @@ def test_look_line():
                          "on_top": "partner", "facing": "towards", "viewpoint": "onlooker"})
     assert "penetration clearly visible (penis, vagina)" in line and "on top: partner" in line
     assert TR.look_line({}) == ""
+    acts = TR.look_line({"her_hands": "holding his penis", "her_mouth": "on his penis", "mouth_depth": "partway",
+                         "her_feet": "not visible", "partner_hands": "on her body", "partner_mouth": "other"})
+    assert acts == "her hands holding his penis, her mouth on his penis, depth partway, his hands on her body"
+    assert [k for k, _, _ in TR.look_steps()][-7:] == ["her_hands", "her_mouth", "mouth_depth", "her_feet",
+                                                       "partner_hands", "partner_mouth", "viewpoint"]
 
 
 def _a_look(**kw):

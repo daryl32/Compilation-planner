@@ -341,7 +341,10 @@ LOOK_STEPS = [
     ("her_posture", "Her posture", POSTURES),
     ("her_front_faces", "Her front faces (relative to the camera)", ["the camera", "away from the camera", "sideways"]),
     ("partner_posture", "Her partner's posture", POSTURES),
-    ("partner_legs_point", "Her partner's legs point (relative to the camera)",
+    ("partner_legs_point", "Are her partner's feet nearer the camera than his head? Feet nearer → towards the "
+                           "camera; head nearer → away from the camera; feet and head about as near → sideways. "
+                           "When the camera is behind her and his legs are under her, his feet are usually "
+                           "nearer → towards the camera",
      ["towards the camera", "away from the camera", "sideways", "out of frame"]),
     ("on_top", "Who is on top? Her back against the bed → partner on top; her hair or breasts hang down towards "
                "her partner → she is on top; in POV, the camera looks up at her → she is on top, looks down at "
@@ -350,6 +353,24 @@ LOOK_STEPS = [
                "or buttocks towards his face, his legs stretched out in front of her → away; with an onlooker "
                "camera use the steps above (his legs towards the camera + her front away from the camera → "
                "towards); in POV, her face to the camera → towards", ["towards", "away"]),
+    # Hands, mouths and feet — for the action tags (Handjob, Blowjob, deepthroat, fingering, masturbation,
+    # Cunnilingus, Footjob). If a hand does two things, answer what it does to genitals.
+    ("her_hands", "What are her hands doing? 'stroking' = her hand moves along it across the 7 frames; "
+                  "'holding' = her hand is on it but not moving along it",
+     ["stroking his penis", "holding his penis", "on her own genitals", "on her partner's body",
+      "on her own body", "supporting herself", "not visible"]),
+    ("her_mouth", "Where is her mouth?",
+     ["on his penis", "kissing", "on her partner's body", "open / other", "not visible"]),
+    ("mouth_depth", "If her mouth is on his penis, how far in? 'near the base' only when you can see her lips "
+                    "at or close to his body, with most of it in her mouth; her hand wrapped round most of the "
+                    "shaft means it isn't near the base; hair, angle or a hand hiding her lips → can't tell",
+     ["tip only", "partway", "near the base", "not applicable"]),
+    ("her_feet", "Her feet", ["on his penis", "other", "not visible"]),
+    ("partner_hands", "What are her partner's hands doing? 'fingers inside her' only when you can see them go in",
+     ["fingers inside her", "rubbing her genitals", "holding a toy on or in her", "on her body", "other",
+      "not visible"]),
+    ("partner_mouth", "Where is her partner's mouth?",
+     ["on her genitals", "kissing", "on her body", "other", "not visible"]),
     ("viewpoint", "Viewpoint", ["a participant's eyes (their own body at the frame edge)", "onlooker"]),
 ]
 LOOK_POSITION_NEEDS = {   # position tag (lower case) → what the look must say for it to stand

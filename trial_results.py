@@ -142,6 +142,13 @@ def look_line(look: dict) -> str:
         parts.append(f"on top: {look['on_top']}")
     if look.get("facing"):
         parts.append(f"she faces partner: {look['facing']}")
+    acts = [f"{name} {look[k]}" for k, name in (("her_hands", "her hands"), ("her_mouth", "her mouth"),
+                                                ("mouth_depth", "depth"), ("her_feet", "her feet"),
+                                                ("partner_hands", "his hands"), ("partner_mouth", "his mouth"))
+            if look.get(k) and look[k] not in ("not visible", "not applicable", "can't tell", "other",
+                                               "open / other")]
+    if acts:
+        parts.append(", ".join(acts))
     if look.get("viewpoint"):
         parts.append("POV" if look["viewpoint"].startswith("a participant") else look["viewpoint"])
     return " · ".join(parts)
@@ -528,7 +535,10 @@ LOOK_STEP_NAMES = {"women": "Women", "men": "Men", "penetration": "Penetration",
                    "penetration_where": "Penetration where", "hidden": "Hidden from view",
                    "her_posture": "Her posture", "her_front_faces": "Her front faces (camera)",
                    "partner_posture": "Partner's posture", "partner_legs_point": "Partner's legs point (camera)",
-                   "on_top": "On top", "facing": "She faces her partner", "viewpoint": "Viewpoint"}
+                   "on_top": "On top", "facing": "She faces her partner", "her_hands": "Her hands",
+                   "her_mouth": "Her mouth", "mouth_depth": "How far in (mouth)", "her_feet": "Her feet",
+                   "partner_hands": "Partner's hands", "partner_mouth": "Partner's mouth",
+                   "viewpoint": "Viewpoint"}
 
 
 def look_steps() -> list:

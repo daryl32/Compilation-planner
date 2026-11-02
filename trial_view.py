@@ -58,7 +58,8 @@ def _look_check_form(run_id: str, v: str, m: dict, look: dict, mine, run_tags) -
     pick the right answer if not, then 💾 Save. Saved checks reopen with your answers."""
     key = TR.look_check_key(run_id, v, m["t"])
     saved = TR.load_look_checks().get(key)
-    steps = TR.look_steps()
+    # Only the steps this run answered (older runs predate the hands / mouth steps — don't save a guess).
+    steps = [s for s in TR.look_steps() if look.get(s[0])]
     done = ""
     if saved:
         n = sum(1 for k, _, _ in steps if saved["mine"].get(k))

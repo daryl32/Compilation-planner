@@ -83,7 +83,7 @@ TEST_HOURS = 2.0
 TEST_MIN_LABELLED = 5           # a test video needs at least this many of your labelled frames
 # Near-identical moments in a scene are tagged once and the answer copied (--dedup 0 = tag all).
 DEDUP_DEFAULT = 0.96
-LOOK_EXTRA_TOKENS = 300    # room for the look steps and summary (--look on)
+LOOK_EXTRA_TOKENS = 400    # room for the look steps and summary (--look on; 19 steps since the hands / mouth steps)
 TAG_MAX_TOKENS = 800        # the reply lists every tag that might apply, with a confidence — room for ~50
 
 DATA, CACHE = "/data", "/cache"
