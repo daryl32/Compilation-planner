@@ -52,6 +52,15 @@ def name_key(name: str) -> str:
     return unicodedata.normalize("NFC", str(name)).casefold().strip()
 
 
+_MEDIA_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".m4a", ".mp3", ".wav", ".aac", ".flac"}
+
+
+def _media_stem(name: str) -> str:
+    """The name without a video/audio extension ("clip.mp4" → "clip", "clip" → "clip")."""
+    base, dot, ext = name.rpartition(".")
+    return base if dot and base and f".{ext}" in _MEDIA_EXTS else name
+
+
 def _get_service():
     from googleapiclient.discovery import build
     from google.oauth2 import service_account
@@ -415,6 +424,13 @@ def find_drive_file(drive_rel_path: str, service=None) -> tuple:
         listing = _list_files(service, parent_id)
         want = name_key(file_name)
         files = [f for f in listing if name_key(f.get("name", "")) == want]
+        if not files:
+            # Same name with the extension missing or different ("clip" or "clip.mov"
+            # for "clip.mp4") — taken only when exactly one file fits, never a guess.
+            stem = _media_stem(want)
+            same = [f for f in listing if _media_stem(name_key(f.get("name", ""))) == stem]
+            if len(same) == 1:
+                files = same
         if not files:
             import difflib
             close = difflib.get_close_matches(want, [name_key(f.get("name", "")) for f in listing], n=1, cutoff=0.8)

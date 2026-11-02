@@ -47,3 +47,18 @@ def test_find_drive_file_matches_accents_written_either_way():
     assert f is None and "closest there" in err and "BATID" in err
     f, err = DS.find_drive_file("Audio-Library/nothing like it.m4a", _Service([nfd]))
     assert f is None and "closest" not in err
+
+
+def test_find_drive_file_accepts_missing_or_different_extension():
+    import drive_sync as DS
+    # The Drive copy lost its extension, and the render asks for the .mp4 name
+    f, err = DS.find_drive_file("Videos-PH/Eva_Elfie1.mp4", _Service(["Eva_Elfie1", "Eva_Elfie2.mp4"]))
+    assert err is None and f["name"] == "Eva_Elfie1"
+    f, err = DS.find_drive_file("Videos-PH/clip.mp4", _Service(["clip.mov"]))
+    assert err is None and f["name"] == "clip.mov"
+    # Two candidates → no guess
+    f, err = DS.find_drive_file("Videos-PH/clip.mp4", _Service(["clip", "clip.mov"]))
+    assert f is None
+    # A near-but-different name still isn't taken
+    f, err = DS.find_drive_file("Videos-PH/Eva_Elfie1.mp4", _Service(["Eva_Elfie11"]))
+    assert f is None
