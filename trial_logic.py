@@ -323,8 +323,110 @@ def gpu_use(key: str, gpu: str, tokens: int, seconds: float) -> dict:
 # The tagging prompt
 # ---------------------------------------------------------------------------
 
-def build_prompt(vocab: list) -> tuple:
+# The look: before any tag, the teacher answers these steps in order, each from fixed choices
+# (+ "can't tell"), then writes a one-sentence summary from them. (key, question, choices)
+CANT = "can't tell"
+POSTURES = ["lying on back", "lying on front", "lying on side", "on all fours", "kneeling upright", "sitting",
+            "squatting / straddling", "standing", "bent over (standing)", "out of frame"]
+LOOK_STEPS = [
+    ("women", "How many women are in the scene?", ["0", "1", "2", "3+"]),
+    ("men", "How many men are in the scene?", ["0", "1", "2", "3+"]),
+    ("penetration", "Penetration — 'hidden but implied' only when their hips are joined AND there is a steady "
+                    "thrusting or riding movement across the 7 frames",
+     ["clearly visible", "hidden but implied", "not happening"]),
+    ("penetration_with", "Penetration with", ["penis", "toy", "fingers", "not applicable"]),
+    ("penetration_where", "Penetration where", ["vagina", "anus", "not applicable"]),
+    ("hidden", "What is hidden from view?",
+     ["genitals hidden", "partner mostly hidden behind her", "nothing important hidden"]),
+    ("her_posture", "Her posture", POSTURES),
+    ("her_front_faces", "Her front faces (relative to the camera)", ["the camera", "away from the camera", "sideways"]),
+    ("partner_posture", "Her partner's posture", POSTURES),
+    ("partner_legs_point", "Her partner's legs point (relative to the camera)",
+     ["towards the camera", "away from the camera", "sideways", "out of frame"]),
+    ("on_top", "Who is on top? Her back against the bed → partner on top; her hair or breasts hang down towards "
+               "her partner → she is on top; in POV, the camera looks up at her → she is on top, looks down at "
+               "her → partner on top", ["her", "partner", "side by side", "neither (standing)"]),
+    ("facing", "Which way does she face her partner? Her face and chest turned to his face → towards; her back "
+               "or buttocks towards his face, his legs stretched out in front of her → away; with an onlooker "
+               "camera use the steps above (his legs towards the camera + her front away from the camera → "
+               "towards); in POV, her face to the camera → towards", ["towards", "away"]),
+    ("viewpoint", "Viewpoint", ["a participant's eyes (their own body at the frame edge)", "onlooker"]),
+]
+LOOK_POSITION_NEEDS = {   # position tag (lower case) → what the look must say for it to stand
+    "cowgirl position": lambda L: L.get("on_top") == "her" and L.get("facing") == "towards",
+    "reverse cowgirl": lambda L: L.get("on_top") == "her" and L.get("facing") == "away",
+    "missionary": lambda L: L.get("her_posture") == "lying on back" and L.get("on_top") == "partner",
+    "doggy style": lambda L: L.get("her_posture") in ("on all fours", "bent over (standing)"),
+    "laying down": lambda L: (L.get("her_posture", "").startswith("lying")
+                              and L.get("partner_posture", "").startswith("lying")),
+    "standing": lambda L: L.get("her_posture") == "standing" and L.get("partner_posture") == "standing",
+}
+
+
+def look_instructions() -> str:
+    lines = ["Before any tag, look carefully at the people and fill in \"look\" — every step, in this order, "
+             "choosing one of the listed answers (or \"can't tell\" when you can't see it). Then write "
+             "\"summary\": one or two plain sentences built only from your answers. Use your answers when "
+             "you choose the tags."]
+    lines += [f"- {key}: {q} — {' | '.join(ch)} | {CANT}" for key, q, ch in LOOK_STEPS]
+    return "\n".join(lines)
+
+
+def look_shape() -> str:
+    return '"look": {' + ", ".join(f'"{k}": "..."' for k, _, _ in LOOK_STEPS) + ', "summary": "..."}'
+
+
+def look_schema() -> dict:
+    props = {k: {"type": "string", "enum": ch + [CANT]} for k, _, ch in LOOK_STEPS}
+    props["summary"] = {"type": "string", "maxLength": 240}
+    return {"type": "object", "additionalProperties": False, "required": list(props), "properties": props}
+
+
+def read_look(data) -> dict | None:
+    """The look from a reply: known steps with an allowed answer, plus the summary; None if absent."""
+    if not isinstance(data, dict):
+        return None
+    out = {}
+    for k, _, ch in LOOK_STEPS:
+        v = str(data.get(k) or "").strip()
+        if v in ch or v == CANT:
+            out[k] = v
+    if data.get("summary"):
+        out["summary"] = str(data["summary"])[:240]
+    return out or None
+
+
+def look_check(r: dict, vocab: list) -> list:
+    """The free CPU check: drop to unsure what the moment's own look contradicts. A position needs
+    penetration clearly visible or hidden but implied, both postures seen (not out of frame / can't
+    tell) and on top / facing / postures that fit it (LOOK_POSITION_NEEDS). Penetration (and Anal
+    Sex) needs "clearly visible" — your labels give it only when it's visible. Changes `r` in place
+    ("look_dropped"); returns the tags dropped. A moment without a look is left alone."""
+    L = r.get("look") or {}
+    if not L:
+        return []
+    names = {x["tag"].lower(): x["tag"] for x in vocab}
+    seen_pen = L.get("penetration") in ("clearly visible", "hidden but implied")
+    bodies = all(L.get(k) not in (None, CANT, "out of frame") for k in ("her_posture", "partner_posture"))
+    drop = []
+    for t in r.get("tags") or []:
+        low = t.lower()
+        if low in LOOK_POSITION_NEEDS:
+            if not (seen_pen and bodies and LOOK_POSITION_NEEDS[low](L)):
+                drop.append(t)
+        elif low in ("penetration", "anal sex") and L.get("penetration") != "clearly visible":
+            drop.append(t)
+    if drop:
+        r["tags"] = [t for t in r["tags"] if t not in drop]
+        r["unsure"] = list(r.get("unsure") or []) + [t for t in drop if t not in (r.get("unsure") or [])]
+        r["look_dropped"] = list(r.get("look_dropped") or []) + drop
+    return [names.get(t.lower(), t) for t in drop]
+
+
+def build_prompt(vocab: list, look: bool = False) -> tuple:
     """(head, moment, tail) for one moment shown as 7 frames over 4 seconds.
+    look: before tagging, the teacher answers the look steps (LOOK_STEPS — people, penetration,
+    bodies, orientation) and a one-sentence summary, which replaces the caption.
 
     head — everything that is the same for every moment (the task, the tag lists, the rules,
            the reply format). It comes FIRST, before any picture, so vLLM's prefix cache keeps
@@ -389,14 +491,17 @@ def build_prompt(vocab: list) -> tuple:
                  if r["tag"].lower() in umap]
     need = [name for name, _, required in cats if required]
     shape = ", ".join(f'"{category_key(name)}": [{{"tag": "...", "conf": 0-100}}]' for name, _, _ in cats)
-    head += ["", "Work through the categories in order. In each one, list the tags that might apply, each "
+    if look:
+        head += ["", look_instructions()]
+    head += ["", ("First fill in \"look\", then work" if look else "Work") + " through the categories in order. In each one, list the tags that might apply, each "
                  "with how sure you are that it is clearly there, from 0 to 100. Give a tag you are not "
                  "sure about a low number rather than leaving it out; leave out tags that clearly don't "
                  "apply; use [] when nothing in a category applies."
              + (f" {', '.join(need)} must always have at least one tag — give your best guess." if need else ""),
              "Only use tags from that category's list, spelled exactly as written. Reply with JSON only, "
              "no other text:",
-             "{" + shape + ', "caption": "one short neutral sentence"}']
+             ("{" + look_shape() + ", " + shape + "}" if look
+              else "{" + shape + ', "caption": "one short neutral sentence"}')]
     moment = "The moment to label — 7 frames in time order, frame 4 in the middle:"
     tail = "Reply with the JSON for this moment only."
     return "\n".join(head), moment, tail
@@ -501,7 +606,7 @@ def parse_answer(text: str, vocab: list) -> dict:
             conf[r["tag"]] = max(conf.get(r["tag"], -1), c)
 
     for k, val in data.items():
-        if k in ("caption", "tags", "unsure") or not isinstance(val, list):
+        if k in ("caption", "tags", "unsure", "look") or not isinstance(val, list):
             continue
         for it in val:
             if isinstance(it, dict):
@@ -513,8 +618,11 @@ def parse_answer(text: str, vocab: list) -> dict:
     for n in data.get("unsure") if isinstance(data.get("unsure"), list) else []:
         put(n, 0)
     out = finalize(conf, vocab)
-    return {"tags": out["tags"], "unsure": out["unsure"], "caption": str(data.get("caption") or "")[:300],
-            "ok": ok, **{k: v for k, v in out.items() if k not in ("tags", "unsure")}}
+    seen = read_look(data.get("look"))
+    caption = str(data.get("caption") or (seen or {}).get("summary") or "")[:300]
+    return {"tags": out["tags"], "unsure": out["unsure"], "caption": caption, "ok": ok,
+            **({"look": seen} if seen else {}),
+            **{k: v for k, v in out.items() if k not in ("tags", "unsure")}}
 
 
 def finalize(conf: dict, vocab: list, rejected=()) -> dict:
@@ -604,11 +712,16 @@ def finalize(conf: dict, vocab: list, rejected=()) -> dict:
             "rule_drops": dropped, "rule_required": required_adds}
 
 
-def answer_schema(vocab: list) -> dict:
+def answer_schema(vocab: list, look: bool = False) -> dict:
     """JSON schema the teacher's reply is held to (vLLM structured output): one list per category,
     in your category order, each item a tag from THAT category with a 0–100 confidence; required
-    categories need at least one item; then the caption. Typos and invented tags can't happen."""
+    categories need at least one item; then the caption. Typos and invented tags can't happen.
+    look: the look object comes FIRST (each step one of its fixed choices, then a summary) and
+    replaces the caption."""
     props, req = {}, []
+    if look:
+        props["look"] = look_schema()
+        req.append("look")
     for name, rows, required in categories(vocab):
         key = category_key(name)
         props[key] = {"type": "array", "minItems": 1 if required else 0,
@@ -617,6 +730,8 @@ def answer_schema(vocab: list) -> dict:
                                 "properties": {"tag": {"type": "string", "enum": [r["tag"] for r in rows]},
                                                "conf": {"type": "integer", "minimum": 0, "maximum": 100}}}}
         req.append(key)
+    if look:
+        return {"type": "object", "additionalProperties": False, "required": req, "properties": props}
     props["caption"] = {"type": "string", "maxLength": 200}
     return {"type": "object", "additionalProperties": False, "required": req + ["caption"], "properties": props}
 

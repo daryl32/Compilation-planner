@@ -552,3 +552,12 @@ def test_neighbours_filter():
     filled = {"key": "a", "teachers": {"32b": {"tags": ["x"], "neighbour_added": ["x"]}}}
     plain = {"key": "b", "teachers": {"32b": {"tags": ["x"]}}}
     assert [m["key"] for m in TR.filter_moments([filled, plain], "neighbours")] == ["a"]
+
+
+def test_look_line():
+    line = TR.look_line({"women": "1", "men": "1", "penetration": "clearly visible", "penetration_with": "penis",
+                         "penetration_where": "vagina", "her_posture": "lying on back", "her_front_faces": "the camera",
+                         "partner_posture": "kneeling upright", "partner_legs_point": "away from the camera",
+                         "on_top": "partner", "facing": "towards", "viewpoint": "onlooker"})
+    assert "penetration clearly visible (penis, vagina)" in line and "on top: partner" in line
+    assert TR.look_line({}) == ""

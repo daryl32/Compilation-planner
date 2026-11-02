@@ -269,7 +269,10 @@ def _compare(data: dict) -> None:
                                     + (f" · 🔍 taken out on double-check: {', '.join(r['look_removed'])}"
                                        if r.get("look_removed") else "")
                                     + (f" · ↔️ filled in from the moments either side: {', '.join(r['neighbour_added'])}"
-                                       if r.get("neighbour_added") else ""))
+                                       if r.get("neighbour_added") else "")
+                                    + (f" · 👁️ dropped — its look disagrees: {', '.join(r['look_dropped'])}"
+                                       if r.get("look_dropped") else "")
+                                    + (f"  \n👁️ *{TR.look_line(r['look'])}*" if r.get("look") else ""))
                 if caps:
                     st.caption("  \n".join(caps))
                 # ✏️ Correct: your tags for this frame go to your training labels (the gold set).

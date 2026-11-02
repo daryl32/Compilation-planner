@@ -219,7 +219,8 @@ def test_export(tmp_path, monkeypatch):
     assert m["mine"] == ["close-up", "dancing"] and m["old"] == []
     assert m["teachers"] == {"32b": {"tags": ["close-up", "dancing"], "unsure": None, "caption": None,
                                      "copied_from": None, "look_added": None, "look_removed": None,
-                                     "neighbour_added": None, "conf": None}}
+                                     "neighbour_added": None, "look": None, "look_dropped": None,
+                                     "conf": None}}
     assert (out / "export" / m["frame"]).exists()
     plain = next(m for m in v["moments"] if m["key"] == "s1_0")
     assert plain["mine"] is None and plain["teachers"] == {}
@@ -1112,3 +1113,50 @@ def test_neighbour_fill_never_chains_from_its_own_fills():
     cow = ["penetration", "Cowgirl position"]
     res = {"a": _m(10, cow), "b": _m(18, []), "c": _m(26, []), "d": _m(34, cow)}
     assert TL.neighbour_fill(res, v) == 0       # b's after (c) and c's before (b) have nothing
+
+
+def _look(**kw):
+    base = {"women": "1", "men": "1", "penetration": "clearly visible", "penetration_with": "penis",
+            "penetration_where": "vagina", "hidden": "nothing important hidden",
+            "her_posture": "squatting / straddling", "her_front_faces": "away from the camera",
+            "partner_posture": "lying on back", "partner_legs_point": "towards the camera",
+            "on_top": "her", "facing": "towards", "viewpoint": "onlooker", "summary": "She rides him."}
+    return {**base, **kw}
+
+
+def test_look_prompt_schema_and_parse():
+    v = TL.parse_vocabulary(NEIGHBOUR_CSV)
+    head, _, _ = TL.build_prompt(v, look=True)
+    assert 'First fill in "look"' in head and '"look": {"women"' in head and '"caption"' not in head
+    plain, _, _ = TL.build_prompt(v)
+    assert '"look"' not in plain and '"caption"' in plain
+    sch = TL.answer_schema(v, look=True)
+    assert list(sch["properties"])[0] == "look" and "caption" not in sch["properties"]
+    assert sch["properties"]["look"]["properties"]["on_top"]["enum"][-1] == "can't tell"
+    assert "caption" in TL.answer_schema(v)["properties"]
+    reply = json.dumps({"look": {**_look(), "facing": "sideways-ish"},
+                        "action": [{"tag": "penetration", "conf": 90}],
+                        "Position": [{"tag": "Cowgirl position", "conf": 80}]})
+    ans = TL.parse_answer(reply, TL.teacher_vocab(v))
+    assert ans["tags"] == ["penetration", "Cowgirl position"]
+    assert ans["caption"] == "She rides him."              # the summary is the caption
+    assert "facing" not in ans["look"] and ans["look"]["on_top"] == "her"   # unknown answer ignored
+
+
+def test_look_check_drops_what_the_look_contradicts():
+    v = TL.parse_vocabulary(NEIGHBOUR_CSV)
+    def run(look, tags=("penetration", "Cowgirl position")):
+        r = {"tags": list(tags), "unsure": [], "look": look}
+        return TL.look_check(r, v), r
+    assert run(_look()) == ([], {"tags": ["penetration", "Cowgirl position"], "unsure": [], "look": _look()})
+    assert run(_look(facing="away"))[0] == ["Cowgirl position"]            # that's reverse cowgirl
+    assert run(_look(on_top="partner"))[0] == ["Cowgirl position"]
+    assert run(_look(partner_posture="out of frame"))[0] == ["Cowgirl position"]
+    dropped, r = run(_look(penetration="hidden but implied"))
+    assert dropped == ["penetration"] and r["tags"] == ["Cowgirl position"]   # position stays
+    assert run(_look(penetration="not happening"))[0] == ["penetration", "Cowgirl position"]
+    mis = _look(her_posture="lying on back", partner_posture="kneeling upright", on_top="partner")
+    assert run(mis, ("penetration", "Missionary"))[0] == []
+    _, r = run(_look(facing="away"))
+    assert r["unsure"] == ["Cowgirl position"] and r["look_dropped"] == ["Cowgirl position"]
+    assert TL.look_check({"tags": ["Cowgirl position"]}, v) == []            # no look → untouched

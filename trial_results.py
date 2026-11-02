@@ -122,6 +122,31 @@ def any_wrong(moment: dict) -> bool:
     return "mine" in sets and any(s != sets["mine"] for k, s in sets.items() if k not in ("mine", "old"))
 
 
+def look_line(look: dict) -> str:
+    """The teacher's look steps as one short line for a card (the summary is the caption)."""
+    look = look or {}
+    parts = []
+    if look.get("women") or look.get("men"):
+        parts.append(f"{look.get('women', '?')} woman/women, {look.get('men', '?')} man/men")
+    if look.get("penetration"):
+        parts.append("penetration " + look["penetration"]
+                     + (f" ({look['penetration_with']}, {look['penetration_where']})"
+                        if look.get("penetration_with") not in (None, "not applicable", "can't tell") else ""))
+    if look.get("hidden") and look["hidden"] != "nothing important hidden":
+        parts.append(look["hidden"])
+    if look.get("her_posture"):
+        parts.append(f"her: {look['her_posture']}, front to {look.get('her_front_faces', '?')}")
+    if look.get("partner_posture"):
+        parts.append(f"partner: {look['partner_posture']}, legs {look.get('partner_legs_point', '?')}")
+    if look.get("on_top"):
+        parts.append(f"on top: {look['on_top']}")
+    if look.get("facing"):
+        parts.append(f"she faces partner: {look['facing']}")
+    if look.get("viewpoint"):
+        parts.append("POV" if look["viewpoint"].startswith("a participant") else look["viewpoint"])
+    return " · ".join(parts)
+
+
 FILTERS = {
     "all": "All moments",
     "todo": "Not reviewed by me yet",
