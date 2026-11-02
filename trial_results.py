@@ -350,7 +350,14 @@ def test_run_scores(runs: list, labels: list, tags: list) -> list:
     trial_logic.score_tags: "n", "overall", "per_tag")."""
     import trial_logic as TLG
     gold = [i for i in labels if i.get("type") == "tags" and not i.get("skipped")]
-    return [{"run": r, "score": TLG.score_tags(TLG.run_pairs(r.get("frames") or [], gold), tags)} for r in runs]
+    return [{"run": r, "score": TLG.score_tags(TLG.run_pairs(r.get("frames") or [], gold), tags),
+             "copied": TLG.copied_scored(r.get("frames") or [], gold)} for r in runs]
+
+
+def test_set_videos() -> set:
+    """The 🧪 test set's video ids (empty if there's no test set yet)."""
+    return {x.get("video_id") for x in (((load_test_runs() or {}).get("set") or {}).get("videos") or [])
+            if x.get("video_id")}
 
 
 def tag_changes(a: dict, b: dict) -> list:

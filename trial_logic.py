@@ -254,14 +254,17 @@ def window_embedding(times, embs, t: float, half: float = DEDUP_WINDOW):
     return v / n if n else None
 
 
-def dedup_targets(targets: list, times, embs, threshold: float = DEDUP_DEFAULT) -> tuple:
+def dedup_targets(targets: list, times, embs, threshold: float = DEDUP_DEFAULT, protect=()) -> tuple:
     """Split a video's moments into the ones to send to the teacher and the ones that can copy a
     tagged moment's answer: (keep, copies). copies = {key: {"of": kept key, "similarity": s}}.
 
     Two moments are "the same" only when they're in the same scene and BOTH their middle frame and
     their ±2 s window of frames match above the threshold — so a still scene where nothing changes
     is tagged once, while a scene whose movement differs from one moment to the next is tagged at
-    every moment. Your labelled frames (gold) are always sent, so the report's scores are real."""
+    every moment. Your labelled frames (gold) are always sent, so the report's scores are real.
+    protect: keys of more moments to always send — your labels matched by video and time (✏️
+    corrections and cards labelled after the vision run carry no gold_id on the target)."""
+    protect = set(protect or ())
     if not threshold or threshold <= 0 or times is None or embs is None or len(times) == 0:
         return list(targets), {}
     times = np.asarray(times, dtype=float)
@@ -279,7 +282,7 @@ def dedup_targets(targets: list, times, embs, threshold: float = DEDUP_DEFAULT) 
     for tg in sorted(targets, key=lambda x: float(x["t"])):
         f = feats.get(tg["key"])
         sc = tg.get("scene_id")
-        if f is None or tg.get("gold_id") or sc is None:
+        if f is None or tg.get("gold_id") or tg["key"] in protect or sc is None:
             keep.append(tg)
             if f is not None and sc is not None:
                 reps.setdefault(sc, []).append((tg["key"], *f))
@@ -1146,6 +1149,19 @@ def run_pairs(frames: list, gold: list) -> list:
         if f is not None:
             pairs.append((f.get("tags") or [], i.get("tags") or []))
     return pairs
+
+
+def copied_scored(frames: list, gold: list) -> int:
+    """How many of your labelled frames a run answered by copying a near-identical moment (dedup)
+    instead of tagging them (runs from before 3 Nov didn't protect ✏️ corrections from copying)."""
+    by_id = {f["g"]: f for f in frames if f.get("g")}
+    by_t = {(f["v"], round(float(f["t"]), 2)): f for f in frames if f.get("t") is not None}
+    n = 0
+    for i in gold:
+        f = by_id.get(i.get("id")) or (by_t.get((i.get("video_id"), round(float(i["t"]), 2)))
+                                       if i.get("t") is not None else None)
+        n += bool(f is not None and f.get("c"))
+    return n
 
 
 def test_runs_markdown(runs: list, gold: list, tags: list, top: int = 15) -> str:

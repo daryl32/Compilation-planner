@@ -313,6 +313,15 @@ def test_dedup_targets_same_scene_only_and_gold_kept():
     assert copies["b"]["similarity"] >= 0.96
     assert TL.dedup_targets(targets, times, embs, 0) == (targets, {})
     assert TL.dedup_targets(targets, None, None, 0.96) == (targets, {})
+    keep, copies = TL.dedup_targets(targets, times, embs, 0.96, protect={"b"})   # labelled by time
+    assert "b" in [k["key"] for k in keep] and "b" not in copies
+
+
+def test_copied_scored():
+    frames = [{"v": "a", "t": 1.0, "tags": [], "c": "k1"}, {"v": "a", "t": 2.0, "tags": []},
+              {"v": "a", "t": 3.0, "g": "x", "tags": [], "c": "k2"}]
+    gold = [{"video_id": "a", "t": 1.0}, {"video_id": "a", "t": 2.0}, {"id": "x"}, {"video_id": "b", "t": 1.0}]
+    assert TL.copied_scored(frames, gold) == 2
 
 
 def test_gpu_use():

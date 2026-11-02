@@ -194,6 +194,14 @@ def _compare(data: dict) -> None:
                if (k != "disagree" or len(teachers) > 1) and (k != "suspect" or test_ids)}
     if st.session_state.get("tr_filter") not in filters:
         st.session_state["tr_filter"] = "all"
+    test_vids = TR.test_set_videos()
+    if test_vids:
+        if st.toggle(f"🧪 Test-set videos only ({len(test_vids & set(videos))} of {len(test_vids)} here)",
+                     key="tr_test_only",
+                     help="Just the moments in the 🧪 test-set videos — e.g. with “Not reviewed by me yet” to "
+                          "label every test-set moment. Pick “All batches” above if some are missing: the "
+                          "test-set videos come from several batches."):
+            videos = {v: d for v, d in videos.items() if v in test_vids}
     with st.container(key="tl_wrap_tr_filters"):
         c = st.columns([3, 2, 2, 2])
     if st.session_state.get("tr_vid") not in ["(all videos)"] + sorted(videos):
@@ -511,10 +519,16 @@ def _test_set() -> None:
                    "Missed": x["score"]["overall"]["fn"],
                    "2nd looks (+/−)": f"{x['run'].get('looks', 0)} (+{x['run'].get('look_added', 0)}/"
                                       f"−{x['run'].get('look_removed', 0)})",
-                   "Needs-a-tag fills": x["run"].get("required_fills", 0), "Tagging $": x["run"].get("cost")}
+                   "Needs-a-tag fills": x["run"].get("required_fills", 0),
+                   "Your frames copied": x.get("copied", 0), "Tagging $": x["run"].get("cost")}
                   for x in scored], hide_index=True, width="stretch", key="tr_test_runs",
                  column_config={"F1": st.column_config.ProgressColumn("F1", min_value=0.0, max_value=1.0, format="%.2f"),
                                 "Tagging $": st.column_config.NumberColumn(format="$%.2f")})
+    if any(x.get("copied") for x in scored):
+        st.caption("**Your frames copied** = labelled frames the run answered by copying a near-identical "
+                   "moment instead of tagging them (labels added after a video's vision run weren't protected "
+                   "before v1.39). Runs from now on tag every labelled frame for real. Older runs show 0 until "
+                   "`--stage test-refresh` rebuilds their summary.")
     if len(scored) < 2:
         st.caption("Run it again after your next settings change to see the per-tag difference here.")
         return

@@ -783,7 +783,13 @@ def prepare_prompts(video_id: str, max_prompts: int = 0, examples: int = 0, dedu
         dedup = 0
     by_key = {tg["key"]: tg for tg in targets}
     times, embs = _video_embeddings(video_id)
-    keep, copies = TL.dedup_targets(targets, times, embs, dedup)
+    # every moment you've labelled is tagged for real, never copied (scores stay honest) — matched by
+    # video and time, as the scores match them (✏️ corrections carry no gold_id)
+    labelled_t = {round(float(i["t"]), 2) for i in _gold_items()
+                  if i.get("type") == "tags" and not i.get("skipped") and i.get("video_id") == video_id
+                  and i.get("t") is not None}
+    protect = {tg["key"] for tg in targets if round(float(tg["t"]), 2) in labelled_t}
+    keep, copies = TL.dedup_targets(targets, times, embs, dedup, protect)
     for key, c in copies.items():
         tg = by_key[key]
         c.update({"t": tg["t"], "scene_id": tg.get("scene_id"), "gold_id": tg.get("gold_id")})
@@ -1787,7 +1793,8 @@ def _run_summary(run_dir: Path) -> dict | None:
         frames += [{"v": v, "t": r.get("t"), "g": r.get("gold_id"), "tags": r.get("tags") or [],
                     "unsure": r.get("unsure") or [],
                     **{short: r[long] for short, long in (("look", "look"), ("nb", "neighbour_added"),
-                                                          ("ld", "look_dropped")) if r.get(long)}}
+                                                          ("ld", "look_dropped"), ("c", "copied_from"))
+                       if r.get(long)}}
                    for r in (tj.get("results") or {}).values()]
     import trial_logic as TL
     return {**meta, "seconds": round(sec, 1), "moments": moments, "gpu": gpu,
