@@ -516,3 +516,100 @@ def batch_report(videos: dict, teacher: str = MAIN_TEACHER) -> list:
     if len(rows) > 1:
         rows.append(row("All", [v for b in order for v in groups[b]]))
     return rows
+
+
+# ---------------------------------------------------------------------------
+# 👁️ Look checks — your verdict on each of a look run's answers, per frame
+# ---------------------------------------------------------------------------
+
+LOOK_CHECKS_FILE = CATALOGUE_DIR / "look_checks.json"
+LOOK_CHECKS_PENDING = f"cat:{LOOK_CHECKS_FILE.name}"
+LOOK_STEP_NAMES = {"women": "Women", "men": "Men", "penetration": "Penetration", "penetration_with": "Penetration with",
+                   "penetration_where": "Penetration where", "hidden": "Hidden from view",
+                   "her_posture": "Her posture", "her_front_faces": "Her front faces (camera)",
+                   "partner_posture": "Partner's posture", "partner_legs_point": "Partner's legs point (camera)",
+                   "on_top": "On top", "facing": "She faces her partner", "viewpoint": "Viewpoint"}
+
+
+def look_steps() -> list:
+    """[(key, name, choices incl. "can't tell")] in the order the teacher answers them."""
+    import trial_logic as TLG
+    return [(k, LOOK_STEP_NAMES.get(k, k), list(ch) + [TLG.CANT]) for k, _, ch in TLG.LOOK_STEPS]
+
+
+def look_check_key(run_id: str, video_id: str, t) -> str:
+    return f"{run_id}|{video_id}|{round(float(t), 2):.2f}"
+
+
+def load_look_checks() -> dict:
+    """{key: {"run", "video_id", "t", "model": {step: answer}, "mine": {step: answer}, "my_tags",
+    "run_tags", "checked_at"}} — your look checks (look_checks.json in the catalogue)."""
+    try:
+        data = json.loads(LOOK_CHECKS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data.get("items") or {} if isinstance(data, dict) else {}
+
+
+def save_look_check(run_id: str, video_id: str, t, model: dict, mine: dict, my_tags=None, run_tags=None) -> dict:
+    """Save your answers for one frame's look (a step you left as the model had it = right).
+    Queued for Drive with your other catalogue edits. Returns the saved item."""
+    import time
+    import training_labels as TLB
+    from library_common import mark_pending
+    items = load_look_checks()
+    key = look_check_key(run_id, video_id, t)
+    steps = [k for k, _, _ in look_steps()]
+    item = {"run": run_id, "video_id": video_id, "t": round(float(t), 2),
+            "model": {k: model.get(k) for k in steps if model.get(k)},
+            "mine": {k: mine[k] for k in steps if mine.get(k)},
+            "summary": model.get("summary") or "",
+            "my_tags": list(my_tags or []), "run_tags": list(run_tags or []),
+            "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    items[key] = item
+    TLB._atomic_write(LOOK_CHECKS_FILE, json.dumps({"version": 1, "items": items}, indent=1))
+    mark_pending(LOOK_CHECKS_PENDING)
+    return item
+
+
+def look_check_summary(items) -> list:
+    """Per step: [{"step", "name", "checked", "right", "pct", "fixes": [(model answer, yours, count)]}] —
+    how often the model's answer was right, and its most common mistakes."""
+    from collections import Counter
+    out = []
+    for k, name, _ in look_steps():
+        n = right = 0
+        fixes = Counter()
+        for it in items:
+            a, b = (it.get("model") or {}).get(k), (it.get("mine") or {}).get(k)
+            if not a or not b:
+                continue
+            n += 1
+            if a == b:
+                right += 1
+            else:
+                fixes[(a, b)] += 1
+        out.append({"step": k, "name": name, "checked": n, "right": right,
+                    "pct": None if not n else round(100 * right / n),
+                    "fixes": [(a, b, c) for (a, b), c in fixes.most_common(3)]})
+    return out
+
+
+def look_checks_csv(items) -> str:
+    """One row per frame and step, for sending on: run, video, time, step, the model's answer,
+    yours, right (yes/no), your tags, the run's tags, the model's summary."""
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(["run", "video_id", "t", "step", "model_answer", "my_answer", "right", "my_tags", "run_tags",
+                "model_summary", "checked_at"])
+    for it in sorted(items, key=lambda x: (x.get("run", ""), x.get("video_id", ""), x.get("t", 0))):
+        for k, _, _ in look_steps():
+            a, b = (it.get("model") or {}).get(k), (it.get("mine") or {}).get(k)
+            if not a and not b:
+                continue
+            w.writerow([it.get("run"), it.get("video_id"), it.get("t"), k, a or "", b or "",
+                        "yes" if a and a == b else "no", "; ".join(it.get("my_tags") or []),
+                        "; ".join(it.get("run_tags") or []), it.get("summary") or "", it.get("checked_at") or ""])
+    return buf.getvalue()

@@ -53,6 +53,54 @@ def _save(card: dict, tags: list, key: str) -> None:
     st.session_state["tr_saved_note"] = f"Saved your tags for {card['video_id'][:40]} at {format_mmss(card['t'])}."
 
 
+def _look_check_form(run_id: str, v: str, m: dict, look: dict, mine, run_tags) -> None:
+    """👁️ Check the look: every step with the model's answer preselected — leave it if it's right,
+    pick the right answer if not, then 💾 Save. Saved checks reopen with your answers."""
+    key = TR.look_check_key(run_id, v, m["t"])
+    saved = TR.load_look_checks().get(key)
+    steps = TR.look_steps()
+    done = ""
+    if saved:
+        n = sum(1 for k, _, _ in steps if saved["mine"].get(k))
+        ok = sum(1 for k, _, _ in steps if saved["mine"].get(k) and saved["mine"].get(k) == saved["model"].get(k))
+        done = f" — ✔️ checked: {ok} of {n} right"
+    with st.expander(f"👁️ Check the look ({run_id.split('_', 2)[-1]}){done}", expanded=False):
+        with st.form(f"tr_lookf_{_k(v, m)}_{run_id}", border=False):
+            st.caption("Each step shows the model's answer. Leave it if it's right; pick the right answer if "
+                       "it's wrong (\"can't tell\" if you can't see it either).")
+            cols = st.columns(2)
+            picked = {}
+            for i, (k, name, choices) in enumerate(steps):
+                model = look.get(k)
+                start = (saved or {}).get("mine", {}).get(k) or model
+                opts = list(choices) if start in choices else list(choices) + ([start] if start else [])
+                picked[k] = cols[i % 2].selectbox(
+                    f"{name} — model: {model or '—'}", opts, index=opts.index(start) if start in opts else 0,
+                    key=f"tr_look_{_k(v, m)}_{run_id}_{k}")
+            if st.form_submit_button("💾 Save look check", type="primary"):
+                TR.save_look_check(run_id, v, m["t"], look, picked, mine, run_tags)
+                st.session_state["tr_saved_note"] = (f"Saved your look check for {v[:40]} at "
+                                                     f"{format_mmss(m['t'])}.")
+                st.rerun()
+
+
+def _look_check_panel() -> None:
+    """Your look checks so far: how often each step was right, and the download to send on."""
+    items = list(TR.load_look_checks().values())
+    if not items:
+        return
+    with st.expander(f"👁️ My look checks — {len(items)} frame(s) checked · ⬇️ download", expanded=False):
+        rows = [{"Step": r["name"], "Checked": r["checked"],
+                 "Model right": "—" if r["pct"] is None else f"{r['right']} ({r['pct']}%)",
+                 "Most common mistakes (model → you)": "; ".join(f"{a} → {b} ×{c}" for a, b, c in r["fixes"])}
+                for r in TR.look_check_summary(items)]
+        st.dataframe(rows, hide_index=True, width="stretch")
+        st.download_button("⬇️ Download my look checks (CSV)", TR.look_checks_csv(items),
+                           file_name="look_checks.csv", mime="text/csv", key="tr_look_dl",
+                           help="One row per frame and step: the model's answer, yours, right or not — "
+                                "attach it in the chat.")
+
+
 def _editor(vid: str, m: dict, teachers: list, ekey: str) -> None:
     """Fix the tags for one frame: pick-one rows and grouped chips from the vocabulary, starting
     from your tags (or the best model's)."""
@@ -182,6 +230,7 @@ def _compare(data: dict) -> None:
                                              + sus[(v, round(float(m["t"]), 2))]["not_there"]})]
         moments.sort(key=lambda vm: -len(sus[(vm[0], round(float(vm[1]["t"]), 2))]["there"])
                      - len(sus[(vm[0], round(float(vm[1]["t"]), 2))]["not_there"]))
+        _look_check_panel()
         st.caption(f"**{len(moments)}** of your labelled frames where every chosen run disagrees with you on at "
                    "least one tag, most disagreements first (pick a tag above to focus, e.g. a position). If your "
                    "label is wrong, ✏️ Correct it; if it's right, save it unchanged — either way it's marked "
@@ -265,6 +314,8 @@ def _compare(data: dict) -> None:
                                          + (f" — “{d['look']['summary']}”" if d["look"].get("summary") else ""))
                         if extra:
                             st.caption(f"🧪 {rid.split('_', 2)[-1]}: " + "  \n".join(extra))
+                        if d.get("look"):
+                            _look_check_form(rid, v, m, d["look"], mine, sus[sk]["runs"].get(rid) or [])
                     st.button("✅ My label is right", key=f"tr_sus_ok_{_k(v, m)}", on_click=_save,
                               args=(TR.correction_card(v, m, mine), list(mine), f"tr_edit_{_k(v, m)}"),
                               help="Keeps your tags as they are and marks the frame checked.")

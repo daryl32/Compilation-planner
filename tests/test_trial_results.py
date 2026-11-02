@@ -567,3 +567,67 @@ def test_look_line():
                          "on_top": "partner", "facing": "towards", "viewpoint": "onlooker"})
     assert "penetration clearly visible (penis, vagina)" in line and "on top: partner" in line
     assert TR.look_line({}) == ""
+
+
+def _a_look(**kw):
+    return {"women": "1", "men": "1", "penetration": "clearly visible", "penetration_with": "penis",
+            "penetration_where": "vagina", "hidden": "nothing important hidden",
+            "her_posture": "squatting / straddling", "her_front_faces": "the camera",
+            "partner_posture": "lying on back", "partner_legs_point": "towards the camera",
+            "on_top": "her", "facing": "towards", "viewpoint": "onlooker", "summary": "She rides him.", **kw}
+
+
+def test_look_checks_save_summary_and_csv(bundle, no_labels):
+    TR.LOOK_CHECKS_FILE.unlink(missing_ok=True)
+    TR.save_look_check("run1", "vid_a", 5.0, _a_look(), {**_a_look(), "facing": "away"}, ["reverse cowgirl"],
+                       ["Cowgirl position"])
+    TR.save_look_check("run1", "vid_a", 9.0, _a_look(), _a_look(), [], [])
+    items = TR.load_look_checks()
+    assert set(items) == {"run1|vid_a|5.00", "run1|vid_a|9.00"}
+    assert items["run1|vid_a|5.00"]["mine"]["facing"] == "away" and "summary" not in items["run1|vid_a|5.00"]["mine"]
+    summ = {r["step"]: r for r in TR.look_check_summary(items.values())}
+    assert summ["facing"]["checked"] == 2 and summ["facing"]["right"] == 1 and summ["facing"]["pct"] == 50
+    assert summ["facing"]["fixes"] == [("towards", "away", 1)] and summ["on_top"]["pct"] == 100
+    csv_text = TR.look_checks_csv(items.values())
+    assert csv_text.splitlines()[0].startswith("run,video_id,t,step,model_answer,my_answer,right")
+    assert "run1,vid_a,5.0,facing,towards,away,no,reverse cowgirl,Cowgirl position" in csv_text
+    TR.save_look_check("run1", "vid_a", 5.0, _a_look(), _a_look(), [], [])       # re-saving replaces
+    assert TR.load_look_checks()["run1|vid_a|5.00"]["mine"]["facing"] == "towards"
+    TR.LOOK_CHECKS_FILE.unlink()
+
+
+def test_look_check_form_on_a_card(bundle, no_labels):
+    import training_labels as TLB
+    TR.LOOK_CHECKS_FILE.unlink(missing_ok=True)
+    from tests.apptest_util import errors, page_app
+    m = _bundle()["videos"]["vid_a"]["moments"][0]
+    rid = "2026-11-02_0045_plain-look"
+    runs = {"runs": [{"id": rid, "created": "2026-11-02 00:45",
+                      "frames": [{"v": "vid_a", "t": m["t"], "tags": ["night"], "look": _a_look()}]}],
+            "set": {"videos": [{"video_id": "vid_a"}], "hours": 0.1}}
+    (TR.RESULTS_DIR / "test_runs.json").write_text(json.dumps(runs))
+    TLB.save_label({"id": TLB.card_id("tags", "vid_a", m["t"]), "type": "tags", "video_id": "vid_a",
+                    "t": m["t"]}, tags=["dance"])
+    items = TLB.load_labels()
+    items[0]["labelled_at"] = "2026-10-30T09:00:00"
+    TLB._write_labels(items)
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_sub"] = "🖼️ Compare tags"
+    at.session_state["tr_filter"] = "suspect"
+    at.session_state["tr_sus_runs"] = [rid]
+    at.run()
+    assert not errors(at), errors(at)
+    caps = " ".join(c.value for c in at.caption)
+    assert "on top: her" in caps and "She rides him." in caps
+    facing = next(s for s in at.selectbox if s.label.startswith("She faces her partner"))
+    assert facing.value == "towards"
+    facing.set_value("away")
+    next(b for b in at.button if b.label == "💾 Save look check").click().run()
+    assert not errors(at), errors(at)
+    saved = TR.load_look_checks()[TR.look_check_key(rid, "vid_a", m["t"])]
+    assert saved["mine"]["facing"] == "away" and saved["model"]["facing"] == "towards"
+    assert saved["my_tags"] == ["dance"] and saved["run_tags"] == ["night"]
+    assert any("1 frame(s) checked" in e.label for e in at.expander)
+    assert any("12 of 13 right" in e.label for e in at.expander)
+    TR.LOOK_CHECKS_FILE.unlink()
