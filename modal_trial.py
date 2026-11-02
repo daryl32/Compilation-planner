@@ -944,6 +944,8 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora
                           "t": c["t"],
                           "scene_id": c.get("scene_id"), "gold_id": c.get("gold_id"),
                           "copied_from": c["of"], "similarity": c.get("similarity")}
+    # with two people, her hand / mouth / feet on his penis rules out penetration with it (look runs)
+    look_fixes = sum(len(TL.look_conflict(r, vocab)) for r in results.values()) if look else 0
     # a position the view hid for a moment, carried over when the moments either side agree
     neighbour_adds = TL.neighbour_fill(results, vocab)
     gpu = _gpu_name(TEACHER_GPUS[key][0])
@@ -959,6 +961,7 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora
                                "rule_fixes": rule_fixes, "rule_adds": rule_adds, "rule_drops": rule_drops,
                                "looks": looks, "look_added": look_added, "look_removed": look_removed,
                                "required_fills": required, "neighbour_adds": neighbour_adds,
+                               "look_fixes": look_fixes,
                                "structured": StructuredOutputsParams is not None,
                                "prompt_tokens": p_tok, "output_tokens": o_tok,
                                "tokens_per_s": use["tokens_per_s"], "mfu": use["mfu"],
@@ -1778,7 +1781,7 @@ def _run_summary(run_dir: Path) -> dict | None:
         return None
     frames, sec, moments, gpu, vocab_csv = [], 0.0, 0, None, ""
     counts = {"looks": 0, "look_added": 0, "look_removed": 0, "required_fills": 0, "unreadable": 0,
-              "neighbour_adds": 0, "look_drops": 0}
+              "neighbour_adds": 0, "look_drops": 0, "look_fixes": 0}
     for f in sorted(run_dir.glob("*.json")):
         if f.name == "run.json":
             continue
@@ -1808,6 +1811,8 @@ def derived_test_run(run_id: str, how: str = "neighbours") -> dict:
     the two runs compare like for like.
     how = "neighbours": positions the view hid for a moment, filled in from the moments either side;
     how = "look-check": tags the moment's own look contradicts dropped to unsure (a --look on run).
+    how = "look-fix": only the handjob fix (TL.look_conflict) — two people, her hand / mouth / feet on
+    his penis → no penetration or position (a --look on run from before the fix was built in).
     Returns the new run's meta, or {"error"}."""
     import shutil
     import trial_logic as TL
@@ -1836,6 +1841,9 @@ def derived_test_run(run_id: str, how: str = "neighbours") -> dict:
                     r["tags"] = [x for x in r.get("tags") or [] if x != t]
             n = TL.neighbour_fill(results, vocab)
             extra = {"neighbour_adds": n}
+        elif how == "look-fix":
+            n = sum(len(TL.look_conflict(r, vocab)) for r in results.values())
+            extra = {"look_fixes": n}
         else:
             n = sum(len(TL.look_check(r, vocab)) for r in results.values())
             extra = {"look_drops": n}
@@ -2391,7 +2399,9 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     New batches and test runs apply the rule themselves.
     --stage test --look on: the teacher answers the look steps (people, penetration, bodies, who's on
     top, facing…) before tagging. --stage look-check --run <that run>: CPU-only copy with the tags its
-    own look contradicts dropped to unsure.
+    own look contradicts dropped to unsure. --stage look-fix --run <that run>: CPU-only copy with just
+    the handjob fix (two people, her hand / mouth / feet on his penis → no penetration or position);
+    look runs from v1.40 apply it themselves.
     --stage test-refresh: rebuild and download the test-run summary the app reads (no GPU).
     --trainer unsloth (default) or hf; --max-examples 16 --label smoke = a quick ~$1 check that training runs.
     --lora <name> on a normal / --batch run: tag with the FP8 teacher + that adapter (second looks off
@@ -2436,7 +2446,7 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         text = finish_test_run.remote("", {})
         print(text + f"\n\n   Test runs → {_download_test_runs()}\n   In the app: 🧪 Trial results → 📋 Summary → 🧪 Test set.")
         return
-    if stage in ("neighbours", "look-check"):
+    if stage in ("neighbours", "look-check", "look-fix"):
         if not run.strip():
             print("--run <test run id> is needed, e.g. --run 2026-11-01_2239_positions-v2 "
                   "(the names are in 📋 Summary → 🧪 Test set).")
@@ -2445,8 +2455,10 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         if meta.get("error"):
             print(meta["error"])
             return
-        what = ("position(s) filled in from the moments either side" if stage == "neighbours"
-                else "tag(s) dropped to unsure because the moment's own look contradicts them")
+        what = {"neighbours": "position(s) filled in from the moments either side",
+                "look-fix": "penetration / position tag(s) dropped: two people and her hand, mouth or feet on "
+                            "his penis"}.get(stage, "tag(s) dropped to unsure because the moment's own look "
+                                                "contradicts them")
         print(f"{meta['changed']} {what} → test run {meta['id']} (no GPU used).")
         text = finish_test_run.remote(meta["id"], meta)
         Path("test_report.md").write_text(text, encoding="utf-8")

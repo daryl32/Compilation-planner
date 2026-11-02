@@ -317,6 +317,21 @@ def test_dedup_targets_same_scene_only_and_gold_kept():
     assert "b" in [k["key"] for k in keep] and "b" not in copies
 
 
+def test_look_conflict_two_people_hand_on_penis():
+    vocab = [{"tag": t} for t in ("penetration", "Cowgirl position", "Handjob", "Brunette")]
+    look = {"women": "1", "men": "1", "penetration": "clearly visible", "penetration_with": "penis",
+            "her_hands": "holding his penis"}
+    r = {"tags": ["penetration", "Cowgirl position", "Brunette"], "look": look}
+    assert TL.look_conflict(r, vocab) == ["penetration", "Cowgirl position"]
+    assert r["tags"] == ["Brunette"] and r["look_conflict"] and "penetration" in r["unsure"]
+    for other in ({"men": "2"}, {"women": "2"}, {"penetration_with": "toy"}, {"her_hands": "supporting herself"}):
+        r = {"tags": ["penetration"], "look": {**look, **other}}
+        assert TL.look_conflict(r, vocab) == [] and r["tags"] == ["penetration"]
+    r = {"tags": ["penetration"], "look": {**look, "her_hands": "not visible", "her_mouth": "on his penis"}}
+    assert TL.look_conflict(r, vocab) == ["penetration"]
+    assert TL.look_conflict({"tags": ["penetration"]}, vocab) == []
+
+
 def test_copied_scored():
     frames = [{"v": "a", "t": 1.0, "tags": [], "c": "k1"}, {"v": "a", "t": 2.0, "tags": []},
               {"v": "a", "t": 3.0, "g": "x", "tags": [], "c": "k2"}]

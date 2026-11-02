@@ -334,8 +334,29 @@ POSTURES = ["lying on back", "lying on front", "lying on side", "on all fours", 
 LOOK_STEPS = [
     ("women", "How many women are in the scene?", ["0", "1", "2", "3+"]),
     ("men", "How many men are in the scene?", ["0", "1", "2", "3+"]),
+    # Hands, mouths and feet — for the action tags (Handjob, Blowjob, deepthroat, fingering, masturbation,
+    # Cunnilingus, Footjob). If a hand does two things, answer what it does to genitals. Asked BEFORE
+    # penetration, so a straddling handjob is seen as one before penetration is assumed from the pose.
+    ("her_hands", "What are her hands doing? 'stroking' = her hand moves along it across the 7 frames; "
+                  "'holding' = her hand is on it but not moving along it",
+     ["stroking his penis", "holding his penis", "on her own genitals (touching, rubbing or fingers inside)",
+      "on her partner's body", "on her own body", "supporting herself", "not visible"]),
+    ("her_mouth", "Where is her mouth?",
+     ["on his penis", "kissing", "on her partner's body", "open / other", "not visible"]),
+    ("mouth_depth", "If her mouth is on his penis, how far in? 'near the base' only when you can see her lips "
+                    "at or close to his body, with most of it in her mouth; her hand wrapped round most of the "
+                    "shaft means it isn't near the base; hair, angle or a hand hiding her lips → can't tell",
+     ["tip only", "partway", "near the base", "not applicable"]),
+    ("her_feet", "Her feet", ["on his penis", "other", "not visible"]),
+    ("partner_hands", "What are her partner's hands doing? (Her own hand on her genitals is her hands, above)",
+     ["on her genitals (touching, rubbing or fingers inside)", "holding a toy on or in her", "on her body",
+      "other", "not visible"]),
+    ("partner_mouth", "Where is her partner's mouth?",
+     ["on her genitals", "kissing", "on her body", "other", "not visible"]),
     ("penetration", "Penetration — 'hidden but implied' only when their hips are joined AND there is a steady "
-                    "thrusting or riding movement across the 7 frames",
+                    "thrusting or riding movement across the 7 frames. With one woman and one man, if her hand, "
+                    "mouth or feet are on his penis (your answers above), his penis isn't inside her — answer "
+                    "'not happening' unless a toy or fingers are",
      ["clearly visible", "hidden but implied", "not happening"]),
     ("penetration_with", "Penetration with", ["penis", "toy", "fingers", "not applicable"]),
     ("penetration_where", "Penetration where", ["vagina", "anus", "not applicable"]),
@@ -356,24 +377,6 @@ LOOK_STEPS = [
                "or buttocks towards his face, his legs stretched out in front of her → away; with an onlooker "
                "camera use the steps above (his legs towards the camera + her front away from the camera → "
                "towards); in POV, her face to the camera → towards", ["towards", "away"]),
-    # Hands, mouths and feet — for the action tags (Handjob, Blowjob, deepthroat, fingering, masturbation,
-    # Cunnilingus, Footjob). If a hand does two things, answer what it does to genitals.
-    ("her_hands", "What are her hands doing? 'stroking' = her hand moves along it across the 7 frames; "
-                  "'holding' = her hand is on it but not moving along it",
-     ["stroking his penis", "holding his penis", "on her own genitals", "on her partner's body",
-      "on her own body", "supporting herself", "not visible"]),
-    ("her_mouth", "Where is her mouth?",
-     ["on his penis", "kissing", "on her partner's body", "open / other", "not visible"]),
-    ("mouth_depth", "If her mouth is on his penis, how far in? 'near the base' only when you can see her lips "
-                    "at or close to his body, with most of it in her mouth; her hand wrapped round most of the "
-                    "shaft means it isn't near the base; hair, angle or a hand hiding her lips → can't tell",
-     ["tip only", "partway", "near the base", "not applicable"]),
-    ("her_feet", "Her feet", ["on his penis", "other", "not visible"]),
-    ("partner_hands", "What are her partner's hands doing? 'fingers inside her' only when you can see them go in",
-     ["fingers inside her", "rubbing her genitals", "holding a toy on or in her", "on her body", "other",
-      "not visible"]),
-    ("partner_mouth", "Where is her partner's mouth?",
-     ["on her genitals", "kissing", "on her body", "other", "not visible"]),
     ("viewpoint", "Viewpoint", ["a participant's eyes (their own body at the frame edge)", "onlooker"]),
 ]
 LOOK_POSITION_NEEDS = {   # position tag (lower case) → what the look must say for it to stand
@@ -440,6 +443,32 @@ def look_check(r: dict, vocab: list) -> list:
                 drop.append(t)
         elif low in ("penetration", "anal sex") and L.get("penetration") != "clearly visible":
             drop.append(t)
+    if drop:
+        r["tags"] = [t for t in r["tags"] if t not in drop]
+        r["unsure"] = list(r.get("unsure") or []) + [t for t in drop if t not in (r.get("unsure") or [])]
+        r["look_dropped"] = list(r.get("look_dropped") or []) + drop
+    return [names.get(t.lower(), t) for t in drop]
+
+
+PENIS_BUSY = {"her_hands": ("stroking his penis", "holding his penis"), "her_mouth": ("on his penis",),
+              "her_feet": ("on his penis",)}
+
+
+def look_conflict(r: dict, vocab: list) -> list:
+    """The handjob-astride fix: with exactly one woman and one man, if her hand, mouth or feet are on
+    his penis, his penis can't be penetrating her — so when the look also says penetration with a
+    penis, penetration, Anal Sex and every position drop to unsure. Only fires on that direct
+    contradiction (a toy or fingers inside her is left alone). Changes `r` in place
+    ("look_conflict"); returns the tags dropped. A moment without a look is left alone."""
+    L = r.get("look") or {}
+    if not L or L.get("women") != "1" or L.get("men") != "1" or L.get("penetration_with") != "penis":
+        return []
+    if not any(L.get(k) in v for k, v in PENIS_BUSY.items()):
+        return []
+    names = {x["tag"].lower(): x["tag"] for x in vocab}
+    gone = set(LOOK_POSITION_NEEDS) | {"penetration", "anal sex"}
+    drop = [t for t in r.get("tags") or [] if t.lower() in gone]
+    r["look_conflict"] = True
     if drop:
         r["tags"] = [t for t in r["tags"] if t not in drop]
         r["unsure"] = list(r.get("unsure") or []) + [t for t in drop if t not in (r.get("unsure") or [])]
@@ -1017,7 +1046,7 @@ def neighbour_fill(results: dict, vocab: list, gap: float = NEIGHBOUR_GAP, close
         ms.sort()
         for t, k in ms:
             r = results[k]
-            if not r.get("ok", True):
+            if not r.get("ok", True) or r.get("look_conflict"):
                 continue
             prev = next((m for m in reversed(ms) if t - gap <= m[0] <= t - closest), None)
             nxt = next((m for m in ms if t + closest <= m[0] <= t + gap), None)
