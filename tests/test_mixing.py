@@ -864,3 +864,134 @@ def test_mashup_lanes_and_card_trim(mixlib):
     trims[0].set_value((later, hi)).run()
     assert not errors(at), errors(at)
     assert at.session_state["mxm_parts"][1]["start"] == later
+
+
+# ---------------------------------------------------------------------------
+# ⚡ Faster previews: windowed, parallel, remembered decodes
+# ---------------------------------------------------------------------------
+
+def test_decode_window_matches_the_whole_file_and_is_reused(mixlib):
+    import mixer
+    path = Path(mixlib["tracks"]["mix_song_c"]["source_path"])
+    mixer._DEC.clear()
+    whole = mixer.decode(path)
+    w = mixer.decode_window(path, 1.0, 0.0, 31.0, 44.0)
+    assert w.lo <= 31.0 - mixer.PAD_SEC and w.hi >= 44.0 and not w.eof
+    assert np.array_equal(whole[w.off:w.off + len(w.y)], w.y)          # trimmed in the filter: same decode
+    assert mixer.decode_window(path, 1.0, 0.0, 33.0, 40.0) is w          # inside: straight from RAM
+    end = mixer.decode_window(path, 1.0, 0.0, 50.0, 500.0)               # past the end of the song
+    assert end.eof and end.end == len(whole)
+    seg = end.take(len(whole) - 100, len(whole) + 5000)
+    assert len(seg) == 100                                               # shorter at the end, like a slice
+    # a stretched window: same timing as a whole-file stretch (within a few samples)
+    sp = round(120 / 126, 6)
+    full = mixer.decode(path, sp)[:, 0]
+    ws = mixer.decode_window(path, sp, 0.0, 30.0, 40.0)
+    i = int(5 * mixer.SR)
+    seg = ws.y[i:i + mixer.SR, 0]
+    lags = range(-200, 201)
+    best = max(lags, key=lambda L: float(np.dot(full[ws.off + i + L:ws.off + i + L + mixer.SR], seg)))
+    assert abs(best) <= 20
+
+
+def test_render_reuses_windows_and_reports_progress(mixlib, monkeypatch):
+    import mixer
+    t = mixlib["tracks"]
+    gc, ga = MX.grid(t["mix_song_c"]), MX.grid(t["mix_song_a"])
+    rec = {"pieces": [{"track": "mix_song_c", "start": 0.0, "end": MX.snap_to_bar(gc, 24)},
+                      {"track": "mix_song_a", "start": MX.snap_to_bar(ga, 8), "end": MX.snap_to_bar(ga, 24)}],
+           "bpm": 120.0, "level_match": True}
+    tracks = {k: t[k] for k in ("mix_song_c", "mix_song_a")}
+    mixer._DEC.clear()
+    fr, msgs = [], []
+    mixer.render(rec, tracks, mixlib["root"] / "p1.mp3", progress=msgs.append, fraction=fr.append)
+    assert fr and fr[-1] == 1.0 and all(b >= a for a, b in zip(fr, fr[1:])) and any("read" in m for m in msgs)
+    calls = []
+    real = mixer.subprocess.run
+    monkeypatch.setattr(mixer.subprocess, "run", lambda cmd, *a, **k: (calls.append(cmd), real(cmd, *a, **k))[1])
+    tweak = {**rec, "pieces": [rec["pieces"][0], {**rec["pieces"][1], "gain_db": -3.0}]}
+    mixer.render(tweak, tracks, mixlib["root"] / "p2.mp3")
+    assert not [c for c in calls if "-f" in c and c[c.index("-f") + 1] == "f32le" and "-i" in c
+                and c[c.index("-i") + 1] != "-"]                           # no song decoded again — only the encode
+
+
+def test_mashup_tempo_snaps_to_the_first_songs_own_tempo(mixlib, monkeypatch):
+    """The tempo box rounds to 0.1 BPM; that rounding mustn't stretch the first song by a hair."""
+    import mix_ui
+    from tests.apptest_util import page_app, errors
+    t = mixlib["tracks"]
+    gc = MX.grid(t["mix_song_c"])
+    seen = []
+
+    def fake(recipe, tracks, out, label="Mixing"):
+        seen.append(recipe["bpm"])
+        raise RuntimeError("stop here")
+    monkeypatch.setattr(mix_ui, "_render_progress", fake)
+    for box, expect in ((round(gc["bpm"], 1), gc["bpm"]), (gc["bpm"] + 2.0, gc["bpm"] + 2.0)):
+        at = page_app("pages/3_Media_Library.py", timeout=300)
+        at.session_state["lib_kind"] = "🎚️ Mix"
+        at.session_state["mx_mode"] = "🧩 Mashup"
+        at.session_state["mxm_parts"] = [{"track": "mix_song_c", "start": 0.0, "end": MX.snap_to_bar(gc, 16),
+                                          "gain_db": 0.0, "uid": "p1", "part": "full"}]
+        at.session_state["mxm_bpm"] = box
+        at.run()
+        at.button(key="mxm_preview").click().run()
+        assert seen and seen[-1] == pytest.approx(expect, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# 🛟 Nothing replaces a mashup without asking
+# ---------------------------------------------------------------------------
+
+def _two_suggestions(at):
+    at.session_state["mx_mode"] = "💡 Suggestions"
+    at.run()
+    return [b for b in at.button if (b.key or "").startswith(("mx_sug_go_p_", "mx_sug_go_v_"))]
+
+
+def test_replacing_a_mashup_asks_first_and_can_be_brought_back(mixlib):
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎚️ Mix"
+    go = _two_suggestions(at)
+    assert len(go) >= 2
+    go[0].click().run()                                   # empty mashup: no question
+    assert not errors(at), errors(at)
+    first = [dict(p) for p in at.session_state["mxm_parts"]]
+    assert first and "_mx_pending" not in at.session_state
+    go = _two_suggestions(at)
+    go[-1].click().run()                                  # a mashup with parts: asks
+    assert not errors(at), errors(at)
+    assert [p["uid"] for p in at.session_state["mxm_parts"]] == [p["uid"] for p in first]
+    at.button(key="mx_pending_no").click().run()          # keep editing: nothing changes
+    assert [p["uid"] for p in at.session_state["mxm_parts"]] == [p["uid"] for p in first]
+    assert "_mx_pending" not in at.session_state
+    go = _two_suggestions(at)
+    go[-1].click().run()
+    at.button(key="mx_pending_yes").click().run()         # replace it
+    assert not errors(at), errors(at)
+    assert at.session_state["mx_mode"] == "🧩 Mashup"
+    assert [p["uid"] for p in at.session_state["mxm_parts"]] != [p["uid"] for p in first]
+    at.button(key="mx_draft_back").click().run()          # ↩️ bring it back
+    assert not errors(at), errors(at)
+    assert [p["uid"] for p in at.session_state["mxm_parts"]] == [p["uid"] for p in first]
+    assert "_mx_draft" not in at.session_state
+
+
+def test_saved_mix_delete_asks_first(mixlib):
+    import mixes as MS
+    from tests.apptest_util import page_app, errors
+    m = MS.save({"kind": "mashup", "name": "Delete me maybe", "bpm": 120.0,
+                 "pieces": [{"track": "mix_song_c", "start": 0.0, "end": 8.0}]})
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎚️ Mix"
+    at.session_state["mx_mode"] = "📂 Saved mixes"
+    at.run()
+    at.button(key=f"mxs_del_{m['id']}").click().run()
+    assert MS.get(m["id"])                                # first tap only asks
+    at.button(key=f"mxs_del_no_{m['id']}").click().run()
+    assert MS.get(m["id"])
+    at.button(key=f"mxs_del_{m['id']}").click().run()
+    at.button(key=f"mxs_del_yes_{m['id']}").click().run()
+    assert not errors(at), errors(at)
+    assert not MS.get(m["id"])

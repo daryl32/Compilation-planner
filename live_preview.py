@@ -6,7 +6,7 @@ tracks have them — else the full song — and saves each as a small FLAC. The 
 live with Web Audio, with the same per-stem curves as core/stem_mix.py, so dragging B, the mix point, the
 blend length or the curves is heard straight away — no render.
 
-Windows are snapped to a 16-bar grid so small drags reuse what's prepared; a drag that leaves the window prepares
+Windows are snapped to an 8-bar grid so small drags reuse what's prepared; a drag that leaves the window prepares
 a new one (a few seconds). Decoded windows are kept in RAM (an LRU of up to RAM_MB) as well as on disk.
 """
 
@@ -28,9 +28,12 @@ from core import mixing as MX
 
 LIVE_SR = 32000            # Hz — plenty for previewing, a third smaller than 44.1 kHz
 CH = 2
-A_BEFORE, A_AFTER = 40, 8   # bars of A kept around the mix point
-B_BEFORE, B_AFTER = 40, 24  # bars of B kept around where it's fully in
-GRID = 16                   # windows snap to this many bars
+# Bars kept around the blend. ▶ Live mix starts 4 bars before the blend (components/deck_editor), so A keeps the
+# blend + A_LEAD bars before its mix point and B the blend + B_LEAD before it's fully in (then the GRID snap adds
+# up to GRID more) — small enough that an iPad loads the stems quickly.
+A_LEAD, A_AFTER = 8, 8
+B_LEAD, B_AFTER = 6, 16
+GRID = 8                    # windows snap to this many bars (small drags reuse what is prepared)
 RAM_MB = 1500
 WORKERS = 6
 
@@ -140,8 +143,9 @@ def prepare(a_id: str, b_id: str, ta: dict, tb: dict, state: dict, have: dict = 
                                                             int(state["bars"]) + 4, 2, ga["duration"])
     reuse_b = have and have.get("b_id") == b_id and abs(have.get("speed_b", 0) - speed_b) < 1e-6 and \
         inside(b_full, tuple(have["b"]["w"]), gb["bar_len"], int(state["bars"]) + 4, 8, gb["duration"])
-    wa = tuple(have["a"]["w"]) if reuse_a else window(a_end, ga["bar_len"], A_BEFORE, A_AFTER, ga["duration"])
-    wb = tuple(have["b"]["w"]) if reuse_b else window(b_full, gb["bar_len"], B_BEFORE, B_AFTER, gb["duration"])
+    bars = int(state["bars"])
+    wa = tuple(have["a"]["w"]) if reuse_a else window(a_end, ga["bar_len"], bars + A_LEAD, A_AFTER, ga["duration"])
+    wb = tuple(have["b"]["w"]) if reuse_b else window(b_full, gb["bar_len"], bars + B_LEAD, B_AFTER, gb["duration"])
     jobs = []
     for deck, tid, t, w, speed, shift in (("a", a_id, ta, wa, 1.0, 0.0), ("b", b_id, tb, wb, speed_b, shift_b)):
         for part in parts:

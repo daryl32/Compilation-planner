@@ -5,10 +5,13 @@ jumps, and fetches source tracks from Google Drive when they aren't on this
 machine. No Streamlit in here.
 
 Rendering, in short:
-  1. each source track is decoded once (stereo, 44.1 kHz), already stretched
-     to the mix tempo and pitch-shifted if asked (ffmpeg rubberband; atempo /
-     asetrate when this ffmpeg has no rubberband),
-  2. its loudness is measured so tracks can be levelled against each other,
+  1. only the stretch of each source track (and stem) the mix plays is decoded
+     (stereo, 44.1 kHz, a little padding either side), already stretched to the
+     mix tempo and pitch-shifted if asked (ffmpeg rubberband; atempo / asetrate
+     when this ffmpeg has no rubberband) — several at once, and kept in RAM so a
+     re-preview after a small change (a fade, a volume) reads nothing again,
+  2. each song's loudness is measured once (remembered on disk) so tracks can be
+     levelled against each other,
   3. the pieces are laid end to end with a crossfade centred on every join's
      bar line (straight for jumps within one track — the two sides are nearly
      the same audio — equal-power between different tracks),
@@ -22,8 +25,12 @@ import functools
 import hashlib
 import json
 import math
+import os
 import subprocess
+import threading
 import time
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -182,6 +189,126 @@ def decode(path: Path, speed: float = 1.0, semitones: float = 0.0) -> np.ndarray
     return np.frombuffer(proc.stdout, dtype=np.float32).reshape(-1, CH).copy()
 
 
+# ---------------------------------------------------------------------------
+# ⚡ Windowed decoding: only the stretch of each song a mix plays, read in parallel and kept in RAM
+# ---------------------------------------------------------------------------
+
+CHUNK_SEC = 15.0              # windows snap outward to this grid (source seconds) so small edits reuse them
+PAD_SEC = 2.0                 # extra source audio either side (stretch filters settle in this)
+DECODE_RAM_MB = 900
+DECODE_WORKERS = max(2, min(4, os.cpu_count() or 2))
+
+_DEC: "OrderedDict[tuple, Window]" = OrderedDict()
+_DEC_LOCK = threading.Lock()
+
+
+class Window:
+    """Decoded, stretched audio covering part of a file. y[i] is output-time sample off + i
+    (output time = source time / speed). eof: the window reaches the end of the file."""
+    __slots__ = ("y", "off", "eof", "lo", "hi")
+
+    def __init__(self, y: np.ndarray, off: int, eof: bool, lo: float, hi: float):
+        self.y, self.off, self.eof, self.lo, self.hi = y, off, eof, lo, hi
+
+    @property
+    def end(self) -> int:
+        return self.off + len(self.y)
+
+    def avail_sec(self) -> float:
+        """Output-time length of the whole file when known (the window reached its end), else no limit."""
+        return self.end / SR if self.eof else float("inf")
+
+    def take(self, i0: int, i1: int) -> np.ndarray:
+        """A copy of output samples [i0, i1) — shorter at the end of the file, zeros where the window
+        doesn't reach (never happens when the window was sized from the recipe)."""
+        i0 = max(int(i0), 0)
+        i1 = min(int(i1), self.end) if self.eof else int(i1)
+        if i1 <= i0:
+            return np.zeros((0, CH), dtype=np.float32)
+        out = np.zeros((i1 - i0, CH), dtype=np.float32)
+        lo, hi = max(i0, self.off), min(i1, self.end)
+        if hi > lo:
+            out[lo - i0:hi - i0] = self.y[lo - self.off:hi - self.off]
+        return out
+
+
+def _file_sig(path: Path) -> tuple:
+    try:
+        st = path.stat()
+        return str(path), st.st_size, int(st.st_mtime)
+    except OSError:
+        return str(path), 0, 0
+
+
+def _snap_window(lo: float, hi: float) -> tuple:
+    lo = max(0.0, math.floor((lo - PAD_SEC) / CHUNK_SEC) * CHUNK_SEC)
+    hi = math.ceil((hi + PAD_SEC) / CHUNK_SEC) * CHUNK_SEC
+    return lo, max(hi, lo + CHUNK_SEC)
+
+
+def _dec_find(sig: tuple, lo: float, hi: float):
+    with _DEC_LOCK:
+        for key, w in reversed(_DEC.items()):
+            if key[:2] == sig and w.lo <= lo + 1e-6 and (w.hi >= hi - 1e-6 or w.eof):
+                _DEC.move_to_end(key)
+                return w
+    return None
+
+
+def _dec_put(key: tuple, w: Window) -> None:
+    with _DEC_LOCK:
+        _DEC[key] = w
+        _DEC.move_to_end(key)
+        total = sum(v.y.nbytes for v in _DEC.values())
+        while total > DECODE_RAM_MB * 1e6 and len(_DEC) > 1:
+            _, old = _DEC.popitem(last=False)
+            total -= old.y.nbytes
+
+
+def decode_window(path: Path, speed: float, semitones: float, lo: float, hi: float) -> Window:
+    """Source seconds [lo, hi) of the file (snapped outward, padded), stretched / shifted. Reused from
+    RAM when an earlier window already covers it."""
+    path = Path(path)
+    lo, hi = _snap_window(lo, hi)
+    sig = (_file_sig(path), (round(float(speed), 6), float(semitones or 0)))
+    w = _dec_find(sig, lo, hi)
+    if w is not None:
+        return w
+    # Trimmed inside the filter graph (not with -ss): the file decodes exactly as a whole-file read
+    # would — seeking changes how ffmpeg decodes AAC around drum hits — and only the window is stretched,
+    # which is where the time goes.
+    f = ",".join(x for x in (f"atrim=start={lo:.6f}:end={hi:.6f}", "asetpts=PTS-STARTPTS",
+                             stretch_filter(speed, semitones)) if x)
+    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-map", "0:a:0", "-af", f,
+           "-ac", str(CH), "-ar", str(SR), "-f", "f32le", "-"]
+    proc = subprocess.run(cmd, capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg could not read {path.name}: {proc.stderr.decode(errors='ignore')[-300:]}")
+    y = np.frombuffer(proc.stdout, dtype=np.float32).reshape(-1, CH).copy()
+    expected = (hi - lo) / speed * SR
+    eof = len(y) < expected - 0.25 * SR          # the file ended inside the window
+    w = Window(y, int(round(lo / speed * SR)), eof, lo, hi)
+    _dec_put((*sig, lo, hi), w)
+    return w
+
+
+def track_loudness(path: Path) -> float:
+    """The song file's gated loudness (core/mixing.loudness_db), measured once over the whole file and
+    remembered on disk — so level matching doesn't depend on which window a mix plays."""
+    path = Path(path)
+    sig = _file_sig(path)
+    d = cache_dir() / "loudness"
+    f = d / (hashlib.sha1(json.dumps(sig).encode()).hexdigest()[:16] + ".json")
+    try:
+        return float(json.loads(f.read_text())["db"])
+    except (OSError, ValueError, KeyError):
+        pass
+    db = float(MX.loudness_db(decode(path), SR))
+    d.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"db": db, "file": sig[0]}))
+    return db
+
+
 @functools.lru_cache(maxsize=1)
 def has_mp3() -> bool:
     try:
@@ -288,12 +415,15 @@ def _fade_region(region: np.ndarray, ramp: np.ndarray, jn: dict | None, region_s
     region[:] = high * ramp[:, None] + low * step[:, None]
 
 
-def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: str = "256k") -> dict:
+def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: str = "256k",
+           fraction=None) -> dict:
     """Render recipe to out_path. tracks: {track_id: catalogue track} for every
     track the recipe uses (their audio files must be local — ensure_local).
+    progress(msg) gets a line of text per step, fraction(0…1) how far it has got.
     Returns {"duration", "bpm", "beats", "bars", "energy" (30 Hz curve),
     "warnings", "layout"}."""
     say = progress or (lambda msg: None)
+    frac = fraction or (lambda f: None)
     grids = {tid: MX.grid(t) for tid, t in tracks.items()}
     lay = MX.layout(recipe, grids)
     if not lay["pieces"]:
@@ -304,28 +434,36 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
         warnings.append("This server's ffmpeg has no rubberband filter — using the simpler atempo stretch "
                         "(fine for small changes).")
 
-    # 1. decode each (track, speed, shift, part) once
-    audio, loud = {}, {}
-
+    # 1. which stretch of each (track, speed, shift, part) the mix plays — in output seconds
     def key_of(p, default_part="full"):
         return (p["track"], round(p["speed"], 6), float(shifts.get(p["track"], 0) or 0),
                 p.get("part") or default_part)
 
+    need, loud_keys = {}, []
+
+    def want(key, a, b):
+        lo, hi = need.get(key, (a, b))
+        need[key] = (min(lo, a), max(hi, b))
+
+    joins = lay["joins"]
+    for k, p in enumerate(lay["pieces"]):
+        head = joins[k - 1]["pre"] if k > 0 else 0.0
+        tail = joins[k]["post"] if k < len(joins) else 0.0
+        want(key_of(p), max(0.0, p["start"] / p["speed"] - head), p["end"] / p["speed"] + tail)
+    for ly in lay.get("layers") or []:
+        want(key_of(ly, "vocals"), ly["start"] / ly["speed"], ly["end"] / ly["speed"])
     for p, default_part in [*[(p, "full") for p in lay["pieces"]], *[(ly, "vocals") for ly in lay.get("layers") or []]]:
         key = key_of(p, default_part)
-        if key in audio:
-            continue
-        say(f"reading {p['track']}" + ("" if key[3] == "full" else f" ({key[3]})"))
-        audio[key] = decode(local_path(tracks[p["track"]], key[3]), key[1], key[2])
-        if key[3] != "vocals":
-            loud[key] = MX.loudness_db(audio[key], SR)
+        if key[3] != "vocals" and key not in loud_keys:
+            loud_keys.append(key)
         note = MX.stretch_note(p["speed"])
         if note and f"{p['track']}: {note}" not in warnings:
             warnings.append(f"{p['track']}: {note}")
 
-    # 1b. 🧠 neural joins: both sides' four stems at the same speed / shift (else an ordinary crossfade)
+    # 1b. 🧠 neural joins: both sides' four stems over the blend, at the same speed / shift (else an
+    #     ordinary crossfade)
     neural_ok = set()
-    for k, jn in enumerate(lay["joins"]):
+    for k, jn in enumerate(joins):
         if not jn.get("neural"):
             continue
         a, b = lay["pieces"][k], lay["pieces"][k + 1]
@@ -335,13 +473,30 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
                             "has no drums / bass / other stems yet (run run_audio_analysis.bat) — an ordinary "
                             "crossfade instead.")
             continue
+        w0, dur = jn["at"] - jn["pre"], jn["pre"] + jn["post"]
         for p in (a, b):
+            s0 = p["start"] / p["speed"] + (w0 - p["out_start"])
             for stem in FOUR_STEMS:
-                key = key_of({**p, "part": stem})
-                if key not in audio:
-                    say(f"reading {p['track']} ({stem})")
-                    audio[key] = decode(local_path(tracks[p["track"]], stem), key[1], key[2])
+                want(key_of({**p, "part": stem}), max(0.0, s0), s0 + dur)
         neural_ok.add(k)
+
+    # 1c. read those windows (several at once; earlier windows come straight from RAM) and each song's
+    #     loudness (remembered on disk)
+    audio, loud = {}, {}
+    jobs = {}
+    with ThreadPoolExecutor(DECODE_WORKERS) as ex:
+        for key, (a, b) in need.items():
+            path = local_path(tracks[key[0]], key[3])
+            jobs[ex.submit(decode_window, path, key[1], key[2], a * key[1], b * key[1])] = ("audio", key)
+        if recipe.get("level_match", True) and len({k[0] for k in loud_keys}) > 1:
+            for key in loud_keys:
+                jobs[ex.submit(track_loudness, local_path(tracks[key[0]], key[3]))] = ("loud", key)
+        for i, fut in enumerate(as_completed(jobs)):
+            kind, key = jobs[fut]
+            (audio if kind == "audio" else loud)[key] = fut.result()
+            if kind == "audio":
+                say(f"read {key[0]}" + ("" if key[3] == "full" else f" ({key[3]})"))
+            frac(0.85 * (i + 1) / len(jobs))
 
     # 2. level matching: every track to the loudest track's level (within limits). A vocal
     #    layer gets its own track's correction (vocals alone are quieter than a full mix).
@@ -355,14 +510,14 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
 
     # 3. lay the pieces out with crossfades centred on the joins
     say("joining the pieces")
+    frac(0.88)
     total = lay["duration"]
     n_out = int(math.ceil(total * SR)) + SR
     out = np.zeros((n_out, CH), dtype=np.float32)
-    joins = lay["joins"]
     for k, p in enumerate(lay["pieces"]):
         key = key_of(p)
-        y = audio[key]
-        avail = len(y) / SR
+        w = audio[key]
+        avail = w.avail_sec()
         # the incoming audio starts `pre` early (under the end of the piece before), the outgoing
         # carries on `post` past the line (under the start of the next)
         head = joins[k - 1]["pre"] if k > 0 else 0.0
@@ -371,7 +526,7 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
         b_t = min(avail, p["end"] / p["speed"] + tail)
         head_eff = p["start"] / p["speed"] - a_t
         tail_eff = b_t - p["end"] / p["speed"]
-        seg = y[int(round(a_t * SR)):int(round(b_t * SR))].copy()
+        seg = w.take(int(round(a_t * SR)), int(round(b_t * SR)))
         if not len(seg):
             continue
         gain_db = gains.get(key, 0.0) + float(p.get("gain_db") or 0.0)
@@ -418,10 +573,10 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
                         (p.get("part") == "vocals" and stem != "vocals"):
                     stems[stem] = part                           # the piece plays only those stems
                     continue
-                y = audio[key_of({**p, "part": stem})]
-                lo, hi = max(src0, 0), min(src0 + n, len(y))
-                if hi > lo:
-                    part[lo - src0:hi - src0] = y[lo:hi] * g
+                lo = max(src0, 0)
+                chunk = audio[key_of({**p, "part": stem})].take(lo, src0 + n)
+                if len(chunk):
+                    part[lo - src0:lo - src0 + len(chunk)] = chunk * g
                 stems[stem] = part
             sides.append(stems)
         blend = SM.render_region(sides[0], sides[1], jn["neural"]["profile"], jn["neural"]["beats"], SR,
@@ -434,9 +589,8 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
     # 3b. 🎤 layers (one track's vocals, instrumental or the full song) over the pieces, faded in and out
     for ly in lay.get("layers") or []:
         key = key_of(ly, "vocals")
-        y = audio[key]
         a_t, b_t = ly["start"] / ly["speed"], ly["end"] / ly["speed"]
-        seg = y[int(round(a_t * SR)):int(round(b_t * SR))].copy()
+        seg = audio[key].take(int(round(a_t * SR)), int(round(b_t * SR)))
         if not len(seg):
             continue
         gain_db = gains.get(key, track_gain.get(ly["track"], 0.0)) + float(ly.get("gain_db") or 0.0)
@@ -467,7 +621,9 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
     if peak > PEAK:
         out *= np.float32(PEAK / peak)
     say("saving")
+    frac(0.92)
     encode(out, out_path, bitrate)
+    frac(1.0)
 
     hop = SR // 30
     m = out[: len(out) // hop * hop].mean(axis=1).reshape(-1, hop)

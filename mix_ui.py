@@ -119,6 +119,115 @@ def _audio_ready(needs, ns: str) -> bool:
     return False
 
 
+# 🛟 Nothing replaces a mashup with parts without asking first, and the replaced one can be brought back.
+_DRAFT_KEYS = ("mxm_parts", "mxm_layers", "mxm_bpm", "mxm_match", "mxm_xf", "mxm_fin", "mxm_fout", "mxm_level",
+               "mxm_id", "mxm_name", "mxm_snap")
+_DRAFT_PREFIXES = ("mxm_shift_", "mxm_part_")
+_REPLACERS = {}                                    # name → function, for _mx_pending (session state holds names)
+
+
+def _replacer(fn):
+    _REPLACERS[fn.__name__] = fn
+    return fn
+
+
+def _mashup_snapshot() -> dict:
+    ss = st.session_state
+    return {k: ss[k] for k in list(ss.keys()) if k in _DRAFT_KEYS or k.startswith(_DRAFT_PREFIXES)}
+
+
+def _replace_mashup(fn_name: str, args: tuple = (), what: str = "") -> None:
+    """on_click for anything that replaces the 🧩 Mashup: straight away when it's empty, else ask first."""
+    if st.session_state.get("mxm_parts"):
+        st.session_state["_mx_pending"] = {"fn": fn_name, "args": list(args), "what": what}
+    else:
+        _REPLACERS[fn_name](*args)
+
+
+def _do_pending() -> None:
+    p = st.session_state.pop("_mx_pending", None)
+    if not p:
+        return
+    snap = _mashup_snapshot()
+    _REPLACERS[p["fn"]](*p["args"])
+    if snap.get("mxm_parts"):
+        st.session_state["_mx_draft"] = snap
+
+
+def _drop_pending() -> None:
+    st.session_state.pop("_mx_pending", None)
+
+
+@st.dialog("Replace your mashup?", on_dismiss=_drop_pending)
+def _confirm_replace() -> None:
+    p = st.session_state.get("_mx_pending")
+    if not p:                        # answered (a button's callback ran) — close
+        st.rerun()
+    n = len(st.session_state.get("mxm_parts") or [])
+    name = st.session_state.get("mxm_name") or ""
+    st.markdown(f"Your current mashup{f' **{name}**' if name else ''} ({n} part{'s' if n != 1 else ''}) will be "
+                f"replaced{' by ' + p['what'] if p.get('what') else ''}. Saved mixes aren't affected, and "
+                "↩️ Bring it back undoes this.")
+    c = st.columns(2)
+    c[0].button("Replace it", type="primary", width="stretch", key="mx_pending_yes", on_click=_do_pending)
+    c[1].button("Keep editing", width="stretch", key="mx_pending_no", on_click=_drop_pending)
+
+
+def _pending_check() -> None:
+    if st.session_state.get("_mx_pending"):
+        _confirm_replace()
+
+
+def _bring_back() -> None:
+    snap = st.session_state.pop("_mx_draft", None)
+    if not snap:
+        return
+    _clear("mxm")
+    st.session_state.update(snap)
+    st.session_state["mx_mode"] = MASHUP
+
+
+def _draft_banner() -> None:
+    snap = st.session_state.get("_mx_draft")
+    if not snap:
+        return
+    n = len(snap.get("mxm_parts") or [])
+    c = st.columns([4, 1.4, 0.6], vertical_alignment="center")
+    c[0].caption(f"You replaced a mashup{' — **' + snap['mxm_name'] + '**' if snap.get('mxm_name') else ''} "
+                 f"({n} part{'s' if n != 1 else ''}).")
+    c[1].button("↩️ Bring it back", key="mx_draft_back", on_click=_bring_back, width="stretch")
+    c[2].button("✖", key="mx_draft_x", on_click=lambda: st.session_state.pop("_mx_draft", None),
+                help="Forget it")
+
+
+@_replacer
+def _new_mashup() -> None:
+    _clear("mxm")
+
+
+def _render_progress(recipe: dict, tracks: dict, out, label: str = "Mixing") -> dict:
+    """mixer.render with a progress bar that says which song it's reading."""
+    import mixer
+    bar = st.progress(0.0, text=f"{label}…")
+    state = {"f": 0.0, "msg": ""}
+
+    def show():
+        bar.progress(min(1.0, state["f"]), text=f"{label} — {state['msg']}…" if state["msg"] else f"{label}…")
+
+    def on_msg(m):
+        state["msg"] = m
+        show()
+
+    def on_frac(f):
+        state["f"] = f
+        show()
+
+    try:
+        return mixer.render(recipe, tracks, out, progress=on_msg, fraction=on_frac)
+    finally:
+        bar.empty()
+
+
 def _features(track_id: str):
     """(grid, bar similarity) — needs the audio on the server; cached per run."""
     import mixer
@@ -369,12 +478,11 @@ def _preview_and_save(recipe: dict, tracks: dict, sims: dict, default_name: str,
     if c[0].button("▶️ Preview", key=f"{ns}_preview", type="primary", width="stretch",
                    help="Renders the mix to a quick temporary file to listen to (nothing is saved)."):
         if not pv_path.exists() or pv.get("path") != str(pv_path):
-            with st.spinner("Mixing…"):
-                try:
-                    info = mixer.render(recipe, tracks, pv_path)
-                except Exception as e:
-                    st.error(f"Couldn't make the preview: {e}")
-                    return
+            try:
+                info = _render_progress(recipe, tracks, pv_path)
+            except Exception as e:
+                st.error(f"Couldn't make the preview: {e}")
+                return
             st.session_state[f"{ns}_pv"] = {"path": str(pv_path), "energy": info["energy"],
                                             "warnings": info["warnings"]}
         st.session_state[f"{ns}_start"] = 0
@@ -964,6 +1072,12 @@ def _mashup(summaries: dict) -> None:
                                              help=_key_text(tracks[tid].get("key"), st.session_state[key]))
 
     bpm = float(st.session_state.get("mxm_bpm") or 120.0) if st.session_state.get("mxm_match", True) else None
+    if bpm and parts:
+        # ⚡ The tempo box shows 0.1 BPM; when it's the first song's own tempo, use that exactly, so that
+        # song plays unstretched (a 0.01 % stretch costs a full rubberband pass for nothing audible)
+        own = float(MX.grid(tracks[parts[0]["track"]]).get("bpm") or 0)
+        if own and abs(own - bpm) <= 0.05:
+            bpm = own
     shift = {tid: int(st.session_state.get(f"mxm_shift_{tid}", 0)) for tid in used}
     grids = {tid: MX.grid(t) for tid, t in tracks.items()}
 
@@ -1023,7 +1137,7 @@ def _mashup(summaries: dict) -> None:
               "settings": {"parts": parts, "layers": layers}}
     name = " + ".join(used[:3]) + (" …" if len(used) > 3 else "")
     _preview_and_save(recipe, tracks, {}, f"{name} (mashup)"[:90], "mxm")
-    st.button("🧹 Start a new mashup", key="mxm_clear", on_click=_clear, args=("mxm",))
+    st.button("🧹 Start a new mashup", key="mxm_clear", on_click=_replace_mashup, args=("_new_mashup", (), "an empty one"))
 
 
 # ---------------------------------------------------------------------------
@@ -1057,6 +1171,7 @@ def _tx_recipe(a: str, b: str, ta: dict, tb: dict, s: dict, *, short: bool) -> d
                                              **({"curves": s["curves"]} if s.get("curves") else {})}}}]}
 
 
+@_replacer
 def _tx_to_mashup(a: str, b: str, ta: dict, tb: dict, s: dict, append: bool) -> None:
     rec = _tx_recipe(a, b, ta, tb, s, short=False)
     t0 = f"{time.time():.6f}"
@@ -1247,12 +1362,11 @@ def _transition(summaries: dict) -> None:
                            help="▶ Live mix above is the quick way to listen. This renders the transition (8 bars "
                                 "either side) exactly as a saved mix will sound — studio-quality tempo matching."):
         out = mixer.preview_path(rec_short)
-        with st.spinner("Mixing the transition…"):
-            try:
-                mixer.render(rec_short, tracks_full, out)
-            except Exception as e:
-                st.error(f"Couldn't make the preview: {e}")
-                return
+        try:
+            _render_progress(rec_short, tracks_full, out, "Mixing the transition")
+        except Exception as e:
+            st.error(f"Couldn't make the preview: {e}")
+            return
         st.session_state["mxt_pv"] = {"path": str(out), "sig": json.dumps(rec_short, sort_keys=True)}
         st.rerun()
     if pv_ok:
@@ -1271,7 +1385,8 @@ def _transition(summaries: dict) -> None:
                                        st.session_state.__setitem__("mx_mode", MASHUP)))
     else:
         bc[0].button("🧩 Start a mashup with it", key="mxt_new", type="primary", width="stretch",
-                     on_click=_tx_to_mashup, args=(a, b, ta, tb, dict(s), False),
+                     on_click=_replace_mashup, args=("_tx_to_mashup", (a, b, ta, tb, dict(s), False),
+                                                     f"{a} → {b}"),
                      help="A from 16 bars before the blend, then B to its end — carry on adding parts in 🧩 Mashup.")
         parts = st.session_state.get("mxm_parts") or []
         can_append = bool(parts) and parts[-1]["track"] == a
@@ -1294,6 +1409,7 @@ def _infos(summaries: dict) -> list:
     return out
 
 
+@_replacer
 def _start_suggestion(a: str, b: str, vocal_swap: bool) -> None:
     """Fill the 🧩 Mashup editor with a suggested pair and switch to it: a's loudest section
     then b's (or, for a vocal swap, a's loudest section as instrumental with b's most-sung
@@ -1331,6 +1447,7 @@ def _start_suggestion(a: str, b: str, vocal_swap: bool) -> None:
     st.session_state["mx_mode"] = MASHUP
 
 
+@_replacer
 def _start_drop_swap(a: str, b: str) -> None:
     """Fill the 🧩 Mashup editor with "a's build-up → b's drop" (core/mixing.drop_swap_plan) and switch
     to it: a's tempo, b's key fitted to a's, a 1-beat swap on the drop's downbeat with 🎛️ bass swap."""
@@ -1371,8 +1488,8 @@ def _drop_swap_row(r: dict, i: int) -> None:
         bits = [r["key_label"] + (f" (shift {r['shift']:+d} st)" if r["shift"] else ""),
                 f"tempo {(r['speed'] - 1) * 100:+.1f} %"]
         c[0].caption(" · ".join(bits))
-        c[1].button("🧩 Start it", key=f"mx_sug_go_d_{i}", width="stretch", on_click=_start_drop_swap,
-                    args=(r["a"], r["b"]))
+        c[1].button("🧩 Start it", key=f"mx_sug_go_d_{i}", width="stretch", on_click=_replace_mashup,
+                    args=("_start_drop_swap", (r["a"], r["b"]), f"{r['a']} → {r['b']}"))
 
 
 def _suggestions(summaries: dict) -> None:
@@ -1426,7 +1543,8 @@ def _suggestion_row(r: dict, i: int, vocal_swap: bool) -> None:
                 f"tempo {(r['speed'] - 1) * 100:+.1f} %"]
         c[0].caption(" · ".join(bits))
         c[1].button("🧩 Start it", key=f"mx_sug_go_{'v' if vocal_swap else 'p'}_{i}", width="stretch",
-                    on_click=_start_suggestion, args=(r["a"], r["b"], vocal_swap))
+                    on_click=_replace_mashup, args=("_start_suggestion", (r["a"], r["b"], vocal_swap),
+                                                    f"{r['a']} + {r['b']}"))
 
 
 # ---------------------------------------------------------------------------
@@ -1438,6 +1556,7 @@ def _clear(ns: str) -> None:
         del st.session_state[k]
 
 
+@_replacer
 def _open(rec: dict) -> None:
     """Load a saved recipe into its editor."""
     s = rec.get("settings") or {}
@@ -1507,7 +1626,9 @@ def _saved(summaries: dict) -> None:
                 bits.append("recipe only — not saved as a track yet")
             c[0].caption("  ·  ".join(bits))
             missing = [t for t in src if t not in summaries]
-            c[1].button("✏️", key=f"mxs_open_{m['id']}", on_click=_open, args=(m,), disabled=bool(missing),
+            c[1].button("✏️", key=f"mxs_open_{m['id']}", disabled=bool(missing),
+                        on_click=(_open if m.get("kind") == "extend" else _replace_mashup),
+                        args=((m,) if m.get("kind") == "extend" else ("_open", (m,), f"the saved mix {m.get('name', '')}")),
                         help="Open in the editor to change it, preview and save again."
                         if not missing else f"Source track(s) gone: {', '.join(missing)}")
             if out and not out.get("uploaded"):
@@ -1516,9 +1637,19 @@ def _saved(summaries: dict) -> None:
                     err = MS.upload_output(m["id"], drive_token())
                     st.toast(err or "Uploaded to Google Drive ✅")
                     st.rerun()
-            if c[3].button("🗑", key=f"mxs_del_{m['id']}",
-                           help="Forget this recipe. A track already made from it stays in the library."):
-                MS.delete(m["id"])
+            if st.session_state.get("_mxs_del") == m["id"]:
+                d = st.columns([4, 1.3, 1.3], vertical_alignment="center")
+                d[0].caption(f"Delete the recipe **{m.get('name', m['id'])}**? A track already made from it stays "
+                             "in the library.")
+                if d[1].button("🗑 Delete", key=f"mxs_del_yes_{m['id']}", type="primary", width="stretch"):
+                    st.session_state.pop("_mxs_del", None)
+                    MS.delete(m["id"])
+                    st.rerun()
+                d[2].button("Keep it", key=f"mxs_del_no_{m['id']}", width="stretch",
+                            on_click=lambda: st.session_state.pop("_mxs_del", None))
+            elif c[3].button("🗑", key=f"mxs_del_{m['id']}",
+                             help="Forget this recipe (asks first). A track already made from it stays in the library."):
+                st.session_state["_mxs_del"] = m["id"]
                 st.rerun()
 
 
@@ -1531,6 +1662,9 @@ def render(summaries: dict) -> None:
     st.session_state.setdefault("mx_mode", MODES[0])
     with st.container(key="subnav_mix"):   # a sub menu — chips (page_setup.menu_css)
         mode = st.radio("Mix", MODES, horizontal=True, key="mx_mode", label_visibility="collapsed")
+    _pending_check()
+    if mode == MASHUP:
+        _draft_banner()
     if mode == EXTEND:
         _extend(summaries)
     elif mode == MASHUP:
