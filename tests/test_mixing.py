@@ -327,8 +327,8 @@ def test_mix_page_mashup_build(mixlib):
     assert at.session_state["mxm_shift_mix_song_a"] != 0
     # 🔀 the join's own crossfade: a 4-bar blend with the next song coming in early
     uid2 = at.session_state["mxm_parts"][1]["uid"]
-    at.selectbox(key=f"mxm_xfl_{uid2}").set_value("4 bars").run()
-    at.selectbox(key=f"mxm_xfw_{uid2}").set_value("before").run()
+    at.pills(key=f"mxm_xfl_{uid2}").set_value("4 bars").run()
+    at.pills(key=f"mxm_xfw_{uid2}").set_value("before").run()
     assert not errors(at), errors(at)
     assert at.session_state["mxm_parts"][1]["xfade"] == {"beats": 16.0, "where": "before", "shape": "smooth"}
     at.button(key="mxm_preview").click().run()
@@ -731,10 +731,10 @@ def test_mix_page_neural_join_place_and_preview(mixlib):
     at.button(key="mxm_add").click().run()
     assert not errors(at), errors(at)
     uid2 = at.session_state["mxm_parts"][1]["uid"]
-    at.selectbox(key=f"mxm_xfl_{uid2}").set_value("🧠 Neural").run()
+    at.pills(key=f"mxm_xfl_{uid2}").set_value("🧠 Neural").run()
     assert not errors(at), errors(at)
-    at.selectbox(key=f"mxm_nnp_{uid2}").set_value("drums_first").run()
-    at.selectbox(key=f"mxm_nnb_{uid2}").set_value(4).run()
+    at.pills(key=f"mxm_nnp_{uid2}").set_value("drums_first").run()
+    at.pills(key=f"mxm_nnb_{uid2}").set_value(4).run()
     assert at.session_state["mxm_parts"][1]["xfade"] == {"neural": {"profile": "drums_first", "bars": 4}}
     parts = [dict(p) for p in at.session_state["mxm_parts"]]
     parts[0]["end"], parts[1]["start"], parts[1]["end"] = 40.0, 16.0, 40.0   # long enough for the blend
@@ -812,7 +812,7 @@ def test_mix_page_transition_mode(mixlib):
     assert not errors(at), errors(at)
     key = "mxt_state::mix_song_c::mix_song_a"
     s0 = dict(at.session_state[key])
-    assert any("Suggested transitions" in m.value for m in at.markdown)
+    assert any("Top 3" in m.value for m in at.markdown)
     # a drag in the editor comes back as a value
     b_bars = MX.grid(mixlib["tracks"]["mix_song_a"])["bars"]
     new_b = float(b_bars[min(12, len(b_bars) - 1)])
@@ -855,7 +855,7 @@ def test_mashup_neural_joins_survive_leaving_the_screen(mixlib):
         assert not errors(at), (mode, errors(at))
     xf = [p.get("xfade") for p in at.session_state["mxm_parts"]]
     assert xf[1] == nn and xf[2] == nn
-    assert {at.selectbox(key=f"mxm_xfl_{u}").value for u in ("P2", "P3")} == {"🧠 Neural"}
+    assert {at.pills(key=f"mxm_xfl_{u}").value for u in ("P2", "P3")} == {"🧠 Neural"}
 
 
 def test_mashup_lanes_and_card_trim(mixlib):
@@ -1061,8 +1061,8 @@ def test_mashup_join_chip_and_one_join_preview(mixlib):
     at.run()
     assert not errors(at), errors(at)
     labels = [p.proto.popover.label for p in at.get("popover")]
-    assert any(lb.startswith("🔀 1 → 2 · ") for lb in labels), labels
-    at.selectbox(key="mxm_xfl_j2").set_value("2 bars").run()
+    assert any(lb.replace("⚠️ ", "").startswith("🔀 1 → 2 · ") for lb in labels), labels
+    at.pills(key="mxm_xfl_j2").set_value("2 bars").run()
     assert any("🔀 1 → 2 · 2 bars" in p.proto.popover.label for p in at.get("popover"))
     at.button(key="mxm_jplay_j2").click().run()
     _settle(at)
@@ -1148,3 +1148,101 @@ def test_mixing_a_song_marks_it_used(mixlib, tmp_path):
     mixer.decode_window(f, 1.0, 0.0, 0.0, 10.0)
     st_ = f.stat()
     assert st_.st_atime > old + 1000 and int(st_.st_mtime) == old
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 of the Mix redesign: one-tap pills, phrase snapping, undo, ✨ Fix, ▶ on suggestions
+# ---------------------------------------------------------------------------
+
+def _two_part_mashup(at, mixlib):
+    t = mixlib["tracks"]
+    gc, ga = MX.grid(t["mix_song_c"]), MX.grid(t["mix_song_a"])
+    at.session_state["lib_kind"] = "🎚️ Mix"
+    at.session_state["mx_mode"] = "🧩 Mashup"
+    at.session_state["mxm_parts"] = [
+        {"track": "mix_song_c", "start": 0.0, "end": MX.snap_to_bar(gc, 40), "gain_db": 0.0, "uid": "u1", "part": "full"},
+        {"track": "mix_song_a", "start": MX.snap_to_bar(ga, 8), "end": MX.snap_to_bar(ga, 36), "gain_db": 0.0,
+         "uid": "u2", "part": "full"}]
+    at.run()
+
+
+def test_lane_data_has_phrases_and_sections(mixlib):
+    import deck_editor as DE
+    t = mixlib["tracks"]["mix_song_c"]
+    g = MX.grid(t)
+    d = DE.lane_data(t, "mix_song_c", g)
+    assert d["phrases"] and all(w >= 0.6 for _, w in d["phrases"])
+    assert all(min(abs(x - b) for b in g["bars"]) < 0.01 for x, _ in d["phrases"])      # phrases sit on bar lines
+    assert [s_["label"] for s_ in d["sections"]] == [s_["label"] for s_ in g["sections"]]
+    assert sum(s_["bars"] for s_ in d["sections"]) <= len(g["bars"]) and d["bar_len"] > 0
+
+
+def test_join_pills_one_tap_and_never_empty(mixlib):
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    _two_part_mashup(at, mixlib)
+    at.pills(key="mxm_xfl_u2").set_value("🧠 Neural").run()
+    at.pills(key="mxm_nnp_u2").set_value("vocal_swap").run()
+    assert not errors(at), errors(at)
+    assert at.session_state["mxm_parts"][1]["xfade"]["neural"]["profile"] == "vocal_swap"
+    at.pills(key="mxm_nnp_u2").set_value(None).run()          # a second tap on the chosen pill
+    assert at.session_state["mxm_nnp_u2"] == "vocal_swap"
+    assert at.session_state["mxm_parts"][1]["xfade"]["neural"]["profile"] == "vocal_swap"
+
+
+def test_mashup_undo_and_redo(mixlib):
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    _two_part_mashup(at, mixlib)
+    assert at.button(key="mxm_undo").disabled
+    at.pills(key="mxm_xfl_u2").set_value("4 bars").run()
+    at.number_input(key="mxm_gain_u1").set_value(-3.0).run()
+    assert at.session_state["mxm_parts"][1]["xfade"]["beats"] == 16.0
+    assert at.session_state["mxm_parts"][0]["gain_db"] == -3.0
+    at.button(key="mxm_undo").click().run()                   # the level change goes
+    assert not errors(at), errors(at)
+    assert at.session_state["mxm_parts"][0]["gain_db"] == 0.0
+    assert at.session_state["mxm_parts"][1]["xfade"]["beats"] == 16.0
+    at.button(key="mxm_undo").click().run()                   # then the crossfade
+    assert "xfade" not in at.session_state["mxm_parts"][1] or \
+        at.session_state["mxm_parts"][1]["xfade"].get("beats") != 16.0
+    at.button(key="mxm_redo").click().run()
+    assert at.session_state["mxm_parts"][1]["xfade"]["beats"] == 16.0
+    assert not errors(at), errors(at)
+
+
+def test_fix_a_rough_join(mixlib, monkeypatch):
+    """✨ Fix: the incoming song's key shifted to fit, and the hand-over moved to a suggested place as a 🧠 blend."""
+    import mix_ui
+    from tests.apptest_util import page_app, errors
+    real = mix_ui._join_notes
+    monkeypatch.setattr(mix_ui, "_join_notes", lambda lay, *a: [(n[0], "red", n[2]) for n in real(lay, *a)])
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    _two_part_mashup(at, mixlib)
+    at.button(key="mxm_jfix_u2").click().run()
+    assert not errors(at), errors(at)
+    p2 = at.session_state["mxm_parts"][1]
+    assert any("Fixed:" in i.value or "Nothing better" in i.value for i in at.info)
+    if "hand-over moved" in " ".join(i.value for i in at.info):
+        assert p2["xfade"]["neural"]["bars"] in NEURAL_BARS_T
+        assert at.pills(key="mxm_xfl_u2").value == "🧠 Neural"
+
+
+NEURAL_BARS_T = (1, 2, 4, 8, 16)
+
+
+def test_suggestion_card_plays_it(mixlib):
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎚️ Mix"
+    at.session_state["mx_mode"] = "🎚️ Transition"
+    at.session_state["mxt_a"] = "mix_song_c"
+    at.session_state["mxt_b"] = "mix_song_a"
+    at.run()
+    go = [b for b in at.button if (b.key or "").startswith("mxt_use_")]
+    assert go
+    go[-1].click().run()
+    assert not errors(at), errors(at)
+    assert at.session_state["_mxt_play"] > 0                 # the decks are asked to play it live
+    s_ = at.session_state["mxt_state::mix_song_c::mix_song_a"]
+    assert s_["from"] == "suggestion"

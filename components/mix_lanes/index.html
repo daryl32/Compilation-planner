@@ -34,7 +34,7 @@
 </div>
 <canvas id="cv"></canvas>
 <div class="hint" id="hint">Each part on its own lane, where it plays in the mix · drag a part's ▌ start or end ▐ handle to trim it
-(on its bar lines) · tap a lane to set where its ▶ plays from · ▶ Mix plays the preview · drag the ruler to scroll</div>
+(it clicks onto phrase lines — the brighter lines — near one, else bar lines) · tap a lane to set where its ▶ plays from · ▶ Mix plays the preview · drag the ruler to scroll</div>
 
 <script>
 function post(type, extra) { window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra || {}), "*"); }
@@ -50,6 +50,23 @@ function fmt(t) { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = t -
 function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
 function clip(x, a, b) { return Math.max(a, Math.min(b, x)); }
 function nearest(arr, t) { let best = t, d = 1e9; for (const x of arr) { const e = Math.abs(x - t); if (e < d) { d = e; best = x; } } return best; }
+// 🎯 Magnetic snapping: an 8 / 16-bar phrase or a section start when the drag is within 1½ bars of one,
+// otherwise the nearest bar line. Returns {t, label}.
+function magnet(trk, t, extra) {
+  const bl = trk.bar_len || 2, ph = trk.phrases || [];
+  let best = null, d = 1e9;
+  for (const [x] of ph) { const e = Math.abs(x - t); if (e < d) { d = e; best = x; } }
+  const bars = trk.bars.concat(extra || []);
+  const snapped = (best !== null && d <= 1.5 * bl) ? best : nearest(bars, t);
+  return {t: snapped, label: placeLabel(trk, snapped)};
+}
+function placeLabel(trk, t) {
+  let bi = 0, d = 1e9; trk.bars.forEach((b, i) => { const e = Math.abs(b - t); if (e < d) { d = e; bi = i; } });
+  const sec = (trk.sections || []).filter(s => s.t <= t + 1e-3).pop();
+  const onPhrase = (trk.phrases || []).some(([x]) => Math.abs(x - t) < 1e-3);
+  const onSection = (trk.sections || []).some(s => Math.abs(s.t - t) < 0.05);
+  return `${fmt(t)} · bar ${bi + 1}` + (onSection ? ` · start of ${sec ? sec.label : "a section"}` : onPhrase ? " · phrase" : "");
+}
 function fit(c) {
   const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
   if (c.width !== Math.round(r.width * d) || c.height !== Math.round(r.height * d)) { c.width = Math.round(r.width * d); c.height = Math.round(r.height * d); }
@@ -78,6 +95,17 @@ function drawLane(g, w, X, L, y, h) {
     if (k > 0.05) { g.fillStyle = css("--drums"); g.fillRect(px, mid + (1 - k) * amp, 1, k * amp); }
   }
   g.globalAlpha = 1;
+  // 🎯 phrase lines and section names (what drags snap to)
+  const p0 = X(play0), p1 = X(play1);
+  for (const [t, wgt] of (trk.phrases || [])) {
+    const x = X(toMix(L, t)); if (x < p0 - 1 || x > p1 + 1 || x < 0 || x > w) continue;
+    g.globalAlpha = 0.25 + 0.45 * wgt; g.fillStyle = css("--fg"); g.fillRect(x, y + 2, 1, h - 4); }
+  g.globalAlpha = 1; g.font = "10px sans-serif";
+  for (const sec of (trk.sections || [])) {
+    const x = X(toMix(L, sec.t)); if (x < p0 - 1 || x > p1 - 30 || x < 0 || x > w - 30) continue;
+    const txt = `${sec.label} · ${sec.bars}`; g.globalAlpha = 0.85; g.fillStyle = css("--panel");
+    g.fillRect(x + 1, y + h - 15, g.measureText(txt).width + 6, 13); g.globalAlpha = 1;
+    g.fillStyle = css("--fg"); g.fillText(txt, x + 4, y + h - 5); }
   // handles
   for (const [x, side] of [[L.out_start, "s"], [L.out_end, "e"]]) {
     const xx = X(x); g.fillStyle = css("--fg"); g.globalAlpha = 0.85;
@@ -105,6 +133,12 @@ function draw() {
   if (c) { const [y0, y1] = c.lane === null ? [RULER, h] : [geo[c.lane].y, geo[c.lane].y + LANE_H];
            g.beginPath(); g.moveTo(X(c.x), y0); g.lineTo(X(c.x), y1); g.stroke(); }
   else { g.globalAlpha = 0.5; g.beginPath(); g.moveTo(X(cue.M), RULER); g.lineTo(X(cue.M), h); g.stroke(); g.globalAlpha = 1; }
+  // while trimming: where the handle has snapped to
+  if (drag && drag.tag && drag.lane !== null && geo[drag.lane]) {
+    const L = P(drag.lane), xx = X(drag.kind === "s" ? L.out_start : L.out_end), yy = geo[drag.lane].y - 2;
+    g.font = "bold 12px sans-serif"; const tw = g.measureText(drag.tag).width + 12, x0 = clip(xx - tw / 2, 2, w - tw - 2);
+    g.fillStyle = css("--fg"); g.globalAlpha = 0.92; g.fillRect(x0, yy - 16, tw, 18); g.globalAlpha = 1;
+    g.fillStyle = css("--panel"); g.fillText(drag.tag, x0 + 6, yy - 3); }
   cv._geo = {X, T, geo, w};
 }
 
@@ -165,11 +199,11 @@ cv.addEventListener("pointermove", ev => {
   if (!drag.moved) return;
   if (drag.kind === "pan" || drag.kind === "lane") view.start = drag.v0 - dt;
   else {
-    const L = D.lanes[drag.lane], bars = L.trk.bars.concat([0, L.trk.duration]);
-    if (drag.kind === "s") { const s = nearest(bars, clip(L.start + dt * L.speed, 0, L.end - 1));
-      edits[L.uid] = {start: s, out_start: L.out_start + 0 }; }          // start moves under a fixed position
-    else { const e = nearest(bars, clip(L.end + dt * L.speed, L.start + 1, L.trk.duration));
-      edits[L.uid] = {end: e, out_end: L.out_start + (e - L.start) / L.speed}; }
+    const L = D.lanes[drag.lane], extra = [0, L.trk.duration];
+    if (drag.kind === "s") { const m = magnet(L.trk, clip(L.start + dt * L.speed, 0, L.end - 1), extra);
+      edits[L.uid] = {start: m.t, out_start: L.out_start + 0 }; drag.tag = "starts " + m.label; }   // start moves under a fixed position
+    else { const m = magnet(L.trk, clip(L.end + dt * L.speed, L.start + 1, L.trk.duration), extra);
+      edits[L.uid] = {end: m.t, out_end: L.out_start + (m.t - L.start) / L.speed}; drag.tag = "ends " + m.label; }
   }
   draw();
 });

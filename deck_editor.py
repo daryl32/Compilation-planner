@@ -56,15 +56,29 @@ def lane_data(track: dict, track_id: str, g: dict, url: str = "", label: str = N
             k = np.maximum(k, np.asarray(a["snare"], dtype=float))
         drums = _resample(k, arate, dur)
     vox = _resample(a.get("vocals"), arate, dur) if a.get("vocals") is not None else None
+    from core import transitions as TR
+    bars = [round(float(b), 3) for b in g["bars"]]
+    # 🎯 phrase lines (8 / 16-bar phrases, section starts) that drags snap to when close, and the sections' names
+    phrases = [[round(float(t), 3), round(float(w), 2)] for t, w in TR.phrase_points(track, g) if w >= 0.6]
+    sections = []
+    for sec in g.get("sections") or []:
+        start = float(sec["start"])
+        n = sum(1 for b in bars if start - 1e-3 <= b < float(sec["end"]) - 1e-3)
+        sections.append({"t": round(start, 3), "label": str(sec.get("label") or ""), "bars": n,
+                         "energy": round(float(sec.get("energy") or 0.0), 2)})
     return {"id": track_id, "label": label or track_id, "duration": dur, "rate": RATE, "env": env,
-            "vox": vox, "drums": drums, "bars": [round(float(b), 3) for b in g["bars"]], "url": url}
+            "vox": vox, "drums": drums, "bars": bars, "bar_len": round(float(g["bar_len"]), 4),
+            "phrases": phrases, "sections": sections, "url": url}
 
 
 def deck_editor(*, a: dict, b: dict, state: dict, bar_a: float, bar_b: float, speed_b: float,
-                live: dict = None, beats_per_bar: int = 4, state_key: str = "", key: str = "deck_editor"):
+                live: dict = None, beats_per_bar: int = 4, state_key: str = "", key: str = "deck_editor",
+                play: int = 0):
     """live: the ⚡ live preview ({"a": {"w", "urls", "gain_db"}, "b": {…}, "mode"} — live_preview.prepare with
-    its files as URLs), or None while it's being prepared."""
+    its files as URLs), or None while it's being prepared. play: a new number starts ▶ Live mix from 4 bars
+    before the blend (as soon as the live preview is ready) — the ▶ on a suggestion card."""
     st_ = {"a_end": float(state["a_end"]), "b_full": float(state["b_full"]), "bars": int(state["bars"]),
            "profile": state.get("profile") or "smooth", "curves": state.get("curves") or None}
     return _COMPONENT(a=a, b=b, state=st_, bar_a=float(bar_a), bar_b=float(bar_b), speed_b=float(speed_b),
-                      live=live, bpb=int(beats_per_bar), state_key=state_key, key=key, default=None)
+                      live=live, bpb=int(beats_per_bar), state_key=state_key, play=int(play or 0), key=key,
+                      default=None)

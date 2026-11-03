@@ -23,6 +23,8 @@
   #deck { height:270px; }
   .hint { color:var(--muted); font-size:13px; margin-top:4px; min-height:18px; }
   .key span { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 3px 0 10px; vertical-align:middle; }
+  button.nudge { animation: nudge 1s ease-in-out 3; border-color: var(--accent); }
+  @keyframes nudge { 50% { transform: scale(1.08); } }
 </style>
 </head>
 <body>
@@ -61,6 +63,19 @@ let drag = null;
 function fmt(t) { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = t - m * 60; return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1); }
 function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
 function nearest(arr, t) { let best = null, d = 1e9; for (const x of arr) { const e = Math.abs(x - t); if (e < d) { d = e; best = x; } } return best; }
+// 🎯 Magnetic snapping: an 8 / 16-bar phrase or a section start when the drag is within 1½ bars of one,
+// otherwise the nearest bar line.
+function magnet(trk, t, extra) {
+  const bl = trk.bar_len || 2; let best = null, d = 1e9;
+  for (const [x] of (trk.phrases || [])) { const e = Math.abs(x - t); if (e < d) { d = e; best = x; } }
+  return (best !== null && d <= 1.5 * bl) ? best : nearest(trk.bars.concat(extra || []), t);
+}
+function placeLabel(trk, t) {
+  let bi = 0, d = 1e9; trk.bars.forEach((b, i) => { const e = Math.abs(b - t); if (e < d) { d = e; bi = i; } });
+  const sec = (trk.sections || []).find(s => Math.abs(s.t - t) < 0.05);
+  const onPhrase = (trk.phrases || []).some(([x]) => Math.abs(x - t) < 1e-3);
+  return `bar ${bi + 1}` + (sec ? ` · start of ${sec.label}` : onPhrase ? " · phrase" : "");
+}
 function clip(x, a, b) { return Math.max(a, Math.min(b, x)); }
 function fit(c) {
   const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
@@ -175,6 +190,14 @@ function lane(g, w, X, y, h, trk, toLane, from, keep0, keep1) {
   g.globalAlpha = 1;
   g.strokeStyle = css("--line"); g.lineWidth = 1;
   if (view.span < 160) for (const b of trk.bars) { const x = X(from(b)); if (x >= 0 && x <= w) { g.beginPath(); g.moveTo(x, y); g.lineTo(x, y + h); g.stroke(); } }
+  // 🎯 phrase lines (brighter — drags click onto them) and the sections' names
+  for (const [t, wgt] of (trk.phrases || [])) { const x = X(from(t)); if (x < 0 || x > w) continue;
+    g.globalAlpha = 0.25 + 0.45 * wgt; g.fillStyle = css("--fg"); g.fillRect(x, y + 2, 1, h - 4); }
+  g.globalAlpha = 1; g.font = "10px sans-serif";
+  for (const sec of (trk.sections || [])) { const x = X(from(sec.t)); if (x < 0 || x > w - 30) continue;
+    const txt = `${sec.label} · ${sec.bars}`; g.globalAlpha = 0.85; g.fillStyle = css("--panel");
+    g.fillRect(x + 1, y + h - 15, g.measureText(txt).width + 6, 13); g.globalAlpha = 1;
+    g.fillStyle = css("--fg"); g.fillText(txt, x + 4, y + h - 5); }
 }
 
 function curveHandles(side, X, top, H) {
@@ -227,7 +250,7 @@ function draw() {
   g.beginPath(); g.moveTo(xb0, ruler); g.lineTo(xb0, yB + laneH); g.stroke(); g.setLineDash([]);
   g.fillStyle = css("--muted"); g.fillRect(xb0 - 3, yA + laneH / 2 - 14, 6, 28);
   g.fillStyle = css("--fg"); g.font = "12px sans-serif";
-  g.fillText(`blend ${S.bars} bar${S.bars === 1 ? "" : "s"} · A hands over at ${fmt(S.a_end)} · B in from ${fmt(bIn())}, fully in at ${fmt(S.b_full)}`, 6, h - 4);
+  g.fillText(`blend ${S.bars} bar${S.bars === 1 ? "" : "s"} · A hands over at ${fmt(S.a_end)} (${placeLabel(D.a, S.a_end)}) · B in from ${fmt(bIn())}, fully in at ${fmt(S.b_full)} (${placeLabel(D.b, S.b_full)})`, 6, h - 4);
   // cursors
   const cx = curX();
   g.strokeStyle = css("--cursor"); g.lineWidth = 2;
@@ -275,7 +298,9 @@ function softKneeCurve() {          // the same as core/stem_mix.soft_knee: flat
     c[i] = m <= k ? x : Math.sign(x) * (k + room * Math.tanh((m - k) / room)) ; }
   return c;
 }
+let lastPlay = 0, pendingPlay = false;
 async function playLive(fromX) {
+  $("pm").classList.remove("nudge");
   stopAll();
   const L = D.live; if (!L || !L.a) return;
   if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -369,10 +394,10 @@ deck.addEventListener("pointermove", ev => {
   if (Math.abs(dx) > 6 || Math.abs(dy) > 6) drag.moved = true;
   if (!drag.moved) return;
   if (drag.kind === "pan" || drag.kind === "laneA") view.start = drag.v0 - dt;
-  else if (drag.kind === "mix") S.a_end = nearest(D.a.bars.concat([D.a.duration]), drag.s0.a_end + dt);
+  else if (drag.kind === "mix") S.a_end = magnet(D.a, drag.s0.a_end + dt, [D.a.duration]);
   else if (drag.kind === "edge") { const bars = (S.a_end - (drag.s0.a_end - drag.s0.bars * D.bar_a + dt)) / D.bar_a;
                                    S.bars = [1, 2, 4, 8, 16].reduce((a, b) => Math.abs(b - bars) < Math.abs(a - bars) ? b : a); }
-  else if (drag.kind === "laneB") S.b_full = nearest(D.b.bars, drag.s0.b_full - dt * D.speed_b);
+  else if (drag.kind === "laneB") S.b_full = magnet(D.b, drag.s0.b_full - dt * D.speed_b);
   else if (drag.kind === "curve") {
     // sideways: when (t); up / down: how far that side has faded by then (u) — kept in order, never backwards
     const {side, i} = drag.handle, pts = drag.pts0[side].map(q => q.slice()), len = (g.xb1 - g.xb0) || 1;
@@ -419,6 +444,13 @@ window.addEventListener("message", ev => {
   if (pairChanged) { fitBlend(); cue.A = cue.M = blendStart() - 4 * D.bar_a; cue.B = Math.max(0, bIn() - 2 * D.bar_b);
                      $("hint").textContent = HINT; if (playing) stopAll(); }
   else if (wasLive && liveChanged) playLive(x);              // new stems prepared — carry on from here
+  // ▶ on a suggestion card: play it live from 4 bars before the blend (as soon as its stems are ready)
+  if (args.play && args.play !== lastPlay) { lastPlay = args.play; pendingPlay = true; }
+  if (pendingPlay && D.live && D.live.a && !loading) {
+    pendingPlay = false; cue.A = cue.M = blendStart() - 4 * D.bar_a;
+    playLive(cue.M).then(() => { if (!ctx || ctx.state !== "running") {
+      $("pm").classList.add("nudge"); $("hint").textContent = "Tap ▶ Live mix to hear it — the browser wants one tap first."; } });
+  }
   setButtons(); draw(); setHeight();
 });
 window.addEventListener("resize", () => { draw(); setHeight(); });
