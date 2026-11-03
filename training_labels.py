@@ -240,6 +240,47 @@ def load_look_steps() -> list:
     return TLG.default_look_steps()
 
 
+LOOK_COLUMNS = ["order", "on", "if_penetration", "key", "name", "question", "choices"]
+
+
+def look_steps_csv(rows: list) -> str:
+    """Your look steps as CSV (open in Excel / send to Claude): one row per step, in order;
+    choices separated by ; ("can't tell" is always added, so it isn't listed)."""
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=LOOK_COLUMNS, lineterminator="\n")
+    w.writeheader()
+    for i, r in enumerate(rows, 1):
+        w.writerow({"order": i * 10, "on": "yes" if r.get("on", True) else "no",
+                    "if_penetration": "yes" if r.get("if_penetration") else "no", "key": r.get("key", ""),
+                    "name": r.get("name", ""), "question": r.get("question", ""),
+                    "choices": "; ".join(r.get("choices") or [])})
+    return buf.getvalue()
+
+
+def parse_look_steps_csv(text: str) -> list:
+    """Look steps from a CSV like look_steps_csv's (Excel's BOM and ; or , separators are fine),
+    sorted by order (rows without one go last, as listed). Rows missing a key, question or
+    choices are skipped."""
+    import trial_logic as TLG
+    text = text.lstrip("\ufeff")
+    first = text.splitlines()[0] if text.strip() else ""
+    delim = ";" if first.count(";") > first.count(",") else ","
+    rows = []
+    for n, raw in enumerate(csv.DictReader(io.StringIO(text), delimiter=delim)):
+        r = {str(k or "").strip().lower().replace(" ", "_"): (v or "").strip() for k, v in raw.items()}
+        try:
+            order = float(r.get("order") or "")
+        except ValueError:
+            order = None
+        yes = lambda v, d: d if not v else v.lower() in ("yes", "y", "true", "1", "on", "x")
+        rows.append((order is None, order or 0.0, n, {
+            "key": r.get("key"), "name": r.get("name"), "question": r.get("question"),
+            "choices": (r.get("choices") or "").replace("|", ";").split(";"),
+            "on": yes(r.get("on"), True), "if_penetration": None if not r.get("if_penetration")
+            else yes(r.get("if_penetration"), False)}))
+    return TLG.clean_look_steps([r for *_, r in sorted(rows, key=lambda x: x[:3])])
+
+
 def save_look_steps(rows: list) -> int:
     """Write look_steps.json and queue it for Drive (each Modal run sends it). Returns the number of
     steps switched on."""

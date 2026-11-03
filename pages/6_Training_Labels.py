@@ -474,6 +474,34 @@ def look_steps_editor() -> None:
     if late:
         st.warning("These are set to **if penetration** but come before the penetration step, so the teacher "
                    "hasn't answered penetration yet — move them after it: " + ", ".join(late))
+    d, u = st.columns(2)
+    d.download_button("⬇️ Download look steps (CSV)", "\ufeff" + TL.look_steps_csv(rows), file_name="look_steps.csv",
+                      mime="text/csv", key="tl_look_dl", width="stretch",
+                      help="Open in Excel or send it to Claude, then upload the edited file here.")
+    up = u.file_uploader("⬆️ Upload look steps (CSV)", type=["csv"], key="tl_look_up",
+                         help="Replaces all your look steps once you confirm. Columns: order, on, if_penetration, "
+                              "key, name, question, choices (separated by ;).")
+    if up is not None:
+        try:
+            new_rows = TL.parse_look_steps_csv(up.getvalue().decode("utf-8-sig"))
+        except (UnicodeDecodeError, ValueError, IndexError) as e:
+            st.error(f"Couldn't read that file: {e}")
+            new_rows = []
+        if not new_rows:
+            st.warning("No usable steps in that file — each row needs a key, a question and choices.")
+        else:
+            on = sum(1 for r in new_rows if r["on"])
+            st.caption("In the file: " + " → ".join(r["key"] + ("" if r["on"] else " (off)") for r in new_rows))
+            gaps_up = TLG.look_rule_gaps(new_rows)
+            if gaps_up:
+                st.warning("The built-in rules lose answers they read: "
+                           + "; ".join(f"**{k}**: {', '.join(m)}" for k, m in gaps_up))
+            if st.button(f"💾 Use these {len(new_rows)} steps ({on} on)", type="primary", key="tl_look_up_save",
+                         width="stretch"):
+                TL.save_look_steps(new_rows)
+                st.session_state["tl_look_note"] = f"Uploaded {len(new_rows)} look steps ({on} switched on)."
+                st.session_state.pop("tl_look_editor", None)
+                st.rerun()
     with st.expander("📋 Copy the look steps as text (e.g. to send to Claude)"):
         st.code("\n".join(f"{i}. [{'on' if r['on'] else 'off'}{', if penetration' if r['if_penetration'] else ''}] "
                           f"{r['key']} — {r['question']}\n   choices: {' | '.join(r['choices'])}"

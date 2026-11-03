@@ -317,6 +317,25 @@ def test_look_steps_editor_saves_and_resets(clean_files):
     assert TL.load_look_steps() == TLG.default_look_steps()
 
 
+def test_look_steps_csv_round_trip():
+    import trial_logic as TLG
+    rows = TLG.default_look_steps()
+    rows[3]["on"] = False
+    text = TL.look_steps_csv(rows)
+    assert text.splitlines()[0] == "order,on,if_penetration,key,name,question,choices"
+    assert TL.parse_look_steps_csv("\ufeff" + text) == TLG.clean_look_steps(rows)
+    # Excel-style: ; separated, reordered by the order column, a row without choices skipped
+    xl = ("order;on;if_penetration;key;name;question;choices\n"
+          "20;yes;yes;on_top;On top;Who is on top?;her | partner\n"
+          "10;yes;;women;Women;How many women?;0; 1\n"
+          "5;no;no;empty;Empty;Nothing;\n")
+    xl = xl.replace("0; 1", '"0; 1"')
+    got = TL.parse_look_steps_csv(xl)
+    assert [r["key"] for r in got] == ["women", "on_top"]
+    assert got[0]["choices"] == ["0", "1"] and got[0]["if_penetration"] is False
+    assert got[1]["choices"] == ["her", "partner"] and got[1]["if_penetration"] is True
+
+
 def test_upsert_rename_delete_tag():
     rows = TL.parse_vocabulary(CSV)
     rows = TL.upsert_tag(rows, {"tag": "kissing", "kind": "motion", "group": "action"})
