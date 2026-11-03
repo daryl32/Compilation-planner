@@ -372,6 +372,17 @@ def test_look_position_needs_match_the_wording():
     assert need["doggy style"]({"her_posture": "bent over (standing)"})
 
 
+def test_boost_examples():
+    assert TL.parse_boost("Reverse Cowgirl:3; standing:9, laying down; :2; x:y") == {
+        "reverse cowgirl": 3, "standing": 5, "laying down": 2, "x": 2}
+    recs = [{"t": 1, "tags": ["reverse cowgirl", "penetration"]}, {"t": 2, "tags": ["Doggy Style"]},
+            {"t": 3, "tags": ["Standing", "reverse cowgirl"]}]
+    out, counts = TL.boost_examples(recs, {"reverse cowgirl": 3, "standing": 5})
+    assert [r["t"] for r in out] == [1, 1, 1, 2, 3, 3, 3, 3, 3]
+    assert counts == {"reverse cowgirl": 8, "standing": 5}
+    assert TL.boost_examples(recs, {}) == (recs, {})
+
+
 def test_copied_scored():
     frames = [{"v": "a", "t": 1.0, "tags": [], "c": "k1"}, {"v": "a", "t": 2.0, "tags": []},
               {"v": "a", "t": 3.0, "g": "x", "tags": [], "c": "k2"}]

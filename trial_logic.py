@@ -1339,6 +1339,37 @@ def test_runs_markdown(runs: list, gold: list, tags: list, top: int = 15) -> str
 LORA_CONF = 90          # your tags are taught as "sure" (the teacher's answers use 0–100)
 
 
+def parse_boost(text: str) -> dict:
+    """"reverse cowgirl:3; standing:3" → {"reverse cowgirl": 3, "standing": 3} (lower-case tags, a
+    repeat count of 2–5; a tag without a number counts 2)."""
+    out = {}
+    for part in str(text or "").replace(",", ";").split(";"):
+        tag, _, n = part.partition(":")
+        tag = tag.strip().lower()
+        if not tag:
+            continue
+        try:
+            k = int(float(n)) if n.strip() else 2
+        except ValueError:
+            k = 2
+        out[tag] = max(1, min(5, k))
+    return out
+
+
+def boost_examples(recs: list, boost: dict) -> tuple:
+    """Rare tags seen more often in training: each example is repeated as many times as the
+    highest boost among its tags (1 = once, as now). Returns (examples, {tag: examples with it
+    after boosting})."""
+    out, counts = [], {}
+    for r in recs:
+        tags = {str(t).lower() for t in r.get("tags") or []}
+        k = max([boost[t] for t in tags if t in boost] or [1])
+        out += [r] * k
+        for t in tags & set(boost):
+            counts[t] = counts.get(t, 0) + k
+    return out, counts
+
+
 def lora_target(tags: list, vocab: list, caption: str = "") -> str:
     """The answer the teacher should have given for one of your labelled frames, in exactly the
     shape its structured replies have (category order, compact JSON): your tags at LORA_CONF, each

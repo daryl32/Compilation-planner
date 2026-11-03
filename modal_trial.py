@@ -1901,10 +1901,12 @@ def _lora_dir() -> Path:
 
 
 @app.function(image=report_image, volumes={DATA: pack_vol}, timeout=1800, cpu=2)
-def prepare_lora_data(val_share: float = 0.05, seed: int = 7) -> dict:
+def prepare_lora_data(val_share: float = 0.05, seed: int = 7, boost: str = "") -> dict:
     """CPU: one training example per labelled frame whose 7 frames are on the Volume, in exactly the
     prompt the teacher sees (today's vocabulary), answered with YOUR tags (lora/data.json). The test
-    set's videos are left out; a few other whole videos are kept back to watch the loss (val)."""
+    set's videos are left out; a few other whole videos are kept back to watch the loss (val).
+    boost: "reverse cowgirl:3; standing:3" — training examples with those tags are repeated (rare
+    positions seen more often); the val examples aren't."""
     import random
     import trial_logic as TL
     pack_vol.reload()
@@ -1937,20 +1939,24 @@ def prepare_lora_data(val_share: float = 0.05, seed: int = 7) -> dict:
             no_frames += 1
             continue
         target = TL.lora_target(i.get("tags") or [], vocab, cap_cache[v].get(round(float(i["t"]), 2), ""))
-        recs.append({"video_id": v, "t": i["t"], "frames": frames, "target": target})
+        recs.append({"video_id": v, "t": i["t"], "frames": frames, "target": target, "tags": i.get("tags") or []})
     vids = sorted({r["video_id"] for r in recs})
     random.Random(seed).shuffle(vids)
     val_vids = set(vids[:max(1, int(len(vids) * val_share))]) if len(vids) > 4 else set()
+    train_recs = [r for r in recs if r["video_id"] not in val_vids]
+    boosts = TL.parse_boost(boost)
+    train_recs, boosted = TL.boost_examples(train_recs, boosts) if boosts else (train_recs, {})
     data = {"created": time.strftime("%Y-%m-%d %H:%M"), "head": head, "moment": moment, "tail": tail,
             "vocab_csv": vocab_csv, "test_videos": sorted(held), "val_videos": sorted(val_vids),
-            "train": [r for r in recs if r["video_id"] not in val_vids],
+            "boost": boosts, "train": train_recs,
             "val": [r for r in recs if r["video_id"] in val_vids]}
     d = _lora_dir()
     d.mkdir(parents=True, exist_ok=True)
     (d / "data.json").write_text(json.dumps(data), encoding="utf-8")
     pack_vol.commit()
     return {"train": len(data["train"]), "val": len(data["val"]), "videos": len(vids),
-            "left_out_test_set": skipped_test, "no_frames": no_frames}
+            "left_out_test_set": skipped_test, "no_frames": no_frames,
+            **({"boosted (examples after repeating)": boosted} if boosts else {})}
 
 
 def _answer_loss_labels(model, batch: dict, starts: list):
@@ -2399,7 +2405,7 @@ def _run_vision(vids: list, max_seconds: float, redo: bool) -> None:
 def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool = False, teacher: str = "",
          examples: int = -1, dedup: float = -1.0, batch: int = 0, label: str = "", keep_vocab: bool = False,
          lora: str = "", epochs: float = 1.0, max_examples: int = 0, trainer: str = "unsloth",
-         second_look: str = "auto", run: str = "", look: str = "off"):
+         second_look: str = "auto", run: str = "", look: str = "off", boost: str = ""):
     """teacher: 8b, 32b, 32b-fp8 or both (= 8b + 32b). Default: 8b for --smoke, 32b-fp8 otherwise.
     examples: worked examples from your labels before each moment (default 0 = off, at most 6).
     dedup: near-identical moments in a scene are tagged once and the answer copied when their
@@ -2408,7 +2414,8 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
     --stage test: re-tag the fixed 🧪 test set (~2 h) and compare with earlier test runs; --label names
     the run (e.g. --label positions-v2); --keep-vocab uses the vocabulary already on Modal (the last
     batch's) instead of sending today's — for a baseline. --stage test-pick [--redo]: show / re-pick the set.
-    --stage lora-train --label <name> [--epochs 1]: fine-tune the teacher on your labels (test set held
+    --stage lora-train --label <name> [--epochs 1] [--boost "reverse cowgirl:3; standing:3"]: fine-tune the
+    teacher on your labels (--boost repeats the examples with those tags, 2–5×; test set held
     out) → lora/<name>. Then --stage test --lora <name> tags the test set with it.
     --stage check-labels --lora <name>: tag only your labelled training frames, plain + LoRA, for 🔍.
     --stage neighbours --run <test run id>: copy that test run with the neighbour rule applied
@@ -2499,7 +2506,7 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
             ts = pick_test_set.remote(TEST_HOURS, False)
             print(f"🧠 LoRA '{name}': the {len(ts.get('videos') or [])} test-set videos are held out.")
             print("Preparing training examples (CPU)…")
-            print("  ", prepare_lora_data.remote())
+            print("  ", prepare_lora_data.remote(boost=boost))
         print(f"Training on an H100 ({epochs} epoch(s)) — progress every 50 examples, a checkpoint every "
               f"{LORA_SAVE_EVERY}…")
         fn = train_lora_unsloth if trainer == "unsloth" else train_lora
