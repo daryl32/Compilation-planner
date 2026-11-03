@@ -392,10 +392,18 @@ LOOK_STEP_NAMES = {"women": "Women", "men": "Men", "penetration": "Penetration",
                    "viewpoint": "Viewpoint"}
 
 
+# Steps only worth answering when there's penetration (the positions need it): when the look says
+# penetration is "not happening", the teacher answers these "not applicable".
+NA = "not applicable"
+GATED_DEFAULT = {"her_posture", "her_front_faces", "partner_posture", "partner_legs_point", "on_top", "facing"}
+LOOK_GATED = set(GATED_DEFAULT)
+
+
 def default_look_steps() -> list:
-    """The built-in steps as editable rows: [{"key", "name", "question", "choices", "on"}]."""
-    return [{"key": k, "name": LOOK_STEP_NAMES.get(k, k), "question": q, "choices": list(ch), "on": True}
-            for k, q, ch in DEFAULT_LOOK_STEPS]
+    """The built-in steps as editable rows: [{"key", "name", "question", "choices", "on",
+    "if_penetration"}]."""
+    return [{"key": k, "name": LOOK_STEP_NAMES.get(k, k), "question": q, "choices": list(ch), "on": True,
+             "if_penetration": k in GATED_DEFAULT} for k, q, ch in DEFAULT_LOOK_STEPS]
 
 
 def clean_look_steps(rows) -> list:
@@ -411,22 +419,35 @@ def clean_look_steps(rows) -> list:
         ch = r.get("choices")
         if isinstance(ch, str):
             ch = ch.split(";")
-        ch = list(dict.fromkeys(str(c).strip() for c in (ch or []) if str(c).strip() and str(c).strip() != CANT))
+        ch = list(dict.fromkeys(str(c).strip() for c in (ch or [])
+                                if str(c).strip() and str(c).strip() not in (CANT, NA)))
         if not key or key in seen or not q or not ch:
             continue
         seen.add(key)
         out.append({"key": key, "name": str(r.get("name") or "").strip() or LOOK_STEP_NAMES.get(key, key),
-                    "question": q, "choices": ch, "on": r.get("on", True) not in (False, "no", "false", 0, "0")})
+                    "question": q, "choices": ch, "on": r.get("on", True) not in (False, "no", "false", 0, "0"),
+                    "if_penetration": (key in GATED_DEFAULT if r.get("if_penetration") is None
+                                       else r["if_penetration"] not in (False, "no", "false", 0, "0"))})
     return out
 
 
 def set_look_steps(rows) -> list:
     """Use your look steps (the ones switched on, in your order) for this process's look runs;
     None / nothing usable → the built-in steps. Returns the steps now in use."""
-    global LOOK_STEPS
-    steps = [(r["key"], r["question"], r["choices"]) for r in clean_look_steps(rows) if r["on"]]
-    LOOK_STEPS = steps or list(DEFAULT_LOOK_STEPS)
+    global LOOK_STEPS, LOOK_GATED
+    on = [r for r in clean_look_steps(rows) if r["on"]]
+    if on:
+        LOOK_STEPS = [(r["key"], r["question"], r["choices"]) for r in on]
+        LOOK_GATED = {r["key"] for r in on if r["if_penetration"]}
+    else:
+        LOOK_STEPS, LOOK_GATED = list(DEFAULT_LOOK_STEPS), set(GATED_DEFAULT)
     return LOOK_STEPS
+
+
+def look_choices(key: str, choices) -> list:
+    """A step's allowed answers: its choices, "can't tell", and "not applicable" for a step that's
+    only answered when there's penetration."""
+    return list(choices) + [CANT] + ([NA] if key in LOOK_GATED else [])
 
 
 # What the built-in rules read from the look: step → the answers they rely on. Rename or remove one
@@ -468,7 +489,11 @@ def look_instructions() -> str:
              "choosing one of the listed answers (or \"can't tell\" when you can't see it). Then write "
              "\"summary\": one or two plain sentences built only from your answers. Use your answers when "
              "you choose the tags."]
-    lines += [f"- {key}: {q} — {' | '.join(ch)} | {CANT}" for key, q, ch in LOOK_STEPS]
+    if LOOK_GATED & {k for k, _, _ in LOOK_STEPS}:
+        lines.append("Steps marked (only with penetration): answer them only when your penetration answer is "
+                     f"\"clearly visible\" or \"hidden but implied\"; otherwise answer \"{NA}\".")
+    lines += [f"- {key}: {q}{' (only with penetration)' if key in LOOK_GATED else ''} — "
+              f"{' | '.join(look_choices(key, ch))}" for key, q, ch in LOOK_STEPS]
     return "\n".join(lines)
 
 
@@ -477,7 +502,7 @@ def look_shape() -> str:
 
 
 def look_schema() -> dict:
-    props = {k: {"type": "string", "enum": ch + [CANT]} for k, _, ch in LOOK_STEPS}
+    props = {k: {"type": "string", "enum": look_choices(k, ch)} for k, _, ch in LOOK_STEPS}
     props["summary"] = {"type": "string", "maxLength": 240}
     return {"type": "object", "additionalProperties": False, "required": list(props), "properties": props}
 
@@ -489,7 +514,7 @@ def read_look(data) -> dict | None:
     out = {}
     for k, _, ch in LOOK_STEPS:
         v = str(data.get(k) or "").strip()
-        if v in ch or v == CANT:
+        if v in look_choices(k, ch):
             out[k] = v
     if data.get("summary"):
         out["summary"] = str(data["summary"])[:240]
@@ -507,7 +532,7 @@ def look_check(r: dict, vocab: list) -> list:
         return []
     names = {x["tag"].lower(): x["tag"] for x in vocab}
     seen_pen = L.get("penetration") in ("clearly visible", "hidden but implied")
-    bodies = all(L.get(k) not in (None, CANT, "out of frame") for k in ("her_posture", "partner_posture"))
+    bodies = all(L.get(k) not in (None, CANT, NA, "out of frame") for k in ("her_posture", "partner_posture"))
     drop = []
     for t in r.get("tags") or []:
         low = t.lower()

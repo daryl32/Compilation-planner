@@ -341,7 +341,8 @@ def test_look_steps_editable():
     rows.append({"key": "empty", "question": "no choices", "choices": []})        # no choices: dropped
     clean = TL.clean_look_steps(rows)
     assert clean[-1] == {"key": "her_hair", "name": "her_hair", "question": "Hair colour",
-                         "choices": ["blonde", "brunette"], "on": True}
+                         "choices": ["blonde", "brunette"], "on": True, "if_penetration": False}
+    assert next(r for r in clean if r["key"] == "on_top")["if_penetration"]       # built-in default by key
     assert len(clean) == len(TL.DEFAULT_LOOK_STEPS) + 1
     assert ("her_hands", ["stroking his penis", "holding his penis"]) in TL.look_rule_gaps(clean)
     try:
@@ -350,6 +351,13 @@ def test_look_steps_editable():
         assert "her_hair" in TL.look_schema()["properties"] and "her_hands" not in TL.look_schema()["properties"]
         assert TL.read_look({"her_hair": "blonde", "her_hands": "holding his penis"}) == {"her_hair": "blonde"}
         assert "her_hair: Hair colour" in TL.look_instructions()
+        assert TL.look_schema()["properties"]["on_top"]["enum"][-2:] == [TL.CANT, TL.NA]
+        assert TL.NA not in TL.look_schema()["properties"]["her_hair"]["enum"]
+        assert "on_top: Who is on top?" in TL.look_instructions() and "(only with penetration)" in TL.look_instructions()
+        assert TL.read_look({"on_top": TL.NA, "her_hair": TL.NA}) == {"on_top": TL.NA}
+        r = {"tags": ["Cowgirl position", "penetration"],
+             "look": {"penetration": "clearly visible", "her_posture": TL.NA, "partner_posture": TL.NA}}
+        assert TL.look_check(r, [{"tag": "Cowgirl position"}, {"tag": "penetration"}]) == ["Cowgirl position"]
         assert TL.set_look_steps(None) == TL.DEFAULT_LOOK_STEPS
     finally:
         TL.set_look_steps(None)

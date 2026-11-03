@@ -419,7 +419,8 @@ def _save_look(rows: list) -> None:
         except (TypeError, ValueError):
             return (True, 0.0)
     rows = sorted(rows, key=order)
-    n = TL.save_look_steps([{**r, "choices": str(r.get("choices") or "").split(";")} for r in rows])
+    n = TL.save_look_steps([{**r, "choices": str(r.get("choices") or "").split(";"),
+                             "if_penetration": bool(r.get("if penetration"))} for r in rows])
     st.session_state["tl_look_note"] = f"Saved the look steps — {n} switched on."
     st.session_state.pop("tl_look_editor", None)
 
@@ -445,11 +446,12 @@ def look_steps_editor() -> None:
     if note:
         st.success(note)
     rows = TL.load_look_steps()
-    table = [{"on": r["on"], "order": (i + 1) * 10, "key": r["key"], "name": r["name"], "question": r["question"],
+    table = [{"on": r["on"], "order": (i + 1) * 10, "key": r["key"], "name": r["name"],
+              "if penetration": r["if_penetration"], "question": r["question"],
               "choices": "; ".join(r["choices"])} for i, r in enumerate(rows)]
     edited = st.data_editor(
         table, num_rows="dynamic", hide_index=True, width="stretch", key="tl_look_editor",
-        column_order=["on", "order", "key", "name", "question", "choices"],
+        column_order=["on", "order", "key", "name", "if penetration", "question", "choices"],
         column_config={
             "on": st.column_config.CheckboxColumn("on", default=True),
             "order": st.column_config.NumberColumn("order", min_value=0, max_value=9999, step=1,
@@ -459,9 +461,23 @@ def look_steps_editor() -> None:
                                                help="Short id (letters, digits, _). The built-in rules read some "
                                                     "keys — see below before renaming one."),
             "name": st.column_config.TextColumn("name", help="Shown on the 👁️ Check the look cards."),
+            "if penetration": st.column_config.CheckboxColumn(
+                "if penetration", default=False,
+                help="Only answered when the look says penetration is clearly visible or hidden but implied — "
+                     "otherwise the teacher answers \"not applicable\". Put these steps after penetration."),
             "question": st.column_config.TextColumn("question", width="large", required=True),
             "choices": st.column_config.TextColumn("choices", width="large", required=True),
         })
+    keys = [str(r.get("key") or "") for r in edited if r.get("on")]
+    late = [k for k, r in zip(keys, [r for r in edited if r.get("on")]) if r.get("if penetration")
+            and "penetration" in keys and keys.index(k) < keys.index("penetration")]
+    if late:
+        st.warning("These are set to **if penetration** but come before the penetration step, so the teacher "
+                   "hasn't answered penetration yet — move them after it: " + ", ".join(late))
+    with st.expander("📋 Copy the look steps as text (e.g. to send to Claude)"):
+        st.code("\n".join(f"{i}. [{'on' if r['on'] else 'off'}{', if penetration' if r['if_penetration'] else ''}] "
+                          f"{r['key']} — {r['question']}\n   choices: {' | '.join(r['choices'])}"
+                          for i, r in enumerate(rows, 1)), language=None)
     gaps = TLG.look_rule_gaps([{**r, "choices": str(r.get("choices") or "").split(";")} for r in edited])
     if gaps:
         st.warning("The built-in rules below rely on answers these steps no longer offer — they'll quietly stop "

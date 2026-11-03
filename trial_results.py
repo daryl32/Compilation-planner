@@ -543,7 +543,8 @@ def look_steps() -> list:
     switched off ones too — older runs may have answered them), else the built-in ones."""
     import trial_logic as TLG
     import training_labels as TLB
-    return [(r["key"], r["name"], list(r["choices"]) + [TLG.CANT]) for r in TLB.load_look_steps()]
+    return [(r["key"], r["name"], list(r["choices"]) + [TLG.CANT] + ([TLG.NA] if r["if_penetration"] else []))
+            for r in TLB.load_look_steps()]
 
 
 def look_changes(old: list | None, new: list | None) -> list:
@@ -558,6 +559,8 @@ def look_changes(old: list | None, new: list | None) -> list:
         if k in b:
             if a[k].get("question") != b[k].get("question"):
                 out.append(f"👁️ {k} · question: {a[k].get('question')} → {b[k].get('question')}")
+            if bool(a[k].get("if_penetration")) != bool(b[k].get("if_penetration")):
+                out.append(f"👁️ {k} · only with penetration: {'yes' if b[k].get('if_penetration') else 'no'}")
             if list(a[k].get("choices") or []) != list(b[k].get("choices") or []):
                 out.append(f"👁️ {k} · choices: {' | '.join(a[k].get('choices') or [])} → "
                            f"{' | '.join(b[k].get('choices') or [])}")

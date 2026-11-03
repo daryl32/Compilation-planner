@@ -841,7 +841,8 @@ def prepare_prompts(video_id: str, max_prompts: int = 0, examples: int = 0, dedu
             "vocab": [r["tag"] for r in vocab], "vocab_csv": vocab_csv,
             "examples": examples, "examples_used": used_examples,
             "dedup": dedup, "look": bool(look), "copies": copies, "moments": moments,
-            **({"look_steps": [{"key": k, "question": q, "choices": ch} for k, q, ch in TL.LOOK_STEPS]}
+            **({"look_steps": [{"key": k, "question": q, "choices": ch, "if_penetration": k in TL.LOOK_GATED}
+                               for k, q, ch in TL.LOOK_STEPS]}
                if look else {})}
     pf = prompts_file(video_id)
     pf.write_text(json.dumps(data), encoding="utf-8")
