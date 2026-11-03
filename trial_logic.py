@@ -419,8 +419,7 @@ def clean_look_steps(rows) -> list:
         ch = r.get("choices")
         if isinstance(ch, str):
             ch = ch.split(";")
-        ch = list(dict.fromkeys(str(c).strip() for c in (ch or [])
-                                if str(c).strip() and str(c).strip() not in (CANT, NA)))
+        ch = list(dict.fromkeys(str(c).strip() for c in (ch or []) if str(c).strip() and str(c).strip() != CANT))
         if not key or key in seen or not q or not ch:
             continue
         seen.add(key)
@@ -447,7 +446,7 @@ def set_look_steps(rows) -> list:
 def look_choices(key: str, choices) -> list:
     """A step's allowed answers: its choices, "can't tell", and "not applicable" for a step that's
     only answered when there's penetration."""
-    return list(choices) + [CANT] + ([NA] if key in LOOK_GATED else [])
+    return list(choices) + [CANT] + ([NA] if key in LOOK_GATED and NA not in choices else [])
 
 
 # What the built-in rules read from the look: step → the answers they rely on. Rename or remove one

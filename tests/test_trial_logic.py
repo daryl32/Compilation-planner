@@ -1187,7 +1187,8 @@ def test_look_prompt_schema_and_parse():
     assert '"look"' not in plain and '"caption"' in plain
     sch = TL.answer_schema(v, look=True)
     assert list(sch["properties"])[0] == "look" and "caption" not in sch["properties"]
-    assert sch["properties"]["look"]["properties"]["on_top"]["enum"][-1] == "can't tell"
+    assert sch["properties"]["look"]["properties"]["on_top"]["enum"][-2:] == ["can't tell", "not applicable"]
+    assert sch["properties"]["look"]["properties"]["women"]["enum"][-1] == "can't tell"
     assert "caption" in TL.answer_schema(v)["properties"]
     reply = json.dumps({"look": {**_look(), "facing": "sideways-ish"},
                         "action": [{"tag": "penetration", "conf": 90}],

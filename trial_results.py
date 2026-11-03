@@ -543,7 +543,7 @@ def look_steps() -> list:
     switched off ones too — older runs may have answered them), else the built-in ones."""
     import trial_logic as TLG
     import training_labels as TLB
-    return [(r["key"], r["name"], list(r["choices"]) + [TLG.CANT] + ([TLG.NA] if r["if_penetration"] else []))
+    return [(r["key"], r["name"], list(r["choices"]) + [TLG.CANT] + ([TLG.NA] if r["if_penetration"] and TLG.NA not in r["choices"] else []))
             for r in TLB.load_look_steps()]
 
 
