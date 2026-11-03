@@ -524,8 +524,9 @@ def look_steps_editor() -> None:
             "- **Look check** — only in a CPU copy (`--stage look-check --run <id>`). A position stays only when "
             "penetration is *clearly visible* or *hidden but implied*, both postures are seen, and: Cowgirl = on "
             "top *her* + facing *towards*; reverse cowgirl = *her* + *away*; Missionary = her *lying on back* + "
-            "on top *partner*; Doggy = her *on all fours* or *bent over (standing)*; laying down = both lying; "
-            "standing = both *standing*. Penetration and Anal Sex need *clearly visible*.\n"
+            "on top *partner* (or her partner *standing* at the edge); Doggy = her *on all fours* or *bent over "
+            "(standing)*; laying down = both lying; standing = her partner *standing* and she isn't lying, on all "
+            "fours or bent over (so lifted counts). Penetration and Anal Sex need *clearly visible*.\n"
             "- **Handjob fix on an older run** — `--stage look-fix --run <id>` (CPU copy).")
 
 

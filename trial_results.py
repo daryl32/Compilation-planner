@@ -137,7 +137,9 @@ def look_line(look: dict) -> str:
     if look.get("her_posture"):
         parts.append(f"her: {look['her_posture']}, front to {look.get('her_front_faces', '?')}")
     if look.get("partner_posture"):
-        parts.append(f"partner: {look['partner_posture']}, legs {look.get('partner_legs_point', '?')}")
+        where = (f"head {look['partner_head']}" if look.get("partner_head")
+                 else f"legs {look.get('partner_legs_point', '?')}")
+        parts.append(f"partner: {look['partner_posture']}, {where}")
     if look.get("on_top"):
         parts.append(f"on top: {look['on_top']}")
     if look.get("facing"):

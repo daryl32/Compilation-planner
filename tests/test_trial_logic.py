@@ -363,6 +363,15 @@ def test_look_steps_editable():
         TL.set_look_steps(None)
 
 
+def test_look_position_needs_match_the_wording():
+    need = TL.LOOK_POSITION_NEEDS
+    assert need["missionary"]({"her_posture": "lying on back", "on_top": "neither (standing)",
+                               "partner_posture": "standing"})                     # partner at the bed edge
+    assert need["standing"]({"her_posture": "squatting / straddling", "partner_posture": "standing"})  # lifted
+    assert not need["standing"]({"her_posture": "bent over (standing)", "partner_posture": "standing"})  # Doggy
+    assert need["doggy style"]({"her_posture": "bent over (standing)"})
+
+
 def test_copied_scored():
     frames = [{"v": "a", "t": 1.0, "tags": [], "c": "k1"}, {"v": "a", "t": 2.0, "tags": []},
               {"v": "a", "t": 3.0, "g": "x", "tags": [], "c": "k2"}]

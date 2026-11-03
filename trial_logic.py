@@ -386,6 +386,7 @@ LOOK_STEP_NAMES = {"women": "Women", "men": "Men", "penetration": "Penetration",
                    "penetration_where": "Penetration where", "hidden": "Hidden from view",
                    "her_posture": "Her posture", "her_front_faces": "Her front faces (camera)",
                    "partner_posture": "Partner's posture", "partner_legs_point": "Partner's legs point (camera)",
+                   "partner_head": "Partner's head",
                    "on_top": "On top", "facing": "She faces her partner", "her_hands": "Her hands",
                    "her_mouth": "Her mouth", "mouth_depth": "How far in (mouth)", "her_feet": "Her feet",
                    "partner_hands": "Partner's hands", "partner_mouth": "Partner's mouth",
@@ -395,7 +396,8 @@ LOOK_STEP_NAMES = {"women": "Women", "men": "Men", "penetration": "Penetration",
 # Steps only worth answering when there's penetration (the positions need it): when the look says
 # penetration is "not happening", the teacher answers these "not applicable".
 NA = "not applicable"
-GATED_DEFAULT = {"her_posture", "her_front_faces", "partner_posture", "partner_legs_point", "on_top", "facing"}
+GATED_DEFAULT = {"her_posture", "her_front_faces", "partner_posture", "partner_legs_point", "partner_head",
+                 "on_top", "facing"}
 LOOK_GATED = set(GATED_DEFAULT)
 
 
@@ -455,7 +457,7 @@ LOOK_RULE_NEEDS = {
     "women": ("1",), "men": ("1",), "penetration": ("clearly visible", "hidden but implied"),
     "penetration_with": ("penis",), "her_hands": ("stroking his penis", "holding his penis"),
     "her_mouth": ("on his penis",), "her_feet": ("on his penis",),
-    "her_posture": ("lying on back", "on all fours", "bent over (standing)", "standing"),
+    "her_posture": ("lying on back", "on all fours", "bent over (standing)"),
     "partner_posture": ("standing",), "on_top": ("her", "partner"), "facing": ("towards", "away"),
 }
 
@@ -475,11 +477,15 @@ def look_rule_gaps(rows) -> list:
 LOOK_POSITION_NEEDS = {   # position tag (lower case) → what the look must say for it to stand
     "cowgirl position": lambda L: L.get("on_top") == "her" and L.get("facing") == "towards",
     "reverse cowgirl": lambda L: L.get("on_top") == "her" and L.get("facing") == "away",
-    "missionary": lambda L: L.get("her_posture") == "lying on back" and L.get("on_top") == "partner",
+    # partner kneeling / lying on her, or standing at the bed edge (your Missionary wording)
+    "missionary": lambda L: L.get("her_posture") == "lying on back" and (
+        L.get("on_top") == "partner" or L.get("partner_posture") == "standing"),
     "doggy style": lambda L: L.get("her_posture") in ("on all fours", "bent over (standing)"),
     "laying down": lambda L: (L.get("her_posture", "").startswith("lying")
                               and L.get("partner_posture", "").startswith("lying")),
-    "standing": lambda L: L.get("her_posture") == "standing" and L.get("partner_posture") == "standing",
+    # both on their feet, or her partner standing and lifting her (your standing wording) — not bent over
+    "standing": lambda L: L.get("partner_posture") == "standing" and L.get("her_posture") not in (
+        "lying on back", "lying on front", "lying on side", "on all fours", "bent over (standing)"),
 }
 
 
