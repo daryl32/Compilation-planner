@@ -196,11 +196,17 @@ def _compare(data: dict) -> None:
         st.session_state["tr_filter"] = "all"
     test_vids = TR.test_set_videos()
     if test_vids:
-        if st.toggle(f"🧪 Test-set videos only ({len(test_vids & set(videos))} of {len(test_vids)} here)",
-                     key="tr_test_only",
-                     help="Just the moments in the 🧪 test-set videos — e.g. with “Not reviewed by me yet” to "
-                          "label every test-set moment. Pick “All batches” above if some are missing: the "
-                          "test-set videos come from several batches."):
+        n_test = len(test_vids & set(videos))
+        which = st.segmented_control(
+            "Videos", ["all", "train", "test"], key="tr_set", default="all",
+            format_func={"all": "All", "train": f"🧠 Training only ({len(videos) - n_test})",
+                         "test": f"🧪 Test set only ({n_test} of {len(test_vids)})"}.get,
+            help="🧠 Training only = every video except the 🧪 test set: frames you label there go into the next "
+                 "LoRA training (each moment here already has its frames on Modal). 🧪 Test set only = the "
+                 "held-out videos the test runs are scored on. Pick “All batches” above to see every video.")
+        if which == "train":
+            videos = {v: d for v, d in videos.items() if v not in test_vids}
+        elif which == "test":
             videos = {v: d for v, d in videos.items() if v in test_vids}
     with st.container(key="tl_wrap_tr_filters"):
         c = st.columns([3, 2, 2, 2])
