@@ -19,13 +19,13 @@ def clean_files(tmp_path):
     """Run with no vocabulary / labels file and an untouched pending list; restore afterwards."""
     from library_common import PENDING_FILE
     saved = {}
-    for p in (TL.VOCAB_FILE, TL.LABELS_FILE, PENDING_FILE):
+    for p in (TL.VOCAB_FILE, TL.LABELS_FILE, TL.LOOK_FILE, PENDING_FILE):
         if p.exists():
             saved[p] = tmp_path / p.name
             shutil.copy2(p, saved[p])
             p.unlink()
     yield
-    for p in (TL.VOCAB_FILE, TL.LABELS_FILE, PENDING_FILE):
+    for p in (TL.VOCAB_FILE, TL.LABELS_FILE, TL.LOOK_FILE, PENDING_FILE):
         p.unlink(missing_ok=True)
         if p in saved:
             shutil.copy2(saved[p], p)
@@ -284,6 +284,37 @@ def test_page_other_views(view, clean_files):
         assert not errors(at), errors(at)
         rows, source = TL.load_vocabulary()
         assert source == "tag_vocabulary.csv" and [r["tag"] for r in rows] == ["dance", "street", "crowd", "night"]
+
+
+def test_look_steps_editor_saves_and_resets(clean_files):
+    import trial_logic as TLG
+    from tests.apptest_util import errors, page_app
+    assert [r["key"] for r in TL.load_look_steps()] == [k for k, _, _ in TLG.DEFAULT_LOOK_STEPS]
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "📒 Vocabulary"
+    at.run()
+    assert not errors(at), errors(at)
+    next(b for b in at.button if b.label == "💾 Save look steps").click().run()
+    assert not errors(at), errors(at)
+    data = json.loads(TL.LOOK_FILE.read_text())
+    assert len(data["steps"]) == len(TLG.DEFAULT_LOOK_STEPS) and all(r["on"] for r in data["steps"])
+    from library_common import read_pending
+    assert "cat:look_steps.json" in read_pending()
+    # a short look: body-layout steps off, one question changed
+    rows = TL.load_look_steps()
+    for r in rows:
+        if r["key"] in ("her_posture", "on_top", "facing"):
+            r["on"] = False
+    rows[0]["question"] = "How many women?"
+    assert TL.save_look_steps(rows) == len(rows) - 3
+    got = TL.load_look_steps()
+    assert got[0]["question"] == "How many women?" and not next(r for r in got if r["key"] == "facing")["on"]
+    at.run()
+    assert not errors(at), errors(at)
+    assert any("on_top" in w.value for w in at.warning)          # the rules lose answers they read
+    next(b for b in at.button if b.label == "↩️ Back to the built-in steps").click().run()
+    assert not errors(at), errors(at)
+    assert TL.load_look_steps() == TLG.default_look_steps()
 
 
 def test_upsert_rename_delete_tag():

@@ -575,6 +575,18 @@ def test_look_line():
                         "partner_mouth"] and keys[8] == "penetration" and keys[-1] == "viewpoint"
 
 
+def test_look_changes():
+    a = [{"key": "women", "question": "How many women?", "choices": ["0", "1"]},
+         {"key": "facing", "question": "Facing", "choices": ["towards", "away"]}]
+    b = [{"key": "facing", "question": "Facing?", "choices": ["towards", "away"]},
+         {"key": "women", "question": "How many women?", "choices": ["0", "1", "2"]},
+         {"key": "hair", "question": "Hair", "choices": ["blonde"]}]
+    ch = TR.look_changes(a, b)
+    assert "👁️ hair · step added" in ch and "👁️ facing · question: Facing → Facing?" in ch
+    assert "👁️ women · choices: 0 | 1 → 0 | 1 | 2" in ch and "👁️ order of the steps changed" in ch
+    assert TR.look_changes(None, b) == [] and TR.look_changes(a, a) == []
+
+
 def _a_look(**kw):
     return {"women": "1", "men": "1", "penetration": "clearly visible", "penetration_with": "penis",
             "penetration_where": "vagina", "hidden": "nothing important hidden",

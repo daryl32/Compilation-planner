@@ -547,7 +547,8 @@ def _test_set() -> None:
                          hide_index=True, width="stretch", key="tr_test_changes")
         else:
             st.caption("No tag changed.")
-        lines = TR.vocab_changes(ra["run"].get("vocab_csv") or "", rb["run"].get("vocab_csv") or "")
+        lines = (TR.vocab_changes(ra["run"].get("vocab_csv") or "", rb["run"].get("vocab_csv") or "")
+                 + TR.look_changes(ra["run"].get("look_steps"), rb["run"].get("look_steps")))
         st.markdown("**Vocabulary changes between them**")
         st.caption("  \n".join(lines[:60]) + (f"  \n… and {len(lines) - 60} more" if len(lines) > 60 else "")
                    if lines else "None — same vocabulary (so any difference is from the code or chance).")

@@ -379,6 +379,79 @@ LOOK_STEPS = [
                "towards); in POV, her face to the camera → towards", ["towards", "away"]),
     ("viewpoint", "Viewpoint", ["a participant's eyes (their own body at the frame edge)", "onlooker"]),
 ]
+# The built-in steps; your edited copy (📒 Vocabulary → 👁️ Look steps, look_steps.json) replaces
+# LOOK_STEPS for a run via set_look_steps. Short names for the app's cards and tables:
+DEFAULT_LOOK_STEPS = list(LOOK_STEPS)
+LOOK_STEP_NAMES = {"women": "Women", "men": "Men", "penetration": "Penetration", "penetration_with": "Penetration with",
+                   "penetration_where": "Penetration where", "hidden": "Hidden from view",
+                   "her_posture": "Her posture", "her_front_faces": "Her front faces (camera)",
+                   "partner_posture": "Partner's posture", "partner_legs_point": "Partner's legs point (camera)",
+                   "on_top": "On top", "facing": "She faces her partner", "her_hands": "Her hands",
+                   "her_mouth": "Her mouth", "mouth_depth": "How far in (mouth)", "her_feet": "Her feet",
+                   "partner_hands": "Partner's hands", "partner_mouth": "Partner's mouth",
+                   "viewpoint": "Viewpoint"}
+
+
+def default_look_steps() -> list:
+    """The built-in steps as editable rows: [{"key", "name", "question", "choices", "on"}]."""
+    return [{"key": k, "name": LOOK_STEP_NAMES.get(k, k), "question": q, "choices": list(ch), "on": True}
+            for k, q, ch in DEFAULT_LOOK_STEPS]
+
+
+def clean_look_steps(rows) -> list:
+    """Your look steps tidied: each needs a key (letters, digits, _), a question and at least one
+    choice; keys are unique (first wins); "can't tell" is never a listed choice (it's always added)."""
+    import re
+    out, seen = [], set()
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        key = re.sub(r"[^a-z0-9_]+", "_", str(r.get("key") or "").strip().lower()).strip("_")
+        q = str(r.get("question") or "").strip()
+        ch = r.get("choices")
+        if isinstance(ch, str):
+            ch = ch.split(";")
+        ch = list(dict.fromkeys(str(c).strip() for c in (ch or []) if str(c).strip() and str(c).strip() != CANT))
+        if not key or key in seen or not q or not ch:
+            continue
+        seen.add(key)
+        out.append({"key": key, "name": str(r.get("name") or "").strip() or LOOK_STEP_NAMES.get(key, key),
+                    "question": q, "choices": ch, "on": r.get("on", True) not in (False, "no", "false", 0, "0")})
+    return out
+
+
+def set_look_steps(rows) -> list:
+    """Use your look steps (the ones switched on, in your order) for this process's look runs;
+    None / nothing usable → the built-in steps. Returns the steps now in use."""
+    global LOOK_STEPS
+    steps = [(r["key"], r["question"], r["choices"]) for r in clean_look_steps(rows) if r["on"]]
+    LOOK_STEPS = steps or list(DEFAULT_LOOK_STEPS)
+    return LOOK_STEPS
+
+
+# What the built-in rules read from the look: step → the answers they rely on. Rename or remove one
+# of these and that rule quietly stops working (the app warns).
+LOOK_RULE_NEEDS = {
+    "women": ("1",), "men": ("1",), "penetration": ("clearly visible", "hidden but implied"),
+    "penetration_with": ("penis",), "her_hands": ("stroking his penis", "holding his penis"),
+    "her_mouth": ("on his penis",), "her_feet": ("on his penis",),
+    "her_posture": ("lying on back", "on all fours", "bent over (standing)", "standing"),
+    "partner_posture": ("standing",), "on_top": ("her", "partner"), "facing": ("towards", "away"),
+}
+
+
+def look_rule_gaps(rows) -> list:
+    """[(step, missing answers)] — answers the built-in rules rely on that your switched-on steps no
+    longer offer (a step switched off or removed is listed with all of them)."""
+    have = {r["key"]: set(r["choices"]) for r in clean_look_steps(rows) if r["on"]}
+    out = []
+    for k, need in LOOK_RULE_NEEDS.items():
+        miss = [a for a in need if a not in have.get(k, ())]
+        if miss:
+            out.append((k, miss))
+    return out
+
+
 LOOK_POSITION_NEEDS = {   # position tag (lower case) → what the look must say for it to stand
     "cowgirl position": lambda L: L.get("on_top") == "her" and L.get("facing") == "towards",
     "reverse cowgirl": lambda L: L.get("on_top") == "her" and L.get("facing") == "away",

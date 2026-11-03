@@ -68,6 +68,8 @@ from config import CATALOGUE_DIR
 
 VOCAB_FILE = CATALOGUE_DIR / "tag_vocabulary.csv"
 VOCAB_PENDING = f"cat:{VOCAB_FILE.name}"
+LOOK_FILE = CATALOGUE_DIR / "look_steps.json"
+LOOK_PENDING = f"cat:{LOOK_FILE.name}"
 LABELS_FILE = CATALOGUE_DIR / "training_labels.json"
 LABELS_STEM = LABELS_FILE.stem
 
@@ -223,6 +225,30 @@ def save_vocabulary(rows: list) -> int:
     from library_common import mark_pending   # here, so reading never needs Streamlit
     mark_pending(VOCAB_PENDING)
     return len(clean)
+
+
+def load_look_steps() -> list:
+    """Your look steps (look_steps.json), else the built-in ones: [{"key", "name", "question",
+    "choices", "on"}] in the order the teacher answers them."""
+    import trial_logic as TLG
+    try:
+        rows = TLG.clean_look_steps((json.loads(LOOK_FILE.read_text(encoding="utf-8")) or {}).get("steps"))
+        if rows:
+            return rows
+    except (OSError, ValueError, AttributeError):
+        pass
+    return TLG.default_look_steps()
+
+
+def save_look_steps(rows: list) -> int:
+    """Write look_steps.json and queue it for Drive (each Modal run sends it). Returns the number of
+    steps switched on."""
+    import trial_logic as TLG
+    clean = TLG.clean_look_steps(rows)
+    _atomic_write(LOOK_FILE, json.dumps({"version": 1, "steps": clean}, indent=1))
+    from library_common import mark_pending
+    mark_pending(LOOK_PENDING)
+    return sum(1 for r in clean if r["on"])
 
 
 def group_settings(rows: list) -> list:

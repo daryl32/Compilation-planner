@@ -411,6 +411,80 @@ def category_order() -> None:
                          for e in edited],))
 
 
+def _save_look(rows: list) -> None:
+    def order(r):
+        try:
+            o = float(r.get("order"))
+            return (o != o, o if o == o else 0.0)      # NaN (a new row's empty order) goes last
+        except (TypeError, ValueError):
+            return (True, 0.0)
+    rows = sorted(rows, key=order)
+    n = TL.save_look_steps([{**r, "choices": str(r.get("choices") or "").split(";")} for r in rows])
+    st.session_state["tl_look_note"] = f"Saved the look steps — {n} switched on."
+    st.session_state.pop("tl_look_editor", None)
+
+
+def _reset_look() -> None:
+    import trial_logic as TLG
+    TL.save_look_steps(TLG.default_look_steps())
+    st.session_state["tl_look_note"] = "Back to the built-in look steps."
+    st.session_state.pop("tl_look_editor", None)
+
+
+def look_steps_editor() -> None:
+    """👁️ The look: the steps the teacher answers before tagging in a --look on run, and the
+    built-in rules that read its answers."""
+    import trial_logic as TLG
+    st.subheader("👁️ Look steps (look runs only)")
+    st.caption("Only used by runs started with `--look on`: before any tag, the teacher answers these steps in "
+               "order, each by picking one choice (\"can't tell\" is always added), then writes a one-sentence "
+               "summary. **on**: untick to leave a step out (e.g. a short look). **order**: the order they're "
+               "asked in. **choices**: separated by ; — keep them short and clear-cut. Each run sends the latest "
+               "steps and keeps a copy, so 🧪 Compare two runs lists what changed.")
+    note = st.session_state.pop("tl_look_note", None)
+    if note:
+        st.success(note)
+    rows = TL.load_look_steps()
+    table = [{"on": r["on"], "order": (i + 1) * 10, "key": r["key"], "name": r["name"], "question": r["question"],
+              "choices": "; ".join(r["choices"])} for i, r in enumerate(rows)]
+    edited = st.data_editor(
+        table, num_rows="dynamic", hide_index=True, width="stretch", key="tl_look_editor",
+        column_order=["on", "order", "key", "name", "question", "choices"],
+        column_config={
+            "on": st.column_config.CheckboxColumn("on", default=True),
+            "order": st.column_config.NumberColumn("order", min_value=0, max_value=9999, step=1,
+                                                   help="Lower is asked first. Steps 10 apart leave room to slot "
+                                                        "one in between."),
+            "key": st.column_config.TextColumn("key", required=True,
+                                               help="Short id (letters, digits, _). The built-in rules read some "
+                                                    "keys — see below before renaming one."),
+            "name": st.column_config.TextColumn("name", help="Shown on the 👁️ Check the look cards."),
+            "question": st.column_config.TextColumn("question", width="large", required=True),
+            "choices": st.column_config.TextColumn("choices", width="large", required=True),
+        })
+    gaps = TLG.look_rule_gaps([{**r, "choices": str(r.get("choices") or "").split(";")} for r in edited])
+    if gaps:
+        st.warning("The built-in rules below rely on answers these steps no longer offer — they'll quietly stop "
+                   "working for them: " + "; ".join(f"**{k}**: {', '.join(m)}" for k, m in gaps))
+    a, b = st.columns(2)
+    a.button("💾 Save look steps", type="primary", key="tl_look_save", width="stretch", on_click=_save_look,
+             args=(list(edited),))
+    b.button("↩️ Back to the built-in steps", key="tl_look_reset", width="stretch", on_click=_reset_look,
+             help="Replaces your look steps with the ones the code ships with.")
+    with st.expander("📏 Look rules (built in — ask Claude to change these)", expanded=False):
+        st.markdown(
+            "- **Handjob fix** — every look run. With exactly 1 woman and 1 man, if the look says penetration "
+            "with a penis **and** her hands are *stroking / holding his penis*, or her mouth or feet are *on his "
+            "penis*: penetration, Anal Sex and every position move to unsure. A toy or fingers inside her are "
+            "left alone, and the neighbour rule never fills a position back in there.\n"
+            "- **Look check** — only in a CPU copy (`--stage look-check --run <id>`). A position stays only when "
+            "penetration is *clearly visible* or *hidden but implied*, both postures are seen, and: Cowgirl = on "
+            "top *her* + facing *towards*; reverse cowgirl = *her* + *away*; Missionary = her *lying on back* + "
+            "on top *partner*; Doggy = her *on all fours* or *bent over (standing)*; laying down = both lying; "
+            "standing = both *standing*. Penetration and Anal Sex need *clearly visible*.\n"
+            "- **Handjob fix on an older run** — `--stage look-fix --run <id>` (CPU copy).")
+
+
 def vocab_view() -> None:
     st.caption("The tag list the new models learn. **kind**: *frame* = visible in one still, *motion* = "
                "needs a few seconds of movement. **one_of**: a name shared by tags that can't both be true "
@@ -484,6 +558,8 @@ def vocab_view() -> None:
     tag_editor()
     st.download_button("⬇️ Download as CSV (for Excel)", "﻿" + TL.vocabulary_csv(vocab),
                       file_name="tag_vocabulary.csv", mime="text/csv", key="tl_vocab_dl", width="stretch")
+    st.divider()
+    look_steps_editor()
 
 
 def trial_view() -> None:

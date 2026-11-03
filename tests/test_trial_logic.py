@@ -332,6 +332,29 @@ def test_look_conflict_two_people_hand_on_penis():
     assert TL.look_conflict({"tags": ["penetration"]}, vocab) == []
 
 
+def test_look_steps_editable():
+    rows = TL.default_look_steps()
+    assert TL.clean_look_steps(rows) == rows and TL.look_rule_gaps(rows) == []
+    rows[2]["on"] = False                                           # her_hands off
+    rows.append({"key": "Her Hair!", "question": "Hair colour", "choices": "blonde; brunette; can't tell; ;"})
+    rows.append({"key": "women", "question": "dupe", "choices": ["1"]})          # duplicate key: dropped
+    rows.append({"key": "empty", "question": "no choices", "choices": []})        # no choices: dropped
+    clean = TL.clean_look_steps(rows)
+    assert clean[-1] == {"key": "her_hair", "name": "her_hair", "question": "Hair colour",
+                         "choices": ["blonde", "brunette"], "on": True}
+    assert len(clean) == len(TL.DEFAULT_LOOK_STEPS) + 1
+    assert ("her_hands", ["stroking his penis", "holding his penis"]) in TL.look_rule_gaps(clean)
+    try:
+        used = TL.set_look_steps(clean)
+        assert "her_hands" not in [k for k, _, _ in used] and used[-1][0] == "her_hair"
+        assert "her_hair" in TL.look_schema()["properties"] and "her_hands" not in TL.look_schema()["properties"]
+        assert TL.read_look({"her_hair": "blonde", "her_hands": "holding his penis"}) == {"her_hair": "blonde"}
+        assert "her_hair: Hair colour" in TL.look_instructions()
+        assert TL.set_look_steps(None) == TL.DEFAULT_LOOK_STEPS
+    finally:
+        TL.set_look_steps(None)
+
+
 def test_copied_scored():
     frames = [{"v": "a", "t": 1.0, "tags": [], "c": "k1"}, {"v": "a", "t": 2.0, "tags": []},
               {"v": "a", "t": 3.0, "g": "x", "tags": [], "c": "k2"}]

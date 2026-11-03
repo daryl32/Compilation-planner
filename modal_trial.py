@@ -152,6 +152,12 @@ def _vocab_text() -> str:
         return ""
 
 
+def _look_steps_rows():
+    """Your look steps (📒 Vocabulary → 👁️ Look steps) sent with the run, or None (built-in steps)."""
+    data = _read_json(f"{PACK}/library/look_steps.json")
+    return (data or {}).get("steps") if isinstance(data, dict) else None
+
+
 def _vocab() -> list:
     import trial_logic as TL
     p = Path(f"{PACK}/library/tag_vocabulary.csv")
@@ -773,6 +779,9 @@ def prepare_prompts(video_id: str, max_prompts: int = 0, examples: int = 0, dedu
     vocab_csv = _vocab_text()
     vocab = TL.teacher_vocab((TL.parse_vocabulary(vocab_csv) if vocab_csv else []) or _vocab())
     # (tags switched off for the teacher aren't asked about)
+    look_rows = _look_steps_rows() if look else None
+    if look:
+        TL.set_look_steps(look_rows)          # your edited steps (built-in ones if none saved)
     head, moment, tail = TL.build_prompt(vocab, look=look)
     targets = vis["targets"][:max_prompts] if max_prompts else vis["targets"]
     if only_labelled:
@@ -831,7 +840,9 @@ def prepare_prompts(video_id: str, max_prompts: int = 0, examples: int = 0, dedu
             "partial": bool(max_prompts) or bool(vis.get("partial")),
             "vocab": [r["tag"] for r in vocab], "vocab_csv": vocab_csv,
             "examples": examples, "examples_used": used_examples,
-            "dedup": dedup, "look": bool(look), "copies": copies, "moments": moments}
+            "dedup": dedup, "look": bool(look), "copies": copies, "moments": moments,
+            **({"look_steps": [{"key": k, "question": q, "choices": ch} for k, q, ch in TL.LOOK_STEPS]}
+               if look else {})}
     pf = prompts_file(video_id)
     pf.write_text(json.dumps(data), encoding="utf-8")
     pack_vol.commit()
@@ -884,6 +895,8 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora
                               structured_outputs=StructuredOutputsParams(json=schema, disable_any_whitespace=True))
 
     look = bool(data.get("look"))          # the look steps first (a 🧪 --look on test run)
+    if look:
+        TL.set_look_steps(data.get("look_steps"))     # exactly the steps prep wrote into the prompt
     outs, chunk, params = [], 32, sampling(TAG_MAX_TOKENS + (LOOK_EXTRA_TOKENS if look else 0),
                                            TL.answer_schema(vocab, look=look))
     # second looks (usually-with / double-check): off by default with an adapter — on the test set
@@ -968,6 +981,7 @@ def _tag_video(self, video_id: str, redo: bool = False, out_path: str = "", lora
                                "moments_per_min": round(60 * len(convs) / max(seconds, 1e-6), 1),
                                "examples": data.get("examples", 0), "examples_used": data.get("examples_used", 0),
                                "dedup": data.get("dedup"), "look": look, "vocab": vocab_names, "results": results,
+                               **({"look_steps": data.get("look_steps")} if look and data.get("look_steps") else {}),
                                **({"vocab_csv": data.get("vocab_csv") or ""} if out_path else {}),
                                **({"lora": Path(lora_path).name} if lora_path else {})}),
                    encoding="utf-8")
@@ -1779,7 +1793,7 @@ def _run_summary(run_dir: Path) -> dict | None:
     meta = _read_json(run_dir / "run.json")
     if not meta:
         return None
-    frames, sec, moments, gpu, vocab_csv = [], 0.0, 0, None, ""
+    frames, sec, moments, gpu, vocab_csv, look_steps = [], 0.0, 0, None, "", None
     counts = {"looks": 0, "look_added": 0, "look_removed": 0, "required_fills": 0, "unreadable": 0,
               "neighbour_adds": 0, "look_drops": 0, "look_fixes": 0}
     for f in sorted(run_dir.glob("*.json")):
@@ -1793,6 +1807,7 @@ def _run_summary(run_dir: Path) -> dict | None:
         for k in counts:
             counts[k] += int(tj.get(k) or 0)
         vocab_csv = vocab_csv or tj.get("vocab_csv") or ""
+        look_steps = look_steps or tj.get("look_steps")
         frames += [{"v": v, "t": r.get("t"), "g": r.get("gold_id"), "tags": r.get("tags") or [],
                     "unsure": r.get("unsure") or [],
                     **{short: r[long] for short, long in (("look", "look"), ("nb", "neighbour_added"),
@@ -1802,6 +1817,7 @@ def _run_summary(run_dir: Path) -> dict | None:
     import trial_logic as TL
     return {**meta, "seconds": round(sec, 1), "moments": moments, "gpu": gpu,
             "cost": round(TL.stage_cost(sec, gpu or "H100"), 2), **counts, "vocab_csv": vocab_csv,
+            **({"look_steps": look_steps} if look_steps else {}),
             "videos": len([f for f in run_dir.glob("*.json") if f.name != "run.json"]), "frames": frames}
 
 
@@ -2349,7 +2365,7 @@ def _push_labels(vocab: bool = True) -> None:
     if not shutil.which("modal"):
         return
     sent = []
-    for name in ("training_labels.json",) + (("tag_vocabulary.csv",) if vocab else ()):
+    for name in ("training_labels.json",) + (("tag_vocabulary.csv", "look_steps.json") if vocab else ()):
         src = newest_copy(name)
         if src is None:
             continue

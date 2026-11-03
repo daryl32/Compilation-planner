@@ -538,20 +538,32 @@ def batch_report(videos: dict, teacher: str = MAIN_TEACHER) -> list:
 
 LOOK_CHECKS_FILE = CATALOGUE_DIR / "look_checks.json"
 LOOK_CHECKS_PENDING = f"cat:{LOOK_CHECKS_FILE.name}"
-LOOK_STEP_NAMES = {"women": "Women", "men": "Men", "penetration": "Penetration", "penetration_with": "Penetration with",
-                   "penetration_where": "Penetration where", "hidden": "Hidden from view",
-                   "her_posture": "Her posture", "her_front_faces": "Her front faces (camera)",
-                   "partner_posture": "Partner's posture", "partner_legs_point": "Partner's legs point (camera)",
-                   "on_top": "On top", "facing": "She faces her partner", "her_hands": "Her hands",
-                   "her_mouth": "Her mouth", "mouth_depth": "How far in (mouth)", "her_feet": "Her feet",
-                   "partner_hands": "Partner's hands", "partner_mouth": "Partner's mouth",
-                   "viewpoint": "Viewpoint"}
-
-
 def look_steps() -> list:
-    """[(key, name, choices incl. "can't tell")] in the order the teacher answers them."""
+    """[(key, name, choices incl. "can't tell")]: your look steps (📒 Vocabulary → 👁️ Look steps,
+    switched off ones too — older runs may have answered them), else the built-in ones."""
     import trial_logic as TLG
-    return [(k, LOOK_STEP_NAMES.get(k, k), list(ch) + [TLG.CANT]) for k, _, ch in TLG.LOOK_STEPS]
+    import training_labels as TLB
+    return [(r["key"], r["name"], list(r["choices"]) + [TLG.CANT]) for r in TLB.load_look_steps()]
+
+
+def look_changes(old: list | None, new: list | None) -> list:
+    """What changed in the look steps between two runs (each run keeps the steps it used):
+    ["step added / removed / question / choices …"]. Runs from before v1.41 kept none."""
+    if not old or not new:
+        return []
+    a = {r["key"]: r for r in old}
+    b = {r["key"]: r for r in new}
+    out = [f"👁️ {k} · step added" for k in b if k not in a] + [f"👁️ {k} · step removed" for k in a if k not in b]
+    for k in a:
+        if k in b:
+            if a[k].get("question") != b[k].get("question"):
+                out.append(f"👁️ {k} · question: {a[k].get('question')} → {b[k].get('question')}")
+            if list(a[k].get("choices") or []) != list(b[k].get("choices") or []):
+                out.append(f"👁️ {k} · choices: {' | '.join(a[k].get('choices') or [])} → "
+                           f"{' | '.join(b[k].get('choices') or [])}")
+    if [k for k in a if k in b] != [k for k in b if k in a]:
+        out.append("👁️ order of the steps changed")
+    return out
 
 
 def look_check_key(run_id: str, video_id: str, t) -> str:
