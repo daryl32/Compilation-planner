@@ -51,15 +51,16 @@ PALETTE = ["rgba(99,132,255,{a})", "rgba(255,140,60,{a})", "rgba(46,184,120,{a})
 # Data
 # ---------------------------------------------------------------------------
 
-@st.cache_data(max_entries=12, show_spinner=False)
-
 def _has_file(path) -> bool:
-    """Whether a song file is here — False (not a crash) when its folder can't be read."""
+    """Whether a song file is here — False (not a crash) when its folder can't be read.
+    Never cached: a file fetched from Drive must show up straight away."""
     try:
         return Path(path).exists()
     except OSError:
         return False
 
+
+@st.cache_data(max_entries=12, show_spinner=False)
 def _load_track(track_id: str, mtime: float) -> dict:
     return json.loads(track_file(track_id, AUDIO_DIR).read_text())
 
