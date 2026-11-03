@@ -168,6 +168,18 @@ def test_join_quality_and_partner_score():
 # Real audio: render, save, analyse, and the page
 # ---------------------------------------------------------------------------
 
+def _settle(at, rounds: int = 4):
+    """Let the Mix page's background jobs (mix_jobs.py: renders, downloads, live stems) finish, then redraw."""
+    import mix_jobs
+    for _ in range(rounds):
+        active = [k for k, j in list(mix_jobs._JOBS.items()) if j.active]
+        if not active:
+            break
+        mix_jobs.wait(active, 300)
+        at.run()
+    return at
+
+
 @pytest.fixture(scope="module")
 def mixlib(tmp_path_factory):
     """Two synthetic songs in their own audio folder; config / module paths point there."""
@@ -287,6 +299,7 @@ def test_mix_page_extend_auto_preview(mixlib):
     opts = at.radio(key="mxe_pick").options
     assert len(opts) >= 1 and "Option 1" in opts[0]
     at.button(key="mxe_preview").click().run()
+    _settle(at)
     assert not errors(at), errors(at)
     assert at.get("audio"), "no preview player"
     # by sections: play the 2nd section twice
@@ -319,6 +332,7 @@ def test_mix_page_mashup_build(mixlib):
     assert not errors(at), errors(at)
     assert at.session_state["mxm_parts"][1]["xfade"] == {"beats": 16.0, "where": "before", "shape": "smooth"}
     at.button(key="mxm_preview").click().run()
+    _settle(at)
     assert not errors(at), errors(at)
     assert at.get("audio")
 
@@ -440,6 +454,7 @@ def test_mix_page_suggestions_start_a_vocal_swap(mixlib):
     assert len(layers) == 1 and layers[0]["on"] == parts[0]["uid"] and layers[0]["track"] != parts[0]["track"]
     assert any("🎤" in c.value and "vocals" in c.value for c in at.caption)
     at.button(key="mxm_preview").click().run()
+    _settle(at)
     assert not errors(at), errors(at)
     assert at.get("audio")
 
@@ -539,6 +554,7 @@ def test_mix_page_mashup_with_no_stems_anywhere(mixlib):
         assert len(ly) == 1 and ly[0]["part"] == "full" and ly[0]["fade_beats"] == 4.0
         assert any("🎵 mix_song_a full song" in c.value for c in at.caption)
         at.button(key="mxm_preview").click().run()
+        _settle(at)
         assert not errors(at), errors(at)
         assert at.get("audio")
     finally:
@@ -730,6 +746,7 @@ def test_mix_page_neural_join_place_and_preview(mixlib):
     a = at.session_state["mxm_parts"][0]
     assert a["start"] == before["start"] and a["end"] <= before["end"] + 1e-6
     at.button(key="mxm_preview").click().run()
+    _settle(at)
     assert not errors(at), errors(at)
     assert at.get("audio")
 
@@ -803,9 +820,13 @@ def test_mix_page_transition_mode(mixlib):
     at.run()
     assert not errors(at), errors(at)
     assert at.session_state[key]["b_full"] == new_b and at.session_state[key]["bars"] == 4
-    at.button(key="mxt_preview").click().run()
+    _settle(at)                                          # the live stems are prepared in the background
     assert not errors(at), errors(at)
-    assert at.session_state["mxt_pv"]["path"]
+    if at.session_state.get("mxt_pv") is None and [b for b in at.button if b.key == "mxt_preview"]:
+        at.button(key="mxt_preview").click().run()
+        _settle(at)
+    assert not errors(at), errors(at)
+    assert at.get("audio")
     at.button(key="mxt_new").click().run()
     assert not errors(at), errors(at)
     assert at.session_state["mx_mode"] == "🧩 Mashup"
@@ -923,10 +944,15 @@ def test_mashup_tempo_snaps_to_the_first_songs_own_tempo(mixlib, monkeypatch):
     gc = MX.grid(t["mix_song_c"])
     seen = []
 
+    class _Done:
+        key, state, active, error = "fake", "done", False, None
+
     def fake(recipe, tracks, out, label="Mixing"):
         seen.append(recipe["bpm"])
-        raise RuntimeError("stop here")
-    monkeypatch.setattr(mix_ui, "_render_progress", fake)
+        return _Done()
+    monkeypatch.setattr(mix_ui, "_start_render", fake)
+    monkeypatch.setattr(mix_ui.mixer if hasattr(mix_ui, "mixer") else __import__("mixer"), "preview_path",
+                        lambda recipe: mixlib["root"] / f"never-{len(seen)}.mp3")
     for box, expect in ((round(gc["bpm"], 1), gc["bpm"]), (gc["bpm"] + 2.0, gc["bpm"] + 2.0)):
         at = page_app("pages/3_Media_Library.py", timeout=300)
         at.session_state["lib_kind"] = "🎚️ Mix"
@@ -936,6 +962,7 @@ def test_mashup_tempo_snaps_to_the_first_songs_own_tempo(mixlib, monkeypatch):
         at.session_state["mxm_bpm"] = box
         at.run()
         at.button(key="mxm_preview").click().run()
+        _settle(at)
         assert seen and seen[-1] == pytest.approx(expect, abs=1e-9)
 
 
@@ -995,3 +1022,129 @@ def test_saved_mix_delete_asks_first(mixlib):
     at.button(key=f"mxs_del_yes_{m['id']}").click().run()
     assert not errors(at), errors(at)
     assert not MS.get(m["id"])
+
+
+# ---------------------------------------------------------------------------
+# ⏳ Background work, one join at a time, nothing loads before you pick
+# ---------------------------------------------------------------------------
+
+def test_transition_opens_without_loading_until_track_a_is_picked(mixlib):
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎚️ Mix"
+    at.session_state["mx_mode"] = "🎚️ Transition"
+    at.run()
+    assert not errors(at), errors(at)
+    assert at.selectbox(key="mxt_a").value is None
+    assert "mxt_b" not in at.session_state and "_mxt_livejob" not in at.session_state
+    assert any("Pick track A" in c.value for c in at.caption)
+    at.selectbox(key="mxt_a").set_value("mix_song_c").run()
+    assert not errors(at), errors(at)
+    assert at.selectbox(key="mxt_b").value                   # the best fit, picked for you
+    assert "mxt_live" not in at.session_state                # live stems: prepared in the background…
+    _settle(at)
+    assert not errors(at), errors(at)
+    assert at.session_state["mxt_live"]["a_id"] == "mix_song_c"   # …and picked up once ready
+
+
+def test_mashup_join_chip_and_one_join_preview(mixlib):
+    from tests.apptest_util import page_app, errors
+    t = mixlib["tracks"]
+    gc, ga = MX.grid(t["mix_song_c"]), MX.grid(t["mix_song_a"])
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎚️ Mix"
+    at.session_state["mx_mode"] = "🧩 Mashup"
+    at.session_state["mxm_parts"] = [
+        {"track": "mix_song_c", "start": 0.0, "end": MX.snap_to_bar(gc, 40), "gain_db": 0.0, "uid": "j1", "part": "full"},
+        {"track": "mix_song_a", "start": MX.snap_to_bar(ga, 8), "end": MX.snap_to_bar(ga, 40), "gain_db": 0.0,
+         "uid": "j2", "part": "full"}]
+    at.run()
+    assert not errors(at), errors(at)
+    labels = [p.proto.popover.label for p in at.get("popover")]
+    assert any(lb.startswith("🔀 1 → 2 · ") for lb in labels), labels
+    at.selectbox(key="mxm_xfl_j2").set_value("2 bars").run()
+    assert any("🔀 1 → 2 · 2 bars" in p.proto.popover.label for p in at.get("popover"))
+    at.button(key="mxm_jplay_j2").click().run()
+    _settle(at)
+    assert not errors(at), errors(at)
+    import mixer
+    jp = at.session_state["_mxm_jpv_j2"]
+    assert Path(jp).exists() and at.get("audio")
+    y = mixer.decode(Path(jp))
+    assert len(y) / mixer.SR < 40                            # just the join, not the whole mix
+
+
+def test_mashup_saves_in_the_background(mixlib):
+    import mixes as MS
+    from tests.apptest_util import page_app, errors
+    gc = MX.grid(mixlib["tracks"]["mix_song_c"])
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎚️ Mix"
+    at.session_state["mx_mode"] = "🧩 Mashup"
+    at.session_state["mxm_parts"] = [{"track": "mix_song_c", "start": 0.0, "end": MX.snap_to_bar(gc, 16),
+                                      "gain_db": 0.0, "uid": "s1", "part": "full"}]
+    at.session_state["mxm_name"] = "Saved in the background"
+    at.run()
+    at.button(key="mxm_save").click().run()
+    assert at.session_state["mxm_savejob"]
+    _settle(at)
+    assert not errors(at), errors(at)
+    assert any("Saved **Saved_in_the_background**" in s.value or "Saved **" in s.value for s in at.success)
+    rec = MS.get(at.session_state["mxm_id"])
+    assert rec and rec["output"]["track_id"]
+
+
+def test_songs_fetch_from_drive_without_a_tap(mixlib, monkeypatch):
+    """⬇️ A song only on Google Drive starts downloading as soon as it's in a mashup; the preview follows."""
+    import shutil
+    import drive_sync
+    import mixer
+    from tests.apptest_util import page_app, errors
+    src = Path(mixlib["tracks"]["mix_song_c"]["source_path"])
+    calls = []
+
+    def fake_download(rel, dest, progress_callback=None):
+        calls.append(rel)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(src, dest)
+        if progress_callback:
+            progress_callback(1.0)
+        return None
+    monkeypatch.setattr(drive_sync, "download_source_video", fake_download)
+    import mix_ui
+    real_full = mix_ui.full_track
+
+    def full(tid):
+        t = real_full(tid)
+        if t and tid == "mix_song_c":
+            t = {**t, "source_path": "/content/drive/MyDrive/Audio-Library/only_on_drive_c.m4a", "stems": {}}
+        return t
+    monkeypatch.setattr(mix_ui, "full_track", full)
+    dest = mixer.local_path(full("mix_song_c"))
+    dest.unlink(missing_ok=True)
+    gc = MX.grid(mixlib["tracks"]["mix_song_c"])
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎚️ Mix"
+    at.session_state["mx_mode"] = "🧩 Mashup"
+    at.session_state["mxm_parts"] = [{"track": "mix_song_c", "start": 0.0, "end": MX.snap_to_bar(gc, 12),
+                                      "gain_db": 0.0, "uid": "d1", "part": "full"}]
+    at.run()
+    assert not errors(at), errors(at)
+    _settle(at)
+    assert calls == ["Audio-Library/only_on_drive_c.m4a"] and dest.exists()
+    assert [b for b in at.button if b.key == "mxm_preview"]   # ready to preview — no ⬇️ button pressed
+
+
+def test_mixing_a_song_marks_it_used(mixlib, tmp_path):
+    """A downloaded song being mixed counts as used, so the downloads clean-up (by last use) leaves it."""
+    import os
+    import shutil
+    import mixer
+    f = tmp_path / "song.m4a"
+    shutil.copy(mixlib["tracks"]["mix_song_c"]["source_path"], f)
+    old = 1_600_000_000
+    os.utime(f, (old, old))
+    mixer._DEC.clear()
+    mixer.decode_window(f, 1.0, 0.0, 0.0, 10.0)
+    st_ = f.stat()
+    assert st_.st_atime > old + 1000 and int(st_.st_mtime) == old

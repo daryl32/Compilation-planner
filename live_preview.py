@@ -90,6 +90,7 @@ def _decode_window(path: Path, w0: float, w1: float, speed: float, semitones: fl
     y = _ram_get(key)
     if y is not None:
         return y
+    mixer.mark_used(path)
     cmd = ["ffmpeg", "-v", "error", "-nostdin", "-ss", f"{w0:.3f}", "-t", f"{max(0.05, w1 - w0):.3f}",
            "-i", str(path), "-map", "0:a:0"]
     f = mixer.stretch_filter(speed, semitones)

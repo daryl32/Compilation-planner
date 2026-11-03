@@ -103,6 +103,7 @@ def ensure_local(track: dict, progress=None, parts=("full",)) -> str | None:
             return f"{track.get('track_id')}: no {part} stem yet — run run_audio_analysis.bat on the laptop (it makes stems)."
         path = local_path(track, part)
         if path.exists():
+            mark_used(path)
             continue
         if "MyDrive/" not in ref:
             return f"{track.get('track_id')}: audio file not found ({path})"
@@ -232,6 +233,16 @@ class Window:
         return out
 
 
+def mark_used(path: Path) -> None:
+    """Note that a downloaded song / stem was just used (its access time — storage.auto_cleanup clears
+    downloads by last use), so files being mixed aren't cleared. The modified time stays as it is."""
+    try:
+        st = Path(path).stat()
+        os.utime(path, (time.time(), st.st_mtime))
+    except OSError:
+        pass
+
+
 def _file_sig(path: Path) -> tuple:
     try:
         st = path.stat()
@@ -274,6 +285,7 @@ def decode_window(path: Path, speed: float, semitones: float, lo: float, hi: flo
     w = _dec_find(sig, lo, hi)
     if w is not None:
         return w
+    mark_used(path)
     # Trimmed inside the filter graph (not with -ss): the file decodes exactly as a whole-file read
     # would — seeking changes how ffmpeg decodes AAC around drum hits — and only the window is stretched,
     # which is where the time goes.
@@ -641,7 +653,7 @@ def preview_path(recipe: dict) -> Path:
     d = cache_dir() / "previews"
     d.mkdir(parents=True, exist_ok=True)
     now = time.time()
-    for f in [*d.glob("*.m4a"), *d.glob("*.mp3")]:
+    for f in [*d.glob("*.m4a"), *d.glob("*.mp3"), *d.glob("*.json")]:
         try:
             if now - f.stat().st_mtime > 86400:
                 f.unlink()

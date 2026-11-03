@@ -112,13 +112,14 @@ def output_paths(name: str) -> dict:
             "local": Path(colab_to_local(source_path))}
 
 
-def publish(recipe: dict, tracks: dict, token: dict = None, progress=None) -> tuple:
+def publish(recipe: dict, tracks: dict, token: dict = None, progress=None, fraction=None) -> tuple:
     """Render the recipe as a library track, upload it, queue its analysis.
     Returns (saved recipe, list of notes for the user). Raises on a render error."""
     import mixer
     say = progress or (lambda m: None)
     paths = output_paths(recipe["name"])
-    info = mixer.render(recipe, tracks, paths["local"], progress=say)
+    info = mixer.render(recipe, tracks, paths["local"], progress=say,
+                        fraction=(lambda f: fraction(0.8 * f)) if fraction else None)
     notes = list(info["warnings"])
 
     uploaded = False
