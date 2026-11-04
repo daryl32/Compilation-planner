@@ -631,7 +631,7 @@ def _part_trim(p: dict, g: dict, col) -> None:
     lines = sorted({0.0, round(float(p["start"]), 3), round(float(p["end"]), 3),
                     *[round(float(x), 3) for x in marks if 0 < x < g["duration"]], round(g["duration"], 3)})
     key = f"mxm_trim_{p['uid']}_{p['start']:.3f}_{p['end']:.3f}_{snap}"
-    with col.popover("✂️", help="Trim this part's start and end"):
+    with col.popover("✂️", width="stretch", help="Trim this part's start and end"):
         st.select_slider(f"{p['track']} — start and end ({snap.lower()})", options=lines,
                          value=(round(float(p["start"]), 3), round(float(p["end"]), 3)), key=key,
                          format_func=format_mmss, on_change=_trim_part, args=(p["uid"], key))
@@ -1086,10 +1086,163 @@ def _part_stems_row(p: dict, t: dict, tracks_all: dict, summaries: dict) -> None
             lc[2].button("🗑", key=f"mxm_lrm_{ly['uid']}", on_click=_remove_layer, args=(ly["uid"],))
 
 
+def _section_rows(tr: dict, g: dict) -> list:
+    """The song's sections with their bar counts (long enough to use: 4 bars or more when there's anything longer)."""
+    out = []
+    for sec in g["sections"]:
+        a, b = MX.snap_to_bar(g, sec["start"]), MX.snap_to_bar(g, sec["end"])
+        n = max(1, int(round((b - a) / g["bar_len"])))
+        if b > a:
+            out.append({**sec, "start": a, "end": b, "bars": n})
+    longer = [x for x in out if x["bars"] >= 4]
+    return longer or out
+
+
+def _swap_options(p: dict, t: dict, tracks_all: dict, summaries: dict, top: int = 6) -> list:
+    """🔁 What could play instead of part p: the song's other sections (similar length, more energy ranks
+    higher) and the best section of each of the 3 best-fitting other songs. [{"track", "start", "end",
+    "label", "score"}], best first."""
+    g = MX.grid(t)
+    cur_bars = max(1.0, (float(p["end"]) - float(p["start"])) / g["bar_len"])
+    rows = []
+    for sec in _section_rows(t, g):
+        if abs(sec["start"] - float(p["start"])) < 0.05 and abs(sec["end"] - float(p["end"])) < 0.05:
+            continue
+        fit_len = 1 - min(1.0, abs(sec["bars"] - cur_bars) / cur_bars)
+        rows.append({"track": p["track"], "start": sec["start"], "end": sec["end"], "bars": sec["bars"],
+                     "label": f"🎵 {sec['label']} · {sec['bars']} bars · {format_mmss(sec['start'])}",
+                     "score": 0.55 * float(sec.get("energy") or 0) + 0.45 * fit_len})
+    base = summaries.get(p["track"])
+    if base:
+        for r in _partners(base, {k: v for k, v in summaries.items() if k in tracks_all})[:3]:
+            tr = full_track(r["track_id"])
+            if tr is None:
+                continue
+            gb = MX.grid(tr)
+            best = MX.best_section(tr, "energy")
+            a, b = MX.snap_to_bar(gb, best["start"]), MX.snap_to_bar(gb, best["end"])
+            if b <= a:
+                continue
+            rows.append({"track": r["track_id"], "start": a, "end": b, "bars": int(round((b - a) / gb["bar_len"])),
+                         "label": f"🔀 {r['track_id']} · {best['label']} · {format_mmss(a)} · fits {r['score'] * 100:.0f} %",
+                         "score": float(r["score"])})
+    return sorted(rows, key=lambda x: -x["score"])[:top]
+
+
+def _swap_part(uid: str, opt: dict) -> None:
+    """🔁 Put opt in part uid's place — its joins, level and vocal layers stay; a new song gets the key shift
+    that fits the part before it."""
+    import mixer
+    ss = st.session_state
+    parts = ss.get("mxm_parts") or []
+    i = next((k for k, p in enumerate(parts) if p["uid"] == uid), None)
+    if i is None:
+        return
+    p = parts[i]
+    new_song = opt["track"] != p["track"]
+    p["track"], p["start"], p["end"] = opt["track"], round(float(opt["start"]), 3), round(float(opt["end"]), 3)
+    t = full_track(opt["track"])
+    if t is not None and p.get("part", "full") != "full" and not mixer.has_stems(t):
+        p["part"] = "full"
+        ss[f"mxm_part_{uid}"] = ss[f"_last_mxm_part_{uid}"] = "full"
+    if new_song and i > 0 and t is not None:
+        prev = parts[i - 1]
+        pt = full_track(prev["track"])
+        if pt is not None and f"mxm_shift_{opt['track']}" not in ss:
+            ss[f"mxm_shift_{opt['track']}"] = int(K.best_shift(
+                K.shifted(pt.get("key"), int(ss.get(f"mxm_shift_{prev['track']}", 0) or 0)), t.get("key")))
+    ss.pop(f"_mxm_aud_{uid}", None)
+    ss["mxm_neural_msg"] = f"🔁 Part {i + 1} is now {opt['label'].split(' · fits')[0]}. ↶ undoes it."
+
+
+def _audition(tid: str, start: float, end: float, ns: str) -> None:
+    """▶ The original song from start to end (fetched from Drive first if it isn't on the server)."""
+    import mixer
+    t = full_track(tid)
+    if t is None:
+        return
+    if _audio_ready([tid], ns):
+        st.audio(str(mixer.local_path(t)), start_time=int(start), end_time=int(np.ceil(end)))
+
+
+def _swap_menu(p: dict, t: dict, tracks_all: dict, summaries: dict, col) -> None:
+    uid = p["uid"]
+    with col.popover("🔁", width="stretch", help="Swap this part: another section of the song, or the best part of a song that "
+                               "fits — its joins stay as they are"):
+        st.markdown("**🔁 Swap this part for…**")
+        opts = _swap_options(p, t, tracks_all, summaries)
+        if not opts:
+            st.caption("Nothing else to swap in yet.")
+            return
+        ak = f"_mxm_aud_{uid}"
+        for i, o in enumerate(opts):
+            c = st.columns([3.2, 1, 1.5], vertical_alignment="center")
+            c[0].caption(o["label"])
+            c[1].button("⏹" if st.session_state.get(ak) == i else "▶", key=f"mxm_swpl_{uid}_{i}", width="stretch",
+                        on_click=lambda k=ak, j=i: st.session_state.__setitem__(
+                            k, None if st.session_state.get(k) == j else j), help="Listen to it (the original song)")
+            c[2].button("Use", key=f"mxm_swuse_{uid}_{i}", width="stretch", type="primary" if i == 0 else "secondary",
+                        on_click=_swap_part, args=(uid, o))
+            if st.session_state.get(ak) == i:
+                _audition(o["track"], o["start"], o["end"], f"mxm_swa_{uid}")
+
+
+def _quick_layer(uid: str, tid: str, start: float, end: float) -> None:
+    """🎤 Lay tid's vocals (start → end) over part uid, from its first bar, and play that part without its own vocals."""
+    import mixer
+    ss = st.session_state
+    _layers().append({"uid": f"{time.time():.6f}", "on": uid, "track": tid, "part": "vocals",
+                      "start": round(float(start), 3), "end": round(float(end), 3), "offset_bars": 0,
+                      "gain_db": 0.0, "fade_beats": LAYER_FADES["½ beat"]})
+    host = next((p for p in ss.get("mxm_parts") or [] if p["uid"] == uid), None)
+    if host is not None and (t := full_track(host["track"])) is not None and mixer.has_stems(t):
+        ss.setdefault("_mxm_part_pending", {})[uid] = "instrumental"
+    ss["mxm_neural_msg"] = f"🎤 {tid}'s vocals laid over the part — 🎹 it now plays without its own. ↶ undoes it."
+
+
+def _layer_picks(p: dict, tracks_all: dict, summaries: dict, top: int = 3) -> list:
+    """The most-sung section of each of the best-fitting songs that have stems (their vocals can go over)."""
+    import mixer
+    base = summaries.get(p["track"])
+    if not base:
+        return []
+    out = []
+    for r in _partners(base, {k: v for k, v in summaries.items() if k in tracks_all and k != p["track"]}):
+        tr = full_track(r["track_id"])
+        if tr is None or not mixer.has_stems(tr):
+            continue
+        g = MX.grid(tr)
+        sec = MX.best_section(tr, "vocals")
+        a, b = MX.snap_to_bar(g, sec["start"]), MX.snap_to_bar(g, sec["end"])
+        if b > a:
+            out.append({"track": r["track_id"], "start": a, "end": b, "score": r["score"],
+                        "label": f"🎤 {r['track_id']} · {sec['label']} · {format_mmss(a)}–{format_mmss(b)} · "
+                                 f"fits {r['score'] * 100:.0f} %"})
+        if len(out) >= top:
+            break
+    return out
+
+
 def _add_layer_form(p: dict, host: dict, others: list, tracks_all: dict, summaries: dict) -> None:
-    """➕ Lay another track (its full song, or with stems its vocals or instrumental) over part p."""
+    """➕ Lay another track (its full song, or with stems its vocals or instrumental) over part p — quick picks
+    (the most-sung parts of the best-fitting songs, one tap each) first, then pick it yourself."""
     if not others:
         return
+    picks = _layer_picks(p, {k: tracks_all[k] for k in others if k in tracks_all}, summaries)
+    if picks:
+        st.markdown("**🎤 Quick picks** — their vocals over this part")
+        ak = f"_mxm_laud_{p['uid']}"
+        for i, o in enumerate(picks):
+            c = st.columns([5, 1, 1.6], vertical_alignment="center")
+            c[0].caption(o["label"])
+            c[1].button("⏹" if st.session_state.get(ak) == i else "▶", key=f"mxm_lqpl_{p['uid']}_{i}", width="stretch",
+                        on_click=lambda k=ak, j=i: st.session_state.__setitem__(
+                            k, None if st.session_state.get(k) == j else j), help="Listen to it (the original song)")
+            c[2].button("Lay it over", key=f"mxm_lq_{p['uid']}_{i}", width="stretch", type="primary" if i == 0 else "secondary",
+                        on_click=_quick_layer, args=(p["uid"], o["track"], o["start"], o["end"]))
+            if st.session_state.get(ak) == i:
+                _audition(o["track"], o["start"], o["end"], f"mxm_lqa_{p['uid']}")
+        st.markdown("**Or pick it yourself**")
     base = summaries.get(p["track"])
     ranked = {}
     if base:
@@ -1611,7 +1764,7 @@ def _mashup(summaries: dict) -> None:
             slots.append(_join_row(prev, p, i, rough=p["uid"] in rough, open_uid=open_uid) or
                          (open_slot if p["uid"] == open_uid else None))
         with st.container(border=True):
-            c = st.columns([5, 2, 1, 1, 1, 1])
+            c = st.columns([3.4, 1.5, 0.9, 0.9, 1.2, 1.2, 0.9])
             c[0].markdown(f"**{i + 1}. {p['track']}** — {format_mmss(p['start'])}–{format_mmss(p['end'])} "
                           f"({format_mmss((p['end'] - p['start']) / speed)})"
                           + ("" if p.get("part", "full") == "full" else f" · {PART_LABELS[p['part']].lower()}"))
@@ -1630,7 +1783,8 @@ def _mashup(summaries: dict) -> None:
             c[2].button("↑", key=f"mxm_up_{p['uid']}", on_click=_move, args=(i, -1), disabled=i == 0)
             c[3].button("↓", key=f"mxm_dn_{p['uid']}", on_click=_move, args=(i, 1), disabled=i == len(parts) - 1)
             _part_trim(p, g, c[4])
-            c[5].button("🗑", key=f"mxm_rm_{p['uid']}", on_click=_remove, args=(i,))
+            _swap_menu(p, t, tracks_all, summaries, c[5])
+            c[6].button("🗑", key=f"mxm_rm_{p['uid']}", on_click=_remove, args=(i,))
             _part_stems_row(p, t, tracks_all, summaries)
         prev = p
     for k, slot in enumerate(slots):

@@ -1282,3 +1282,41 @@ def test_lanes_join_tap_opens_its_settings_under_the_lanes(mixlib):
     at.button(key="mxm_jpclose").click().run()
     assert "_mxm_join_open" not in at.session_state
     assert not errors(at), errors(at)
+
+
+def test_swap_a_part_keeps_its_joins(mixlib):
+    """🔁 Swap: the part plays another section (or song); its uid, join and level stay; ↶ brings it back."""
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    _two_part_mashup(at, mixlib)
+    at.pills(key="mxm_xfl_u2").set_value("2 bars").run()
+    before = dict(at.session_state["mxm_parts"][1])
+    use = [b for b in at.button if (b.key or "").startswith("mxm_swuse_u2_")]
+    assert use, "no swap options"
+    at.button(key="mxm_swpl_u2_0").click().run()            # ▶ listen first
+    _settle(at)
+    assert not errors(at), errors(at)
+    at.button(key="mxm_swuse_u2_0").click().run()
+    assert not errors(at), errors(at)
+    after = at.session_state["mxm_parts"][1]
+    assert after["uid"] == "u2" and (after["start"], after["end"], after["track"]) != \
+        (before["start"], before["end"], before["track"])
+    assert after["xfade"]["beats"] == 8.0                    # the join stayed
+    assert any("is now" in i.value for i in at.info)
+    at.button(key="mxm_undo").click().run()
+    p = at.session_state["mxm_parts"][1]
+    assert (p["start"], p["end"], p["track"]) == (before["start"], before["end"], before["track"])
+
+
+def test_quick_vocal_layover(mixlib):
+    """🎤 Lay over in one tap: another song's most-sung section on this part; the part goes instrumental."""
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    _two_part_mashup(at, mixlib)
+    quick = [b for b in at.button if (b.key or "").startswith("mxm_lq_u1_")]
+    assert quick, "no quick picks"
+    quick[0].click().run()
+    assert not errors(at), errors(at)
+    ly = at.session_state["mxm_layers"]
+    assert len(ly) == 1 and ly[0]["on"] == "u1" and ly[0]["part"] == "vocals" and ly[0]["track"] != "mix_song_c"
+    assert at.session_state["mxm_parts"][0]["part"] == "instrumental"
