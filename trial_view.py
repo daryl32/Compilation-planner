@@ -217,16 +217,22 @@ def _compare(data: dict) -> None:
     order = c[3].selectbox("Order", ["video", "random"], key="tr_order",
                            format_func={"video": "By video and time", "random": "🎲 Random"}.get,
                            help="Random mixes frames from every video, so a review isn't stuck in one video.")
+    no_old = st.toggle("🙈 Ignore old tags", key="tr_no_old", value=True,
+                       help="Focus on the model's tags: the Tag filter matches only the model's tags (and "
+                            "yours), and the Old row is hidden on the cards. Off = the old tags count and show "
+                            "as before.")
     all_tags = sorted({t for v in videos.values() for m in v["moments"]
-                       for t in (m.get("mine") or []) + (m.get("old") or [])
+                       for t in (m.get("mine") or []) + ([] if no_old else (m.get("old") or []))
                        + [x for r in m.get("teachers", {}).values() for x in r.get("tags") or []]},
                       key=str.lower)
+    if st.session_state.get("tr_tag") not in ["(any tag)"] + all_tags:
+        st.session_state["tr_tag"] = "(any tag)"          # e.g. an old-only tag after turning 🙈 on
     tag = c[2].selectbox("Tag", ["(any tag)"] + all_tags, key="tr_tag")
     pool = [(v, m) for v in (sorted(videos) if vid == "(all videos)" else [vid]) for m in videos[v]["moments"]]
     vocab_rows, _ = TLB.load_vocabulary()
     problems = (lambda tags: TLB.rule_problems(tags, vocab_rows))
     moments = [(v, m) for v, m in pool
-               if TR.filter_moments([m], how, None if tag == "(any tag)" else tag, problems)]
+               if TR.filter_moments([m], how, None if tag == "(any tag)" else tag, problems, skip_old=no_old)]
     sus, sus_runs = {}, []
     if how == "suspect":
         # 🔍 your labels that every chosen test run disagrees with — the likeliest mislabels
@@ -302,7 +308,8 @@ def _compare(data: dict) -> None:
                 rows = []
                 if mine is not None:
                     rows.append(_row("You", mine, None))
-                rows.append(_row("Old", m.get("old") or [], mine))
+                if not no_old:
+                    rows.append(_row("Old", m.get("old") or [], mine))
                 for k in here:
                     r = (m.get("teachers") or {}).get(k)
                     rows.append(_row(label(v, k), r.get("tags") if r else [], mine, r.get("unsure") if r else ())

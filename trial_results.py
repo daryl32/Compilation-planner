@@ -187,9 +187,11 @@ def ordered(items: list, how: str = "video", seed: int = 0) -> list:
     return items
 
 
-def filter_moments(moments: list, how: str = "all", tag: str | None = None, problems=None) -> list:
+def filter_moments(moments: list, how: str = "all", tag: str | None = None, problems=None,
+                   skip_old: bool = False) -> list:
     """problems: tags -> list of rule problems (training_labels.rule_problems with your vocabulary),
-    for the "rules" filter — your labelled frames whose tags break a rule."""
+    for the "rules" filter — your labelled frames whose tags break a rule. skip_old: the tag filter looks
+    only at the models' tags (and yours), not the old tags."""
     out = []
     for m in moments:
         if how == "rules" and (m.get("mine") is None or not problems or not problems(m["mine"])):
@@ -204,7 +206,7 @@ def filter_moments(moments: list, how: str = "all", tag: str | None = None, prob
             continue
         if how == "neighbours" and not any((r or {}).get("neighbour_added") for r in (m.get("teachers") or {}).values()):
             continue
-        if tag and not any(norm(tag) in s for s in tag_sets(m).values()):
+        if tag and not any(norm(tag) in s for k, s in tag_sets(m).items() if not (skip_old and k == "old")):
             continue
         out.append(m)
     return out
