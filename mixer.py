@@ -75,6 +75,39 @@ def has_four_stems(track: dict) -> bool:
     return all(st.get(p) for p in FOUR_STEMS)
 
 
+STEM_MIX = "stems:"            # a part playing some of its four stems: "stems:bass+drums" (names sorted, joined by +)
+
+
+def part_stems(part: str | None) -> tuple:
+    """The four stems a part plays: "full" all, "instrumental" all but vocals, "vocals" just vocals,
+    "stems:a+b" those."""
+    part = part or "full"
+    if part.startswith(STEM_MIX):
+        return tuple(x for x in FOUR_STEMS if x in part[len(STEM_MIX):].split("+"))
+    return {"full": FOUR_STEMS, "instrumental": tuple(x for x in FOUR_STEMS if x != "vocals"),
+            "vocals": ("vocals",)}.get(part, FOUR_STEMS)
+
+
+def part_for_stems(stems, track: dict = None) -> str:
+    """The part name for a set of stems (the inverse of part_stems): all four = "full", all but vocals =
+    "instrumental" (when the track has that stem file), only vocals = "vocals", else "stems:…"."""
+    chosen = tuple(x for x in FOUR_STEMS if x in set(stems or ()))
+    if not chosen or chosen == FOUR_STEMS:
+        return "full"
+    if chosen == ("vocals",):
+        return "vocals"
+    if chosen == tuple(x for x in FOUR_STEMS if x != "vocals") and \
+            (track is None or ((track.get("stems") or {}).get("instrumental"))):
+        return "instrumental"
+    return STEM_MIX + "+".join(sorted(chosen))
+
+
+def files_for_part(part: str | None) -> tuple:
+    """The audio files ("full", a stem name…) that make up a part."""
+    part = part or "full"
+    return part_stems(part) if part.startswith(STEM_MIX) else (part,)
+
+
 def neural_joins(recipe: dict) -> list:
     """[(outgoing piece, incoming piece)] for every 🧠 neural join in the recipe."""
     pieces = recipe.get("pieces") or []
@@ -123,7 +156,7 @@ def parts_needed(recipe: dict, tracks: dict = None) -> dict:
     (without, the join falls back to an ordinary crossfade)."""
     out = {}
     for p in recipe.get("pieces") or []:
-        out.setdefault(p["track"], set()).add(p.get("part") or "full")
+        out.setdefault(p["track"], set()).update(files_for_part(p.get("part")))
     for ly in recipe.get("layers") or []:
         out.setdefault(ly["track"], set()).add(ly.get("part") or "vocals")
     for a, b in neural_joins(recipe):
@@ -302,6 +335,20 @@ def decode_window(path: Path, speed: float, semitones: float, lo: float, hi: flo
     w = Window(y, int(round(lo / speed * SR)), eof, lo, hi)
     _dec_put((*sig, lo, hi), w)
     return w
+
+
+def decode_part_window(track: dict, part: str, speed: float, semitones: float, lo: float, hi: float) -> Window:
+    """decode_window for a part — a stem mix is its stems' windows added together (they share the same grid)."""
+    files = files_for_part(part)
+    if len(files) == 1:
+        return decode_window(local_path(track, files[0]), speed, semitones, lo, hi)
+    ws = [decode_window(local_path(track, f), speed, semitones, lo, hi) for f in files]
+    off = min(w.off for w in ws)
+    end = max(w.end for w in ws)
+    y = np.zeros((end - off, CH), dtype=np.float32)
+    for w in ws:
+        y[w.off - off:w.off - off + len(w.y)] += w.y
+    return Window(y, off, all(w.eof for w in ws), min(w.lo for w in ws), max(w.hi for w in ws))
 
 
 def track_loudness(path: Path) -> float:
@@ -498,11 +545,13 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
     jobs = {}
     with ThreadPoolExecutor(DECODE_WORKERS) as ex:
         for key, (a, b) in need.items():
-            path = local_path(tracks[key[0]], key[3])
-            jobs[ex.submit(decode_window, path, key[1], key[2], a * key[1], b * key[1])] = ("audio", key)
+            jobs[ex.submit(decode_part_window, tracks[key[0]], key[3], key[1], key[2], a * key[1], b * key[1])] = \
+                ("audio", key)
         if recipe.get("level_match", True) and len({k[0] for k in loud_keys}) > 1:
             for key in loud_keys:
-                jobs[ex.submit(track_loudness, local_path(tracks[key[0]], key[3]))] = ("loud", key)
+                # a stem mix is levelled like its whole song (taking the drums out shouldn't turn the rest up)
+                f = "full" if key[3].startswith(STEM_MIX) else key[3]
+                jobs[ex.submit(track_loudness, local_path(tracks[key[0]], f))] = ("loud", key)
         for i, fut in enumerate(as_completed(jobs)):
             kind, key = jobs[fut]
             (audio if kind == "audio" else loud)[key] = fut.result()
@@ -581,8 +630,7 @@ def render(recipe: dict, tracks: dict, out_path: Path, progress=None, bitrate: s
             stems = {}
             for stem in FOUR_STEMS:
                 part = np.zeros((n, CH), dtype=np.float32)
-                if (p.get("part") == "instrumental" and stem == "vocals") or \
-                        (p.get("part") == "vocals" and stem != "vocals"):
+                if stem not in part_stems(p.get("part")):
                     stems[stem] = part                           # the piece plays only those stems
                     continue
                 lo = max(src0, 0)

@@ -35,6 +35,16 @@ MODES = ["📏 Extend / shorten", "🧩 Mashup", "🎚️ Transition", "💡 Sug
 EXTEND, MASHUP, TRANSITION, SUGGESTIONS, SAVED = MODES
 PART_LABELS = {"full": "Full song", "instrumental": "Instrumental", "vocals": "Vocals only"}
 PART_ICON_LABELS = {"full": "🎵 Full", "instrumental": "🎹 No vocals", "vocals": "🎤 Vocals"}
+STEM_LABELS = {"vocals": "🎤 Vocals", "drums": "🥁 Drums", "bass": "🎸 Bass", "other": "🎹 Other"}
+
+
+def part_label(part: str | None) -> str:
+    """"Full song", "Instrumental", "Vocals only", or the stems a part plays ("drums + bass")."""
+    part = part or "full"
+    if part in PART_LABELS:
+        return PART_LABELS[part]
+    import mixer
+    return " + ".join(mixer.part_stems(part))
 XF_SAME = {"Very short (⅛ beat)": 0.125, "Short (¼ beat)": 0.25, "Half a beat": 0.5, "One beat": 1.0}
 XF_OTHER = {"¼ beat": 0.25, "1 beat": 1.0, "2 beats": 2.0, "1 bar": 4.0, "2 bars": 8.0, "4 bars": 16.0,
             "8 bars": 32.0, "16 bars": 64.0}
@@ -465,7 +475,7 @@ def _timeline(recipe: dict, tracks: dict, sims: dict, energy: list = None, audio
     many = len({p["track"] for p in lay["pieces"]}) > 1
     pieces = [{"x0": p["out_start"], "x1": p["out_end"], "colour": colour_of[p["track"]],
                "label": (f"{p['track'][:22]} " if many else "") + f"{format_mmss(p['start'])}–{format_mmss(p['end'])}"
-               + ("" if (p.get("part") or "full") == "full" else f" · {PART_LABELS[p['part']].lower()}")}
+               + ("" if (p.get("part") or "full") == "full" else f" · {part_label(p['part']).lower()}")}
               for p in lay["pieces"]]
     layers = [{"x0": ly["out_start"], "x1": ly["out_end"], "colour": colour_of[ly["track"]],
                "label": f"{LAYER_ICONS.get(ly.get('part') or 'vocals', '🎤')} {ly['track'][:16]}"}
@@ -1098,29 +1108,60 @@ def _part_stems_row(p: dict, t: dict, tracks_all: dict, summaries: dict) -> None
             st.session_state[pk] = pending          # e.g. instrumental once vocals were laid over it
         st.session_state.setdefault(pk, p.get("part", "full") if has else "full")
         st.session_state.setdefault(f"_last_{pk}", st.session_state[pk])
-        c[0].segmented_control("Play", list(PART_LABELS), key=pk, format_func=PART_ICON_LABELS.get,
-                               disabled=not has, label_visibility="collapsed", on_change=_keep_pick, args=(pk,),
-                               help="What of this track plays here: the full song, the song without its vocals, or "
-                                    "just the vocals. Needs its stems (run_audio_analysis.bat on the laptop)." if has
-                               else "This track has no stems yet — run run_audio_analysis.bat on the laptop (it makes "
-                                    "stems) to play just its instrumental or vocals.")
-        p["part"] = st.session_state.get(pk) or st.session_state.get(f"_last_{pk}") or "full"
+        if mixer.has_four_stems(t):
+            # 🎚️ any mix of its four stems: one tap each (all four = the full song)
+            sk = f"mxm_stemsel_{p['uid']}"
+            st.session_state[sk] = list(mixer.part_stems(st.session_state.get(pk)))
+            c[0].pills("Stems", list(STEM_LABELS), selection_mode="multi", key=sk, format_func=STEM_LABELS.get,
+                       label_visibility="collapsed", on_change=_set_part_stems, args=(p["uid"], p["track"]),
+                       help="What of this song plays here — tap a stem to take it out or put it back. Vocals off = "
+                            "the instrumental (for another song's vocals over it); just vocals = an a cappella.")
+            p["part"] = st.session_state.get(pk) or "full"
+        else:
+            _part_play_switch(p, pk, has, c[0])
         others = sorted(tracks_all, key=str.lower)
         with c[1].popover("➕ Lay over…", width="stretch", disabled=not others):
             if others:   # a disabled popover's contents still run
                 _add_layer_form(p, t, others, tracks_all, summaries)
-        mine = [ly for ly in _layers() if ly["on"] == p["uid"]]
-        for ly in mine:
-            lc = st.columns([5, 2, 1], vertical_alignment="center")
-            icon = LAYER_ICONS.get(ly.get("part") or "vocals", "🎤")
-            what = PART_LABELS.get(ly.get("part") or "vocals", "").lower()
-            lc[0].caption(f"{icon} {ly['track']} {what} {format_mmss(ly['start'])}–{format_mmss(ly['end'])}"
-                          + (f", from bar {int(ly['offset_bars']) + 1} of the part" if ly.get("offset_bars") else ""))
-            gk = f"mxm_lgain_{ly['uid']}"
-            st.session_state.setdefault(gk, float(ly.get("gain_db") or 0.0))
-            ly["gain_db"] = lc[1].number_input("Layer level (dB)", -12.0, 12.0, step=1.0, key=gk,
-                                               label_visibility="collapsed", help="Level of this layer (dB)")
-            lc[2].button("🗑", key=f"mxm_lrm_{ly['uid']}", on_click=_remove_layer, args=(ly["uid"],))
+        _part_layers(p)
+
+
+def _set_part_stems(uid: str, tid: str) -> None:
+    import mixer
+    ss = st.session_state
+    sel = ss.get(f"mxm_stemsel_{uid}") or []
+    pk = f"mxm_part_{uid}"
+    if not sel:                                    # every stem off: keep what was playing
+        return
+    ss[pk] = ss[f"_last_{pk}"] = mixer.part_for_stems(sel, full_track(tid))
+
+
+def _part_play_switch(p: dict, pk: str, has: bool, col) -> None:
+    """Full / No vocals / Vocals — for a song split into vocals + instrumental only (or not at all)."""
+    if st.session_state.get(pk) not in PART_LABELS:          # a stem mix from a song that had four stems
+        st.session_state[pk] = "full"
+    col.segmented_control("Play", list(PART_LABELS), key=pk, format_func=PART_ICON_LABELS.get,
+                          disabled=not has, label_visibility="collapsed", on_change=_keep_pick, args=(pk,),
+                          help="What of this track plays here: the full song, the song without its vocals, or "
+                               "just the vocals. Needs its stems (run_audio_analysis.bat on the laptop)." if has
+                          else "This track has no stems yet — run run_audio_analysis.bat on the laptop (it makes "
+                               "stems) to play just its instrumental or vocals.")
+    p["part"] = st.session_state.get(pk) or st.session_state.get(f"_last_{pk}") or "full"
+
+
+def _part_layers(p: dict) -> None:
+    """The layers laid over a part: what, its level, 🗑."""
+    for ly in [ly for ly in _layers() if ly["on"] == p["uid"]]:
+        lc = st.columns([5, 2, 1], vertical_alignment="center")
+        icon = LAYER_ICONS.get(ly.get("part") or "vocals", "🎤")
+        what = PART_LABELS.get(ly.get("part") or "vocals", "").lower()
+        lc[0].caption(f"{icon} {ly['track']} {what} {format_mmss(ly['start'])}–{format_mmss(ly['end'])}"
+                      + (f", from bar {int(ly['offset_bars']) + 1} of the part" if ly.get("offset_bars") else ""))
+        gk = f"mxm_lgain_{ly['uid']}"
+        st.session_state.setdefault(gk, float(ly.get("gain_db") or 0.0))
+        ly["gain_db"] = lc[1].number_input("Layer level (dB)", -12.0, 12.0, step=1.0, key=gk,
+                                           label_visibility="collapsed", help="Level of this layer (dB)")
+        lc[2].button("🗑", key=f"mxm_lrm_{ly['uid']}", on_click=_remove_layer, args=(ly["uid"],))
 
 
 def _section_rows(tr: dict, g: dict) -> list:
@@ -1179,7 +1220,9 @@ def _swap_part(uid: str, opt: dict) -> None:
     new_song = opt["track"] != p["track"]
     p["track"], p["start"], p["end"] = opt["track"], round(float(opt["start"]), 3), round(float(opt["end"]), 3)
     t = full_track(opt["track"])
-    if t is not None and p.get("part", "full") != "full" and not mixer.has_stems(t):
+    part = p.get("part", "full")
+    if t is not None and part != "full" and (not mixer.has_stems(t) or
+                                             (part.startswith(mixer.STEM_MIX) and not mixer.has_four_stems(t))):
         p["part"] = "full"
         ss[f"mxm_part_{uid}"] = ss[f"_last_mxm_part_{uid}"] = "full"
     if new_song and i > 0 and t is not None:
@@ -1806,7 +1849,7 @@ def _mashup(summaries: dict) -> None:
             c = st.columns([3.4, 1.5, 0.9, 0.9, 1.2, 1.2, 0.9])
             c[0].markdown(f"**{i + 1}. {p['track']}** — {format_mmss(p['start'])}–{format_mmss(p['end'])} "
                           f"({format_mmss((p['end'] - p['start']) / speed)})"
-                          + ("" if p.get("part", "full") == "full" else f" · {PART_LABELS[p['part']].lower()}"))
+                          + ("" if p.get("part", "full") == "full" else f" · {part_label(p['part']).lower()}"))
             bits = [_key_text(t.get("key"), shift.get(p["track"], 0))]
             if abs(speed - 1) > 1e-3:
                 bits.append(f"tempo {(speed - 1) * 100:+.1f} %" + (" ⚠️" if MX.stretch_note(speed) else ""))

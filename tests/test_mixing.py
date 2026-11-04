@@ -1338,3 +1338,63 @@ def test_open_join_is_mixed_for_the_loop_and_follows_changes(mixlib):
     second = at.session_state["_mxm_jlive"]
     assert second["url"] and second["url"] != first["url"]
     assert not errors(at), errors(at)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: stems on / off per part
+# ---------------------------------------------------------------------------
+
+def test_part_stem_names_round_trip():
+    import mixer
+    assert mixer.part_stems("full") == mixer.FOUR_STEMS
+    assert mixer.part_stems("instrumental") == ("drums", "bass", "other")
+    assert mixer.part_for_stems(["drums", "bass", "other"], {"stems": {"instrumental": "x"}}) == "instrumental"
+    assert mixer.part_for_stems(["drums", "bass", "other"], {"stems": {}}) == "stems:bass+drums+other"
+    assert mixer.part_for_stems(["vocals", "bass"]) == "stems:bass+vocals"
+    assert mixer.part_stems("stems:bass+vocals") == ("vocals", "bass")
+    assert mixer.part_for_stems(mixer.FOUR_STEMS) == "full" and mixer.part_for_stems(["vocals"]) == "vocals"
+    assert mixer.files_for_part("stems:bass+vocals") == ("vocals", "bass")
+    assert mixer.parts_needed({"pieces": [{"track": "x", "part": "stems:bass+drums"}]}) == {"x": {"bass", "drums"}}
+
+
+def test_render_a_stem_mix(mixlib):
+    """A part playing two of its stems is the sum of those stems' windows (the test stems are copies of the
+    song, so two of them = the song doubled)."""
+    import mixer
+    t = mixlib["tracks"]
+    gc = MX.grid(t["mix_song_c"])
+    one = {"bpm": None, "level_match": False, "fade_out": 0.0,
+           "pieces": [{"track": "mix_song_c", "start": MX.snap_to_bar(gc, 8), "end": MX.snap_to_bar(gc, 24),
+                       "part": "stems:drums"}]}
+    two = {**one, "pieces": [{**one["pieces"][0], "part": "stems:bass+drums"}]}
+    cap = {}
+    real = mixer.encode
+    try:
+        mixer.encode = lambda y, p, bitrate="256k": cap.__setitem__(p.name, y.copy())
+        mixer.render(one, {"mix_song_c": t["mix_song_c"]}, mixlib["root"] / "one.mp3")
+        mixer.render(two, {"mix_song_c": t["mix_song_c"]}, mixlib["root"] / "two.mp3")
+    finally:
+        mixer.encode = real
+    a, b = cap["one.mp3"], cap["two.mp3"]
+    n = min(len(a), len(b))
+    assert float(np.corrcoef(a[:n, 0], b[:n, 0])[0, 1]) > 0.95   # the same audio (the mix is kept under clipping)
+    w1 = mixer.decode_part_window(t["mix_song_c"], "stems:drums", 1.0, 0.0, 10.0, 20.0)
+    w2 = mixer.decode_part_window(t["mix_song_c"], "stems:bass+drums", 1.0, 0.0, 10.0, 20.0)
+    assert w1.off == w2.off and np.allclose(w2.y, 2 * w1.y, atol=1e-5)   # two stems added together
+
+
+def test_stem_toggles_on_a_part(mixlib):
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    _two_part_mashup(at, mixlib)
+    at.pills(key="mxm_stemsel_u1").set_value(["vocals", "bass", "other"]).run()      # drums out
+    assert not errors(at), errors(at)
+    assert at.session_state["mxm_parts"][0]["part"] == "stems:bass+other+vocals"
+    at.pills(key="mxm_stemsel_u1").set_value(["drums", "bass", "other"]).run()       # vocals out
+    assert at.session_state["mxm_parts"][0]["part"] == "instrumental"
+    at.pills(key="mxm_stemsel_u1").set_value([]).run()                               # all off: kept
+    assert at.session_state["mxm_parts"][0]["part"] == "instrumental"
+    at.button(key="mxm_preview").click().run()
+    _settle(at)
+    assert not errors(at), errors(at)
+    assert at.get("audio")
