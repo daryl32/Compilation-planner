@@ -217,16 +217,22 @@ def _compare(data: dict) -> None:
     order = c[3].selectbox("Order", ["video", "random"], key="tr_order",
                            format_func={"video": "By video and time", "random": "🎲 Random"}.get,
                            help="Random mixes frames from every video, so a review isn't stuck in one video.")
+    no_old = st.toggle("🙈 Ignore old tags", key="tr_no_old", value=True,
+                       help="Focus on the model's tags: the Tag filter matches only the model's tags (and "
+                            "yours), and the Old row is hidden on the cards. Off = the old tags count and show "
+                            "as before.")
     all_tags = sorted({t for v in videos.values() for m in v["moments"]
-                       for t in (m.get("mine") or []) + (m.get("old") or [])
+                       for t in (m.get("mine") or []) + ([] if no_old else (m.get("old") or []))
                        + [x for r in m.get("teachers", {}).values() for x in r.get("tags") or []]},
                       key=str.lower)
+    if st.session_state.get("tr_tag") not in ["(any tag)"] + all_tags:
+        st.session_state["tr_tag"] = "(any tag)"          # e.g. an old-only tag after turning 🙈 on
     tag = c[2].selectbox("Tag", ["(any tag)"] + all_tags, key="tr_tag")
     pool = [(v, m) for v in (sorted(videos) if vid == "(all videos)" else [vid]) for m in videos[v]["moments"]]
     vocab_rows, _ = TLB.load_vocabulary()
     problems = (lambda tags: TLB.rule_problems(tags, vocab_rows))
     moments = [(v, m) for v, m in pool
-               if TR.filter_moments([m], how, None if tag == "(any tag)" else tag, problems)]
+               if TR.filter_moments([m], how, None if tag == "(any tag)" else tag, problems, skip_old=no_old)]
     sus, sus_runs = {}, []
     if how == "suspect":
         # 🔍 your labels that every chosen test run disagrees with — the likeliest mislabels
@@ -302,7 +308,8 @@ def _compare(data: dict) -> None:
                 rows = []
                 if mine is not None:
                     rows.append(_row("You", mine, None))
-                rows.append(_row("Old", m.get("old") or [], mine))
+                if not no_old:
+                    rows.append(_row("Old", m.get("old") or [], mine))
                 for k in here:
                     r = (m.get("teachers") or {}).get(k)
                     rows.append(_row(label(v, k), r.get("tags") if r else [], mine, r.get("unsure") if r else ())
@@ -614,6 +621,199 @@ def _report(data: dict, batch) -> None:
         st.markdown(TR.report_markdown() or "_No report._")
 
 
+# ---------------------------------------------------------------------------
+# 🏷️ Scene tags — the teacher's moment tags put onto your scenes (new_scene_tags.py)
+# ---------------------------------------------------------------------------
+
+def _tag_chips(tags, mark=(), colour="46,160,67", strike=False, share=None) -> str:
+    out = []
+    for t in tags:
+        hit = t in mark or t.lower() in mark
+        bg = f"rgba({colour},.18)" if hit else "rgba(128,128,128,.12)"
+        border = f"rgba({colour},.8)" if hit else "rgba(128,128,128,.4)"
+        deco = "text-decoration:line-through;" if (hit and strike) else ""
+        tail = f' <span style="opacity:.6;font-size:.75rem">{share[t]:.2f}</span>' if share and t in share else ""
+        out.append(f'<span style="display:inline-block;margin:2px 4px 2px 0;padding:1px 8px;border-radius:999px;'
+                   f'border:1px solid {border};background:{bg};font-size:.84rem;{deco}">{html.escape(t)}{tail}</span>')
+    return "".join(out) or '<span style="opacity:.55;font-size:.84rem">no tags</span>'
+
+
+def _scene_tags_changed(why: str, queue: bool) -> None:
+    """The library's tags may differ now: drop every cached copy, and search again where it matters."""
+    from library_common import clear_shared_data_caches
+    st.cache_data.clear()
+    clear_shared_data_caches()
+    if queue:
+        try:
+            import jobs as J
+            n = J.queue_changed(why=why)
+        except Exception as e:                # never let the queue stop the build or the switch
+            n, st.session_state["nst_queue_err"] = 0, str(e)
+        st.session_state["nst_queued"] = n
+
+
+def _scene_tags(data: dict) -> None:
+    import catalogue_store as CS
+    import new_scene_tags as NST
+
+    built = NST.load()
+    st.caption("New tags for every scene from the teacher's moment tags inside it (your 🎯 labels win). "
+               "A tag goes on when it's on at least half of the scene's moments. Scenes with no moment keep their "
+               "old tags, and scenes you corrected in the Reviewer always keep yours.")
+    with st.container(key="nst_top"):
+        a, b = st.columns([1, 1])
+        if a.button("🏷️ Build new scene tags", key="nst_build", type="primary", width="stretch",
+                    help="From this trial's results (all batches) and your current labels. Run it again after each "
+                         "new export. Nothing in your catalogues changes."):
+            with st.spinner("Putting the teacher's tags onto your scenes…"):
+                out, summ = NST.build(data, TLB.load_labels(), NST.raw_catalogues())
+                NST.save(out)
+            _scene_tags_changed("scene tags rebuilt", queue=NST.mode() == "new")
+            st.session_state["nst_built_note"] = summ
+            st.rerun()
+        with b:
+            # The file is the truth (another device may have flipped it) — show what it says.
+            st.session_state["nst_mode"] = NST.mode()
+
+            def _flip():
+                pick = st.session_state.get("nst_mode")
+                if pick in ("old", "new") and pick != NST.mode():
+                    NST.set_mode(pick)
+                    _scene_tags_changed(f"scene tags: {pick}", queue=True)
+                    st.session_state["nst_flip_note"] = pick
+            st.segmented_control("🏷️ Scene tags", ["old", "new"], key="nst_mode", on_change=_flip,
+                                 format_func={"old": "Old", "new": "🆕 New"}.get,
+                                 help="Which tags the whole app uses for scenes — tag filters, 🔎 More like "
+                                      "this, Recommendations and video ranking. For this copy of the app only.",
+                                 disabled=not built and NST.mode() == "old")
+    note = st.session_state.pop("nst_built_note", None)
+    if note:
+        st.success(f"Built: **{note['scenes_new']}** scene(s) in **{note['videos']}** video(s) got new tags · "
+                   f"**{note['scenes_changed']}** changed · **{note['scenes_fallback']}** kept their old tags "
+                   f"(no moment inside) · from {note['moments_used']} moments ({note['moments_labelled']} yours)"
+                   + (f" · {note['videos_missing']} video(s) not in your library" if note["videos_missing"] else ""))
+    flip = st.session_state.pop("nst_flip_note", None)
+    if flip:
+        st.toast(f"The app now uses the {'new' if flip == 'new' else 'old'} scene tags.", icon="🏷️")
+    if "nst_queued" in st.session_state:
+        n = st.session_state.pop("nst_queued")
+        if n:
+            st.caption(f"⚡ {n} recommendation search(es) queued again for the videos whose tags changed.")
+    err = st.session_state.pop("nst_queue_err", None)
+    if err:
+        st.warning(f"Couldn't queue the recommendation searches ({err}) — use ⚡ on Recommendations.")
+    if not built:
+        st.info("No new scene tags yet — press **🏷️ Build new scene tags**.")
+        return
+    s = built.get("summary") or {}
+    st.caption(f"Built {built.get('built')} from the trial export of {built.get('export')} · "
+               f"{s.get('scenes_new', 0)} scenes with new tags · {s.get('scenes_changed', 0)} changed · "
+               f"{s.get('scenes_fallback', 0)} kept their old tags · now using: "
+               f"**{'🆕 new' if NST.mode() == 'new' else 'old'}** tags")
+
+    cats = CS.all_catalogues()
+    rows = NST.compare_rows(cats, built)
+    if not rows:
+        st.info("None of the videos with new tags are in your library here.")
+        return
+    part = st.segmented_control("Look at", ["compare", "similar"], key="nst_part", default="compare",
+                                format_func={"compare": "🆚 Old vs new", "similar": "🔎 More like this both ways"}.get)
+    if part is None:                               # pills can be deselected — keep the last pick
+        part = st.session_state.get("nst_part_last", "compare")
+    st.session_state["nst_part_last"] = part
+    vids = sorted({r["video_id"] for r in rows})
+    if st.session_state.get("nst_vid") not in vids:
+        st.session_state.pop("nst_vid", None)
+    if part == "similar":
+        _scene_tags_similar(cats, built, rows, vids)
+    else:
+        _scene_tags_compare(rows, vids)
+
+
+def _scene_tags_compare(rows: list, vids: list) -> None:
+    import new_scene_tags as NST
+    with st.expander("📈 Tags that changed most across the library"):
+        ch = NST.tag_changes(rows)
+        if ch:
+            st.dataframe([{"Tag": t, "Added to scenes": a, "Removed from scenes": r} for t, a, r in ch[:40]],
+                         hide_index=True, width="stretch")
+        else:
+            st.caption("No tag changed.")
+    with st.container(key="nst_filters"):
+        a, b = st.columns([3, 2])
+        vid = a.selectbox("Video", vids, key="nst_vid")
+        only = b.toggle("Only scenes that changed", key="nst_only", value=True)
+    mine = [r for r in rows if r["video_id"] == vid]
+    n_ch = sum(1 for r in mine if r["added"] or r["removed"])
+    n_fb = sum(1 for r in mine if r["new"] is None)
+    st.caption(f"{len(mine)} scenes · {n_ch} changed · {n_fb} kept their old tags (no moment inside)")
+    show = [r for r in mine if (r["added"] or r["removed"])] if only else mine
+    if not show:
+        st.caption("No scene of this video changed.")
+        return
+    out = []
+    for r in show:
+        when = f"{format_mmss(r['start'])}–{format_mmss(r['end'])}"
+        if r["new"] is None:
+            new = '<span style="opacity:.6;font-size:.84rem">↩︎ keeps its old tags (no moment inside)</span>'
+        else:
+            new = _tag_chips(r["new"], r["added"], share=r["share"])
+            if r["corrected"]:
+                new += '<div style="opacity:.7;font-size:.78rem">✏️ you corrected this scene — the app keeps your tags</div>'
+        moments = "" if r["new"] is None else (f'{r["moments"]} moment(s)'
+                                               + (f', {r["labelled"]} yours' if r["labelled"] else ""))
+        out.append(
+            f'<div style="padding:6px 0;border-bottom:1px solid rgba(128,128,128,.25)">'
+            f'<div style="font-size:.8rem;opacity:.75">Scene {r["scene_id"]} · {when}'
+            f'{" · " + moments if moments else ""}</div>'
+            f'<div><span style="display:inline-block;min-width:3rem;font-weight:600;font-size:.82rem">Old</span>'
+            f'{_tag_chips(r["old"], r["removed"], colour="229,83,75", strike=True)}</div>'
+            f'<div><span style="display:inline-block;min-width:3rem;font-weight:600;font-size:.82rem">New</span>'
+            f'{new}</div></div>')
+    st.markdown("".join(out), unsafe_allow_html=True)
+    st.caption("Green = added by the new tags · red, struck through = dropped · small numbers = the share of the "
+               "scene's moments that had the tag.")
+
+
+def _scene_tags_similar(cats: dict, built: dict, rows: list, vids: list) -> None:
+    import new_scene_tags as NST
+    vid = st.selectbox("Video", vids, key="nst_vid")
+    mine = [r for r in rows if r["video_id"] == vid]
+    opts = [r["scene_id"] for r in mine]
+    by = {r["scene_id"]: r for r in mine}
+    if st.session_state.get("nst_sim_scene") not in opts:
+        st.session_state.pop("nst_sim_scene", None)
+    sid = st.selectbox("Scene", opts, key="nst_sim_scene",
+                       format_func=lambda i: f"{format_mmss(by[i]['start'])} · scene {i} · "
+                                             + ", ".join((by[i]["new"] if by[i]["new"] is not None
+                                                          else by[i]["old"])[:4]))
+    if sid is None:
+        return
+    st.caption("The best matches in other videos (up to 2 per video), on tags — rarer tags count more — and "
+               "movement level. Movement is the same both ways, so any difference comes from the tags.")
+    cols = st.columns(2)
+    for col, which, label in ((cols[0], "old", "Old tags"), (cols[1], "new", "🆕 New tags")):
+        with col:
+            st.markdown(f"**{label}**")
+            r = by[sid]
+            ref = r["old"] if which == "old" or r["new"] is None or r["corrected"] else r["new"]
+            st.markdown(_tag_chips(ref), unsafe_allow_html=True)
+            hits = NST.similar_scenes((vid, sid), cats, built, which)
+            if not hits:
+                st.caption("No matches.")
+            for score, v, s_id, tags, shared in hits:
+                sc = next((x for x in cats[v]["scenes"] if x["scene_id"] == s_id), {})
+                try:
+                    from library_common import tc_to_seconds
+                    when = format_mmss(tc_to_seconds(sc["start_tc"]))
+                except (KeyError, ValueError, TypeError):
+                    when = "?"
+                st.markdown(
+                    f'<div style="padding:4px 0;border-bottom:1px solid rgba(128,128,128,.2)">'
+                    f'<div style="font-size:.8rem"><b>{score:.0%}</b> · {html.escape(v[:44])} · {when}</div>'
+                    f'{_tag_chips(tags, set(shared))}</div>', unsafe_allow_html=True)
+
+
 def render() -> None:
     data = TR.load()
     if not data:
@@ -634,8 +834,11 @@ def render() -> None:
                             help="Look at one batch run on its own, or all of them together.")
         with b:
             with st.container(key="subnav_tr"):
-                sub = st.radio("Trial", ["📋 Summary", "🖼️ Compare tags", "📊 Scores", "🕺 Motion"], horizontal=True,
+                sub = st.radio("Trial", ["📋 Summary", "🖼️ Compare tags", "📊 Scores", "🕺 Motion", "🏷️ Scene tags"], horizontal=True,
                                key="tr_sub", label_visibility="collapsed")
+    if sub == "🏷️ Scene tags":
+        _scene_tags(data)                      # always every batch: the new tags come from all of them
+        return
     view = {**data, "videos": TR.in_batch(data["videos"], batch)}
     if not view["videos"] and sub != "📋 Summary":
         st.info("No videos in this batch.")

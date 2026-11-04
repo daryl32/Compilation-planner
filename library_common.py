@@ -69,6 +69,12 @@ def scene_tags(scene: dict) -> list:
     auto-generated tags."""
     if "corrected_tags" in scene and scene["corrected_tags"] is not None:
         return list(scene["corrected_tags"])
+    # 🏷️ Scene tags: New — the teacher's moment tags put onto the scene (new_scene_tags). The catalogue
+    # loader adds them to each scene as "new_tags"; scenes without any keep their old tags.
+    if scene.get("new_tags") is not None:
+        import new_scene_tags as NST
+        if NST.mode() == "new":
+            return list(scene["new_tags"])
     return list(scene.get("tags", []))
 
 

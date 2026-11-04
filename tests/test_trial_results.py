@@ -69,6 +69,8 @@ def test_filters_and_agreement():
     assert [m["key"] for m in TR.filter_moments(ms, "wrong")] == ["g_5.00"]          # 8b missed "dance"
     assert [m["key"] for m in TR.filter_moments(ms, "disagree")] == ["g_5.00", "s1_0"]
     assert [m["key"] for m in TR.filter_moments(ms, "all", "Night")] == ["s2_0"]     # unsure tags don't count
+    assert [m["key"] for m in TR.filter_moments(ms, "all", "street")] == ["g_5.00"]   # only the old tags have it
+    assert TR.filter_moments(ms, "all", "street", skip_old=True) == []                # 🙈 Ignore old tags
     a = TR.agreement(ms)
     assert a["32b"]["exact"] == 1 and a["32b"]["recall"] == 1.0
     assert a["8b"]["exact"] == 0 and a["8b"]["recall"] == 0.5 and a["8b"]["precision"] == 1.0
@@ -105,6 +107,10 @@ def test_view(bundle, sub):
     assert not errors(at), errors(at)
     md = " ".join(m.value for m in at.markdown)
     if sub == "🖼️ Compare tags":
+        assert "✓ close-up shot" in md and "+ dance" not in md    # 🙈 Ignore old tags is on: no Old row
+        at.toggle(key="tr_no_old").set_value(False).run()
+        assert not errors(at), errors(at)
+        md = " ".join(m.value for m in at.markdown)
         assert "✓ close-up shot" in md and "+ dance" in md       # 32B right; the old tags missed "dance"
         assert ">8B<" not in md and "✅ 8B is right" not in [b.label for b in at.button]   # only the 32B is shown
         assert "The models disagree" not in at.selectbox(key="tr_filter").options

@@ -398,6 +398,7 @@ def save_hashes() -> None:
 
 
 def video_sigs() -> dict:
+    import new_scene_tags as NST
     """{video_id: what the matcher sees of that video} — its catalogue's content (scenes,
     roles, tags, motion curves) and its library range. A video whose sig is unchanged
     gives the matcher exactly the same footage."""
@@ -405,7 +406,11 @@ def video_sigs() -> dict:
     out = {}
     for vid, stem in sorted(_stems().items()):
         h = file_hash(CStore.catalogue_path(stem))
-        out[vid] = hashlib.sha1(json.dumps([h, ranges.get(vid)], default=str).encode()).hexdigest()[:16]
+        parts = [h, ranges.get(vid)]
+        new_tags = NST.video_part(vid)          # 🏷️ Scene tags: New — the video's new tags count too
+        if new_tags is not None:
+            parts.append(new_tags)
+        out[vid] = hashlib.sha1(json.dumps(parts, default=str).encode()).hexdigest()[:16]
     return out
 
 
