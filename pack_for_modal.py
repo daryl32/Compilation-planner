@@ -60,7 +60,7 @@ PACK_VERSION = 1
 LIBRARY_FILES = ["tag_vocabulary.csv", "training_labels.json", "labels.json",
                  "library_meta.json", "scene_roles.json"]
 NOT_CATALOGUES = {"labels.json", "library_meta.json", "video_index.json", "scene_roles.json",
-                  "story_maps.json", "training_labels.json"}
+                  "story_maps.json", "training_labels.json", "scene_tags_new.json"}
 SCENE_FIELDS = ["scene_id", "start_tc", "end_tc", "start_frame", "end_frame", "tags", "corrected_tags",
                 "reviewed", "excluded", "roles", "roles_reviewed", "intro_candidate", "outro_candidate",
                 "motion_intensity", "motion_curve", "clip_embedding", "split_from"]

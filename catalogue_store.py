@@ -35,7 +35,7 @@ from library_common import mark_pending, scene_tags, shared_cache, tc_to_seconds
 
 # JSON files in CATALOGUE_DIR that are never video catalogues.
 NOT_CATALOGUES = {"labels.json", "library_meta.json", "video_index.json", "scene_roles.json",
-                  "story_maps.json", "training_labels.json"}
+                  "story_maps.json", "training_labels.json", "scene_tags_new.json"}
 
 
 def catalogue_paths() -> list:
@@ -132,6 +132,7 @@ def _strip(cat: dict) -> dict:
     video by motion_curves()), and Reviewer-corrected tags as "tags"."""
     for scene in cat["scenes"]:
         scene.pop("motion_curve", None)
+        scene.setdefault("auto_tags", list(scene.get("tags") or []))   # the file's own tags (🆚 Old vs new)
         scene["tags"] = scene_tags(scene)
     return cat
 
@@ -139,8 +140,14 @@ def _strip(cat: dict) -> dict:
 def _refresh() -> dict:
     """Re-read only the catalogue files that changed (or appeared) since last
     time; drop ones that went. Returns the store. Call with no lock held."""
+    import new_scene_tags as NST
     store = _store()
+    tag_sig = NST.signature()
     with store["lock"]:
+        if store.get("tag_sig") != tag_sig:
+            # The 🏷️ Scene tags switch flipped or the new tags were rebuilt: every scene's tags may differ.
+            store["files"] = {}
+            store["tag_sig"] = tag_sig
         files = store["files"]
         seen, changed = set(), False
         for p in catalogue_paths():
@@ -161,6 +168,7 @@ def _refresh() -> dict:
             if not is_video_catalogue(cat):
                 files[p.name] = (mtime, None, None)
                 continue
+            NST.annotate(cat["video_id"], cat)
             slim = _slim_video(p.stem, cat, mtime)
             files[p.name] = (mtime, _strip(cat), slim)
         for gone in set(files) - seen:
