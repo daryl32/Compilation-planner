@@ -341,10 +341,13 @@ function endPointer(ev) {
 cv.addEventListener("pointerup", endPointer);
 cv.addEventListener("pointercancel", endPointer);
 cv.addEventListener("wheel", ev => {                     // laptop: ctrl / pinch-trackpad zooms, a sideways scroll pans
-  if (!D) return; ev.preventDefault();
+  if (!D) return;
+  const sideways = Math.abs(ev.deltaX) > Math.abs(ev.deltaY);
+  if (!ev.ctrlKey && !sideways) return;                   // an up / down scroll scrolls the page
+  ev.preventDefault();
   const G = cv._geo, about = G ? G.T(pos(ev).x) : undefined;
   if (ev.ctrlKey) zoom(Math.exp(ev.deltaY * 0.01), about);
-  else { view.start += (ev.deltaX || ev.deltaY) / (G ? G.w : 800) * view.span; draw(); }
+  else { view.start += ev.deltaX / (G ? G.w : 800) * view.span; draw(); }
 }, {passive: false});
 
 function applyTheme(th) {

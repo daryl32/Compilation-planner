@@ -7,7 +7,9 @@
   :root { --bg:#ffffff; --fg:#262730; --muted:#8a8f98; --line:#d9dce1; --accent:#ff4b4b; --panel:#f3f4f7;
           --wave:rgba(70,110,200,0.55); --vox:rgba(230,80,160,0.75); --drums:rgba(240,140,40,0.85);
           --blend:rgba(128,90,220,0.16); --dim:rgba(120,120,120,0.55); --cursor:#ff4b4b;
-          --curveA:#ffb000; --curveB:#21c7a8; }
+          --curveA:#ffb000; --curveB:#21c7a8;
+          /* the waveform "stage" is dark in both themes — waveforms read better on dark */
+          --stage:#15171e; --sfg:#e8eaf0; --smuted:#9aa0aa; --sline:rgba(255,255,255,.10); --amber:rgba(245,170,40,.38); }
   html, body { margin:0; padding:0; background:transparent; color:var(--fg);
                font-family: "Source Sans Pro", -apple-system, system-ui, sans-serif; font-size:15px;
                -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color: transparent; }
@@ -19,8 +21,8 @@
   button:disabled { opacity:.4; cursor:default; }
   .time { font-variant-numeric: tabular-nums; min-width:110px; text-align:center; font-weight:600; }
   .grow { flex:1; }
-  canvas { display:block; width:100%; touch-action:none; border-radius:8px; background:var(--panel); }
-  #deck { height:270px; }
+  canvas { display:block; width:100%; touch-action:none; border-radius:10px; background:var(--stage); }
+  #deck { height:300px; }
   .hint { color:var(--muted); font-size:13px; margin-top:4px; min-height:18px; }
   .key span { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 3px 0 10px; vertical-align:middle; }
   button.nudge { animation: nudge 1s ease-in-out 3; border-color: var(--accent); }
@@ -41,7 +43,7 @@
 </div>
 <canvas id="deck"></canvas>
 <div class="hint" id="hint"></div>
-<div class="hint key"><span style="background:var(--wave)"></span>level<span style="background:var(--vox)"></span>vocals<span style="background:var(--drums)"></span>drums<span style="background:var(--blend)"></span>the blend<span style="background:var(--curveA)"></span>A fades out<span style="background:var(--curveB)"></span>B comes in</div>
+<div class="hint key"><span style="background:rgb(70,105,235)"></span>bass-heavy<span style="background:rgb(182,194,216)"></span>bright<span style="background:var(--vox)"></span>vocals<span style="background:var(--drums)"></span>drums<span style="background:var(--amber)"></span>high-energy section<span style="background:var(--blend)"></span>the blend<span style="background:var(--curveA)"></span>A fades out<span style="background:var(--curveB)"></span>B comes in</div>
 
 <script>
 function post(type, extra) { window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra || {}), "*"); }
@@ -170,34 +172,47 @@ function gainsAt(x) {
 // ---------------------------------------------------------------------------------------------
 // Drawing
 // ---------------------------------------------------------------------------------------------
+// 🎨 the waveform's body colour: deep blue when the sound is bass-heavy (dull), pale steel when it's bright
+const LO = [70, 105, 235], HI = [182, 194, 216];
+function body(b) { const k = clip(b, 0, 1); return `rgb(${LO.map((v, i) => Math.round(v + (HI[i] - v) * k)).join(",")})`; }
+const RIB = 15;
 function lane(g, w, X, y, h, trk, toLane, from, keep0, keep1) {
-  const t0 = view.start, t1 = view.start + view.span, mid = y + h / 2, amp = h / 2 - 3;
+  const t0 = view.start, t1 = view.start + view.span;
+  // the section strip on top: where each section falls, amber for the high-energy ones
+  const secs = trk.sections || [];
+  for (let i = 0; i < secs.length; i++) {
+    const xa = Math.max(0, X(from(secs[i].t))), xb = Math.min(w, X(from(i + 1 < secs.length ? secs[i + 1].t : trk.duration)));
+    if (xb <= xa) continue;
+    g.fillStyle = (secs[i].energy || 0) >= 0.66 ? css("--amber") : "rgba(255,255,255,.07)"; g.fillRect(xa, y, xb - xa - 1, RIB - 2);
+    const txt = `${secs[i].label} · ${secs[i].bars}`; g.font = "11px sans-serif"; g.fillStyle = css("--sfg");
+    if (xb - xa > g.measureText(txt).width + 8) g.fillText(txt, xa + 4, y + RIB - 4);
+  }
+  const wy = y + RIB, wh = h - RIB, mid = wy + wh / 2, amp = wh / 2 - 3;
   const rate = trk.rate, env = trk.env, vox = trk.vox, drums = trk.drums;
   for (let px = 0; px < w; px++) {
     const xa = t0 + (t1 - t0) * px / w, xb = t0 + (t1 - t0) * (px + 1) / w;
     const ta = toLane(xa), tb = toLane(xb);
     if (tb < 0 || ta > trk.duration) continue;
-    let e = 0, v = 0, k = 0;
+    let e = 0, v = 0, k = 0, br = 0, lo = 0, n = 0;
     for (let i = Math.floor(Math.min(ta, tb) * rate); i <= Math.floor(Math.max(ta, tb) * rate); i++) {
-      e = Math.max(e, env[i] || 0); v = Math.max(v, vox ? (vox[i] || 0) : 0); k = Math.max(k, drums ? (drums[i] || 0) : 0); }
+      e = Math.max(e, env[i] || 0); v = Math.max(v, vox ? (vox[i] || 0) : 0); k = Math.max(k, drums ? (drums[i] || 0) : 0);
+      br += trk.bright ? (trk.bright[i] || 0) : 0.45; lo = Math.max(lo, trk.low ? (trk.low[i] || 0) : 0); n++; }
+    br /= Math.max(n, 1);
     const kept = ta >= keep0 - 1e-3 && ta <= keep1 + 1e-3;
     if (!kept) { g.globalAlpha = 0.35; g.fillStyle = css("--dim"); g.fillRect(px, mid - e * amp, 1, 2 * e * amp); continue; }
     g.globalAlpha = 1;
-    g.fillStyle = css("--wave"); g.fillRect(px, mid - e * amp, 1, 2 * e * amp);
-    if (v > 0.05) { g.fillStyle = css("--vox"); g.fillRect(px, mid - v * amp, 1, v * amp * 0.9); }
-    if (k > 0.05) { g.fillStyle = css("--drums"); g.fillRect(px, mid + (1 - k) * amp, 1, k * amp); }
+    g.fillStyle = body(br); g.fillRect(px, mid - e * amp, 1, 2 * e * amp);
+    if (lo > 0.05) { const c = Math.min(e, lo) * amp * 0.75; g.fillStyle = "rgb(44,72,210)"; g.fillRect(px, mid - c, 1, 2 * c); }
+    if (v > 0.05) { g.fillStyle = css("--vox"); g.fillRect(px, mid - e * amp, 1, Math.min(v, e) * amp * 0.55); }
+    if (k > 0.05) { const kk = Math.min(k, e) * amp * 0.55; g.fillStyle = css("--drums"); g.fillRect(px, mid + e * amp - kk, 1, kk); }
   }
   g.globalAlpha = 1;
-  g.strokeStyle = css("--line"); g.lineWidth = 1;
-  if (view.span < 160) for (const b of trk.bars) { const x = X(from(b)); if (x >= 0 && x <= w) { g.beginPath(); g.moveTo(x, y); g.lineTo(x, y + h); g.stroke(); } }
-  // 🎯 phrase lines (brighter — drags click onto them) and the sections' names
+  g.strokeStyle = css("--sline"); g.lineWidth = 1;
+  if (view.span < 160) for (const b of trk.bars) { const x = X(from(b)); if (x >= 0 && x <= w) { g.beginPath(); g.moveTo(x, wy); g.lineTo(x, wy + wh); g.stroke(); } }
+  // 🎯 phrase lines (brighter — drags click onto them)
   for (const [t, wgt] of (trk.phrases || [])) { const x = X(from(t)); if (x < 0 || x > w) continue;
-    g.globalAlpha = 0.25 + 0.45 * wgt; g.fillStyle = css("--fg"); g.fillRect(x, y + 2, 1, h - 4); }
-  g.globalAlpha = 1; g.font = "10px sans-serif";
-  for (const sec of (trk.sections || [])) { const x = X(from(sec.t)); if (x < 0 || x > w - 30) continue;
-    const txt = `${sec.label} · ${sec.bars}`; g.globalAlpha = 0.85; g.fillStyle = css("--panel");
-    g.fillRect(x + 1, y + h - 15, g.measureText(txt).width + 6, 13); g.globalAlpha = 1;
-    g.fillStyle = css("--fg"); g.fillText(txt, x + 4, y + h - 5); }
+    g.globalAlpha = 0.18 + 0.4 * wgt; g.fillStyle = css("--sfg"); g.fillRect(x, wy + 2, 1, wh - 4); }
+  g.globalAlpha = 1;
 }
 
 function curveHandles(side, X, top, H) {
@@ -213,18 +228,18 @@ function draw() {
   g.clearRect(0, 0, w, h);
   const t0 = view.start, t1 = view.start + view.span, X = t => (t - t0) / (t1 - t0) * w, T = x => t0 + x / w * (t1 - t0);
   const ruler = 22, gap = 8, laneH = (h - ruler - gap - 18) / 2, yA = ruler, yB = ruler + laneH + gap;
-  g.fillStyle = css("--muted"); g.font = "11px sans-serif";
+  g.fillStyle = css("--smuted"); g.font = "11px sans-serif";
   const step = view.span > 120 ? 30 : view.span > 40 ? 10 : view.span > 15 ? 5 : 1;
   for (let t = Math.ceil(t0 / step) * step; t < t1; t += step) { const x = X(t); g.fillRect(x, ruler - 6, 1, 6); g.fillText(fmt(t).replace(".0", ""), x + 2, 11); }
   // the live window (what's prepared for ▶ Live mix)
   if (D.live && D.live.a) { const lw0 = Math.max(D.live.a.w[0], outB(D.live.b.w[0])), lw1 = Math.min(D.live.a.w[1], outB(D.live.b.w[1]));
-    g.fillStyle = css("--line"); g.fillRect(X(lw0), ruler - 3, X(lw1) - X(lw0), 3); }
+    g.fillStyle = css("--sline"); g.fillRect(X(lw0), ruler - 3, X(lw1) - X(lw0), 3); }
   const xb0 = X(blendStart()), xb1 = X(S.a_end);
   g.fillStyle = css("--blend"); g.fillRect(xb0, yA, xb1 - xb0, yB + laneH - yA);
   lane(g, w, X, yA, laneH, D.a, x => x, t => t, 0, S.a_end);
   lane(g, w, X, yB, laneH, D.b, inB, outB, bIn(), D.b.duration);
-  g.fillStyle = css("--fg"); g.font = "bold 12px sans-serif";
-  g.fillText("A  " + D.a.label, 6, yA + 14); g.fillText("B  " + D.b.label, 6, yB + 14);
+  g.fillStyle = css("--sfg"); g.font = "bold 12px sans-serif";
+  g.fillText("A  " + D.a.label, 6, yA + RIB + 14); g.fillText("B  " + D.b.label, 6, yB + RIB + 14);
   // the fade curves over the blend (the 'other' stem — the overall level), with their handles
   const top = yA + 6, H = yB + laneH - 12 - top, prof = S.profile || "smooth", tb = S.bars * (D.bpb || 4);
   for (const [side, col] of [["out", "--curveA"], ["in", "--curveB"]]) {
@@ -246,10 +261,10 @@ function draw() {
   g.strokeStyle = css("--accent"); g.lineWidth = 2;
   g.beginPath(); g.moveTo(xb1, ruler); g.lineTo(xb1, yB + laneH); g.stroke();
   g.fillStyle = css("--accent"); g.beginPath(); g.moveTo(xb1, ruler - 2); g.lineTo(xb1 + 7, ruler + 6); g.lineTo(xb1, ruler + 14); g.lineTo(xb1 - 7, ruler + 6); g.closePath(); g.fill();
-  g.strokeStyle = css("--muted"); g.setLineDash([4, 3]);
+  g.strokeStyle = css("--smuted"); g.setLineDash([4, 3]);
   g.beginPath(); g.moveTo(xb0, ruler); g.lineTo(xb0, yB + laneH); g.stroke(); g.setLineDash([]);
-  g.fillStyle = css("--muted"); g.fillRect(xb0 - 3, yA + laneH / 2 - 14, 6, 28);
-  g.fillStyle = css("--fg"); g.font = "12px sans-serif";
+  g.fillStyle = css("--smuted"); g.fillRect(xb0 - 3, yA + laneH / 2 - 14, 6, 28);
+  g.fillStyle = css("--sfg"); g.font = "12px sans-serif";
   g.fillText(`blend ${S.bars} bar${S.bars === 1 ? "" : "s"} · A hands over at ${fmt(S.a_end)} (${placeLabel(D.a, S.a_end)}) · B in from ${fmt(bIn())}, fully in at ${fmt(S.b_full)} (${placeLabel(D.b, S.b_full)})`, 6, h - 4);
   // cursors
   const cx = curX();
@@ -366,8 +381,26 @@ function send() { sendValue({a_end: S.a_end, b_full: S.b_full, bars: S.bars, cur
 // Dragging and tapping
 // ---------------------------------------------------------------------------------------------
 function pos(ev) { const r = deck.getBoundingClientRect(); return {x: ev.clientX - r.left, y: ev.clientY - r.top}; }
+const ptrs = new Map(); let pinch = null;
+function zoomAbout(f, about) { view.span = clip(view.span * f, 2, 900); view.start = about - (about - view.start) * f; draw(); }
+deck.addEventListener("wheel", ev => {                   // laptop: ctrl / trackpad-pinch zooms, a sideways scroll pans
+  if (!D || !deck._geo) return;
+  const sideways = Math.abs(ev.deltaX) > Math.abs(ev.deltaY);
+  if (!ev.ctrlKey && !sideways) return;                   // an up / down scroll scrolls the page
+  ev.preventDefault();
+  const g = deck._geo, about = g.T(pos(ev).x);
+  if (ev.ctrlKey) zoomAbout(Math.exp(ev.deltaY * 0.01), about);
+  else { view.start += ev.deltaX / deck.getBoundingClientRect().width * view.span; draw(); }
+}, {passive: false});
 deck.addEventListener("pointerdown", ev => {
   if (!D || !deck._geo) return;
+  ptrs.set(ev.pointerId, pos(ev));
+  if (ptrs.size === 2) {                                   // 🤏 pinch: zoom about the fingers' midpoint
+    const [a, b] = [...ptrs.values()], w = deck.getBoundingClientRect().width;
+    pinch = {d0: Math.max(20, Math.hypot(a.x - b.x, a.y - b.y)), span0: view.span, start0: view.start, mid0: (a.x + b.x) / 2, w};
+    if (drag && drag.moved && ["mix", "edge", "laneB", "curve"].includes(drag.kind)) S = drag.s0;
+    drag = null; draw(); return;
+  }
   const g = deck._geo, p = pos(ev); deck.setPointerCapture(ev.pointerId);
   let kind, handle = null, best = 22;
   const near = [];
@@ -389,6 +422,12 @@ deck.addEventListener("pointerdown", ev => {
   drag = {kind, handle, x0: p.x, y0: p.y, moved: false, s0: JSON.parse(JSON.stringify(S)), pts0: curvesOf(), v0: view.start};
 });
 deck.addEventListener("pointermove", ev => {
+  if (ptrs.has(ev.pointerId)) ptrs.set(ev.pointerId, pos(ev));
+  if (pinch && ptrs.size >= 2) {
+    const [a, b] = [...ptrs.values()], d = Math.max(20, Math.hypot(a.x - b.x, a.y - b.y)), mid = (a.x + b.x) / 2;
+    const tm = pinch.start0 + pinch.mid0 / pinch.w * pinch.span0;
+    view.span = clip(pinch.span0 * pinch.d0 / d, 2, 900); view.start = tm - mid / pinch.w * view.span; draw(); return;
+  }
   if (!drag) return;
   const g = deck._geo, p = pos(ev), dx = p.x - drag.x0, dy = p.y - drag.y0, dt = dx / deck.getBoundingClientRect().width * view.span;
   if (Math.abs(dx) > 6 || Math.abs(dy) > 6) drag.moved = true;
@@ -409,7 +448,9 @@ deck.addEventListener("pointermove", ev => {
   }
   draw();
 });
-deck.addEventListener("pointerup", ev => {
+function endPointer(ev) {
+  ptrs.delete(ev.pointerId);
+  if (pinch) { if (ptrs.size < 2) pinch = null; drag = null; return; }
   if (!drag) return;
   const g = deck._geo, p = pos(ev);
   if (!drag.moved) {
@@ -423,12 +464,14 @@ deck.addEventListener("pointerup", ev => {
     send(); restartLiveIfPlaying();
   }
   drag = null;
-});
+}
+deck.addEventListener("pointerup", endPointer);
+deck.addEventListener("pointercancel", endPointer);
 
 function applyTheme(th) {
   if (!th) return; const r = document.documentElement.style;
   if (th.base === "dark") { r.setProperty("--panel", "#1f2129"); r.setProperty("--line", "#3a3d47"); r.setProperty("--muted", "#9aa0aa");
-                            r.setProperty("--wave", "rgba(120,160,255,0.6)"); r.setProperty("--blend", "rgba(160,120,255,0.18)"); }
+                            r.setProperty("--blend", "rgba(160,120,255,0.18)"); }
   if (th.textColor) r.setProperty("--fg", th.textColor);
   if (th.primaryColor) { r.setProperty("--accent", th.primaryColor); r.setProperty("--cursor", th.primaryColor); }
 }
