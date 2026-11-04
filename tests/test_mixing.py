@@ -1320,3 +1320,21 @@ def test_quick_vocal_layover(mixlib):
     ly = at.session_state["mxm_layers"]
     assert len(ly) == 1 and ly[0]["on"] == "u1" and ly[0]["part"] == "vocals" and ly[0]["track"] != "mix_song_c"
     assert at.session_state["mxm_parts"][0]["part"] == "instrumental"
+
+
+def test_open_join_is_mixed_for_the_loop_and_follows_changes(mixlib):
+    """🔁 Join: opening a join mixes it in the background for the lanes' loop; a change mixes it again."""
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    _two_part_mashup(at, mixlib)
+    at.session_state["mxm_lanes"] = {"join": "u2", "open": True, "nonce": 91}
+    at.run()
+    _settle(at)
+    assert not errors(at), errors(at)
+    first = at.session_state["_mxm_jlive"]
+    assert first["uid"] == "u2" and first["url"] and first["mix_start"] >= 0
+    at.pills(key="mxm_xfl_u2").set_value("4 bars").run()
+    _settle(at)
+    second = at.session_state["_mxm_jlive"]
+    assert second["url"] and second["url"] != first["url"]
+    assert not errors(at), errors(at)

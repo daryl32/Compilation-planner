@@ -541,7 +541,42 @@ def _where_label(w) -> str:
 # Preview + save (shared by Extend and Mashup)
 # ---------------------------------------------------------------------------
 
-def _mashup_lanes(recipe: dict, tracks: dict, mix_url: str, rough: set = frozenset()) -> None:
+def _live_join(recipe: dict, tracks: dict, lay: dict) -> dict | None:
+    """🔁 The open join's quick render for the lanes' loop: started (in the background) as soon as the join is
+    open or changed, so the loop picks up each change by itself. Until a new render is ready the last one keeps
+    playing."""
+    import mixer
+    from cut_editor import media_url
+    ss = st.session_state
+    uid = ss.get("_mxm_join_open")
+    pieces = lay["pieces"]
+    k = next((i for i, p in enumerate(pieces) if p.get("uid") == uid), 0) - 1
+    if not uid or k < 0:
+        ss.pop("_mxm_jlive", None)
+        return None
+    grids = {tid: MX.grid(t) for tid, t in tracks.items()}
+    jr = _join_recipe(recipe, k, grids)
+    trs = {t: tracks[t] for t in {p["track"] for p in jr["pieces"]}}
+    path = mixer.preview_path(jr)
+    a = pieces[k]
+    info = {"uid": uid, "label": f"{k + 1} → {k + 2}",
+            "mix_start": round(float(a["out_end"]) - (float(a["end"]) - float(jr["pieces"][0]["start"])) / float(a["speed"]), 3)}
+    if path.exists():
+        info["url"] = media_url(path, "audio/mpeg" if path.suffix == ".mp3" else "audio/mp4", f"mxm_jl_{path.stem}")
+        ss["_mxm_jlive"] = info
+        return info
+    job = _render_job_for(path)
+    if not (job and job.active) and _audio_ready(mixer.parts_needed(jr, trs), f"mxm_jl_{uid}"):
+        job = _start_render(jr, trs, path, f"🔁 Mixing join {k + 1} → {k + 2}")
+    if job is not None and job.active:
+        _job_watch((job.key,))
+    elif job is not None and job.state == "error":
+        st.caption(f":orange[🔁 Couldn't mix the join: {job.error}]")
+    last = ss.get("_mxm_jlive") or {}
+    return {**info, "url": last.get("url", "") if last.get("uid") == uid else ""}
+
+
+def _mashup_lanes(recipe: dict, tracks: dict, mix_url: str, rough: set = frozenset(), join_audio: dict = None) -> None:
     """🎚️ One lane per part (mix_lanes.py): trims, join drags (the hand-over moved) and join taps (open its
     settings under the lanes) come back here."""
     import mixer
@@ -572,7 +607,8 @@ def _mashup_lanes(recipe: dict, tracks: dict, mix_url: str, rough: set = frozens
         jdata.append({"at": j["at"], "pre": j["pre"], "post": j["post"], "uid": b.get("uid"), "a_uid": a.get("uid"),
                       "label": _join_summary(a, b), "rough": b.get("uid") in rough,
                       "neural": bool((b.get("xfade") or {}).get("neural"))})
-    val = ML.mix_lanes(duration=lay["duration"], lanes=lanes, joins=jdata, mix_url=mix_url, key="mxm_lanes")
+    val = ML.mix_lanes(duration=lay["duration"], lanes=lanes, joins=jdata, mix_url=mix_url, join_audio=join_audio,
+                       key="mxm_lanes")
     if not (isinstance(val, dict) and val.get("nonce") and val["nonce"] != st.session_state.get("_mxm_lanes_nonce")):
         return
     st.session_state["_mxm_lanes_nonce"] = val["nonce"]
@@ -613,6 +649,7 @@ def _join_panel(parts: list, rough: set):
                         help="The keys clash here. Shifts the next song's key to fit, and moves the hand-over to the "
                              "best-scoring place inside the two parts as a 🧠 blend. ↶ undoes it.")
         c[-1].button("✖", key="mxm_jpclose", width="stretch", on_click=_close_join_panel, help="Close")
+        st.caption("🔁 **Join** above the lanes loops this join — change it here and the loop follows a moment later.")
         _join_controls(a, b)
         return uid, st.container()
 
@@ -1746,7 +1783,9 @@ def _mashup(summaries: dict) -> None:
     fresh = pv_path.exists()
     url = media_url(pv_path, "audio/mpeg" if pv_path.suffix == ".mp3" else "audio/mp4", "mxm_mix_audio") \
         if fresh else ""
-    _mashup_lanes(recipe, tracks, url, rough)
+    with st.container(key="mxm_jlive_box"):      # always here, so the lanes below never move (they'd restart)
+        live = _live_join(recipe, tracks, lay)
+    _mashup_lanes(recipe, tracks, url, rough, live)
     open_uid, open_slot = _join_panel(parts, rough)
     with st.expander("📈 Whole-mix waveform — crossfade handles, layers, the preview's level", expanded=False):
         _timeline(recipe, tracks, {}, energy=_preview_side(pv_path).get("energy") if fresh else None,
@@ -2021,7 +2060,8 @@ def _transition(summaries: dict) -> None:
     pv = st.session_state.get("mxt_pv")
     rec_short = _tx_recipe(a, b, ta, tb, s, short=True)
     s.setdefault("profile", st.session_state.get("mxt_profile") or "smooth")
-    live = _tx_live(a, b, ta, tb, s)
+    with st.container(key="mxt_live_box"):        # always here, so the decks below never move (they'd restart)
+        live = _tx_live(a, b, ta, tb, s)
     val = DE.deck_editor(a=DE.lane_data(ta, a, ga, urls[a]), b=DE.lane_data(tb, b, gb, urls[b]), state=s,
                          bar_a=ga["bar_len"], bar_b=gb["bar_len"], speed_b=speed_b, live=live,
                          beats_per_bar=int(ga["beats_per_bar"]), state_key=f"{a}|{b}|{s.get('from')}", key="mxt_deck",

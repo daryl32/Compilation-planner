@@ -27,6 +27,7 @@
 <body>
 <div class="bar" id="btns">
   <button id="pm" title="Play the previewed mix from where you last tapped">▶ Mix</button>
+  <button id="lj" title="Tap a join pill, then loop just that join — change it and you hear the change">🔁 Join</button>
   <span id="parts"></span>
   <span class="time" id="time">—</span>
   <span class="grow"></span>
@@ -214,12 +215,48 @@ function draw() {
   cv._geo = {X, T, geo, w};
 }
 
+// 🔁 Loop the open join: its quick render (the server re-mixes it after every change) plays in a loop here, and
+// a new render takes over at the same point — so a change is heard a second or two later, without a tap
+// (on an iPad sound may only start from a tap; once this loop is running, swaps don't need one).
+let ctx = null, jsrc = null, jbuf = null, jurl = "", jt0 = 0, jloading = "";
+async function loadJoin(url) {
+  jloading = url;
+  const r = await fetch(url); const ab = await r.arrayBuffer();
+  const b = await new Promise((ok, no) => ctx.decodeAudioData(ab, ok, no));
+  if (jloading !== url) return null;           // a newer render arrived meanwhile
+  jloading = ""; return b;
+}
+function startJoinAt(b, url, offset) {
+  if (jsrc) { try { jsrc.stop(); } catch (e) {} }
+  jsrc = ctx.createBufferSource(); jsrc.buffer = b; jsrc.loop = true; jsrc.connect(ctx.destination);
+  const off = Math.max(0, Math.min(offset, b.duration - 0.05));
+  jsrc.start(0, off); jt0 = ctx.currentTime - off; jbuf = b; jurl = url; playing = "J"; setButtons();
+}
+async function loopJoin() {
+  if (playing === "J") { stopJoin(); setButtons(); draw(); return; }
+  const J = D.join_audio; if (!J || !J.url) return;
+  stop();
+  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === "suspended") await ctx.resume();
+  $("lj").textContent = "⏳ Join"; 
+  try { const b = await loadJoin(J.url); if (b) startJoinAt(b, J.url, 0); }
+  catch (e) { $("hint").textContent = "Couldn't play the join: " + e; }
+  setButtons();
+}
+async function swapJoin() {                    // a new render of the join: carry on from the same point
+  const J = D.join_audio; if (playing !== "J" || !J || !J.url || J.url === jurl || jloading === J.url) return;
+  try { const b = await loadJoin(J.url); if (!b || playing !== "J") return;
+        const pos = jbuf ? (ctx.currentTime - jt0) % jbuf.duration : 0; startJoinAt(b, J.url, pos); }
+  catch (e) {}
+}
+function stopJoin() { if (jsrc) { try { jsrc.stop(); } catch (e) {} } jsrc = null; if (playing === "J") playing = null; }
 function curX() {
+  if (playing === "J" && jbuf && D.join_audio) return {x: D.join_audio.mix_start + (ctx.currentTime - jt0) % jbuf.duration, lane: null};
   if (playing === "M") return {x: audio.currentTime, lane: null};
   if (typeof playing === "number") { const L = D.lanes[playing]; return {x: toMix(L, audio.currentTime), lane: playing}; }
   return null;
 }
-function stop() { audio.pause(); playing = null; }
+function stop() { audio.pause(); stopJoin(); playing = null; }
 function play(which) {
   const was = playing; stop();
   if (was === which) { setButtons(); draw(); return; }
@@ -238,6 +275,11 @@ audio.addEventListener("timeupdate", () => {           // a part plays only its 
 function setButtons() {
   $("pm").disabled = !D.mix_url; $("pm").classList.toggle("on", playing === "M"); $("pm").textContent = playing === "M" ? "⏸ Mix" : "▶ Mix";
   $("pm").title = D.mix_url ? "Play the previewed mix from where you last tapped" : "Press ▶️ Preview first";
+  const J = D.join_audio;
+  $("lj").disabled = !(J && J.url) && playing !== "J"; $("lj").classList.toggle("on", playing === "J");
+  $("lj").textContent = (playing === "J" ? "⏸ " : "🔁 ") + (J && J.label ? J.label : "Join");
+  $("lj").title = J ? (J.url ? "Loop this join — change it and you hear the change a moment later" : "Mixing the join…")
+                    : "Tap a join pill first, then loop just that join";
   const box = $("parts"); box.innerHTML = "";
   D.lanes.forEach((L, i) => { const b = document.createElement("button");
     b.textContent = (playing === i ? "⏸ " : "▶ ") + (i + 1); b.disabled = !L.trk.url; b.title = `Play part ${i + 1} (${L.label}) on its own`;
@@ -245,11 +287,13 @@ function setButtons() {
     b.onclick = () => play(i); box.appendChild(b); box.appendChild(document.createTextNode(" ")); });
 }
 function updateTime() { const c = curX(); $("time").textContent = c ? fmt(c.x) : "from " + fmt(cue.M); }
-function loop() { if (playing !== null && D) { const c = curX(); if (c && c.x > view.start + view.span * 0.92) view.start = c.x - view.span * 0.1; draw(); }
+function loop() { if (playing !== null && D) { const c = curX();
+                    if (c && playing !== "J" && c.x > view.start + view.span * 0.92) view.start = c.x - view.span * 0.1; draw(); }
                   if (D) updateTime(); requestAnimationFrame(loop); }
 function zoom(f, about) { const c = about ?? (view.start + view.span / 2); view.span = clip(view.span * f, 2, Math.max(D.duration * 1.2, 4));
   view.start = c - view.span / 2; draw(); }
 $("pm").onclick = () => play("M");
+$("lj").onclick = () => loopJoin();
 $("zin").onclick = () => zoom(0.6); $("zout").onclick = () => zoom(1 / 0.6);
 $("all").onclick = () => { view.start = 0; view.span = Math.max(D.duration, 4); draw(); };
 
@@ -364,6 +408,8 @@ window.addEventListener("message", ev => {
   if (first) { view.start = 0; view.span = Math.max(D.duration, 4); $("hint").textContent = HINT; }
   else if (lenChanged) view.span = Math.max(view.span, 4);
   if (playing === "M" && !D.mix_url) stop();
+  if (playing === "J" && !D.join_audio) { stopJoin(); }
+  swapJoin();
   setButtons(); draw(); setHeight();
 });
 window.addEventListener("resize", () => { draw(); setHeight(); });

@@ -19,5 +19,9 @@ _COMPONENT = components.declare_component(
     "mix_lanes", path=str(Path(__file__).resolve().parent / "components" / "mix_lanes"))
 
 
-def mix_lanes(*, duration: float, lanes: list, joins: list, mix_url: str = "", key: str = "mix_lanes"):
-    return _COMPONENT(duration=float(duration), lanes=lanes, joins=joins, mix_url=mix_url, key=key, default=None)
+def mix_lanes(*, duration: float, lanes: list, joins: list, mix_url: str = "", join_audio: dict = None,
+              key: str = "mix_lanes"):
+    """join_audio: the open join's quick render for 🔁 Join — {"uid", "url" ("" while it's being mixed),
+    "mix_start" (where the clip starts in the mix), "label"} — or None."""
+    return _COMPONENT(duration=float(duration), lanes=lanes, joins=joins, mix_url=mix_url, join_audio=join_audio,
+                      key=key, default=None)
