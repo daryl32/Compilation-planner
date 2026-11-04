@@ -678,11 +678,11 @@ def _part_trim(p: dict, g: dict, col) -> None:
     lines = sorted({0.0, round(float(p["start"]), 3), round(float(p["end"]), 3),
                     *[round(float(x), 3) for x in marks if 0 < x < g["duration"]], round(g["duration"], 3)})
     key = f"mxm_trim_{p['uid']}_{p['start']:.3f}_{p['end']:.3f}_{snap}"
-    with col.popover("✂️", width="stretch", help="Trim this part's start and end"):
-        st.select_slider(f"{p['track']} — start and end ({snap.lower()})", options=lines,
-                         value=(round(float(p["start"]), 3), round(float(p["end"]), 3)), key=key,
-                         format_func=format_mmss, on_change=_trim_part, args=(p["uid"], key))
-        st.caption("Snap to bars or beats with **Snap to** in ➕ Add a part. Or drag the part's handles in the lanes above.")
+    col.select_slider(f"✂️ Start and end ({snap.lower()})", options=lines,
+                      value=(round(float(p["start"]), 3), round(float(p["end"]), 3)), key=key,
+                      format_func=format_mmss, on_change=_trim_part, args=(p["uid"], key),
+                      help="Snap to bars or beats with Snap to in ➕ Add a part. Or drag the part's ▌ ▐ ends in the "
+                           "lanes above.")
 
 
 # ---------------------------------------------------------------------------
@@ -1101,7 +1101,7 @@ def _part_stems_row(p: dict, t: dict, tracks_all: dict, summaries: dict) -> None
     import mixer
     has = mixer.has_stems(t)
     with st.container(key=f"mxm_stems_{p['uid']}"):
-        c = st.columns([3.2, 1.6, 2], vertical_alignment="center")
+        c = [st]
         pk = f"mxm_part_{p['uid']}"
         pending = st.session_state.setdefault("_mxm_part_pending", {}).pop(p["uid"], None)
         if pending and has:
@@ -1119,10 +1119,6 @@ def _part_stems_row(p: dict, t: dict, tracks_all: dict, summaries: dict) -> None
             p["part"] = st.session_state.get(pk) or "full"
         else:
             _part_play_switch(p, pk, has, c[0])
-        others = sorted(tracks_all, key=str.lower)
-        with c[1].popover("➕ Lay over…", width="stretch", disabled=not others):
-            if others:   # a disabled popover's contents still run
-                _add_layer_form(p, t, others, tracks_all, summaries)
         _part_layers(p)
 
 
@@ -1590,20 +1586,15 @@ def _ask_join_preview(uid: str) -> None:
     st.session_state["_mxm_jreq"] = uid
 
 
-def _fix_join(a_uid: str, b_uid: str) -> None:
-    """✨ Fix a rough join between two songs: shift the incoming song's key to fit the outgoing one, then move
-    the hand-over to the best-scoring transition (core/transitions.suggest) that fits inside the two parts, as a
-    🧠 blend."""
+def _auto_join(a: dict, b: dict) -> list:
+    """✨ Make the join from part a to part b sound its best: shift b's song to fit a's key, then move the hand-over
+    to the best-scoring transition (core/transitions.suggest) that fits inside the two parts, as a 🧠 blend.
+    Changes the parts and boxes in place; returns what it did (sentences)."""
     from core import transitions as TR
     ss = st.session_state
-    parts = ss.get("mxm_parts") or []
-    a = next((p for p in parts if p["uid"] == a_uid), None)
-    b = next((p for p in parts if p["uid"] == b_uid), None)
-    if a is None or b is None:
-        return
     ta, tb = full_track(a["track"]), full_track(b["track"])
-    if ta is None or tb is None:
-        return
+    if ta is None or tb is None or a["track"] == b["track"]:
+        return []
     done = []
     ka = K.shifted(ta.get("key"), int(ss.get(f"mxm_shift_{a['track']}", 0) or 0))
     shift = int(K.best_shift(ka, tb.get("key")))
@@ -1618,15 +1609,39 @@ def _fix_join(a_uid: str, b_uid: str) -> None:
         sg = fits[0]
         a["end"], b["start"] = round(float(sg["a_end"]), 3), round(float(sg["b_full"]), 3)
         b["xfade"] = {"neural": {"profile": sg["profile"], "bars": int(sg["bars"])}}
-        k = _join_keys(b_uid)
+        k = _join_keys(b["uid"])
         ss[k["len"]], ss[k["profile"]], ss[k["bars"]], ss[k["curve"]] = NEURAL, sg["profile"], int(sg["bars"]), "even"
         for key in (k["len"], k["profile"], k["bars"], k["curve"]):
             ss[f"_last_{key}"] = ss[key]
         done.append(f"the hand-over moved to {format_mmss(sg['a_end'])} in {a['track']} → {b['track']} fully in at "
                     f"{format_mmss(sg['b_full'])}, a {_profile_label(sg['profile'])} blend over {sg['bars']} bars "
                     f"(fits {sg['score'] * 100:.0f} %)")
-    ss["mxm_neural_msg"] = ("✨ Fixed: " + "; ".join(done) + ". ↶ undoes it.") if done else \
+    return done
+
+
+def _fix_join(a_uid: str, b_uid: str) -> None:
+    """✨ Fix one rough join (see _auto_join)."""
+    parts = st.session_state.get("mxm_parts") or []
+    a = next((p for p in parts if p["uid"] == a_uid), None)
+    b = next((p for p in parts if p["uid"] == b_uid), None)
+    if a is None or b is None:
+        return
+    done = _auto_join(a, b)
+    st.session_state["mxm_neural_msg"] = ("✨ Fixed: " + "; ".join(done) + ". ↶ undoes it.") if done else \
         "✨ Nothing better found for this join — try 🎚️ the two-deck editor."
+
+
+def _auto_join_all() -> None:
+    """✨ Every join between two different songs, made its best (one ↶ undoes the lot)."""
+    parts = st.session_state.get("mxm_parts") or []
+    fixed = 0
+    for a, b in zip(parts[:-1], parts[1:]):
+        if a["track"] != b["track"] and _auto_join(a, b):
+            fixed += 1
+    joins = sum(1 for a, b in zip(parts[:-1], parts[1:]) if a["track"] != b["track"])
+    st.session_state["mxm_neural_msg"] = (f"✨ Auto-joined {fixed} of {joins} join{'s' if joins != 1 else ''} between "
+                                          "songs — keys fitted, hand-overs moved to their best places as 🧠 blends. "
+                                          "↶ undoes it.") if fixed else "✨ The joins are already as good as I can make them."
 
 
 def _join_row(a: dict, b: dict, i: int, rough: bool = False, open_uid: str = None) -> object:
@@ -1837,7 +1852,15 @@ def _mashup(summaries: dict) -> None:
     if _nmsg:
         st.info(_nmsg)
 
-    st.markdown("**Parts**")
+    from page_setup import wrap_css
+    st.markdown("<style>" + "".join(wrap_css(px, 56) for px in ("mxm_card_", "mxm_join_", "mxm_playbar"))
+                + wrap_css("mxm_join_panel", 90) + "</style>", unsafe_allow_html=True)
+    hc = st.columns([3, 1.6], vertical_alignment="center")
+    hc[0].markdown("**Parts**")
+    songs = sum(1 for a, b in zip(parts[:-1], parts[1:]) if a["track"] != b["track"])
+    hc[1].button("✨ Auto-join all", key="mxm_autojoin", width="stretch", disabled=not songs, on_click=_auto_join_all,
+                 help="Every join between two songs: fits the next song's key and moves the hand-over to its best "
+                      "place as a 🧠 blend. One ↶ undoes it all.")
     prev, slots = None, []
     for i, p in enumerate(parts):
         t, g = tracks[p["track"]], grids[p["track"]]
@@ -1845,11 +1868,13 @@ def _mashup(summaries: dict) -> None:
         if prev is not None:
             slots.append(_join_row(prev, p, i, rough=p["uid"] in rough, open_uid=open_uid) or
                          (open_slot if p["uid"] == open_uid else None))
-        with st.container(border=True):
-            c = st.columns([3.4, 1.5, 0.9, 0.9, 1.2, 1.2, 0.9])
+        with st.container(border=True, key=f"mxm_card_{p['uid']}"):
+            c = st.columns([4.6, 1, 1.5, 1], vertical_alignment="center")
+            gain = float(st.session_state.get(f"mxm_gain_{p['uid']}", p.get("gain_db") or 0.0))
             c[0].markdown(f"**{i + 1}. {p['track']}** — {format_mmss(p['start'])}–{format_mmss(p['end'])} "
                           f"({format_mmss((p['end'] - p['start']) / speed)})"
-                          + ("" if p.get("part", "full") == "full" else f" · {part_label(p['part']).lower()}"))
+                          + ("" if p.get("part", "full") == "full" else f" · {part_label(p['part']).lower()}")
+                          + (f" · {gain:+.0f} dB" if abs(gain) > 0.01 else ""))
             bits = [_key_text(t.get("key"), shift.get(p["track"], 0))]
             if abs(speed - 1) > 1e-3:
                 bits.append(f"tempo {(speed - 1) * 100:+.1f} %" + (" ⚠️" if MX.stretch_note(speed) else ""))
@@ -1858,15 +1883,23 @@ def _mashup(summaries: dict) -> None:
                                           K.shifted(t.get("key"), shift.get(p["track"], 0)))
                 bits.append(("🟢" if sc >= 0.85 else "🟠" if sc >= 0.5 else "🔴") + f" after part {i}: {lab}")
             c[0].caption("  ·  ".join(bits))
-            gk = f"mxm_gain_{p['uid']}"
-            st.session_state.setdefault(gk, float(p.get("gain_db") or 0.0))
-            c[1].number_input("Level (dB)", -12.0, 12.0, step=1.0, key=gk,
-                              label_visibility="collapsed", help="Level of this part (dB)")
-            c[2].button("↑", key=f"mxm_up_{p['uid']}", on_click=_move, args=(i, -1), disabled=i == 0)
-            c[3].button("↓", key=f"mxm_dn_{p['uid']}", on_click=_move, args=(i, 1), disabled=i == len(parts) - 1)
-            _part_trim(p, g, c[4])
-            _swap_menu(p, t, tracks_all, summaries, c[5])
-            c[6].button("🗑", key=f"mxm_rm_{p['uid']}", on_click=_remove, args=(i,))
+            _swap_menu(p, t, tracks_all, summaries, c[1])
+            others = sorted(tracks_all, key=str.lower)
+            with c[2].popover("➕🎤", width="stretch", disabled=not others,
+                              help="Lay another song over this part — its vocals, usually"):
+                if others:   # a disabled popover's contents still run
+                    _add_layer_form(p, t, others, tracks_all, summaries)
+            with c[3].popover("⋯", width="stretch", help="Level, move, trim or remove this part"):
+                gk = f"mxm_gain_{p['uid']}"
+                st.session_state.setdefault(gk, float(p.get("gain_db") or 0.0))
+                st.number_input("🔊 Level (dB)", -12.0, 12.0, step=1.0, key=gk, help="Level of this part (dB)")
+                _part_trim(p, g, st)
+                mc = st.columns(3)
+                mc[0].button("↑ Earlier", key=f"mxm_up_{p['uid']}", on_click=_move, args=(i, -1), disabled=i == 0,
+                             width="stretch")
+                mc[1].button("↓ Later", key=f"mxm_dn_{p['uid']}", on_click=_move, args=(i, 1),
+                             disabled=i == len(parts) - 1, width="stretch")
+                mc[2].button("🗑 Remove", key=f"mxm_rm_{p['uid']}", on_click=_remove, args=(i,), width="stretch")
             _part_stems_row(p, t, tracks_all, summaries)
         prev = p
     for k, slot in enumerate(slots):

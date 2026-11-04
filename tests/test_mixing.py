@@ -1398,3 +1398,16 @@ def test_stem_toggles_on_a_part(mixlib):
     _settle(at)
     assert not errors(at), errors(at)
     assert at.get("audio")
+
+
+def test_auto_join_all(mixlib):
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    _two_part_mashup(at, mixlib)
+    at.button(key="mxm_autojoin").click().run()
+    assert not errors(at), errors(at)
+    assert any("Auto-joined" in i.value or "already as good" in i.value for i in at.info)
+    if any("Auto-joined 1" in i.value for i in at.info):
+        assert at.session_state["mxm_parts"][1]["xfade"].get("neural")
+    at.button(key="mxm_undo").click().run()
+    assert not errors(at), errors(at)
