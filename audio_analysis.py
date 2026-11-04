@@ -744,7 +744,7 @@ def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocal
         "beats_per_bar": beats_per_bar,
         "downbeats": _r(downbeats, 3),
         "kick": _r(kick30), "snare": _r(snare30), "hat": _r(hat30),
-        "harmony": _r(harmony30), "brightness": _r(bright30), "novelty": _r(novelty30),
+        "harmony": _r(harmony30), "brightness": _r(bright30), "low": _r(low30), "novelty": _r(novelty30),
         "sections": sections, "phrases": phrases, "builds": builds, "drops": drops,
         "vocals": _r(vocals) if vocals is not None else None,
         "vocal_starts": vocal_starts, "vocal_ends": vocal_ends,

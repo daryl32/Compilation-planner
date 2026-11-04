@@ -1246,3 +1246,39 @@ def test_suggestion_card_plays_it(mixlib):
     assert at.session_state["_mxt_play"] > 0                 # the decks are asked to play it live
     s_ = at.session_state["mxt_state::mix_song_c::mix_song_a"]
     assert s_["from"] == "suggestion"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: the join pill on the lanes
+# ---------------------------------------------------------------------------
+
+def test_lanes_join_drag_moves_the_hand_over(mixlib):
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    _two_part_mashup(at, mixlib)
+    a_end, b_start = 32.0, 12.0
+    at.session_state["mxm_lanes"] = {"join": "u2", "a_uid": "u1", "a_end": a_end, "b_start": b_start, "nonce": 77}
+    at.run()
+    assert not errors(at), errors(at)
+    p1, p2 = at.session_state["mxm_parts"]
+    assert p1["end"] == a_end and p2["start"] == b_start
+
+
+def test_lanes_join_tap_opens_its_settings_under_the_lanes(mixlib):
+    from tests.apptest_util import page_app, errors
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    _two_part_mashup(at, mixlib)
+    at.session_state["mxm_lanes"] = {"join": "u2", "open": True, "nonce": 78}
+    at.run()
+    assert not errors(at), errors(at)
+    assert at.session_state["_mxm_join_open"] == "u2"
+    assert any("open under the lanes" in c.value for c in at.caption)
+    at.pills(key="mxm_xfl_u2").set_value("2 bars").run()         # the panel's controls work
+    assert at.session_state["mxm_parts"][1]["xfade"]["beats"] == 8.0
+    at.button(key="mxm_jpplay_u2").click().run()
+    _settle(at)
+    assert not errors(at), errors(at)
+    assert at.session_state.get("_mxm_jpv_u2")
+    at.button(key="mxm_jpclose").click().run()
+    assert "_mxm_join_open" not in at.session_state
+    assert not errors(at), errors(at)

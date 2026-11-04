@@ -114,6 +114,9 @@ def _pick(where, label: str, options: list, key: str, fmt=None, help: str = None
     ss = st.session_state
     if ss.get(key) not in options:
         ss[key] = options[0]
+    # set it again each run: the same box can be drawn in two places (a join's chip, or its panel under the
+    # lanes), and a box drawn somewhere new only shows the value it's given now
+    ss[key] = ss[key]
     ss.setdefault(f"_last_{key}", ss[key])
 
     def changed():
@@ -538,8 +541,9 @@ def _where_label(w) -> str:
 # Preview + save (shared by Extend and Mashup)
 # ---------------------------------------------------------------------------
 
-def _mashup_lanes(recipe: dict, tracks: dict, mix_url: str) -> None:
-    """🎚️ One lane per part (mix_lanes.py) — trims come back here."""
+def _mashup_lanes(recipe: dict, tracks: dict, mix_url: str, rough: set = frozenset()) -> None:
+    """🎚️ One lane per part (mix_lanes.py): trims, join drags (the hand-over moved) and join taps (open its
+    settings under the lanes) come back here."""
     import mixer
     import deck_editor as DE
     import mix_lanes as ML
@@ -557,19 +561,60 @@ def _mashup_lanes(recipe: dict, tracks: dict, mix_url: str) -> None:
         data[tid] = DE.lane_data(t, tid, grids[tid], urls[tid])
     lanes = []
     for k, p in enumerate(lay["pieces"]):
-        lanes.append({"uid": p.get("uid"), "idx": k, "label": p["track"], "colour": PALETTE[k % len(PALETTE)].format(a=0.8),
+        lanes.append({"uid": p.get("uid"), "idx": k, "label": p["track"], "colour": PALETTE[k % len(PALETTE)].format(a=0.9),
                       "trk": data[p["track"]], "start": p["start"], "end": p["end"], "speed": p["speed"],
                       "out_start": p["out_start"], "out_end": p["out_end"],
                       "head": joins[k - 1]["pre"] if k > 0 else 0.0, "tail": joins[k]["post"] if k < len(joins) else 0.0})
-    val = ML.mix_lanes(duration=lay["duration"], lanes=lanes,
-                       joins=[{"at": j["at"], "pre": j["pre"], "post": j["post"]} for j in joins],
-                       mix_url=mix_url, key="mxm_lanes")
-    if isinstance(val, dict) and val.get("nonce") and val["nonce"] != st.session_state.get("_mxm_lanes_nonce"):
-        st.session_state["_mxm_lanes_nonce"] = val["nonce"]
-        for p in st.session_state.get("mxm_parts") or []:
+    pieces = lay["pieces"]
+    jdata = []
+    for k, j in enumerate(joins):
+        a, b = pieces[k], pieces[k + 1]
+        jdata.append({"at": j["at"], "pre": j["pre"], "post": j["post"], "uid": b.get("uid"), "a_uid": a.get("uid"),
+                      "label": _join_summary(a, b), "rough": b.get("uid") in rough,
+                      "neural": bool((b.get("xfade") or {}).get("neural"))})
+    val = ML.mix_lanes(duration=lay["duration"], lanes=lanes, joins=jdata, mix_url=mix_url, key="mxm_lanes")
+    if not (isinstance(val, dict) and val.get("nonce") and val["nonce"] != st.session_state.get("_mxm_lanes_nonce")):
+        return
+    st.session_state["_mxm_lanes_nonce"] = val["nonce"]
+    parts = st.session_state.get("mxm_parts") or []
+    if val.get("join") and val.get("open"):                 # a tap on a join: its settings under the lanes
+        st.session_state["_mxm_join_open"] = val["join"]
+    elif val.get("join"):                                    # a join dragged: the hand-over moved
+        a = next((p for p in parts if p.get("uid") == val.get("a_uid")), None)
+        b = next((p for p in parts if p.get("uid") == val.get("join")), None)
+        if a is not None and b is not None:
+            a["end"], b["start"] = round(float(val["a_end"]), 3), round(float(val["b_start"]), 3)
+    else:
+        for p in parts:
             if p.get("uid") == val.get("uid"):
                 p["start"], p["end"] = round(float(val["start"]), 3), round(float(val["end"]), 3)
-        _rerun()
+    _rerun()
+
+
+def _close_join_panel() -> None:
+    st.session_state.pop("_mxm_join_open", None)
+
+
+def _join_panel(parts: list, rough: set):
+    """🔀 The join tapped on the lanes, edited right under them. Returns (its uid, a slot for its player)."""
+    uid = st.session_state.get("_mxm_join_open")
+    idx = next((i for i, p in enumerate(parts) if p["uid"] == uid), None)
+    if not idx:                                             # gone (or the first part — it has no join)
+        st.session_state.pop("_mxm_join_open", None)
+        return None, None
+    a, b = parts[idx - 1], parts[idx]
+    with st.container(border=True, key="mxm_join_panel"):
+        c = st.columns([4, 1.1, 1.1, 0.7] if uid in rough else [4, 1.1, 0.7], vertical_alignment="center")
+        c[0].markdown(f"**🔀 Join {idx} → {idx + 1}** · {a['track']} → {b['track']}")
+        c[1].button("▶️ Hear it", key=f"mxm_jpplay_{uid}", width="stretch", on_click=_ask_join_preview, args=(uid,),
+                    help="Hear just this join (a few bars either side).")
+        if uid in rough:
+            c[2].button("✨ Fix", key=f"mxm_jpfix_{uid}", width="stretch", on_click=_fix_join, args=(a["uid"], uid),
+                        help="The keys clash here. Shifts the next song's key to fit, and moves the hand-over to the "
+                             "best-scoring place inside the two parts as a 🧠 blend. ↶ undoes it.")
+        c[-1].button("✖", key="mxm_jpclose", width="stretch", on_click=_close_join_panel, help="Close")
+        _join_controls(a, b)
+        return uid, st.container()
 
 
 def _trim_part(uid: str, key: str) -> None:
@@ -1302,6 +1347,7 @@ def _join_controls(a: dict, b: dict) -> None:
     _pick(c[0], "Shape", list(XF_SHAPE_LABELS), k["shape"], XF_SHAPE_LABELS.get, disabled=cut,
           help="Smooth (equal power) keeps the loudness even when two different songs blend; straight suits the "
                "same audio (a jump within one track).")
+    st.session_state[k["bass"]] = bool(st.session_state.get(k["bass"]))
     c[1].toggle("🎛️ Bass swap", key=k["bass"], disabled=cut,
                 help="Only one song's bass plays during the crossfade: the outgoing song keeps its low end until "
                      "the middle of the fade, then hands it over on the beat — stops a long blend getting muddy.")
@@ -1350,11 +1396,15 @@ def _fix_join(a_uid: str, b_uid: str) -> None:
         "✨ Nothing better found for this join — try 🎚️ the two-deck editor."
 
 
-def _join_row(a: dict, b: dict, i: int, rough: bool = False) -> object:
+def _join_row(a: dict, b: dict, i: int, rough: bool = False, open_uid: str = None) -> object:
     """🔀 The join from part i to part i + 1 as one line: a chip that opens its settings, ▶️ to hear just this
     join (and ✨ Fix when it's rough). Returns a slot under it for that join's player (filled once the recipe is
     known)."""
     uid = b["uid"]
+    if uid == open_uid:
+        with st.container(key=f"mxm_join_{uid}"):
+            st.caption(f"🔀 Join {i} → {i + 1} · {_join_summary(a, b)} — open under the lanes ↑")
+        return None
     with st.container(key=f"mxm_join_{uid}"):
         c = st.columns([5, 1.2, 1.2] if rough else [5, 1.2], vertical_alignment="center")
         with c[0].popover(("⚠️ " if rough else "") + f"🔀 {i} → {i + 1} · {_join_summary(a, b)}", width="stretch"):
@@ -1543,7 +1593,8 @@ def _mashup(summaries: dict) -> None:
     fresh = pv_path.exists()
     url = media_url(pv_path, "audio/mpeg" if pv_path.suffix == ".mp3" else "audio/mp4", "mxm_mix_audio") \
         if fresh else ""
-    _mashup_lanes(recipe, tracks, url)
+    _mashup_lanes(recipe, tracks, url, rough)
+    open_uid, open_slot = _join_panel(parts, rough)
     with st.expander("📈 Whole-mix waveform — crossfade handles, layers, the preview's level", expanded=False):
         _timeline(recipe, tracks, {}, energy=_preview_side(pv_path).get("energy") if fresh else None,
                   audio_url=url, ns="mxm", editable=True)
@@ -1557,7 +1608,8 @@ def _mashup(summaries: dict) -> None:
         t, g = tracks[p["track"]], grids[p["track"]]
         speed, _ = MX.tempo_factor(g["bpm"], bpm)
         if prev is not None:
-            slots.append(_join_row(prev, p, i, rough=p["uid"] in rough))
+            slots.append(_join_row(prev, p, i, rough=p["uid"] in rough, open_uid=open_uid) or
+                         (open_slot if p["uid"] == open_uid else None))
         with st.container(border=True):
             c = st.columns([5, 2, 1, 1, 1, 1])
             c[0].markdown(f"**{i + 1}. {p['track']}** — {format_mmss(p['start'])}–{format_mmss(p['end'])} "
@@ -1582,7 +1634,8 @@ def _mashup(summaries: dict) -> None:
             _part_stems_row(p, t, tracks_all, summaries)
         prev = p
     for k, slot in enumerate(slots):
-        _join_player(slot, recipe, k, tracks, grids)
+        if slot is not None:
+            _join_player(slot, recipe, k, tracks, grids)
 
     with st.expander(f"🤝 Good partners for {parts[0]['track']}"):
         rows = _partners(summaries[parts[0]["track"]], tracks_all)[:10] if parts[0]["track"] in summaries else []

@@ -56,6 +56,9 @@ def lane_data(track: dict, track_id: str, g: dict, url: str = "", label: str = N
             k = np.maximum(k, np.asarray(a["snare"], dtype=float))
         drums = _resample(k, arate, dur)
     vox = _resample(a.get("vocals"), arate, dur) if a.get("vocals") is not None else None
+    # 🎨 what colours the waveform: how bright (high) the sound is, and its low end (bass) when the analysis has it
+    bright = _resample(a.get("brightness"), arate, dur) if a.get("brightness") is not None else None
+    low = _resample(a.get("low"), arate, dur) if a.get("low") is not None else None
     from core import transitions as TR
     bars = [round(float(b), 3) for b in g["bars"]]
     # 🎯 phrase lines (8 / 16-bar phrases, section starts) that drags snap to when close, and the sections' names
@@ -67,7 +70,8 @@ def lane_data(track: dict, track_id: str, g: dict, url: str = "", label: str = N
         sections.append({"t": round(start, 3), "label": str(sec.get("label") or ""), "bars": n,
                          "energy": round(float(sec.get("energy") or 0.0), 2)})
     return {"id": track_id, "label": label or track_id, "duration": dur, "rate": RATE, "env": env,
-            "vox": vox, "drums": drums, "bars": bars, "bar_len": round(float(g["bar_len"]), 4),
+            "vox": vox, "drums": drums, "bright": bright, "low": low, "bars": bars,
+            "bar_len": round(float(g["bar_len"]), 4),
             "phrases": phrases, "sections": sections, "url": url}
 
 
