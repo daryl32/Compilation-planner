@@ -712,30 +712,41 @@ def split_videos(videos: list, test: set, share: float = VAL_SHARE, seed: int = 
     return sorted(pool[k:]), sorted(pool[:k])
 
 
+CUTOFF_MODE = "weighted"                  # "weighted" (v9 on) or "plain" (up to v8: --old-cutoffs)
+
+
 def pick_thresholds(prob: np.ndarray, truth: np.ndarray, min_pos: int = 10, gain: float = 0.01,
-                    mask: np.ndarray = None) -> np.ndarray:
+                    mask: np.ndarray = None, mode: str = None) -> np.ndarray:
     """Per tag, the score cut-off (0.25–0.85) with the best F1 on the held-out moments; 0.5 for a
     tag with fewer than min_pos positives there (too few to choose from) or where no cut-off beats
-    0.5 by at least `gain` F1 (a tiny edge on a few moments is chance, not a better cut-off)."""
+    0.5 by at least `gain` F1 (a tiny edge on a few moments is chance, not a better cut-off).
+    mode "weighted" (default since v9): each moment counts by its training weight (`mask`: your
+    labels ×5, the teacher's answers by its trust on that tag), so a tag the teacher is weak on gets
+    a cut-off that fits YOUR labels; and the F1 curve is smoothed over neighbouring cut-offs before
+    the best is taken, so one lucky point can't swing it (v8: POV 0.50 → 0.25, +43 errors).
+    mode "plain": every moment with any weight counts once, best single point (v1–v8)."""
+    mode = mode or CUTOFF_MODE
     grid = np.round(np.arange(0.25, 0.851, 0.05), 2)
     out = np.full(prob.shape[1], 0.5, np.float32)
+    i50 = int(np.argmin(np.abs(grid - 0.5)))
     for j in range(prob.shape[1]):
-        keep = slice(None) if mask is None else mask[:, j] > 0
+        keep = np.ones(len(prob), bool) if mask is None else mask[:, j] > 0
         pj, g = prob[keep, j], truth[keep, j] >= 0.5
         if g.sum() < min_pos:
             continue
-        def f1_at(th):
-            p = pj >= th
-            return 2 * float((p & g).sum()) / max(float(p.sum() + g.sum()), 1.0)
-        base = f1_at(0.5)
-        best, bt = -1.0, 0.5
+        wt = (np.asarray(mask[keep, j], float) if (mode == "weighted" and mask is not None)
+              else np.ones(len(pj)))
+        f1 = []
         for th in grid:
             p = pj >= th
-            tp = float((p & g).sum())
-            f1 = 2 * tp / max(float(p.sum() + g.sum()), 1.0)
-            if f1 > best + 1e-9:
-                best, bt = f1, th
-        out[j] = bt if best >= base + gain else 0.5
+            tp = float(wt[p & g].sum())
+            f1.append(2 * tp / max(float(wt[p].sum() + wt[g].sum()), 1e-9))
+        f1 = np.asarray(f1)
+        if mode == "weighted":            # neighbours count half: [¼, ½, ¼], edges padded
+            pad = np.concatenate([f1[:1], f1, f1[-1:]])
+            f1 = 0.25 * pad[:-2] + 0.5 * pad[1:-1] + 0.25 * pad[2:]
+        k = int(np.argmax(f1 - 1e-9 * np.abs(np.arange(len(grid)) - i50)))   # ties → nearer 0.5
+        out[j] = grid[k] if f1[k] >= f1[i50] + gain else 0.5
     return out
 
 
@@ -1147,7 +1158,8 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, 
             "epochs_run": [len(h) for h in hists], "history": hists,
             "train_minutes": round(minutes, 2), "videos": len(ds["videos"]), "test_videos": sorted(test),
             "labels_newest": max((i.get("labelled_at") or "" for i in labels), default=""),
-            "context": ctx_meta, "step1_thresholds": [float(x) for x in step1_thresholds]}
+            "context": ctx_meta, "step1_thresholds": [float(x) for x in step1_thresholds],
+            "cutoffs": CUTOFF_MODE}
     print(f"Trained in {minutes:.1f} min.", flush=True)
     step1 = None
     if ctx_meta and step1_test_prob is not None:
@@ -1318,6 +1330,8 @@ PICK_STEP = 4                             # candidates every 2 s (half-second st
 PICK_GAP = 10.0                           # picks in a video at least this far apart (s)
 PICK_PER_VIDEO = 12
 PICK_NEAR_LABEL = 3.0                     # never within this of a moment you've labelled
+PICK_PER_TAG = 40                         # at most this many picks for one tag in a round (v8 round: ~all
+                                          # extreme close-up — the teacher's weakness there never changes)
 
 
 def pick_priority(trust: dict, labels: list, tags: list) -> np.ndarray:
@@ -1355,10 +1369,48 @@ def choose_picks(times: np.ndarray, value: np.ndarray, taken, n: int, gap: float
     return out
 
 
-def make_picks(name: str, n: int = 300, n_test: int = 80, dest: Path = None, seed: int = SEED) -> int:
+def greedy_picks(cand: list, n: int, per_tag: int, tags: list, per_video: int = PICK_PER_VIDEO,
+                 gap: float = PICK_GAP) -> list:
+    """One pass over every video's candidate moments: repeatedly the most useful moment left, where
+    a moment's value is its best tag that hasn't reached per_tag yet — so once a tag is full, a moment
+    the student is also unsure about on another tag still counts for that one. ≤ per_video per video,
+    ≥ gap seconds apart. cand = [(video, times, scores, value per tag)]. Returns [(video, t, tag, scores)]."""
+    if not cand:
+        return []
+    V = np.concatenate([np.full(len(c[1]), i) for i, c in enumerate(cand)])
+    T = np.concatenate([c[1] for c in cand]).astype(float)
+    P = np.concatenate([c[2] for c in cand])
+    U = np.concatenate([c[3] for c in cand]).astype(np.float32)
+    alive = np.ones(len(T), bool)
+    open_tag = np.ones(U.shape[1], bool)
+    used_tag = np.zeros(U.shape[1], int)
+    used_vid = np.zeros(len(cand), int)
+    out = []
+    while len(out) < n and open_tag.any():
+        val = np.where(alive, U[:, open_tag].max(axis=1), 0.0)
+        k = int(np.argmax(val))
+        if val[k] <= 0:
+            break
+        b = int(np.flatnonzero(open_tag)[np.argmax(U[k, open_tag])])
+        vi = int(V[k])
+        out.append((cand[vi][0], T[k], tags[b], P[k]))
+        used_tag[b] += 1
+        used_vid[vi] += 1
+        if per_tag and used_tag[b] >= per_tag:
+            open_tag[b] = False
+        same = V == vi
+        alive &= ~(same & (np.abs(T - T[k]) < gap))
+        if used_vid[vi] >= per_video:
+            alive &= ~same
+    return out
+
+
+def make_picks(name: str, n: int = 300, n_test: int = 80, dest: Path = None, seed: int = SEED,
+               per_tag: int = PICK_PER_TAG) -> int:
     """student_picks.json for 🎯 Training Labels → 🎓 Student's picks (catalogue/trial_results on Drive):
       • training videos: the moments where the student is least sure about a tag worth labelling
-        (the teacher is weak on it / you have few labels), most useful first, ≤12 per video, 10 s apart;
+        (the teacher is weak on it / you have few labels), most useful first, ≤12 per video, 10 s apart,
+        and ≤ per_tag for any one tag, so a round covers the weak tags rather than just the weakest;
       • 🧪 test-set videos: random moments (not chosen by the student, so the test set stays fair).
     Every 5th card is a test-set one. The student's own tags come prefilled."""
     models, meta = load_models(name)
@@ -1375,7 +1427,7 @@ def make_picks(name: str, n: int = 300, n_test: int = 80, dest: Path = None, see
     for i in labels:
         by_video.setdefault(i["video_id"], []).append(float(i["t"]))
     rng = np.random.default_rng(seed)
-    train_picks, test_picks = [], []
+    train_picks, test_picks, cand = [], [], []
     use_pose = bool(meta.get("pose_dim"))
     vdirs = sorted(p for p in (WORK / "videos").iterdir() if p.is_dir())
     for k, vdir in enumerate(vdirs, 1):
@@ -1395,24 +1447,22 @@ def make_picks(name: str, n: int = 300, n_test: int = 80, dest: Path = None, see
                 test_picks.append({"video_id": v, "t": round(t, 2), "set": "test", "why": "",
                                    "tags": [x for x, p_, c in zip(tags, pp[j], cutoffs) if p_ >= c]})
             continue
-        u = uncertainty(pp, cutoffs) * prio
-        best = u.argmax(axis=1)
-        val = u.max(axis=1) * edge
-        for t in choose_picks(tt, val, by_video.get(v, []), PICK_PER_VIDEO):
-            j = int(np.argmin(np.abs(tt - t)))
-            b = int(best[j])
-            train_picks.append({"video_id": v, "t": round(t, 2), "set": "train", "value": float(val[j]),
-                                "why": f"{tags[b]} ({pp[j, b]:.2f}, cut-off {cutoffs[b]:.2f})",
-                                "tags": [x for x, p_, c in zip(tags, pp[j], cutoffs) if p_ >= c]})
+        ok = edge.copy()
+        for u_ in by_video.get(v, []):            # never next to a moment you labelled
+            ok &= np.abs(tt - u_) >= PICK_NEAR_LABEL
+        if ok.any():
+            cand.append((v, tt[ok], pp[ok], uncertainty(pp[ok], cutoffs) * prio))
         if k % 25 == 0:
             print(f"   {k} of {len(vdirs)} videos", flush=True)
-    train_picks.sort(key=lambda x: -x["value"])
-    train_picks = train_picks[:n]
+    for v, t, tag, pr in greedy_picks(cand, n, per_tag, tags):
+        b = tags.index(tag)
+        train_picks.append({"video_id": v, "t": round(float(t), 2), "set": "train",
+                            "why": f"{tag} ({pr[b]:.2f}, cut-off {cutoffs[b]:.2f})",
+                            "tags": [x for x, p_, c in zip(tags, pr, cutoffs) if p_ >= c]})
     rng.shuffle(test_picks)
     test_picks = test_picks[:n_test]
     out, ti = [], iter(test_picks)
     for i, pk in enumerate(train_picks, 1):
-        pk.pop("value", None)
         out.append(pk)
         if i % 4 == 0:
             nxt = next(ti, None)
@@ -1483,8 +1533,14 @@ def main(argv=None) -> int:
                     "overall — fewer wrong tags, more missed)")
     ap.add_argument("--no-teacher-trust", action="store_true",
                     help="count the teacher's answers fully on every tag (as v4 did)")
+    ap.add_argument("--old-cutoffs", action="store_true",
+                    help="pick cut-offs the v1–v8 way (every held-out moment counts once, best single point)")
+    ap.add_argument("--per-tag", type=int, default=PICK_PER_TAG,
+                    help=f"picks: at most this many picks for one tag (default {PICK_PER_TAG})")
     ap.add_argument("--vs", default="", help="teacher test run id or label to compare with (default: newest try2)")
     a = ap.parse_args(argv)
+    global CUTOFF_MODE
+    CUTOFF_MODE = "plain" if a.old_cutoffs else "weighted"
     WORK.mkdir(exist_ok=True)
     if a.command in ("fetch", "all"):
         rc = fetch()
@@ -1496,7 +1552,7 @@ def main(argv=None) -> int:
     if a.command == "export":
         return export(a.name)
     if a.command == "picks":
-        return make_picks(a.name, a.n, a.n_test)
+        return make_picks(a.name, a.n, a.n_test, per_tag=a.per_tag)
     return score(a.name, a.vs, a.label_weight)
 
 
