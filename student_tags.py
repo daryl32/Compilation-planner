@@ -19,6 +19,7 @@ Usage (from the activated .venv in the scene-labeling folder, or student_tags.ba
     python student_tags.py train --name v1b --label-weight 8 --epochs 40
     python student_tags.py score --name v1   score a model you trained before (no training)
     python student_tags.py all --name v3     fetch (incl. your Reviewer corrections) + train
+    python student_tags.py export --name v4  every half second of every video → catalogue/student_scores
 
 Everything is written to _student next to this script (genuine local disk, not Google Drive):
     _student/videos/<video_id>/  embeddings.npz, tags_32b.json, person_curve.npy
@@ -283,6 +284,15 @@ def window_index(times: np.ndarray, t: float, half: int = HALF, step: float = ST
     want = t + step * np.arange(-half, half + 1)
     i = np.searchsorted(times, want)
     i = np.clip(i, 1, len(times) - 1)
+    left, right = times[i - 1], times[i]
+    i = np.where(np.abs(want - left) <= np.abs(right - want), i - 1, i)
+    return np.clip(i, 0, len(times) - 1)
+
+
+def window_index_many(times: np.ndarray, ts: np.ndarray, half: int = HALF, step: float = STEP) -> np.ndarray:
+    """window_index for many moments at once: (len(ts), 2*half+1)."""
+    want = np.asarray(ts, float)[:, None] + step * np.arange(-half, half + 1)
+    i = np.clip(np.searchsorted(times, want), 1, len(times) - 1)
     left, right = times[i - 1], times[i]
     i = np.where(np.abs(want - left) <= np.abs(right - want), i - 1, i)
     return np.clip(i, 0, len(times) - 1)
@@ -869,6 +879,60 @@ def load_models(name: str) -> tuple:
     return models, meta
 
 
+def export(name: str, dest: Path = None, root: Path = None) -> int:
+    """Every half second of every downloaded video → the student's score per tag (0–100), one small
+    file per video in the catalogue's student_scores folder on Drive (or `dest`):
+        student_scores/<video_id>.npz   times (s, float32), scores (moments × tags, uint8)
+        student_scores/index.json       model, created, tags, cut-offs (0–100), test-set videos, videos
+    A score at or above the tag's cut-off means "visible here" (the moment meaning — see the new-matcher
+    design: scene tags are for choosing / filtering, these are for what's on screen)."""
+    import torch
+    models, meta = load_models(name)
+    if not models:
+        print(f"No model '{name}' in {WORK / 'models'} — train it first.")
+        return 1
+    if dest is None:
+        try:
+            from config import CATALOGUE_DIR
+        except Exception as e:
+            print(f"Couldn't read CATALOGUE_DIR from config.py ({e}).")
+            return 1
+        dest = Path(CATALOGUE_DIR) / "student_scores"
+    root = root or WORK / "videos"
+    dest.mkdir(parents=True, exist_ok=True)
+    dev = _device()
+    done, t0 = [], time.time()
+    vdirs = sorted(p for p in root.iterdir() if p.is_dir())
+    for k, vdir in enumerate(vdirs, 1):
+        try:
+            z = np.load(vdir / "embeddings.npz")
+            et = np.asarray(z["frame_times"], float)
+            emb = np.asarray(z["frame_embs"], np.float32)
+        except (OSError, KeyError, ValueError):
+            continue
+        if not et.size or emb.ndim != 2 or len(emb) != et.size or emb.shape[1] != meta["dim"]:
+            continue
+        order = np.argsort(et)
+        et, emb = et[order], emb[order]
+        emb /= np.maximum(np.linalg.norm(emb, axis=1, keepdims=True), 1e-6)
+        E_t = torch.as_tensor(emb.astype(np.float16), device=dev)
+        prob = predict_many(models, E_t, window_index_many(et, et))
+        scores = np.clip(np.rint(prob * 100), 0, 100).astype(np.uint8)
+        tmp = dest / f"{vdir.name}.tmp.npz"
+        np.savez_compressed(tmp, times=et.astype(np.float32), scores=scores)
+        tmp.replace(dest / f"{vdir.name}.npz")
+        done.append(vdir.name)
+        if k % 20 == 0 or k == len(vdirs):
+            print(f"   {k} of {len(vdirs)} videos ({time.time() - t0:.0f} s)", flush=True)
+    index = {"model": name, "created": time.strftime("%Y-%m-%d %H:%M"), "tags": meta["tags"],
+             "cutoffs": [int(round(x * 100)) for x in meta["thresholds"]], "step": STEP,
+             "test_videos": meta.get("test_videos") or [], "scores": meta.get("scores", {}).get("plain"),
+             "videos": done}
+    (dest / "index.json").write_text(json.dumps(index, indent=1), encoding="utf-8")
+    print(f"Exported the {name} scores for {len(done)} videos → {dest}")
+    return 0
+
+
 def score(name: str, vs: str, label_weight: float) -> int:
     import torch
     models, meta = load_models(name)
@@ -889,7 +953,7 @@ def score(name: str, vs: str, label_weight: float) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Train / score the student tag model on the laptop.")
-    ap.add_argument("command", choices=["fetch", "train", "score", "all"])
+    ap.add_argument("command", choices=["fetch", "train", "score", "export", "all"])
     ap.add_argument("--name", default="v1", help="model name (default v1)")
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--label-weight", type=float, default=LABEL_WEIGHT,
@@ -905,6 +969,8 @@ def main(argv=None) -> int:
             return rc
     if a.command in ("train", "all"):
         return train(a.name, a.epochs, a.label_weight, a.vs, max(2, a.folds))
+    if a.command == "export":
+        return export(a.name)
     return score(a.name, a.vs, a.label_weight)
 
 

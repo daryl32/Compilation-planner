@@ -152,3 +152,25 @@ def test_scene_answers_and_teacher_off_tags(tmp_path):
     assert (y[ix["dancing"]], w[ix["dancing"]]) == (1, S.SCENE_WEIGHT)
     md = S.scene_rules_markdown(ds)
     assert "Your Reviewer scene answers" in md
+
+
+def test_window_index_many_matches_single():
+    times = np.arange(0, 30, 0.5)
+    ts = np.array([0.0, 3.3, 29.9])
+    many = S.window_index_many(times, ts)
+    assert all((many[k] == S.window_index(times, t)).all() for k, t in enumerate(ts))
+
+
+def test_export_every_half_second(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    _library(tmp_path)
+    monkeypatch.setattr(S, "WORK", tmp_path)
+    monkeypatch.setattr(S, "HERE", tmp_path)
+    assert S.main(["train", "--name", "e1", "--epochs", "6", "--folds", "2"]) == 0
+    out = tmp_path / "scores"
+    assert S.export("e1", dest=out) == 0
+    idx = json.loads((out / "index.json").read_text())
+    assert idx["tags"] == TAGS and len(idx["videos"]) == 14 and len(idx["cutoffs"]) == len(TAGS)
+    z = np.load(out / "vid00.npz")
+    assert z["scores"].shape == (len(z["times"]), len(TAGS)) and z["scores"].dtype == np.uint8
+    assert len(z["times"]) == 240                                     # 2 min, every half second

@@ -17,6 +17,8 @@ rem      student_tags.bat fetch                     just download
 rem      student_tags.bat train --name v1b          train another
 rem      student_tags.bat train --label-weight 8    labels count more
 rem      student_tags.bat score --name v1           score again
+rem      student_tags.bat export --name v4          scores for every half
+rem                                                 second -> Drive catalogue
 rem ============================================================
 
 cd /d "%~dp0"
