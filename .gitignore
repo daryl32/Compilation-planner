@@ -36,5 +36,7 @@ tests/.data/
 
 # Modal trial working folders (pack_for_modal.py / modal_trial.py)
 _modal_pack/
+_student/
+student_report.md
 _trial_download/
 trial_report*.md
