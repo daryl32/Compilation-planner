@@ -275,15 +275,20 @@ def split_videos(videos: list, test: set, share: float = VAL_SHARE, seed: int = 
     return sorted(pool[k:]), sorted(pool[:k])
 
 
-def pick_thresholds(prob: np.ndarray, truth: np.ndarray, min_pos: int = 5) -> np.ndarray:
-    """Per tag, the score cut-off (0.15–0.85) with the best F1 on the validation moments; 0.5 for a
-    tag with fewer than min_pos positives there (too few to choose from)."""
-    grid = np.round(np.arange(0.15, 0.851, 0.05), 2)
+def pick_thresholds(prob: np.ndarray, truth: np.ndarray, min_pos: int = 10, gain: float = 0.01) -> np.ndarray:
+    """Per tag, the score cut-off (0.25–0.85) with the best F1 on the held-out moments; 0.5 for a
+    tag with fewer than min_pos positives there (too few to choose from) or where no cut-off beats
+    0.5 by at least `gain` F1 (a tiny edge on a few moments is chance, not a better cut-off)."""
+    grid = np.round(np.arange(0.25, 0.851, 0.05), 2)
     out = np.full(prob.shape[1], 0.5, np.float32)
     for j in range(prob.shape[1]):
         g = truth[:, j] >= 0.5
         if g.sum() < min_pos:
             continue
+        def f1_at(th):
+            p = prob[:, j] >= th
+            return 2 * float((p & g).sum()) / max(float(p.sum() + g.sum()), 1.0)
+        base = f1_at(0.5)
         best, bt = -1.0, 0.5
         for th in grid:
             p = prob[:, j] >= th
@@ -291,7 +296,7 @@ def pick_thresholds(prob: np.ndarray, truth: np.ndarray, min_pos: int = 5) -> np
             f1 = 2 * tp / max(float(p.sum() + g.sum()), 1.0)
             if f1 > best + 1e-9:
                 best, bt = f1, th
-        out[j] = bt
+        out[j] = bt if best >= base + gain else 0.5
     return out
 
 
@@ -577,10 +582,11 @@ def _prepare(label_weight: float):
     train_rows = np.flatnonzero(np.isin(vids, train_v))
     val_rows = np.flatnonzero(np.isin(vids, val_v))
     test_rows = np.flatnonzero(np.isin(vids, list(test)) & ds["is_label"])
-    print(f"Data: {len(ds['videos'])} videos ({len(train_v)} training, {len(val_v)} validation, "
+    learn = np.flatnonzero(~np.isin(vids, list(test)))
+    print(f"Data: {len(ds['videos'])} videos ({len(train_v) + len(val_v)} to learn from, "
           f"{len(set(vids[test_rows]))} test) · {len(ds['tags'])} tags · "
-          f"{int((~ds['is_label'][train_rows]).sum())} teacher moments + "
-          f"{int(ds['is_label'][train_rows].sum())} of your labels to learn from · "
+          f"{int((~ds['is_label'][learn]).sum())} teacher moments + "
+          f"{int(ds['is_label'][learn].sum())} of your labels to learn from · "
           f"{len(test_rows)} labelled test frames · {ds['E'].shape[0]:,} embeddings "
           f"({ds['E'].nbytes / 1e9:.1f} GB)")
     if ds["skipped"]:
@@ -588,37 +594,73 @@ def _prepare(label_weight: float):
     return vocab, labels, test, ds, train_rows, val_rows, test_rows
 
 
-def train(name: str, epochs: int, label_weight: float, vs: str) -> int:
+def fold_videos(videos: list, test: set, k: int, seed: int = SEED) -> list:
+    """The training videos (test set left out) shuffled into k groups of about the same size."""
+    pool = sorted(v for v in videos if v not in test)
+    random.Random(seed).shuffle(pool)
+    return [sorted(pool[i::k]) for i in range(k)]
+
+
+def predict_many(models: list, E_t, idx: np.ndarray) -> np.ndarray:
+    """The models' scores averaged (the k fold models vote together)."""
+    return np.mean([predict(m, E_t, idx) for m in models], axis=0)
+
+
+def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5) -> int:
+    """k models, each trained with a different fifth of the training videos held out (it stops early on
+    that fifth). Their held-out answers cover every training video, so each tag's cut-off is picked on
+    all of them, not one small split; on the test set the k models' scores are averaged."""
     import torch
-    vocab, labels, test, ds, train_rows, val_rows, test_rows = _prepare(label_weight)
+    vocab, labels, test, ds, _, _, test_rows = _prepare(label_weight)
     dev = _device()
-    print(f"Training on {torch.cuda.get_device_name(0) if dev.type == 'cuda' else 'the CPU (no CUDA GPU found)'}…",
-          flush=True)
+    print(f"Training {folds} models on "
+          f"{torch.cuda.get_device_name(0) if dev.type == 'cuda' else 'the CPU (no CUDA GPU found)'}…", flush=True)
     t0 = time.time()
-    model, E_t, hist = train_model(ds, train_rows, val_rows, epochs=epochs)
+    groups = fold_videos(ds["videos"], test, folds)
+    vids = ds["video"]
+    oof_rows, oof_prob, models, hists, E_t = [], [], [], [], None
+    for f, val_v in enumerate(groups, 1):
+        val_rows = np.flatnonzero(np.isin(vids, val_v))
+        train_rows = np.flatnonzero(np.isin(vids, [v for g in groups if g is not val_v for v in g]))
+        print(f" model {f} of {folds}: {len(val_v)} videos held out", flush=True)
+        model, E_t, hist = train_model(ds, train_rows, val_rows, epochs=epochs,
+                                       log=lambda *_: None)
+        best = min(hist, key=lambda h: h["val_loss"])
+        print(f"   best validation {best['val_loss']:.4f} at epoch {best['epoch']}", flush=True)
+        oof_rows.append(val_rows)
+        oof_prob.append(predict(model, E_t, ds["idx"][val_rows]))
+        models.append(model)
+        hists.append(hist)
+        if dev.type == "cuda" and f < folds:
+            del E_t
+            torch.cuda.empty_cache()
+    rows = np.concatenate(oof_rows)
+    thresholds = pick_thresholds(np.concatenate(oof_prob), ds["y"][rows])
     minutes = (time.time() - t0) / 60
-    val_prob = predict(model, E_t, ds["idx"][val_rows])
-    thresholds = pick_thresholds(val_prob, ds["y"][val_rows]) if len(val_rows) else np.full(len(ds["tags"]), 0.5)
     out = WORK / "models" / name
     out.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), out / "head.pt")
+    for old in out.glob("head*.pt"):
+        old.unlink()
+    for f, m in enumerate(models, 1):
+        torch.save(m.state_dict(), out / f"head_{f}.pt")
     meta = {"name": name, "created": time.strftime("%Y-%m-%d %H:%M"), "tags": ds["tags"],
             "thresholds": [float(x) for x in thresholds], "dim": int(ds["E"].shape[1]), "half": HALF,
-            "step": STEP, "label_weight": label_weight, "epochs_run": len(hist), "history": hist,
+            "step": STEP, "label_weight": label_weight, "folds": folds,
+            "epochs_run": [len(h) for h in hists], "history": hists,
             "train_minutes": round(minutes, 2), "videos": len(ds["videos"]), "test_videos": sorted(test),
             "labels_newest": max((i.get("labelled_at") or "" for i in labels), default="")}
     print(f"Trained in {minutes:.1f} min.", flush=True)
-    rc = _score(model, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta)
+    rc = _score(models, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta)
     (out / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     print(f"Model saved → {out}")
     return rc
 
 
-def _score(model, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta) -> int:
+def _score(models, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta) -> int:
     if not len(test_rows):
         print("No labelled test-set frames to score on.")
         return 0
-    prob = predict(model, E_t, ds["idx"][test_rows])
+    prob = predict_many(models, E_t, ds["idx"][test_rows])
     runs = teacher_runs()
     ref = pick_reference(runs, vs)
     if vs and ref is None:
@@ -633,11 +675,25 @@ def _score(model, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta)
     return 0
 
 
-def score(name: str, vs: str, label_weight: float) -> int:
+def load_models(name: str) -> tuple:
+    """(models, meta) for a saved student, or (None, None)."""
     import torch
     out = WORK / "models" / name
     meta = _read_json(out / "meta.json")
     if not meta:
+        return None, None
+    models = []
+    for p in sorted(out.glob("head*.pt")):
+        m = make_model(meta["dim"], len(meta["tags"])).to(_device())
+        m.load_state_dict(torch.load(p, map_location=_device()))
+        models.append(m)
+    return models, meta
+
+
+def score(name: str, vs: str, label_weight: float) -> int:
+    import torch
+    models, meta = load_models(name)
+    if not models:
         print(f"No model '{name}' in {WORK / 'models'}.")
         return 1
     vocab, labels, test, ds, _, _, test_rows = _prepare(label_weight)
@@ -645,12 +701,10 @@ def score(name: str, vs: str, label_weight: float) -> int:
         print("⚠️ Your vocabulary has changed since this model was trained — retrain it (train) to score "
               "it on today's tags.")
         return 1
-    model = make_model(meta["dim"], len(meta["tags"])).to(_device())
-    model.load_state_dict(torch.load(out / "head.pt", map_location=_device()))
     E_t = torch.as_tensor(ds["E"], device=_device())
-    rc = _score(model, E_t, ds, test_rows, np.asarray(meta["thresholds"], np.float32), vocab, labels, vs,
+    rc = _score(models, E_t, ds, test_rows, np.asarray(meta["thresholds"], np.float32), vocab, labels, vs,
                 name, meta)
-    (out / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
+    (WORK / "models" / name / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     return rc
 
 
@@ -661,6 +715,8 @@ def main(argv=None) -> int:
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--label-weight", type=float, default=LABEL_WEIGHT,
                     help=f"how many teacher answers one of your labels counts as (default {LABEL_WEIGHT:g})")
+    ap.add_argument("--folds", type=int, default=5, help="models trained, each holding out a different share "
+                    "of the training videos (default 5)")
     ap.add_argument("--vs", default="", help="teacher test run id or label to compare with (default: newest try2)")
     a = ap.parse_args(argv)
     WORK.mkdir(exist_ok=True)
@@ -669,7 +725,7 @@ def main(argv=None) -> int:
         if rc or a.command == "fetch":
             return rc
     if a.command in ("train", "all"):
-        return train(a.name, a.epochs, a.label_weight, a.vs)
+        return train(a.name, a.epochs, a.label_weight, a.vs, max(2, a.folds))
     return score(a.name, a.vs, a.label_weight)
 
 

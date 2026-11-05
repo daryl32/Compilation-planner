@@ -99,6 +99,8 @@ def test_thresholds_pick_best_cutoff():
     prob = np.array([[0.9], [0.7], [0.3], [0.2], [0.65], [0.1], [0.8]])
     truth = np.array([[1], [1], [0], [0], [1], [0], [1]], float)
     assert 0.3 < S.pick_thresholds(prob, truth, min_pos=2)[0] <= 0.65
+    # too few positives, or no real gain over 0.5 → stays at 0.5
+    assert S.pick_thresholds(prob, truth, min_pos=10)[0] == 0.5
 
 
 def test_train_and_score_end_to_end(tmp_path, monkeypatch):
@@ -106,7 +108,8 @@ def test_train_and_score_end_to_end(tmp_path, monkeypatch):
     _library(tmp_path)
     monkeypatch.setattr(S, "WORK", tmp_path)
     monkeypatch.setattr(S, "HERE", tmp_path)
-    assert S.main(["train", "--name", "t1", "--epochs", "12"]) == 0
+    assert S.main(["train", "--name", "t1", "--epochs", "12", "--folds", "3"]) == 0
+    assert len(list((tmp_path / "models" / "t1").glob("head_*.pt"))) == 3
     meta = json.loads((tmp_path / "models" / "t1" / "meta.json").read_text())
     assert meta["reference_run"] == "2026-11-03_try2-base"
     sc = meta["scores"]
