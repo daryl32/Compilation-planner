@@ -193,3 +193,45 @@ def test_teacher_trust_follows_its_f1_on_your_labels(tmp_path):
     assert tr["dancing"]["weight"] == pytest.approx(0.667, abs=0.01)    # F1 2/3
     assert tr["wide"]["weight"] == 1.0 and tr["wide"]["f1"] is None      # never labelled → not measured
     assert S.teacher_trust(vocab, labels, {"vidA"}, tmp_path)["dancing"]["f1"] is None   # test set never used
+
+
+def _detections(n_frames=900):
+    """Two people at 15 fps: a big one at the bottom, a smaller one above it; nobody in frames 300–359."""
+    frame, box, kxy, kc = [], [], [], []
+    for i in range(n_frames):
+        if 300 <= i < 360:
+            continue
+        for (x1, y1, x2, y2) in ((100, 200, 500, 350), (200, 50, 400, 250)):
+            frame.append(i)
+            box.append([x1, y1, x2, y2, 0.9, 0])
+            kxy.append(np.stack([np.linspace(x1, x2, 17), np.linspace(y1, y2, 17)], 1))
+            kc.append(np.full(17, 0.8))
+    return {"frame": np.array(frame, np.int32), "box": np.array(box, np.float32),
+            "kxy": np.array(kxy, np.float32), "kconf": np.array(kc, np.float32)}
+
+
+def test_pose_features_layout():
+    det = _detections()
+    f = S.pose_features(det, np.array([1.0, 22.0, 40.0, 99.0]))
+    assert f.shape == (4, S.POSE_DIM)
+    assert f[0, 0] == 1 and f[0, 1] == 0.5                      # two people
+    assert f[1, 0] == 0                                        # 22 s: nobody within a second
+    p1 = f[0, 2:2 + S.PER_PERSON]
+    assert p1[2] == pytest.approx(400 / S.POSE_W)              # the bigger person comes first
+    assert f[0, -1] == 1 and f[0, -3] < 0                      # second person is above the first
+    assert f[3, 0] == 0                                        # past the end (> 1 s from any detection)
+
+
+def test_train_with_pose(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    _library(tmp_path, n_videos=6)
+    for v in (tmp_path / "videos").iterdir():
+        np.savez_compressed(v / "detections.npz", **_detections(1800))
+    monkeypatch.setattr(S, "WORK", tmp_path)
+    monkeypatch.setattr(S, "HERE", tmp_path)
+    assert S.main(["train", "--name", "p1", "--epochs", "4", "--folds", "2"]) == 0
+    meta = json.loads((tmp_path / "models" / "p1" / "meta.json").read_text())
+    assert meta["pose_dim"] == S.POSE_DIM and meta["dim"] == DIM
+    assert (tmp_path / "videos" / "vid00" / "pose_feats.npz").exists()
+    assert S.export("p1", dest=tmp_path / "out") == 0
+    assert S.main(["score", "--name", "p1"]) == 0

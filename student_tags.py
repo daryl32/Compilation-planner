@@ -49,7 +49,7 @@ import trial_logic as TL  # noqa: E402
 WORK = HERE / "_student"
 VOLUME = "media-train"
 TEACHER_FILE = "tags_32b.json"            # 32b and 32b-fp8 (+ LoRA) all write this one
-VIDEO_FILES = ("embeddings.npz", TEACHER_FILE, "person_curve.npy")
+VIDEO_FILES = ("embeddings.npz", TEACHER_FILE, "person_curve.npy", "detections.npz")
 
 STEP = 0.5                                # the embeddings are 2 per second
 HALF = 4                                  # ±4 steps = ±2 s around the moment → 9 embeddings
@@ -322,6 +322,100 @@ def window_index(times: np.ndarray, t: float, half: int = HALF, step: float = ST
     return np.clip(i, 0, len(times) - 1)
 
 
+# ---------------------------------------------------------------------------
+# Body pose (detections.npz from the Modal vision stage: YOLO pose at 15 fps on a 640-wide copy)
+# ---------------------------------------------------------------------------
+
+POSE_FPS = 15.0
+POSE_W, POSE_H = 640.0, 360.0             # the pose copy's size (16:9; only used to scale boxes 0–1)
+POSE_PEOPLE = 2                           # the two biggest people in the frame
+PER_PERSON = 5 + 17 * 3                   # box (centre x, y, width, height, confidence) + 17 keypoints × (x, y, seen)
+POSE_DIM = 1 + 1 + POSE_PEOPLE * PER_PERSON + 4   # has pose · people count · people · second vs first
+
+
+def _person(box, kxy, kc) -> np.ndarray:
+    """One person: the box scaled to the frame, then each keypoint relative to the box centre in box
+    heights (so it's the body's shape, whatever its size), with how sure the pose model was."""
+    x1, y1, x2, y2, conf = [float(v) for v in box[:5]]
+    cx, cy, bw, bh = (x1 + x2) / 2, (y1 + y2) / 2, max(x2 - x1, 1.0), max(y2 - y1, 1.0)
+    rel = np.stack([(kxy[:, 0] - cx) / bh, (kxy[:, 1] - cy) / bh], axis=1)
+    seen = np.clip(kc, 0, 1)[:, None]
+    rel = rel * (seen > 0.3)
+    head = np.array([cx / POSE_W, cy / POSE_H, bw / POSE_W, bh / POSE_H, conf], np.float32)
+    return np.concatenate([head, np.concatenate([rel, seen], axis=1).ravel()]).astype(np.float32)
+
+
+def pose_features(det: dict, times: np.ndarray) -> np.ndarray:
+    """(len(times), POSE_DIM): the body pose nearest each time — the two biggest people (box +
+    keypoint layout), how many people, and where the second is relative to the first (above / below,
+    beside, overlapping: who's on top). All zeros with has-pose 0 where nothing was detected."""
+    out = np.zeros((len(times), POSE_DIM), np.float32)
+    frame = np.asarray(det.get("frame", []), np.int64)
+    if not frame.size:
+        return out
+    box, kxy, kc = det["box"], det["kxy"], det["kconf"]
+    order = np.argsort(frame, kind="stable")
+    frame, box, kxy, kc = frame[order], box[order], kxy[order], kc[order]
+    uniq, start = np.unique(frame, return_index=True)
+    ends = np.append(start[1:], len(frame))
+    want = np.rint(np.asarray(times, float) * POSE_FPS).astype(np.int64)
+    pos = np.clip(np.searchsorted(uniq, want), 0, len(uniq) - 1)
+    prev = np.clip(pos - 1, 0, len(uniq) - 1)
+    pos = np.where(np.abs(uniq[prev] - want) < np.abs(uniq[pos] - want), prev, pos)
+    for k, (j, w) in enumerate(zip(pos, want)):
+        if abs(int(uniq[j]) - int(w)) > POSE_FPS:          # no detection within a second
+            continue
+        a, b = start[j], ends[j]
+        area = (box[a:b, 2] - box[a:b, 0]) * (box[a:b, 3] - box[a:b, 1]) * box[a:b, 4]
+        top = a + np.argsort(-area)[:POSE_PEOPLE]
+        out[k, 0] = 1.0
+        out[k, 1] = min(b - a, 4) / 4.0
+        people = [_person(box[i], kxy[i], kc[i]) for i in top]
+        for n, f in enumerate(people):
+            out[k, 2 + n * PER_PERSON: 2 + (n + 1) * PER_PERSON] = f
+        if len(people) == 2:
+            p1, p2 = people
+            out[k, -4:] = [p2[0] - p1[0], p2[1] - p1[1], p2[3] / max(p1[3], 1e-3), 1.0]
+    return out
+
+
+def video_features(vdir: Path, use_pose: bool) -> tuple:
+    """(frame times, features) for one video, or (None, None): the unit-length SigLIP2 embeddings,
+    plus the body-pose features at the same times when use_pose (cached in pose_feats.npz)."""
+    try:
+        z = np.load(vdir / "embeddings.npz")
+        et = np.asarray(z["frame_times"], float)
+        emb = np.asarray(z["frame_embs"], np.float32)
+    except (OSError, KeyError, ValueError):
+        return None, None
+    if not et.size or emb.ndim != 2 or len(emb) != et.size:
+        return None, None
+    order = np.argsort(et)
+    et, emb = et[order], emb[order]
+    emb /= np.maximum(np.linalg.norm(emb, axis=1, keepdims=True), 1e-6)
+    if not use_pose:
+        return et, emb
+    cache, src = vdir / "pose_feats.npz", vdir / "detections.npz"
+    pf = None
+    try:
+        if cache.stat().st_mtime >= src.stat().st_mtime:
+            c = np.load(cache)
+            if c["feats"].shape == (len(et), POSE_DIM):
+                pf = c["feats"]
+    except (OSError, KeyError, ValueError):
+        pf = None
+    if pf is None:
+        try:
+            d = np.load(src)
+            det = {k: d[k] for k in ("frame", "box", "kxy", "kconf")}
+        except (OSError, KeyError, ValueError):
+            det = {}
+        pf = pose_features(det, et)
+        if det:
+            np.savez_compressed(cache, feats=pf)
+    return et, np.concatenate([emb, pf], axis=1)
+
+
 def window_index_many(times: np.ndarray, ts: np.ndarray, half: int = HALF, step: float = STEP) -> np.ndarray:
     """window_index for many moments at once: (len(ts), 2*half+1)."""
     want = np.asarray(ts, float)[:, None] + step * np.arange(-half, half + 1)
@@ -357,7 +451,7 @@ def hard_target(tags, tag_ix: dict, n: int) -> np.ndarray:
 
 def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LABEL_WEIGHT,
                   root: Path = None, scenes: dict = None, scene_weight: float = SCENE_WEIGHT,
-                  use_trust: bool = True) -> dict:
+                  use_trust: bool = True, use_pose: bool = False) -> dict:
     """Every usable moment as an index window into one big embedding array, with a weight PER TAG
     (0 = this moment says nothing about that tag):
       • teacher moments: its soft answer, weight 1 (0.5 if copied); tags with the teacher switched off 0;
@@ -390,21 +484,15 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
         idx.append(window_index(et, t) + offset)
         ys.append(y); ws.append(w); vids.append(v); is_lab.append(lab); gids.append(gid); ts.append(t)
 
-    for vdir in sorted(p for p in root.iterdir() if p.is_dir()):
+    vdirs = sorted(p for p in root.iterdir() if p.is_dir())
+    for n_v, vdir in enumerate(vdirs, 1):
         v = vdir.name
-        try:
-            z = np.load(vdir / "embeddings.npz")
-            et = np.asarray(z["frame_times"], float)
-            emb = np.asarray(z["frame_embs"], np.float32)
-        except (OSError, KeyError, ValueError):
+        et, emb = video_features(vdir, use_pose)
+        if et is None:
             skipped.append(v)
             continue
-        if not et.size or emb.ndim != 2 or len(emb) != et.size:
-            skipped.append(v)
-            continue
-        order = np.argsort(et)
-        et, emb = et[order], emb[order]
-        emb /= np.maximum(np.linalg.norm(emb, axis=1, keepdims=True), 1e-6)
+        if use_pose and n_v % 25 == 0:
+            print(f"   body pose: {n_v} of {len(vdirs)} videos", flush=True)
         mine = by_video.get(v, [])
         lab_t = {round(float(i["t"]), 2) for i in mine}
         lab_id = {i["id"] for i in mine if i.get("id")}
@@ -455,7 +543,8 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
             "gold_id": np.asarray(gids), "t": np.asarray(ts), "videos": used, "skipped": skipped,
             "tags": tags, "counts": counts, "scene_tags_used": sorted(trusted),
             "scene_rules": {k: sorted(v) for k, v in rules.items()}, "scene_agreement": agreement,
-            "teacher_trust": trust, "use_trust": use_trust}
+            "teacher_trust": trust, "use_trust": use_trust,
+            "pose_dim": POSE_DIM if use_pose else 0}
 
 
 def split_videos(videos: list, test: set, share: float = VAL_SHARE, seed: int = SEED) -> tuple:
@@ -513,7 +602,8 @@ def student_vocab(vocab: list, tags: list, thresholds: np.ndarray) -> list:
 # The model (torch only from here on)
 # ---------------------------------------------------------------------------
 
-def make_model(dim: int, n_tags: int, steps: int = 2 * HALF + 1, hidden: int = 512, drop: float = 0.2):
+def make_model(dim: int, n_tags: int, steps: int = 2 * HALF + 1, hidden: int = 512, drop: float = 0.2,
+               pose_dim: int = 0):
     import torch
     from torch import nn
 
@@ -525,6 +615,9 @@ def make_model(dim: int, n_tags: int, steps: int = 2 * HALF + 1, hidden: int = 5
             super().__init__()
             self.norm = nn.LayerNorm(dim)
             self.proj = nn.Linear(dim, hidden)
+            if pose_dim:                            # body pose: its own norm + projection, added in
+                self.pnorm = nn.LayerNorm(pose_dim)
+                self.pproj = nn.Sequential(nn.Linear(pose_dim, 256), nn.GELU(), nn.Linear(256, hidden))
             self.pos = nn.Parameter(torch.zeros(steps, hidden))
             self.mix = nn.Conv1d(hidden, hidden, 3, padding=1)
             self.att = nn.Linear(hidden, 1)
@@ -532,8 +625,10 @@ def make_model(dim: int, n_tags: int, steps: int = 2 * HALF + 1, hidden: int = 5
                                      nn.Dropout(drop), nn.Linear(hidden, n_tags))
             self.centre = steps // 2
 
-        def forward(self, x):                       # x: batch × steps × dim
-            h = self.proj(self.norm(x)) + self.pos
+        def forward(self, x):                       # x: batch × steps × (dim [+ pose_dim])
+            h = self.proj(self.norm(x[..., :dim])) + self.pos
+            if pose_dim:
+                h = h + self.pproj(self.pnorm(x[..., dim:dim + pose_dim]))
             h = h + torch.nn.functional.gelu(self.mix(h.transpose(1, 2))).transpose(1, 2)
             a = torch.softmax(self.att(h), dim=1)
             pooled = (a * h).sum(dim=1)
@@ -577,7 +672,8 @@ def train_model(ds: dict, train_rows: np.ndarray, val_rows: np.ndarray, epochs: 
     neg = ((ds["y"][train_rows] < 0.5) & seen).sum(0).astype(np.float64)
     pw = torch.as_tensor(np.clip(np.sqrt(neg / np.maximum(pos, 1.0)), 1.0, 8.0), dtype=torch.float32,
                          device=dev)
-    model = make_model(ds["E"].shape[1], ds["y"].shape[1]).to(dev)
+    pose_dim = int(ds.get("pose_dim") or 0)
+    model = make_model(ds["E"].shape[1] - pose_dim, ds["y"].shape[1], pose_dim=pose_dim).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.05)
     steps_per = max(1, int(np.ceil(len(train_rows) / batch)))
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=epochs * steps_per)
@@ -765,13 +861,13 @@ def score_report(ds: dict, prob: np.ndarray, rows: np.ndarray, thresholds: np.nd
 # Commands
 # ---------------------------------------------------------------------------
 
-def _prepare(label_weight: float, use_trust: bool = True):
+def _prepare(label_weight: float, use_trust: bool = True, use_pose: bool = False):
     vocab, labels, test = _vocab(), _labels(), set(test_videos())
     if not vocab:
         raise SystemExit("No tag_vocabulary.csv in _student/library — run `python student_tags.py fetch`.")
     if not test:
         print("⚠️ No test set downloaded (testset.json) — the model will train but can't be scored.")
-    ds = build_dataset(vocab, labels, test, label_weight, use_trust=use_trust)
+    ds = build_dataset(vocab, labels, test, label_weight, use_trust=use_trust, use_pose=use_pose)
     train_v, val_v = split_videos(ds["videos"], test)
     vids = ds["video"]
     train_rows = np.flatnonzero(np.isin(vids, train_v))
@@ -784,6 +880,9 @@ def _prepare(label_weight: float, use_trust: bool = True):
           f"{int(ds['is_label'][learn].sum())} of your labels to learn from · "
           f"{len(test_rows)} labelled test frames · {ds['E'].shape[0]:,} embeddings "
           f"({ds['E'].nbytes / 1e9:.1f} GB)")
+    if ds.get("pose_dim"):
+        has = float((ds["E"][:, -POSE_DIM].astype(np.float32) > 0.5).mean())
+        print(f"   body pose: {POSE_DIM} numbers per half second; a person detected at {100 * has:.0f}% of them")
     c = ds["counts"]
     print(f"   Reviewer corrections: {c['teacher_in_scenes']} teacher moments given your scene's answer + "
           f"{c['scene_extra']} extra moments from your corrected scenes · tags used from them: "
@@ -805,12 +904,15 @@ def predict_many(models: list, E_t, idx: np.ndarray) -> np.ndarray:
     return np.mean([predict(m, E_t, idx) for m in models], axis=0)
 
 
-def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, use_trust: bool = True) -> int:
+def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, use_trust: bool = True,
+          use_pose: bool = True) -> int:
     """k models, each trained with a different fifth of the training videos held out (it stops early on
     that fifth). Their held-out answers cover every training video, so each tag's cut-off is picked on
     all of them, not one small split; on the test set the k models' scores are averaged."""
     import torch
-    vocab, labels, test, ds, _, _, test_rows = _prepare(label_weight, use_trust)
+    vocab, labels, test, ds, _, _, test_rows = _prepare(label_weight, use_trust, use_pose)
+    pose_dim = ds["pose_dim"]
+    emb_dim = ds["E"].shape[1] - pose_dim
     dev = _device()
     print(f"Training {folds} models on "
           f"{torch.cuda.get_device_name(0) if dev.type == 'cuda' else 'the CPU (no CUDA GPU found)'}…", flush=True)
@@ -843,7 +945,7 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, 
     for f, m in enumerate(models, 1):
         torch.save(m.state_dict(), out / f"head_{f}.pt")
     meta = {"name": name, "created": time.strftime("%Y-%m-%d %H:%M"), "tags": ds["tags"],
-            "thresholds": [float(x) for x in thresholds], "dim": int(ds["E"].shape[1]), "half": HALF,
+            "thresholds": [float(x) for x in thresholds], "dim": int(emb_dim), "pose_dim": int(pose_dim), "half": HALF,
             "step": STEP, "label_weight": label_weight, "folds": folds, "counts": ds["counts"],
             "scene_tags_used": ds["scene_tags_used"], "scene_rules": ds["scene_rules"],
             "teacher_trust": ds["teacher_trust"] if use_trust else None,
@@ -932,7 +1034,7 @@ def load_models(name: str) -> tuple:
         return None, None
     models = []
     for p in sorted(out.glob("head*.pt")):
-        m = make_model(meta["dim"], len(meta["tags"])).to(_device())
+        m = make_model(meta["dim"], len(meta["tags"]), pose_dim=int(meta.get("pose_dim") or 0)).to(_device())
         m.load_state_dict(torch.load(p, map_location=_device()))
         models.append(m)
     return models, meta
@@ -963,17 +1065,10 @@ def export(name: str, dest: Path = None, root: Path = None) -> int:
     done, t0 = [], time.time()
     vdirs = sorted(p for p in root.iterdir() if p.is_dir())
     for k, vdir in enumerate(vdirs, 1):
-        try:
-            z = np.load(vdir / "embeddings.npz")
-            et = np.asarray(z["frame_times"], float)
-            emb = np.asarray(z["frame_embs"], np.float32)
-        except (OSError, KeyError, ValueError):
+        pose_dim = int(meta.get("pose_dim") or 0)
+        et, emb = video_features(vdir, bool(pose_dim))
+        if et is None or emb.shape[1] != meta["dim"] + pose_dim:
             continue
-        if not et.size or emb.ndim != 2 or len(emb) != et.size or emb.shape[1] != meta["dim"]:
-            continue
-        order = np.argsort(et)
-        et, emb = et[order], emb[order]
-        emb /= np.maximum(np.linalg.norm(emb, axis=1, keepdims=True), 1e-6)
         E_t = torch.as_tensor(emb.astype(np.float16), device=dev)
         prob = predict_many(models, E_t, window_index_many(et, et))
         scores = np.clip(np.rint(prob * 100), 0, 100).astype(np.uint8)
@@ -998,7 +1093,7 @@ def score(name: str, vs: str, label_weight: float) -> int:
     if not models:
         print(f"No model '{name}' in {WORK / 'models'}.")
         return 1
-    vocab, labels, test, ds, _, _, test_rows = _prepare(label_weight)
+    vocab, labels, test, ds, _, _, test_rows = _prepare(label_weight, use_pose=bool(meta.get("pose_dim")))
     if ds["tags"] != meta["tags"]:
         print("⚠️ Your vocabulary has changed since this model was trained — retrain it (train) to score "
               "it on today's tags.")
@@ -1019,6 +1114,7 @@ def main(argv=None) -> int:
                     help=f"how many teacher answers one of your labels counts as (default {LABEL_WEIGHT:g})")
     ap.add_argument("--folds", type=int, default=5, help="models trained, each holding out a different share "
                     "of the training videos (default 5)")
+    ap.add_argument("--no-pose", action="store_true", help="leave the body pose out (as v5 did)")
     ap.add_argument("--no-teacher-trust", action="store_true",
                     help="count the teacher's answers fully on every tag (as v4 did)")
     ap.add_argument("--vs", default="", help="teacher test run id or label to compare with (default: newest try2)")
@@ -1029,7 +1125,8 @@ def main(argv=None) -> int:
         if rc or a.command == "fetch":
             return rc
     if a.command in ("train", "all"):
-        return train(a.name, a.epochs, a.label_weight, a.vs, max(2, a.folds), not a.no_teacher_trust)
+        return train(a.name, a.epochs, a.label_weight, a.vs, max(2, a.folds), not a.no_teacher_trust,
+                     not a.no_pose)
     if a.command == "export":
         return export(a.name)
     return score(a.name, a.vs, a.label_weight)
