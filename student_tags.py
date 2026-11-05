@@ -49,7 +49,7 @@ import trial_logic as TL  # noqa: E402
 WORK = HERE / "_student"
 VOLUME = "media-train"
 TEACHER_FILE = "tags_32b.json"            # 32b and 32b-fp8 (+ LoRA) all write this one
-VIDEO_FILES = ("embeddings.npz", TEACHER_FILE, "person_curve.npy", "detections.npz")
+VIDEO_FILES = ("embeddings.npz", TEACHER_FILE, "person_curve.npy", "detections.npz", "vision.json")
 
 STEP = 0.5                                # the embeddings are 2 per second
 HALF = 4                                  # ±4 steps = ±2 s around the moment → 9 embeddings
@@ -414,6 +414,148 @@ def video_features(vdir: Path, use_pose: bool) -> tuple:
         if det:
             np.savez_compressed(cache, feats=pf)
     return et, np.concatenate([emb, pf], axis=1)
+
+
+# ---------------------------------------------------------------------------
+# Time context (step 2): look along a video's half-second scores, inside hard cuts
+# ---------------------------------------------------------------------------
+
+CTX_SPANS = (4, 10, 20)                   # averages over ±2 s, ±5 s and ±10 s (half-second steps)
+CTX_MAX = 10                              # and the highest score within ±5 s
+CTX_K = 2 + len(CTX_SPANS)                # numbers per tag: own score, the averages, the max
+
+
+def video_cuts(vdir: Path) -> list:
+    """Hard cuts (TransNetV2, seconds) from the vision stage; [] if unknown."""
+    return [float(c) for c in ((_read_json(vdir / "vision.json", {}) or {}).get("cuts") or [])]
+
+
+def context_features(times: np.ndarray, probs: np.ndarray, cuts) -> np.ndarray:
+    """(T, tags × CTX_K): for every half second, each tag's own score, its average over ±2 / ±5 /
+    ±10 s and its highest score within ±5 s — never reaching across a hard cut, so a shot's tags
+    don't leak into the next shot."""
+    T, n = probs.shape
+    seg = np.searchsorted(np.sort(np.asarray(cuts, float)), np.asarray(times, float), side="right")
+    sums = {s_: probs.copy() for s_ in CTX_SPANS}
+    cnt = {s_: np.ones(T, np.float32) for s_ in CTX_SPANS}
+    mx = probs.copy()
+    reach = max(CTX_SPANS)
+    base = np.arange(T)
+    for d in range(-reach, reach + 1):
+        if d == 0:
+            continue
+        src = base + d
+        ok = (src >= 0) & (src < T)
+        src = np.clip(src, 0, T - 1)
+        ok &= seg[src] == seg
+        val = np.where(ok[:, None], probs[src], 0.0)
+        for s_ in CTX_SPANS:
+            if abs(d) <= s_:
+                sums[s_] += val
+                cnt[s_] += ok
+        if abs(d) <= CTX_MAX:
+            mx = np.maximum(mx, val)
+    feats = [probs] + [sums[s_] / cnt[s_][:, None] for s_ in CTX_SPANS] + [mx]
+    return np.concatenate(feats, axis=1).astype(np.float32)
+
+
+def make_ctx_model(n_tags: int, hidden: int = 256, drop: float = 0.2):
+    """The second step: every tag's context numbers in → every tag's score out (so tags can inform
+    each other: a held position, a shot that's been POV for the last 10 s…). Starts from the step-1
+    score: it learns a correction on top (a residual on the logits)."""
+    import torch
+    from torch import nn
+
+    class ContextHead(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.net = nn.Sequential(nn.LayerNorm(n_tags * CTX_K), nn.Linear(n_tags * CTX_K, hidden), nn.GELU(),
+                                     nn.Dropout(drop), nn.Linear(hidden, n_tags))
+            nn.init.zeros_(self.net[-1].weight)
+            nn.init.zeros_(self.net[-1].bias)
+
+        def forward(self, x):
+            p = x[:, :n_tags].clamp(1e-4, 1 - 1e-4)
+            return torch.log(p / (1 - p)) + self.net(x)
+
+    return ContextHead()
+
+
+def video_timeline(models: list, vdir: Path, use_pose: bool, emb_dim: int = None):
+    """(times, step-1 scores at every half second) for one video, from these models averaged."""
+    import torch
+    et, feats = video_features(vdir, use_pose)
+    if et is None or (emb_dim and feats.shape[1] - (POSE_DIM if use_pose else 0) != emb_dim):
+        return None, None
+    E_t = torch.as_tensor(feats.astype(np.float16), device=_device())
+    return et, predict_many(models, E_t, window_index_many(et, et))
+
+
+def train_ctx(X: np.ndarray, y: np.ndarray, w: np.ndarray, train_rows: np.ndarray, val_rows: np.ndarray,
+              epochs: int = 40, batch: int = 512, lr: float = 2e-3, patience: int = 6, seed: int = SEED):
+    """Weighted BCE like step 1, early stop on the held-out videos. Returns the model."""
+    import torch
+    torch.manual_seed(seed)
+    dev = _device()
+    X_t, y_t, w_t = (torch.as_tensor(a, device=dev) for a in (X, y, w))
+    model = make_ctx_model(y.shape[1]).to(dev)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.05)
+    lossf = torch.nn.BCEWithLogitsLoss(reduction="none")
+
+    def loss_on(r):
+        return (lossf(model(X_t[r]), y_t[r]) * w_t[r]).sum() / w_t[r].sum().clamp(min=1e-6)
+
+    best, best_state, bad = float("inf"), None, 0
+    rng = np.random.default_rng(seed)
+    for _ in range(epochs):
+        model.train()
+        perm = rng.permutation(train_rows)
+        for s_ in range(0, len(perm), batch):
+            r = torch.as_tensor(perm[s_:s_ + batch], device=dev)
+            l = loss_on(r)
+            opt.zero_grad(set_to_none=True)
+            l.backward()
+            opt.step()
+        model.eval()
+        with torch.no_grad():
+            vl = float(loss_on(torch.as_tensor(val_rows, device=dev))) if len(val_rows) else float("nan")
+        if vl < best - 1e-4 or np.isnan(vl):
+            best, bad = vl, 0
+            best_state = {k: t.detach().clone() for k, t in model.state_dict().items()}
+        else:
+            bad += 1
+            if bad >= patience:
+                break
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return model
+
+
+def predict_ctx(models: list, X: np.ndarray) -> np.ndarray:
+    import torch
+    out = []
+    with torch.no_grad():
+        X_t = torch.as_tensor(X, device=_device())
+        for m in models:
+            m.eval()
+            out.append(torch.sigmoid(m(X_t)).cpu().numpy())
+    return np.mean(out, axis=0)
+
+
+def rows_context(ds: dict, rows: np.ndarray, timelines: dict) -> np.ndarray:
+    """The context numbers at each row's moment (nearest half second of its video's timeline)."""
+    n = len(ds["tags"])
+    X = np.zeros((len(rows), n * CTX_K), np.float32)
+    for v in set(ds["video"][rows]):
+        sel = np.flatnonzero(ds["video"][rows] == v)
+        tl = timelines.get(v)
+        if tl is None:
+            continue
+        et, ctx = tl
+        k = np.clip(np.searchsorted(et, ds["t"][rows][sel]), 1, len(et) - 1)
+        k = np.where(np.abs(et[k - 1] - ds["t"][rows][sel]) <= np.abs(et[k] - ds["t"][rows][sel]), k - 1, k)
+        X[sel] = ctx[k]
+    return X
 
 
 def window_index_many(times: np.ndarray, ts: np.ndarray, half: int = HALF, step: float = STEP) -> np.ndarray:
@@ -905,7 +1047,7 @@ def predict_many(models: list, E_t, idx: np.ndarray) -> np.ndarray:
 
 
 def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, use_trust: bool = True,
-          use_pose: bool = True) -> int:
+          use_pose: bool = False, use_context: bool = True) -> int:
     """k models, each trained with a different fifth of the training videos held out (it stops early on
     that fifth). Their held-out answers cover every training video, so each tag's cut-off is picked on
     all of them, not one small split; on the test set the k models' scores are averaged."""
@@ -937,13 +1079,52 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, 
             torch.cuda.empty_cache()
     rows = np.concatenate(oof_rows)
     thresholds = pick_thresholds(np.concatenate(oof_prob), ds["y"][rows], mask=ds["w"][rows])
+    step1_thresholds = thresholds
+    test_prob = predict_many(models, E_t, ds["idx"][test_rows]) if len(test_rows) else None
+    step1_test_prob = test_prob
+    ctx_models, ctx_meta = [], None
+    if use_context:
+        print("Step 2 — time context: scoring every half second of every video…", flush=True)
+        if dev.type == "cuda":
+            del E_t
+            torch.cuda.empty_cache()
+        fold_of = {v: k for k, g in enumerate(groups) for v in g}
+        root = WORK / "videos"
+        timelines = {}
+        for n_v, v in enumerate(ds["videos"], 1):
+            use = [models[fold_of[v]]] if v in fold_of else models       # a training video: only the
+            et, prob = video_timeline(use, root / v, use_pose)            # model that never saw it
+            if et is not None:
+                timelines[v] = (et, context_features(et, prob, video_cuts(root / v)))
+            if n_v % 25 == 0:
+                print(f"   {n_v} of {len(ds['videos'])} videos", flush=True)
+        learn = np.flatnonzero(~np.isin(vids, list(test)))
+        X = np.zeros((len(vids), len(ds["tags"]) * CTX_K), np.float32)
+        X[learn] = rows_context(ds, learn, timelines)
+        if len(test_rows):
+            X[test_rows] = rows_context(ds, test_rows, timelines)
+        oof2_rows, oof2_prob = [], []
+        for f, val_v in enumerate(groups, 1):
+            val_rows = np.flatnonzero(np.isin(vids, val_v))
+            train_rows = np.flatnonzero(np.isin(vids, [v for g in groups if g is not val_v for v in g]))
+            m2 = train_ctx(X, ds["y"], ds["w"], train_rows, val_rows)
+            oof2_rows.append(val_rows)
+            oof2_prob.append(predict_ctx([m2], X[val_rows]))
+            ctx_models.append(m2)
+        r2 = np.concatenate(oof2_rows)
+        thresholds = pick_thresholds(np.concatenate(oof2_prob), ds["y"][r2], mask=ds["w"][r2])
+        if len(test_rows):
+            test_prob = predict_ctx(ctx_models, X[test_rows])
+        ctx_meta = {"spans": list(CTX_SPANS), "max": CTX_MAX, "k": CTX_K}
     minutes = (time.time() - t0) / 60
     out = WORK / "models" / name
     out.mkdir(parents=True, exist_ok=True)
-    for old in out.glob("head*.pt"):
+    for old in list(out.glob("head*.pt")) + list(out.glob("ctx*.pt")):
         old.unlink()
     for f, m in enumerate(models, 1):
         torch.save(m.state_dict(), out / f"head_{f}.pt")
+    for f, m in enumerate(ctx_models, 1):
+        torch.save(m.state_dict(), out / f"ctx_{f}.pt")
     meta = {"name": name, "created": time.strftime("%Y-%m-%d %H:%M"), "tags": ds["tags"],
             "thresholds": [float(x) for x in thresholds], "dim": int(emb_dim), "pose_dim": int(pose_dim), "half": HALF,
             "step": STEP, "label_weight": label_weight, "folds": folds, "counts": ds["counts"],
@@ -951,25 +1132,42 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, 
             "teacher_trust": ds["teacher_trust"] if use_trust else None,
             "epochs_run": [len(h) for h in hists], "history": hists,
             "train_minutes": round(minutes, 2), "videos": len(ds["videos"]), "test_videos": sorted(test),
-            "labels_newest": max((i.get("labelled_at") or "" for i in labels), default="")}
+            "labels_newest": max((i.get("labelled_at") or "" for i in labels), default=""),
+            "context": ctx_meta, "step1_thresholds": [float(x) for x in step1_thresholds]}
     print(f"Trained in {minutes:.1f} min.", flush=True)
-    rc = _score(models, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta)
+    step1 = None
+    if ctx_meta and step1_test_prob is not None:
+        step1 = (step1_test_prob, step1_thresholds)
+    rc = _score(models, None, ds, test_rows, thresholds, vocab, labels, vs, name, meta, prob=test_prob,
+                step1=step1)
     (out / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     print(f"Model saved → {out}")
     return rc
 
 
-def _score(models, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta) -> int:
+def _score(models, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta, prob=None, step1=None) -> int:
     if not len(test_rows):
         print("No labelled test-set frames to score on.")
         return 0
-    prob = predict_many(models, E_t, ds["idx"][test_rows])
+    if prob is None:
+        prob = predict_many(models, E_t, ds["idx"][test_rows])
     runs = teacher_runs()
     ref = pick_reference(runs, vs)
     if vs and ref is None:
         print(f"⚠️ No teacher test run called '{vs}' — scoring the student alone.")
     md, res = score_report(ds, prob, test_rows, thresholds, vocab, labels, ref, name)
     meta["scores"] = {k: v["overall"] for k, v in res.items()}
+    if step1 is not None:                   # the same run without step 2, on the same frames
+        _, r1 = score_report(ds, step1[0], test_rows, step1[1], vocab, labels, ref, name)
+        meta["scores_step1"] = {k: v["overall"] for k, v in r1.items()}
+        f = lambda x: "–" if x is None else f"{x:.2f}"
+        o1p, o1r = r1["plain"]["overall"], r1["rules"]["overall"]
+        line = (f"| Student · step 1 only (no time context) · plain / rules | {r1['plain']['n']} | "
+                f"{f(o1p['f1'])} / {f(o1r['f1'])} | | | {o1p['fp']} / {o1r['fp']} | {o1p['fn']} / {o1r['fn']} |")
+        lines = md.splitlines()
+        at = next(i for i, l in enumerate(lines) if l.startswith("| Student · with your vocabulary rules"))
+        lines.insert(at + 1, line)
+        md = "\n".join(lines)
     meta["reference_run"] = ref["id"] if ref else None
     md += "\n\n" + trust_markdown(ds) + "\n\n" + scene_rules_markdown(ds)
     report = HERE / "student_report.md"
@@ -1040,6 +1238,18 @@ def load_models(name: str) -> tuple:
     return models, meta
 
 
+def load_ctx_models(name: str, meta: dict) -> list:
+    import torch
+    if not meta.get("context"):
+        return []
+    out = []
+    for p in sorted((WORK / "models" / name).glob("ctx*.pt")):
+        m = make_ctx_model(len(meta["tags"])).to(_device())
+        m.load_state_dict(torch.load(p, map_location=_device()))
+        out.append(m)
+    return out
+
+
 def export(name: str, dest: Path = None, root: Path = None) -> int:
     """Every half second of every downloaded video → the student's score per tag (0–100), one small
     file per video in the catalogue's student_scores folder on Drive (or `dest`):
@@ -1062,6 +1272,7 @@ def export(name: str, dest: Path = None, root: Path = None) -> int:
     root = root or WORK / "videos"
     dest.mkdir(parents=True, exist_ok=True)
     dev = _device()
+    ctx_models = load_ctx_models(name, meta)
     done, t0 = [], time.time()
     vdirs = sorted(p for p in root.iterdir() if p.is_dir())
     for k, vdir in enumerate(vdirs, 1):
@@ -1071,6 +1282,8 @@ def export(name: str, dest: Path = None, root: Path = None) -> int:
             continue
         E_t = torch.as_tensor(emb.astype(np.float16), device=dev)
         prob = predict_many(models, E_t, window_index_many(et, et))
+        if ctx_models:
+            prob = predict_ctx(ctx_models, context_features(et, prob, video_cuts(vdir)))
         scores = np.clip(np.rint(prob * 100), 0, 100).astype(np.uint8)
         tmp = dest / f"{vdir.name}.tmp.npz"
         np.savez_compressed(tmp, times=et.astype(np.float32), scores=scores)
@@ -1098,9 +1311,19 @@ def score(name: str, vs: str, label_weight: float) -> int:
         print("⚠️ Your vocabulary has changed since this model was trained — retrain it (train) to score "
               "it on today's tags.")
         return 1
+    ctx_models = load_ctx_models(name, meta)
+    prob = None
+    if ctx_models and len(test_rows):
+        use_pose = bool(meta.get("pose_dim"))
+        timelines = {}
+        for v in set(ds["video"][test_rows]):
+            et, p1 = video_timeline(models, WORK / "videos" / v, use_pose)
+            if et is not None:
+                timelines[v] = (et, context_features(et, p1, video_cuts(WORK / "videos" / v)))
+        prob = predict_ctx(ctx_models, rows_context(ds, test_rows, timelines))
     E_t = torch.as_tensor(ds["E"], device=_device())
     rc = _score(models, E_t, ds, test_rows, np.asarray(meta["thresholds"], np.float32), vocab, labels, vs,
-                name, meta)
+                name, meta, prob=prob)
     (WORK / "models" / name / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     return rc
 
@@ -1114,7 +1337,8 @@ def main(argv=None) -> int:
                     help=f"how many teacher answers one of your labels counts as (default {LABEL_WEIGHT:g})")
     ap.add_argument("--folds", type=int, default=5, help="models trained, each holding out a different share "
                     "of the training videos (default 5)")
-    ap.add_argument("--no-pose", action="store_true", help="leave the body pose out (as v5 did)")
+    ap.add_argument("--pose", action="store_true", help="add the body pose (v6 — it didn't help: patchy detections)")
+    ap.add_argument("--no-context", action="store_true", help="no second step over ±10 s of scores (as v5b did)")
     ap.add_argument("--no-teacher-trust", action="store_true",
                     help="count the teacher's answers fully on every tag (as v4 did)")
     ap.add_argument("--vs", default="", help="teacher test run id or label to compare with (default: newest try2)")
@@ -1126,7 +1350,7 @@ def main(argv=None) -> int:
             return rc
     if a.command in ("train", "all"):
         return train(a.name, a.epochs, a.label_weight, a.vs, max(2, a.folds), not a.no_teacher_trust,
-                     not a.no_pose)
+                     a.pose, not a.no_context)
     if a.command == "export":
         return export(a.name)
     return score(a.name, a.vs, a.label_weight)

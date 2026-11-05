@@ -229,9 +229,38 @@ def test_train_with_pose(tmp_path, monkeypatch):
         np.savez_compressed(v / "detections.npz", **_detections(1800))
     monkeypatch.setattr(S, "WORK", tmp_path)
     monkeypatch.setattr(S, "HERE", tmp_path)
-    assert S.main(["train", "--name", "p1", "--epochs", "4", "--folds", "2"]) == 0
+    assert S.main(["train", "--name", "p1", "--epochs", "4", "--folds", "2", "--pose", "--no-context"]) == 0
     meta = json.loads((tmp_path / "models" / "p1" / "meta.json").read_text())
     assert meta["pose_dim"] == S.POSE_DIM and meta["dim"] == DIM
     assert (tmp_path / "videos" / "vid00" / "pose_feats.npz").exists()
     assert S.export("p1", dest=tmp_path / "out") == 0
     assert S.main(["score", "--name", "p1"]) == 0
+
+
+def test_context_features_stop_at_cuts():
+    times = np.arange(0, 20, 0.5)
+    probs = np.zeros((len(times), 2), np.float32)
+    probs[times < 10, 0] = 1.0                                   # tag 0 on for the first shot only
+    f = S.context_features(times, probs, cuts=[10.0])
+    assert f.shape == (len(times), 2 * S.CTX_K)
+    i = int(np.searchsorted(times, 10.0))                        # the first moment after the cut
+    assert f[i, 0] == 0                                          # own score
+    assert f[i, 2 * 3] == 0 and f[i, 2 * 4] == 0                 # ±10 s average and ±5 s max: nothing leaks
+    g = S.context_features(times, probs, cuts=[])
+    assert g[i, 2 * 4] == 1.0                                    # without the cut it would
+
+
+def test_train_with_context_and_export(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    _library(tmp_path, n_videos=10)
+    for v in (tmp_path / "videos").iterdir():
+        (v / "vision.json").write_text(json.dumps({"cuts": [20.0, 40.0, 60.0, 80.0, 100.0]}))
+    monkeypatch.setattr(S, "WORK", tmp_path)
+    monkeypatch.setattr(S, "HERE", tmp_path)
+    assert S.main(["train", "--name", "c1", "--epochs", "8", "--folds", "3"]) == 0
+    meta = json.loads((tmp_path / "models" / "c1" / "meta.json").read_text())
+    assert meta["context"] and "scores_step1" in meta and meta["pose_dim"] == 0
+    assert len(list((tmp_path / "models" / "c1").glob("ctx_*.pt"))) == 3
+    assert "step 1 only (no time context)" in (tmp_path / "student_report.md").read_text()
+    assert S.export("c1", dest=tmp_path / "out") == 0
+    assert S.main(["score", "--name", "c1"]) == 0
