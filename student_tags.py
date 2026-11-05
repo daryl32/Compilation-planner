@@ -58,6 +58,8 @@ COPY_WEIGHT = 0.5                         # a teacher answer copied from a near-
 SCENE_WEIGHT = 2.0                        # a moment inside a scene you corrected in the Reviewer
 SCENE_STEP = 2.0                          # extra moments taken every this many seconds in those scenes
 SCENE_EDGE = 1.0                          # …but not this close to the scene's start / end (cuts)
+TRUST_MIN_LABELS = 10                     # your labels with a tag (training videos) before its teacher trust is measured
+TRUST_FLOOR = 0.1                         # the least a teacher answer can count for on a tag
 # A tag's Reviewer answers are only used where they match your moment labels inside the same scenes
 # (scene_rules): need this many of your labels in corrected scenes, and this much agreement.
 SCENE_MIN_CHECKS = 15
@@ -186,6 +188,37 @@ def write_reviewer_scenes():
 
 def _reviewer_scenes() -> dict:
     return (_read_json(WORK / "library" / "reviewer_scenes.json", {}) or {}).get("videos") or {}
+
+
+def teacher_trust(vocab: list, labels: list, test: set, root: Path) -> dict:
+    """How right the teacher is per tag, measured on your 🎯 / ✏️ labels in the training videos (never the
+    test set): {tag lower: {"f1", "weight", "labelled"}}. The weight its answers get for that tag is its F1
+    (at least TRUST_FLOOR); a tag with fewer than TRUST_MIN_LABELS of your labels keeps weight 1."""
+    tags = [r["tag"] for r in vocab]
+    by_video = {}
+    for i in labels:
+        if i["video_id"] not in test:
+            by_video.setdefault(i["video_id"], []).append(i)
+    pairs = []
+    for v, mine in by_video.items():
+        tj = _read_json(root / v / TEACHER_FILE, {}) or {}
+        res = (tj.get("results") or {}).values()
+        by_id = {r["gold_id"]: r for r in res if r.get("gold_id")}
+        by_t = {round(float(r["t"]), 2): r for r in res if r.get("t") is not None}
+        for i in mine:
+            r = by_id.get(i.get("id")) or by_t.get(round(float(i["t"]), 2))
+            if r is not None and r.get("ok") is not False:
+                pairs.append((r.get("tags") or [], i.get("tags") or []))
+    sc = TL.score_tags(pairs, tags)["per_tag"] if pairs else {}
+    out = {}
+    for t in tags:
+        s_ = sc.get(t) or {"tp": 0, "fn": 0, "f1": None}
+        n_lab = s_["tp"] + s_["fn"]
+        f1 = s_["f1"] if s_["f1"] is not None else 0.0
+        w = max(TRUST_FLOOR, f1) if n_lab >= TRUST_MIN_LABELS else 1.0
+        out[t.lower()] = {"f1": None if n_lab < TRUST_MIN_LABELS else round(f1, 3), "weight": round(w, 3),
+                          "labelled": n_lab}
+    return out
 
 
 def scene_agreement(vocab: list, scenes: dict, labels: list, test: set) -> dict:
@@ -323,7 +356,8 @@ def hard_target(tags, tag_ix: dict, n: int) -> np.ndarray:
 
 
 def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LABEL_WEIGHT,
-                  root: Path = None, scenes: dict = None, scene_weight: float = SCENE_WEIGHT) -> dict:
+                  root: Path = None, scenes: dict = None, scene_weight: float = SCENE_WEIGHT,
+                  use_trust: bool = True) -> dict:
     """Every usable moment as an index window into one big embedding array, with a weight PER TAG
     (0 = this moment says nothing about that tag):
       • teacher moments: its soft answer, weight 1 (0.5 if copied); tags with the teacher switched off 0;
@@ -339,6 +373,9 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
     tag_ix = {t.lower(): j for j, t in enumerate(tags)}
     n = len(tags)
     teacher_on = np.array([1.0 if r.get("teacher", True) else 0.0 for r in vocab], np.float32)
+    trust = teacher_trust(vocab, labels, test, root)
+    if use_trust:                     # the teacher's answers count for its F1 on each tag
+        teacher_on *= np.array([trust[t.lower()]["weight"] for t in tags], np.float32)
     agreement = scene_agreement(vocab, scenes, labels, test)
     rules = scene_rules(vocab, agreement)
     trusted = rules["absent"] | rules["wide"] | rules["with_teacher"]
@@ -417,7 +454,8 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
             "w": np.stack(ws).astype(np.float32), "video": np.asarray(vids), "is_label": np.asarray(is_lab),
             "gold_id": np.asarray(gids), "t": np.asarray(ts), "videos": used, "skipped": skipped,
             "tags": tags, "counts": counts, "scene_tags_used": sorted(trusted),
-            "scene_rules": {k: sorted(v) for k, v in rules.items()}, "scene_agreement": agreement}
+            "scene_rules": {k: sorted(v) for k, v in rules.items()}, "scene_agreement": agreement,
+            "teacher_trust": trust, "use_trust": use_trust}
 
 
 def split_videos(videos: list, test: set, share: float = VAL_SHARE, seed: int = SEED) -> tuple:
@@ -727,13 +765,13 @@ def score_report(ds: dict, prob: np.ndarray, rows: np.ndarray, thresholds: np.nd
 # Commands
 # ---------------------------------------------------------------------------
 
-def _prepare(label_weight: float):
+def _prepare(label_weight: float, use_trust: bool = True):
     vocab, labels, test = _vocab(), _labels(), set(test_videos())
     if not vocab:
         raise SystemExit("No tag_vocabulary.csv in _student/library — run `python student_tags.py fetch`.")
     if not test:
         print("⚠️ No test set downloaded (testset.json) — the model will train but can't be scored.")
-    ds = build_dataset(vocab, labels, test, label_weight)
+    ds = build_dataset(vocab, labels, test, label_weight, use_trust=use_trust)
     train_v, val_v = split_videos(ds["videos"], test)
     vids = ds["video"]
     train_rows = np.flatnonzero(np.isin(vids, train_v))
@@ -767,12 +805,12 @@ def predict_many(models: list, E_t, idx: np.ndarray) -> np.ndarray:
     return np.mean([predict(m, E_t, idx) for m in models], axis=0)
 
 
-def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5) -> int:
+def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, use_trust: bool = True) -> int:
     """k models, each trained with a different fifth of the training videos held out (it stops early on
     that fifth). Their held-out answers cover every training video, so each tag's cut-off is picked on
     all of them, not one small split; on the test set the k models' scores are averaged."""
     import torch
-    vocab, labels, test, ds, _, _, test_rows = _prepare(label_weight)
+    vocab, labels, test, ds, _, _, test_rows = _prepare(label_weight, use_trust)
     dev = _device()
     print(f"Training {folds} models on "
           f"{torch.cuda.get_device_name(0) if dev.type == 'cuda' else 'the CPU (no CUDA GPU found)'}…", flush=True)
@@ -808,6 +846,7 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5) 
             "thresholds": [float(x) for x in thresholds], "dim": int(ds["E"].shape[1]), "half": HALF,
             "step": STEP, "label_weight": label_weight, "folds": folds, "counts": ds["counts"],
             "scene_tags_used": ds["scene_tags_used"], "scene_rules": ds["scene_rules"],
+            "teacher_trust": ds["teacher_trust"] if use_trust else None,
             "epochs_run": [len(h) for h in hists], "history": hists,
             "train_minutes": round(minutes, 2), "videos": len(ds["videos"]), "test_videos": sorted(test),
             "labels_newest": max((i.get("labelled_at") or "" for i in labels), default="")}
@@ -830,12 +869,32 @@ def _score(models, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta
     md, res = score_report(ds, prob, test_rows, thresholds, vocab, labels, ref, name)
     meta["scores"] = {k: v["overall"] for k, v in res.items()}
     meta["reference_run"] = ref["id"] if ref else None
-    md += "\n\n" + scene_rules_markdown(ds)
+    md += "\n\n" + trust_markdown(ds) + "\n\n" + scene_rules_markdown(ds)
     report = HERE / "student_report.md"
     report.write_text(md, encoding="utf-8")
     (WORK / "models" / name / "student_report.md").write_text(md, encoding="utf-8")
     print("\n" + "\n".join(md.splitlines()[:14]) + f"\n\nFull report (per tag) → {report}")
     return 0
+
+
+def trust_markdown(ds: dict) -> str:
+    """How much the teacher's answers counted per tag (its F1 on your labelled training moments)."""
+    tr = ds.get("teacher_trust") or {}
+    if not tr:
+        return ""
+    names = {t.lower(): t for t in ds["tags"]}
+    head = ("How much the teacher's answers counted, per tag — its F1 on your labelled moments in the training "
+            "videos (test set never used). Your labels and Reviewer answers always count in full."
+            if ds.get("use_trust") else "Teacher trust was OFF for this run (every teacher answer counted in full); "
+            "for reference, the teacher's F1 on your labelled training moments:")
+    md = ["## Teacher trust", "", head, "", "| Tag | Your labels with it | Teacher F1 | Teacher answers count for |",
+          "|---|---|---|---|"]
+    for low, x in sorted(tr.items(), key=lambda kv: (kv[1]["weight"], kv[0])):
+        f1 = "–" if x["f1"] is None else f"{x['f1']:.2f}"
+        w = (f"{x['weight']:.2f}" if x["f1"] is not None else "1.00 (too few labels to measure)") \
+            if ds.get("use_trust") else "1.00"
+        md.append(f"| {names.get(low, low)} | {x['labelled']} | {f1} | {w} |")
+    return "\n".join(md)
 
 
 def scene_rules_markdown(ds: dict) -> str:
@@ -960,6 +1019,8 @@ def main(argv=None) -> int:
                     help=f"how many teacher answers one of your labels counts as (default {LABEL_WEIGHT:g})")
     ap.add_argument("--folds", type=int, default=5, help="models trained, each holding out a different share "
                     "of the training videos (default 5)")
+    ap.add_argument("--no-teacher-trust", action="store_true",
+                    help="count the teacher's answers fully on every tag (as v4 did)")
     ap.add_argument("--vs", default="", help="teacher test run id or label to compare with (default: newest try2)")
     a = ap.parse_args(argv)
     WORK.mkdir(exist_ok=True)
@@ -968,7 +1029,7 @@ def main(argv=None) -> int:
         if rc or a.command == "fetch":
             return rc
     if a.command in ("train", "all"):
-        return train(a.name, a.epochs, a.label_weight, a.vs, max(2, a.folds))
+        return train(a.name, a.epochs, a.label_weight, a.vs, max(2, a.folds), not a.no_teacher_trust)
     if a.command == "export":
         return export(a.name)
     return score(a.name, a.vs, a.label_weight)

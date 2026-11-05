@@ -174,3 +174,22 @@ def test_export_every_half_second(tmp_path, monkeypatch):
     z = np.load(out / "vid00.npz")
     assert z["scores"].shape == (len(z["times"]), len(TAGS)) and z["scores"].dtype == np.uint8
     assert len(z["times"]) == 240                                     # 2 min, every half second
+
+
+def test_teacher_trust_follows_its_f1_on_your_labels(tmp_path):
+    vocab = TL.parse_vocabulary(VOCAB_CSV)
+    d = tmp_path / "vidA"
+    d.mkdir()
+    results, labels = {}, []
+    for k in range(30):
+        t = float(k)
+        # the teacher always gets the shot right, but says dancing on every moment (only half are)
+        results[f"m{k}"] = {"t": t, "tags": ["close-up", "dancing"]}
+        labels.append({"id": f"tags:vidA:{t:.2f}", "type": "tags", "video_id": "vidA", "t": t,
+                       "tags": ["close-up"] + (["dancing"] if k % 2 else [])})
+    (d / S.TEACHER_FILE).write_text(json.dumps({"results": results}))
+    tr = S.teacher_trust(vocab, labels, set(), tmp_path)
+    assert tr["close-up"]["weight"] == 1.0 and tr["close-up"]["f1"] == 1.0
+    assert tr["dancing"]["weight"] == pytest.approx(0.667, abs=0.01)    # F1 2/3
+    assert tr["wide"]["weight"] == 1.0 and tr["wide"]["f1"] is None      # never labelled → not measured
+    assert S.teacher_trust(vocab, labels, {"vidA"}, tmp_path)["dancing"]["f1"] is None   # test set never used
