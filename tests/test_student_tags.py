@@ -87,7 +87,7 @@ def test_teacher_target_respects_final_tags():
 def test_labels_replace_teacher_and_test_set_is_held_out(tmp_path):
     labels, test = _library(tmp_path, n_videos=4)
     vocab = TL.parse_vocabulary(VOCAB_CSV)
-    ds = S.build_dataset(vocab, labels, set(test), root=tmp_path / "videos")
+    ds = S.build_dataset(vocab, labels, set(test), root=tmp_path / "videos", scenes={})
     tv = np.isin(ds["video"], test)
     assert ds["is_label"][tv].all()                       # test videos: your labels only (to score)
     assert (ds["w"][ds["is_label"]] == S.LABEL_WEIGHT).all()
@@ -120,3 +120,35 @@ def test_train_and_score_end_to_end(tmp_path, monkeypatch):
     assert "Student · with your vocabulary rules" in report and "| kissing |" in report
     # score again from the saved model, without training
     assert S.main(["score", "--name", "t1"]) == 0
+
+
+def test_scene_answers_and_teacher_off_tags(tmp_path):
+    labels, test = _library(tmp_path, n_videos=4)
+    vocab = TL.parse_vocabulary(VOCAB_CSV)
+    ix = {t: j for j, t in enumerate(TAGS)}
+    # A corrected scene in vid03 (not a test video): close-up, dancing on it; wide left off.
+    scenes = {"vid03": [[0.0, 20.0, ["close-up", "dancing"]]] * 1}
+    ds0 = S.build_dataset(vocab, labels, set(test), root=tmp_path / "videos", scenes={})
+    teacher_rows = ~ds0["is_label"]
+    assert (ds0["w"][teacher_rows, ix["kissing"]] == 0).all()     # the teacher was never asked about it
+    assert ds0["counts"]["scene_extra"] == 0
+    trusted, wide = S.scene_evidence(vocab, {"v": [[0, 1, ["close-up", "wide"]]] * 25})
+    assert trusted == {"close-up", "wide"} and wide == set()       # shot size isn't scene-wide
+    ds = S.build_dataset(vocab, labels, set(test), root=tmp_path / "videos",
+                         scenes={"vid03": [[0.0, 20.0, ["close-up", "dancing"]]] * 1 + [[20.0, 40.0, ["wide"]]] * 0})
+    # too few uses (min 20) → nothing used yet
+    assert ds["counts"]["scene_extra"] == 0
+    many = {f"x{k}": [[0.0, 20.0, ["close-up"]], [20.0, 40.0, ["wide"]]] for k in range(25)}
+    many["vid03"] = [[0.0, 20.0, ["close-up"]]]
+    ds = S.build_dataset(vocab, labels, set(test), root=tmp_path / "videos", scenes=many)
+    assert ds["counts"]["scene_extra"] > 0 and ds["counts"]["teacher_in_scenes"] > 0
+    extra = (~ds["is_label"]) & (ds["video"] == "vid03") & (ds["t"] < 19) & (ds["t"] > 1)
+    assert extra.any()
+    assert (ds["w"][extra, ix["wide"]] == S.SCENE_WEIGHT).all() and (ds["y"][extra, ix["wide"]] == 0).all()
+    # shot size: present only at the teacher's moments that saw it (×2); the extra moments say nothing
+    assert set(ds["w"][extra, ix["close-up"]]) == {0.0, S.SCENE_WEIGHT}
+    y = np.zeros(4, np.float32); w = np.zeros(4, np.float32)
+    S.apply_scene(y, w, ["dancing"], ix, {"dancing", "wide"}, set(), set())
+    assert w[ix["dancing"]] == 0 and (y[ix["wide"]], w[ix["wide"]]) == (0, S.SCENE_WEIGHT)
+    S.apply_scene(y, w, ["dancing"], ix, {"dancing"}, set(), {"dancing"})
+    assert (y[ix["dancing"]], w[ix["dancing"]]) == (1, S.SCENE_WEIGHT)

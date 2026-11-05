@@ -18,7 +18,7 @@ Usage (from the activated .venv in the scene-labeling folder, or student_tags.ba
                                              student_report.md and _student/models/<name>/)
     python student_tags.py train --name v1b --label-weight 8 --epochs 40
     python student_tags.py score --name v1   score a model you trained before (no training)
-    python student_tags.py all               fetch + train
+    python student_tags.py all --name v3     fetch (incl. your Reviewer corrections) + train
 
 Everything is written to _student next to this script (genuine local disk, not Google Drive):
     _student/videos/<video_id>/  embeddings.npz, tags_32b.json, person_curve.npy
@@ -54,6 +54,15 @@ STEP = 0.5                                # the embeddings are 2 per second
 HALF = 4                                  # ±4 steps = ±2 s around the moment → 9 embeddings
 LABEL_WEIGHT = 5.0                        # one of your labels counts as this many teacher answers
 COPY_WEIGHT = 0.5                         # a teacher answer copied from a near-identical moment
+SCENE_WEIGHT = 2.0                        # a moment inside a scene you corrected in the Reviewer
+SCENE_STEP = 2.0                          # extra moments taken every this many seconds in those scenes
+SCENE_EDGE = 1.0                          # …but not this close to the scene's start / end (cuts)
+SCENE_MIN_USES = 20                       # a tag's Reviewer answers count once you've used it on this many scenes
+# Groups whose tags hold for a whole scene (a tag on the scene = on every moment of it). Other tags
+# (actions, camera, shot size) are taken as present only where the teacher also saw them at that moment;
+# a tag left off a corrected scene counts as absent everywhere in it, whatever its group.
+SCENE_WIDE_GROUPS = {"appearance", "clothing", "overlay", "prop", "position"}
+SCENE_WIDE_TAGS = {"pov"}
 VAL_SHARE = 0.12                          # training videos kept aside to pick thresholds / stop early
 SEED = 7
 
@@ -129,6 +138,9 @@ def fetch() -> int:
             print(f"   ⚠️ {name} not found in the catalogue folder.")
             continue
         (lib / name).write_bytes(src.read_bytes())
+    n_sc = write_reviewer_scenes()
+    if n_sc is not None:
+        print(f"Your Reviewer corrections: {n_sc['scenes']} corrected scenes in {n_sc['videos']} videos.")
     items = _labels()
     newest = max((i.get("labelled_at") or "" for i in items), default="")
     print(f"Your labels: {len(items)} tag answers in {len({i['video_id'] for i in items})} videos, "
@@ -138,9 +150,85 @@ def fetch() -> int:
     return 0
 
 
+def write_reviewer_scenes():
+    """_student/library/reviewer_scenes.json from the catalogues in your Drive folder: every scene
+    you've corrected / confirmed in the Reviewer (not excluded) as [start s, end s, [tags]]."""
+    try:
+        from pack_for_modal import load_catalogues, tc_to_seconds
+    except Exception as e:
+        print(f"Couldn't read the catalogues ({e}) — Reviewer corrections not used.")
+        return None
+    cats = load_catalogues(progress=True)
+    out, n = {}, 0
+    for v, cat in cats.items():
+        rows = []
+        for sc in cat.get("scenes") or []:
+            if sc.get("corrected_tags") is None or sc.get("excluded"):
+                continue
+            try:
+                a, b = tc_to_seconds(sc["start_tc"]), tc_to_seconds(sc["end_tc"])
+            except (KeyError, ValueError):
+                continue
+            if b > a:
+                rows.append([round(a, 3), round(b, 3), list(sc["corrected_tags"] or [])])
+        if rows:
+            out[v] = rows
+            n += len(rows)
+    p = WORK / "library" / "reviewer_scenes.json"
+    p.write_text(json.dumps({"built": time.strftime("%Y-%m-%d %H:%M"), "videos": out}), encoding="utf-8")
+    return {"scenes": n, "videos": len(out)}
+
+
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
+
+def _reviewer_scenes() -> dict:
+    return (_read_json(WORK / "library" / "reviewer_scenes.json", {}) or {}).get("videos") or {}
+
+
+def scene_evidence(vocab: list, scenes: dict, min_uses: int = SCENE_MIN_USES) -> tuple:
+    """(tags whose Reviewer answers count — lower-case, scene-wide lower-case tags). A tag counts once
+    you've put it on at least min_uses corrected scenes: a newer tag you've hardly used in the Reviewer
+    would otherwise be 'absent' from every scene you reviewed before it existed."""
+    uses = {}
+    for rows in scenes.values():
+        for _, _, tags in rows:
+            for t in {str(x).lower() for x in tags}:
+                uses[t] = uses.get(t, 0) + 1
+    trusted = {r["tag"].lower() for r in vocab if uses.get(r["tag"].lower(), 0) >= min_uses}
+    wide = {r["tag"].lower() for r in vocab
+            if r.get("kind") != "motion" and (str(r.get("group") or "").lower() in SCENE_WIDE_GROUPS
+                                              or r["tag"].lower() in SCENE_WIDE_TAGS)}
+    return trusted, wide
+
+
+def apply_scene(y: np.ndarray, w: np.ndarray, scene_tags, tag_ix: dict, trusted: set, wide: set,
+                teacher_saw: set, weight: float = SCENE_WEIGHT) -> int:
+    """Put a corrected scene's answer onto one moment (in place): a trusted tag left off the scene →
+    absent; one on it → present when it's scene-wide or the teacher saw it here too. Returns how many
+    tags were set."""
+    on = {str(t).lower() for t in scene_tags or []}
+    n = 0
+    for low in trusted:
+        j = tag_ix.get(low)
+        if j is None:
+            continue
+        if low not in on:
+            y[j], w[j] = 0.0, weight
+        elif low in wide or low in teacher_saw:
+            y[j], w[j] = 1.0, weight
+        else:
+            continue
+        n += 1
+    return n
+
+
+def _scene_at(rows: list, t: float, edge: float = SCENE_EDGE):
+    for a, b, tags in rows:
+        if a + edge <= t < b - edge:
+            return tags
+    return None
 
 def _read_json(path: Path, default=None):
     try:
@@ -202,20 +290,34 @@ def hard_target(tags, tag_ix: dict, n: int) -> np.ndarray:
 
 
 def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LABEL_WEIGHT,
-                  root: Path = None) -> dict:
-    """Every usable moment as an index window into one big embedding array.
-    Returns {"E" (frames × D, float16), "idx" (samples × 9), "y", "w", "video" (per sample),
-    "is_label", "gold_id", "t", "videos", "skipped"}. Test-set videos give label rows only
-    (for scoring) and are flagged so training never sees them."""
+                  root: Path = None, scenes: dict = None, scene_weight: float = SCENE_WEIGHT) -> dict:
+    """Every usable moment as an index window into one big embedding array, with a weight PER TAG
+    (0 = this moment says nothing about that tag):
+      • teacher moments: its soft answer, weight 1 (0.5 if copied); tags with the teacher switched off 0;
+      • inside a scene you corrected in the Reviewer: that scene's answer for the trusted tags (×2),
+        plus extra moments every 2 s that carry only the scene's answer;
+      • your 🎯 / ✏️ labels: every tag, ×label_weight (they replace anything at the same moment).
+    Returns {"E" (frames × D, float16), "idx" (samples × 9), "y", "w" (samples × tags), "video",
+    "is_label", "gold_id", "t", "videos", "skipped", "tags", "counts"}. Test-set videos give label
+    rows only (for scoring) and are flagged so training never sees them."""
     root = root or WORK / "videos"
+    scenes = _reviewer_scenes() if scenes is None else scenes
     tags = [r["tag"] for r in vocab]
     tag_ix = {t.lower(): j for j, t in enumerate(tags)}
     n = len(tags)
+    teacher_on = np.array([1.0 if r.get("teacher", True) else 0.0 for r in vocab], np.float32)
+    trusted, wide = scene_evidence(vocab, scenes)
     by_video = {}
     for i in labels:
         by_video.setdefault(i["video_id"], []).append(i)
     E, idx, ys, ws, vids, is_lab, gids, ts = [], [], [], [], [], [], [], []
+    counts = {"teacher": 0, "teacher_in_scenes": 0, "scene_extra": 0, "labels": 0}
     offset, skipped, used = 0, [], []
+
+    def add(v, t, y, w, lab=False, gid=""):
+        idx.append(window_index(et, t) + offset)
+        ys.append(y); ws.append(w); vids.append(v); is_lab.append(lab); gids.append(gid); ts.append(t)
+
     for vdir in sorted(p for p in root.iterdir() if p.is_dir()):
         v = vdir.name
         try:
@@ -234,26 +336,42 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
         mine = by_video.get(v, [])
         lab_t = {round(float(i["t"]), 2) for i in mine}
         lab_id = {i["id"] for i in mine if i.get("id")}
-        rows = 0
+        start_rows = len(idx)
         if v not in test:
+            vscenes = scenes.get(v) or [] if trusted else []
+            taken = [float(i["t"]) for i in mine]
             tj = _read_json(vdir / TEACHER_FILE, {}) or {}
             for r in (tj.get("results") or {}).values():
                 if r.get("t") is None or r.get("ok") is False:
                     continue
                 if (r.get("gold_id") and r["gold_id"] in lab_id) or round(float(r["t"]), 2) in lab_t:
                     continue                                   # your label replaces it
-                idx.append(window_index(et, float(r["t"])) + offset)
-                ys.append(teacher_target(r, tag_ix, n))
-                ws.append(COPY_WEIGHT if r.get("copied_from") else 1.0)
-                vids.append(v); is_lab.append(False); gids.append(""); ts.append(float(r["t"]))
-                rows += 1
+                t = float(r["t"])
+                y = teacher_target(r, tag_ix, n)
+                w = teacher_on * (COPY_WEIGHT if r.get("copied_from") else 1.0)
+                sc = _scene_at(vscenes, t) if vscenes else None
+                if sc is not None:
+                    saw = {k for k, j in tag_ix.items() if y[j] >= 0.5}
+                    if apply_scene(y, w, sc, tag_ix, trusted, wide, saw, scene_weight):
+                        counts["teacher_in_scenes"] += 1
+                add(v, t, y, w)
+                taken.append(t)
+                counts["teacher"] += 1
+            # extra moments inside corrected scenes, away from the teacher's and your moments
+            taken = np.sort(np.asarray(taken, float))
+            for a, b, sc in vscenes:
+                for t in np.arange(a + SCENE_EDGE, b - SCENE_EDGE, SCENE_STEP):
+                    if taken.size and np.min(np.abs(taken - t)) < SCENE_STEP / 2:
+                        continue
+                    y, w = np.zeros(n, np.float32), np.zeros(n, np.float32)
+                    if apply_scene(y, w, sc, tag_ix, trusted, wide, set(), scene_weight):
+                        add(v, float(t), y, w)
+                        counts["scene_extra"] += 1
         for i in mine:
-            idx.append(window_index(et, float(i["t"])) + offset)
-            ys.append(hard_target(i.get("tags"), tag_ix, n))
-            ws.append(label_weight)
-            vids.append(v); is_lab.append(True); gids.append(i.get("id") or ""); ts.append(float(i["t"]))
-            rows += 1
-        if not rows:
+            add(v, float(i["t"]), hard_target(i.get("tags"), tag_ix, n), np.full(n, label_weight, np.float32),
+                True, i.get("id") or "")
+            counts["labels"] += 1
+        if len(idx) == start_rows:
             continue
         E.append(emb.astype(np.float16))
         offset += len(emb)
@@ -261,9 +379,9 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
     if not E:
         raise SystemExit(f"No usable videos in {root} — run `python student_tags.py fetch` first.")
     return {"E": np.concatenate(E), "idx": np.stack(idx).astype(np.int64), "y": np.stack(ys),
-            "w": np.asarray(ws, np.float32), "video": np.asarray(vids), "is_label": np.asarray(is_lab),
+            "w": np.stack(ws).astype(np.float32), "video": np.asarray(vids), "is_label": np.asarray(is_lab),
             "gold_id": np.asarray(gids), "t": np.asarray(ts), "videos": used, "skipped": skipped,
-            "tags": tags}
+            "tags": tags, "counts": counts, "scene_tags_used": sorted(trusted)}
 
 
 def split_videos(videos: list, test: set, share: float = VAL_SHARE, seed: int = SEED) -> tuple:
@@ -275,23 +393,25 @@ def split_videos(videos: list, test: set, share: float = VAL_SHARE, seed: int = 
     return sorted(pool[k:]), sorted(pool[:k])
 
 
-def pick_thresholds(prob: np.ndarray, truth: np.ndarray, min_pos: int = 10, gain: float = 0.01) -> np.ndarray:
+def pick_thresholds(prob: np.ndarray, truth: np.ndarray, min_pos: int = 10, gain: float = 0.01,
+                    mask: np.ndarray = None) -> np.ndarray:
     """Per tag, the score cut-off (0.25–0.85) with the best F1 on the held-out moments; 0.5 for a
     tag with fewer than min_pos positives there (too few to choose from) or where no cut-off beats
     0.5 by at least `gain` F1 (a tiny edge on a few moments is chance, not a better cut-off)."""
     grid = np.round(np.arange(0.25, 0.851, 0.05), 2)
     out = np.full(prob.shape[1], 0.5, np.float32)
     for j in range(prob.shape[1]):
-        g = truth[:, j] >= 0.5
+        keep = slice(None) if mask is None else mask[:, j] > 0
+        pj, g = prob[keep, j], truth[keep, j] >= 0.5
         if g.sum() < min_pos:
             continue
         def f1_at(th):
-            p = prob[:, j] >= th
+            p = pj >= th
             return 2 * float((p & g).sum()) / max(float(p.sum() + g.sum()), 1.0)
         base = f1_at(0.5)
         best, bt = -1.0, 0.5
         for th in grid:
-            p = prob[:, j] >= th
+            p = pj >= th
             tp = float((p & g).sum())
             f1 = 2 * tp / max(float(p.sum() + g.sum()), 1.0)
             if f1 > best + 1e-9:
@@ -368,7 +488,7 @@ def predict(model, E_t, idx: np.ndarray, batch: int = 2048) -> np.ndarray:
 
 def train_model(ds: dict, train_rows: np.ndarray, val_rows: np.ndarray, epochs: int = 30,
                 batch: int = 512, lr: float = 1e-3, seed: int = SEED, patience: int = 5, log=print):
-    """Weighted BCE on soft targets, rarer tags weighted up (√ negatives/positives, at most ×8),
+    """BCE on soft targets weighted per tag (a weight of 0 = no answer for that tag), rarer tags weighted up (√ negatives/positives, at most ×8),
     ±1-step time jitter, early stop on validation loss. Returns (model, E on device, history)."""
     import torch
     torch.manual_seed(seed)
@@ -378,8 +498,9 @@ def train_model(ds: dict, train_rows: np.ndarray, val_rows: np.ndarray, epochs: 
     y_t = torch.as_tensor(ds["y"], device=dev)
     w_t = torch.as_tensor(ds["w"], device=dev)
     idx = ds["idx"]
-    pos = (ds["y"][train_rows] >= 0.5).sum(0).astype(np.float64)
-    neg = len(train_rows) - pos
+    seen = ds["w"][train_rows] > 0
+    pos = ((ds["y"][train_rows] >= 0.5) & seen).sum(0).astype(np.float64)
+    neg = ((ds["y"][train_rows] < 0.5) & seen).sum(0).astype(np.float64)
     pw = torch.as_tensor(np.clip(np.sqrt(neg / np.maximum(pos, 1.0)), 1.0, 8.0), dtype=torch.float32,
                          device=dev)
     model = make_model(ds["E"].shape[1], ds["y"].shape[1]).to(dev)
@@ -408,7 +529,7 @@ def train_model(ds: dict, train_rows: np.ndarray, val_rows: np.ndarray, epochs: 
             for s in range(0, len(val_rows), 2048):
                 r = val_rows[s:s + 2048]
                 x = E_t[torch.as_tensor(idx[r], device=dev)].float()
-                l = lossf(model(x), y_t[r]).mean(1) * w_t[r]
+                l = lossf(model(x), y_t[r]) * w_t[r]
                 tot += float(l.sum())
                 wsum += float(w_t[r].sum())
         return tot / max(wsum, 1e-9)
@@ -424,7 +545,7 @@ def train_model(ds: dict, train_rows: np.ndarray, val_rows: np.ndarray, epochs: 
             ii = np.clip(idx[r] + shift, lo[r][:, None], hi[r][:, None])
             x = E_t[torch.as_tensor(ii, device=dev)].float()
             x = x + 0.01 * torch.randn_like(x)
-            l = (lossf(model(x), y_t[r]).mean(1) * w_t[r]).sum() / w_t[r].sum()
+            l = (lossf(model(x), y_t[r]) * w_t[r]).sum() / w_t[r].sum().clamp(min=1e-6)
             opt.zero_grad(set_to_none=True)
             l.backward()
             opt.step()
@@ -589,6 +710,10 @@ def _prepare(label_weight: float):
           f"{int(ds['is_label'][learn].sum())} of your labels to learn from · "
           f"{len(test_rows)} labelled test frames · {ds['E'].shape[0]:,} embeddings "
           f"({ds['E'].nbytes / 1e9:.1f} GB)")
+    c = ds["counts"]
+    print(f"   Reviewer corrections: {c['teacher_in_scenes']} teacher moments given your scene's answer + "
+          f"{c['scene_extra']} extra moments from your corrected scenes · tags used from them: "
+          f"{len(ds['scene_tags_used'])} of {len(ds['tags'])}")
     if ds["skipped"]:
         print(f"   skipped {len(ds['skipped'])} video(s) with unreadable embeddings: {', '.join(ds['skipped'][:5])}")
     return vocab, labels, test, ds, train_rows, val_rows, test_rows
@@ -635,7 +760,7 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5) 
             del E_t
             torch.cuda.empty_cache()
     rows = np.concatenate(oof_rows)
-    thresholds = pick_thresholds(np.concatenate(oof_prob), ds["y"][rows])
+    thresholds = pick_thresholds(np.concatenate(oof_prob), ds["y"][rows], mask=ds["w"][rows])
     minutes = (time.time() - t0) / 60
     out = WORK / "models" / name
     out.mkdir(parents=True, exist_ok=True)
@@ -645,7 +770,8 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5) 
         torch.save(m.state_dict(), out / f"head_{f}.pt")
     meta = {"name": name, "created": time.strftime("%Y-%m-%d %H:%M"), "tags": ds["tags"],
             "thresholds": [float(x) for x in thresholds], "dim": int(ds["E"].shape[1]), "half": HALF,
-            "step": STEP, "label_weight": label_weight, "folds": folds,
+            "step": STEP, "label_weight": label_weight, "folds": folds, "counts": ds["counts"],
+            "scene_tags_used": ds["scene_tags_used"],
             "epochs_run": [len(h) for h in hists], "history": hists,
             "train_minutes": round(minutes, 2), "videos": len(ds["videos"]), "test_videos": sorted(test),
             "labels_newest": max((i.get("labelled_at") or "" for i in labels), default="")}
