@@ -9,7 +9,7 @@ decode and the same maths (the helpers are imported from modal_trial.py / trial_
     ultralytics' default tracker → the camera-free person-movement curve, and per scene its rhythm
     (movement BPM, regularity, onsets) and people on screen
   • SigLIP2 picture embeddings, 2 per second
-…written to _student/videos/<video_id>/ (embeddings.npz, person_curve.npy, detections.npz,
+…written to _student/videos/<video_id>/ (in config.py's WORK_DIR) (embeddings.npz, person_curve.npy, detections.npz,
 vision.json) — the same folder `student_tags.py fetch` puts the Modal videos in, so training,
 export and 🎓 picks see laptop videos like any other (they just have no teacher answers). Then the
 student scores every half second → catalogue/student_scores on Drive.
@@ -50,9 +50,20 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import trial_logic as TL  # noqa: E402
 
-WORK = HERE / "_student"
+
+
+def work_root() -> Path:
+    """config.py's WORK_DIR (scene-labeling\\data), else next to this script — as student_tags.py."""
+    try:
+        import config
+        return Path(getattr(config, "WORK_DIR", HERE))
+    except Exception:      # noqa: BLE001
+        return HERE
+
+
+WORK = work_root() / "_student"
 VIDEOS = WORK / "videos"
-MODELS = HERE / "_vision_models"          # pose weights (downloaded once by ultralytics)
+MODELS = work_root() / "_vision_models"   # pose weights (downloaded once by ultralytics)
 LOG = WORK / "local_vision_log.json"
 EMB_MODEL = "google/siglip2-so400m-patch14-384"     # same as modal_trial.EMB_MODEL
 POSE_MODEL = "yolo11m-pose.pt"                       # same as modal_trial.POSE_MODEL

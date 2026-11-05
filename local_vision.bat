@@ -19,8 +19,8 @@ rem      local_vision.bat check                 one Modal video re-run
 rem                                             here and compared
 rem ============================================================
 
-cd /d "%~dp0"
-set VENV=.venv
+cd /d "%~dp0scripts"
+set VENV=..\.venv
 
 if not exist "%VENV%\Scripts\activate.bat" (
     echo Could not find the virtual environment at "%CD%\%VENV%".

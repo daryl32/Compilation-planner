@@ -7,7 +7,7 @@ rem  No Modal GPU credit is used.
 rem
 rem  Double-click: fetch what's new from Modal (a free download),
 rem  copy your latest labels, train model v1 and score it on the
-rem  test set. The report is saved here as student_report.md
+rem  test set. The report is saved in data\student_report.md
 rem
 rem  First press "Save edits to Drive" in the app so your newest
 rem  labels are on Drive.
@@ -21,8 +21,8 @@ rem      student_tags.bat export --name v4          scores for every half
 rem                                                 second -> Drive catalogue
 rem ============================================================
 
-cd /d "%~dp0"
-set VENV=.venv
+cd /d "%~dp0scripts"
+set VENV=..\.venv
 
 if not exist "%VENV%\Scripts\activate.bat" (
     echo Could not find the virtual environment at "%CD%\%VENV%".

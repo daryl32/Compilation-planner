@@ -16,8 +16,8 @@ rem  The report is saved here as trial_report.md
 rem  (trial_report_smoke.md for the smoke test).
 rem ============================================================
 
-cd /d "%~dp0"
-set VENV=.venv
+cd /d "%~dp0scripts"
+set VENV=..\.venv
 
 if not exist "%VENV%\Scripts\activate.bat" (
     echo Could not find the virtual environment at "%CD%\%VENV%".

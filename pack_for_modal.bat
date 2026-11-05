@@ -15,10 +15,10 @@ rem      pack_for_modal.bat --upload        pack, then upload to Modal
 rem ============================================================
 
 rem Always run from the folder this .bat lives in (the scene-labeling folder)
-cd /d "%~dp0"
+cd /d "%~dp0scripts"
 
 rem Name of the virtual environment folder - change this if yours is called something else
-set VENV=.venv
+set VENV=..\.venv
 
 if not exist "%VENV%\Scripts\activate.bat" (
     echo Could not find the virtual environment at "%CD%\%VENV%".

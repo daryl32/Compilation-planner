@@ -26,10 +26,10 @@ rem      run_audio_analysis.bat --only "Song name"
 rem ============================================================
 
 rem Always run from the folder this .bat lives in (the scene-labeling folder)
-cd /d "%~dp0"
+cd /d "%~dp0scripts"
 
 rem Name of the virtual environment folder - change this if yours is called something else
-set VENV=.venv
+set VENV=..\.venv
 
 for %%F in (analyse_audio_local.py audio_analysis.py config.py) do (
     if not exist "%%F" (

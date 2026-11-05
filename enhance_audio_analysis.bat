@@ -17,8 +17,8 @@ rem      enhance_audio_analysis.bat --only "Song name"
 rem      enhance_audio_analysis.bat --no-vocals     bar lines only
 rem ============================================================
 
-cd /d "%~dp0"
-set VENV=.venv
+cd /d "%~dp0scripts"
+set VENV=..\.venv
 
 for %%F in (analyse_audio_local.py audio_analysis.py config.py) do (
     if not exist "%%F" (

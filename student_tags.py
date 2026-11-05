@@ -22,7 +22,8 @@ Usage (from the activated .venv in the scene-labeling folder, or student_tags.ba
     python student_tags.py export --name v4  every half second of every video → catalogue/student_scores
     python student_tags.py picks --name v5b  the moments worth labelling next → 🎯 Training Labels → 🎓 Student's picks
 
-Everything is written to _student next to this script (genuine local disk, not Google Drive):
+Everything is written to _student in config.py's WORK_DIR (else next to this script; genuine local disk,
+not Google Drive):
     _student/videos/<video_id>/  embeddings.npz, tags_32b.json, person_curve.npy
     _student/library/            training_labels.json, tag_vocabulary.csv (copied at fetch time)
     _student/testset.json, test_runs.json, batches.json
@@ -47,7 +48,19 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import trial_logic as TL  # noqa: E402
 
-WORK = HERE / "_student"
+
+
+def work_root() -> Path:
+    """Where the laptop keeps its working data: config.py's WORK_DIR when set (the scene-labeling
+    folder's data\\ since the 5 Nov tidy-up), else next to this script as before."""
+    try:
+        import config
+        return Path(getattr(config, "WORK_DIR", HERE))
+    except Exception:      # noqa: BLE001 — no config.py (tests, a bare checkout)
+        return HERE
+
+
+WORK = work_root() / "_student"
 VOLUME = "media-train"
 TEACHER_FILE = "tags_32b.json"            # 32b and 32b-fp8 (+ LoRA) all write this one
 VIDEO_FILES = ("embeddings.npz", TEACHER_FILE, "person_curve.npy", "detections.npz", "vision.json")
@@ -1171,7 +1184,7 @@ def _score(models, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta
         md = "\n".join(lines)
     meta["reference_run"] = ref["id"] if ref else None
     md += "\n\n" + trust_markdown(ds) + "\n\n" + scene_rules_markdown(ds)
-    report = HERE / "student_report.md"
+    report = work_root() / "student_report.md"
     report.write_text(md, encoding="utf-8")
     (WORK / "models" / name / "student_report.md").write_text(md, encoding="utf-8")
     print("\n" + "\n".join(md.splitlines()[:14]) + f"\n\nFull report (per tag) → {report}")
