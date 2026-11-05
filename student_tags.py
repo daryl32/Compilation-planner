@@ -57,12 +57,12 @@ COPY_WEIGHT = 0.5                         # a teacher answer copied from a near-
 SCENE_WEIGHT = 2.0                        # a moment inside a scene you corrected in the Reviewer
 SCENE_STEP = 2.0                          # extra moments taken every this many seconds in those scenes
 SCENE_EDGE = 1.0                          # …but not this close to the scene's start / end (cuts)
-SCENE_MIN_USES = 20                       # a tag's Reviewer answers count once you've used it on this many scenes
-# Groups whose tags hold for a whole scene (a tag on the scene = on every moment of it). Other tags
-# (actions, camera, shot size) are taken as present only where the teacher also saw them at that moment;
-# a tag left off a corrected scene counts as absent everywhere in it, whatever its group.
-SCENE_WIDE_GROUPS = {"appearance", "clothing", "overlay", "prop", "position"}
-SCENE_WIDE_TAGS = {"pov"}
+# A tag's Reviewer answers are only used where they match your moment labels inside the same scenes
+# (scene_rules): need this many of your labels in corrected scenes, and this much agreement.
+SCENE_MIN_CHECKS = 15
+SCENE_ABSENT_AGREE = 0.92                 # left off the scene → absent everywhere
+SCENE_WIDE_AGREE = 0.85                   # on the scene → present everywhere
+SCENE_TEACHER_AGREE = 0.50                # on the scene → present where the teacher saw it too
 VAL_SHARE = 0.12                          # training videos kept aside to pick thresholds / stop early
 SEED = 7
 
@@ -187,40 +187,63 @@ def _reviewer_scenes() -> dict:
     return (_read_json(WORK / "library" / "reviewer_scenes.json", {}) or {}).get("videos") or {}
 
 
-def scene_evidence(vocab: list, scenes: dict, min_uses: int = SCENE_MIN_USES) -> tuple:
-    """(tags whose Reviewer answers count — lower-case, scene-wide lower-case tags). A tag counts once
-    you've put it on at least min_uses corrected scenes: a newer tag you've hardly used in the Reviewer
-    would otherwise be 'absent' from every scene you reviewed before it existed."""
-    uses = {}
-    for rows in scenes.values():
-        for _, _, tags in rows:
-            for t in {str(x).lower() for x in tags}:
-                uses[t] = uses.get(t, 0) + 1
-    trusted = {r["tag"].lower() for r in vocab if uses.get(r["tag"].lower(), 0) >= min_uses}
-    wide = {r["tag"].lower() for r in vocab
-            if r.get("kind") != "motion" and (str(r.get("group") or "").lower() in SCENE_WIDE_GROUPS
-                                              or r["tag"].lower() in SCENE_WIDE_TAGS)}
-    return trusted, wide
+def scene_agreement(vocab: list, scenes: dict, labels: list, test: set) -> dict:
+    """How well your Reviewer scene answers match your moment labels, per tag: every 🎯 / ✏️ label
+    (outside the test set) that falls inside a scene you corrected is checked against that scene.
+    {tag lower: {"absent_n", "absent_ok", "present_n", "present_ok"}} — absent_ok = the scene left
+    the tag off and your label agrees; present_ok = the scene has it and so does your label."""
+    names = {r["tag"].lower() for r in vocab}
+    out = {t: {"absent_n": 0, "absent_ok": 0, "present_n": 0, "present_ok": 0} for t in names}
+    for i in labels:
+        v = i.get("video_id")
+        if v in test or v not in scenes:
+            continue
+        sc = _scene_at(scenes[v], float(i["t"]), edge=0.0)
+        if sc is None:
+            continue
+        on = {str(x).lower() for x in sc}
+        mine = {str(x).lower() for x in i.get("tags") or []}
+        for t in names:
+            k = "present" if t in on else "absent"
+            out[t][f"{k}_n"] += 1
+            out[t][f"{k}_ok"] += (t in mine) == (t in on)
+    return out
 
 
-def apply_scene(y: np.ndarray, w: np.ndarray, scene_tags, tag_ix: dict, trusted: set, wide: set,
-                teacher_saw: set, weight: float = SCENE_WEIGHT) -> int:
-    """Put a corrected scene's answer onto one moment (in place): a trusted tag left off the scene →
-    absent; one on it → present when it's scene-wide or the teacher saw it here too. Returns how many
-    tags were set."""
+def scene_rules(vocab: list, agreement: dict, min_n: int = SCENE_MIN_CHECKS) -> dict:
+    """Which Reviewer scene answers to use, decided per tag by how often they match your labels:
+      "absent"       — left off a scene → absent at every moment (when ≥ 92% of your labels agree);
+      "wide"         — on a scene → present at every moment (≥ 85% agree; never a motion tag);
+      "with_teacher" — on a scene → present only where the teacher saw it too (≥ 50% agree).
+    A tag with fewer than min_n of your labels inside corrected scenes on that side isn't used."""
+    motion = {r["tag"].lower() for r in vocab if r.get("kind") == "motion"}
+    rules = {"absent": set(), "wide": set(), "with_teacher": set()}
+    for t, a in agreement.items():
+        if a["absent_n"] >= min_n and a["absent_ok"] / a["absent_n"] >= SCENE_ABSENT_AGREE:
+            rules["absent"].add(t)
+        if a["present_n"] >= min_n:
+            share = a["present_ok"] / a["present_n"]
+            if share >= SCENE_WIDE_AGREE and t not in motion:
+                rules["wide"].add(t)
+            elif share >= SCENE_TEACHER_AGREE:
+                rules["with_teacher"].add(t)
+    return rules
+
+
+def apply_scene(y: np.ndarray, w: np.ndarray, scene_tags, tag_ix: dict, rules: dict, teacher_saw: set,
+                weight: float = SCENE_WEIGHT) -> int:
+    """Put a corrected scene's answer onto one moment (in place), following scene_rules(). Returns how
+    many tags were set."""
     on = {str(t).lower() for t in scene_tags or []}
     n = 0
-    for low in trusted:
-        j = tag_ix.get(low)
-        if j is None:
-            continue
+    for low, j in tag_ix.items():
         if low not in on:
-            y[j], w[j] = 0.0, weight
-        elif low in wide or low in teacher_saw:
+            if low in rules["absent"]:
+                y[j], w[j] = 0.0, weight
+                n += 1
+        elif low in rules["wide"] or (low in rules["with_teacher"] and low in teacher_saw):
             y[j], w[j] = 1.0, weight
-        else:
-            continue
-        n += 1
+            n += 1
     return n
 
 
@@ -306,7 +329,9 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
     tag_ix = {t.lower(): j for j, t in enumerate(tags)}
     n = len(tags)
     teacher_on = np.array([1.0 if r.get("teacher", True) else 0.0 for r in vocab], np.float32)
-    trusted, wide = scene_evidence(vocab, scenes)
+    agreement = scene_agreement(vocab, scenes, labels, test)
+    rules = scene_rules(vocab, agreement)
+    trusted = rules["absent"] | rules["wide"] | rules["with_teacher"]
     by_video = {}
     for i in labels:
         by_video.setdefault(i["video_id"], []).append(i)
@@ -352,7 +377,7 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
                 sc = _scene_at(vscenes, t) if vscenes else None
                 if sc is not None:
                     saw = {k for k, j in tag_ix.items() if y[j] >= 0.5}
-                    if apply_scene(y, w, sc, tag_ix, trusted, wide, saw, scene_weight):
+                    if apply_scene(y, w, sc, tag_ix, rules, saw, scene_weight):
                         counts["teacher_in_scenes"] += 1
                 add(v, t, y, w)
                 taken.append(t)
@@ -364,7 +389,7 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
                     if taken.size and np.min(np.abs(taken - t)) < SCENE_STEP / 2:
                         continue
                     y, w = np.zeros(n, np.float32), np.zeros(n, np.float32)
-                    if apply_scene(y, w, sc, tag_ix, trusted, wide, set(), scene_weight):
+                    if apply_scene(y, w, sc, tag_ix, rules, set(), scene_weight):
                         add(v, float(t), y, w)
                         counts["scene_extra"] += 1
         for i in mine:
@@ -381,7 +406,8 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
     return {"E": np.concatenate(E), "idx": np.stack(idx).astype(np.int64), "y": np.stack(ys),
             "w": np.stack(ws).astype(np.float32), "video": np.asarray(vids), "is_label": np.asarray(is_lab),
             "gold_id": np.asarray(gids), "t": np.asarray(ts), "videos": used, "skipped": skipped,
-            "tags": tags, "counts": counts, "scene_tags_used": sorted(trusted)}
+            "tags": tags, "counts": counts, "scene_tags_used": sorted(trusted),
+            "scene_rules": {k: sorted(v) for k, v in rules.items()}, "scene_agreement": agreement}
 
 
 def split_videos(videos: list, test: set, share: float = VAL_SHARE, seed: int = SEED) -> tuple:
@@ -771,7 +797,7 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5) 
     meta = {"name": name, "created": time.strftime("%Y-%m-%d %H:%M"), "tags": ds["tags"],
             "thresholds": [float(x) for x in thresholds], "dim": int(ds["E"].shape[1]), "half": HALF,
             "step": STEP, "label_weight": label_weight, "folds": folds, "counts": ds["counts"],
-            "scene_tags_used": ds["scene_tags_used"],
+            "scene_tags_used": ds["scene_tags_used"], "scene_rules": ds["scene_rules"],
             "epochs_run": [len(h) for h in hists], "history": hists,
             "train_minutes": round(minutes, 2), "videos": len(ds["videos"]), "test_videos": sorted(test),
             "labels_newest": max((i.get("labelled_at") or "" for i in labels), default="")}
@@ -794,11 +820,38 @@ def _score(models, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta
     md, res = score_report(ds, prob, test_rows, thresholds, vocab, labels, ref, name)
     meta["scores"] = {k: v["overall"] for k, v in res.items()}
     meta["reference_run"] = ref["id"] if ref else None
+    md += "\n\n" + scene_rules_markdown(ds)
     report = HERE / "student_report.md"
     report.write_text(md, encoding="utf-8")
     (WORK / "models" / name / "student_report.md").write_text(md, encoding="utf-8")
     print("\n" + "\n".join(md.splitlines()[:14]) + f"\n\nFull report (per tag) → {report}")
     return 0
+
+
+def scene_rules_markdown(ds: dict) -> str:
+    """Which of your Reviewer scene answers were used, per tag, and how well they matched your labels."""
+    ag, rules = ds.get("scene_agreement") or {}, ds.get("scene_rules") or {}
+    c = ds.get("counts") or {}
+    if not ag:
+        return ""
+    names = {t.lower(): t for t in ds["tags"]}
+
+    def pct(ok, n):
+        return f"{100 * ok / n:.0f}% of {n}" if n else "–"
+    md = ["## Your Reviewer scene answers", "",
+          f"{c.get('teacher_in_scenes', 0)} teacher moments took your scene's answer and {c.get('scene_extra', 0)} "
+          "extra moments came from your corrected scenes. Each tag's scene answers are used only where they "
+          "matched your moment labels inside the same scenes:", "",
+          "| Tag | Left off the scene — your label agrees | On the scene — your label agrees | Used as |",
+          "|---|---|---|---|"]
+    for low, a in sorted(ag.items(), key=lambda kv: -(kv[1]["present_n"] + kv[1]["absent_n"])):
+        if not a["present_n"] and not a["absent_n"]:
+            continue
+        use = [x for x, k in (("absent when left off", "absent"), ("present all scene", "wide"),
+                              ("present where the teacher saw it", "with_teacher")) if low in rules.get(k, [])]
+        md.append(f"| {names.get(low, low)} | {pct(a['absent_ok'], a['absent_n'])} | "
+                  f"{pct(a['present_ok'], a['present_n'])} | {', '.join(use) or 'not used'} |")
+    return "\n".join(md)
 
 
 def load_models(name: str) -> tuple:
