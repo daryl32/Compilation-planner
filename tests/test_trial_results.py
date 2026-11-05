@@ -118,6 +118,13 @@ def test_view(bundle, sub):
         at.session_state["tr_filter"] = "mine"
         at.run()
         assert not errors(at), errors(at)
+        at.session_state["tr_filter"] = "all"
+        at.session_state["tr_tag"] = "dance"
+        at.session_state["tr_by"] = "both"
+        at.run()
+        assert not errors(at), errors(at)
+        assert not at.info                                        # you and the 32B both picked "dance"
+        assert at.session_state["tr_by"] == "both"
     elif sub == "📋 Report":
         assert "Hello." in md
 
@@ -655,3 +662,19 @@ def test_look_check_form_on_a_card(bundle, no_labels):
     assert any("1 frame(s) checked" in e.label for e in at.expander)
     assert any("12 of 13 right" in e.label for e in at.expander)
     TR.LOOK_CHECKS_FILE.unlink()
+
+
+def test_filter_picked_by_counts_confirmed_tags_only():
+    me = {"mine": ["Wide shot"], "teachers": {"32b": {"tags": ["Close-up"], "unsure": ["Wide shot"]}}, "old": []}
+    model = {"mine": ["Close-up"], "teachers": {"32b": {"tags": ["Wide shot"], "unsure": []}}, "old": []}
+    both = {"mine": ["wide shot"], "teachers": {"32b": {"tags": ["Wide shot"]}}, "old": []}
+    unlabelled = {"teachers": {"32b": {"tags": ["Wide shot"]}}, "old": []}
+    unsure_only = {"teachers": {"32b": {"tags": [], "unsure": ["Wide shot"]}}, "old": []}
+    old_only = {"teachers": {"32b": {"tags": []}}, "old": ["Wide shot"]}
+    ms = [me, model, both, unlabelled, unsure_only, old_only]
+    f = lambda by, skip=True: TR.filter_moments(ms, "all", "Wide shot", skip_old=skip, by=by)
+    assert f("mine") == [me, both]
+    assert f("model") == [model, both, unlabelled]
+    assert f("both") == [both]
+    assert f("any") == [me, model, both, unlabelled]
+    assert f("any", skip=False) == [me, model, both, unlabelled, old_only]

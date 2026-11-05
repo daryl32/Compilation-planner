@@ -228,11 +228,21 @@ def _compare(data: dict) -> None:
     if st.session_state.get("tr_tag") not in ["(any tag)"] + all_tags:
         st.session_state["tr_tag"] = "(any tag)"          # e.g. an old-only tag after turning 🙈 on
     tag = c[2].selectbox("Tag", ["(any tag)"] + all_tags, key="tr_tag")
+    by = "any"
+    if tag != "(any tag)":
+        if st.session_state.get("tr_by") not in TR.PICKED_BY:
+            st.session_state["tr_by"] = "any"
+        by = st.segmented_control(
+            "Picked by", list(TR.PICKED_BY), key="tr_by", format_func=TR.PICKED_BY.get,
+            help="Only confirmed tags count — your saved labels and the model's tags, never its unsure "
+                 "(grey?) ones. 👤 Me = frames you tagged with it · 🤖 The model = the model tagged it · "
+                 "🤝 Both of us = you and the model agree. Anyone also counts the old tags unless 🙈 is on.") \
+            or "any"
     pool = [(v, m) for v in (sorted(videos) if vid == "(all videos)" else [vid]) for m in videos[v]["moments"]]
     vocab_rows, _ = TLB.load_vocabulary()
     problems = (lambda tags: TLB.rule_problems(tags, vocab_rows))
     moments = [(v, m) for v, m in pool
-               if TR.filter_moments([m], how, None if tag == "(any tag)" else tag, problems, skip_old=no_old)]
+               if TR.filter_moments([m], how, None if tag == "(any tag)" else tag, problems, skip_old=no_old, by=by)]
     sus, sus_runs = {}, []
     if how == "suspect":
         # 🔍 your labels that every chosen test run disagrees with — the likeliest mislabels

@@ -187,11 +187,37 @@ def ordered(items: list, how: str = "video", seed: int = 0) -> list:
     return items
 
 
+PICKED_BY = {
+    "any": "Anyone",
+    "mine": "👤 Me",
+    "model": "🤖 The model",
+    "both": "🤝 Both of us",
+}
+
+
+def picked_by(moment: dict, tag: str, who: str = "any", skip_old: bool = False) -> bool:
+    """Whether this moment has the tag as a confirmed pick by who: "mine" = your saved label, "model" =
+    a model's tags (never its unsure ones), "both" = you and a model, "any" = you, a model, or (unless
+    skip_old) the old tags."""
+    tn = norm(tag)
+    sets = tag_sets(moment)
+    mine = tn in sets.get("mine", set())
+    model = any(tn in s for k, s in sets.items() if k not in ("mine", "old"))
+    if who == "mine":
+        return mine
+    if who == "model":
+        return model
+    if who == "both":
+        return mine and model
+    return mine or model or (not skip_old and tn in sets["old"])
+
+
 def filter_moments(moments: list, how: str = "all", tag: str | None = None, problems=None,
-                   skip_old: bool = False) -> list:
+                   skip_old: bool = False, by: str = "any") -> list:
     """problems: tags -> list of rule problems (training_labels.rule_problems with your vocabulary),
     for the "rules" filter — your labelled frames whose tags break a rule. skip_old: the tag filter looks
-    only at the models' tags (and yours), not the old tags."""
+    only at the models' tags (and yours), not the old tags. by: whose confirmed picks the tag filter
+    looks at (PICKED_BY) — a model's unsure tags never count."""
     out = []
     for m in moments:
         if how == "rules" and (m.get("mine") is None or not problems or not problems(m["mine"])):
@@ -206,7 +232,7 @@ def filter_moments(moments: list, how: str = "all", tag: str | None = None, prob
             continue
         if how == "neighbours" and not any((r or {}).get("neighbour_added") for r in (m.get("teachers") or {}).values()):
             continue
-        if tag and not any(norm(tag) in s for k, s in tag_sets(m).items() if not (skip_old and k == "old")):
+        if tag and not picked_by(m, tag, by, skip_old):
             continue
         out.append(m)
     return out
