@@ -229,7 +229,7 @@ def test_train_with_pose(tmp_path, monkeypatch):
         np.savez_compressed(v / "detections.npz", **_detections(1800))
     monkeypatch.setattr(S, "WORK", tmp_path)
     monkeypatch.setattr(S, "HERE", tmp_path)
-    assert S.main(["train", "--name", "p1", "--epochs", "4", "--folds", "2", "--pose", "--no-context"]) == 0
+    assert S.main(["train", "--name", "p1", "--epochs", "4", "--folds", "2", "--pose"]) == 0
     meta = json.loads((tmp_path / "models" / "p1" / "meta.json").read_text())
     assert meta["pose_dim"] == S.POSE_DIM and meta["dim"] == DIM
     assert (tmp_path / "videos" / "vid00" / "pose_feats.npz").exists()
@@ -257,10 +257,43 @@ def test_train_with_context_and_export(tmp_path, monkeypatch):
         (v / "vision.json").write_text(json.dumps({"cuts": [20.0, 40.0, 60.0, 80.0, 100.0]}))
     monkeypatch.setattr(S, "WORK", tmp_path)
     monkeypatch.setattr(S, "HERE", tmp_path)
-    assert S.main(["train", "--name", "c1", "--epochs", "8", "--folds", "3"]) == 0
+    assert S.main(["train", "--name", "c1", "--epochs", "8", "--folds", "3", "--context"]) == 0
     meta = json.loads((tmp_path / "models" / "c1" / "meta.json").read_text())
     assert meta["context"] and "scores_step1" in meta and meta["pose_dim"] == 0
     assert len(list((tmp_path / "models" / "c1").glob("ctx_*.pt"))) == 3
     assert "step 1 only (no time context)" in (tmp_path / "student_report.md").read_text()
     assert S.export("c1", dest=tmp_path / "out") == 0
     assert S.main(["score", "--name", "c1"]) == 0
+
+
+def test_picks(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    labels, test = _library(tmp_path, n_videos=8)
+    monkeypatch.setattr(S, "WORK", tmp_path)
+    monkeypatch.setattr(S, "HERE", tmp_path)
+    assert S.main(["train", "--name", "k1", "--epochs", "4", "--folds", "2"]) == 0
+    dest = tmp_path / "picks.json"
+    assert S.make_picks("k1", n=20, n_test=6, dest=dest) == 0
+    picks = json.loads(dest.read_text())["picks"]
+    tr = [p for p in picks if p["set"] == "train"]
+    te = [p for p in picks if p["set"] == "test"]
+    assert 0 < len(tr) <= 20 and 0 < len(te) <= 6
+    assert all(p["video_id"] in test for p in te) and not any(p["video_id"] in test for p in tr)
+    assert all(p["why"] for p in tr)
+    lab = {}
+    for i in labels:
+        lab.setdefault(i["video_id"], []).append(i["t"])
+    for p in picks:                                   # never next to a moment you labelled
+        assert all(abs(p["t"] - t) >= S.PICK_NEAR_LABEL for t in lab.get(p["video_id"], []))
+    by_v = {}
+    for p in picks:
+        by_v.setdefault(p["video_id"], []).append(p["t"])
+    for ts in by_v.values():                          # spread out within a video
+        ts.sort()
+        assert all(b - a >= S.PICK_GAP for a, b in zip(ts, ts[1:]))
+    assert picks[4]["set"] == "test"                  # every 5th card a test-set one
+
+
+def test_uncertainty_peaks_at_cutoff():
+    u = S.uncertainty(np.array([[0.4, 0.95, 0.05]]), np.array([0.4, 0.4, 0.4]))
+    assert u[0, 0] == 1 and u[0, 1] < 0.1 and u[0, 2] < 0.5

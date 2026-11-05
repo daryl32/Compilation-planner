@@ -38,7 +38,8 @@ top_button("tl-top", wrap_css("tl_wrap", 120) + menu_css()
            + "[class*='st-key-tl_wrap_act'] button{min-height:3.1rem;font-size:1.05rem}"
            "[class*='st-key-tl_card'] [data-testid='stButtonGroup'] button{min-height:2.4rem;font-size:.98rem}")
 
-MIXES = {"mixed": "🎲 Mixed", "tags": "🏷️ Tags only", "boundary": "✂️ Scene changes only"}
+MIXES = {"mixed": "🎲 Mixed", "tags": "🏷️ Tags only", "boundary": "✂️ Scene changes only",
+         "student": "🎓 Student's picks"}
 VERDICTS = {"cut": "✂️ Yes, new scene", "no_cut": "➖ No, same scene", "unsure": "🤷 Not sure"}
 SOURCE_QUESTION = {
     "detected": "The scene detector cut here. **Is this really a new scene?**",
@@ -55,8 +56,17 @@ mix = st.sidebar.radio("Cards", list(MIXES), format_func=MIXES.get, key="tl_mix"
 deck_size = st.sidebar.select_slider("Cards per round", [10, 20, 30, 50], value=20, key="tl_size")
 use_range = st.sidebar.toggle("Use library range", value=True, key="tl_range",
                               help="Only pick frames inside each video's Media Library time range.")
-st.sidebar.caption("New cards lean toward videos with the fewest labels and scenes nobody has "
-                   "reviewed yet.")
+if mix == "student":
+    _sp = TL.load_student_picks()
+    if _sp:
+        st.sidebar.caption(f"Picked by the student model **{_sp.get('model', '?')}** ({_sp.get('created', '?')}): "
+                           "the moments where it's least sure about a tag the teacher is weak on, plus random "
+                           "🧪 test-set moments. Its own tags are filled in — fix them.")
+    else:
+        st.sidebar.caption("No picks yet — run `student_tags.bat picks --name v5b` on the laptop, then ☁️ Sync.")
+else:
+    st.sidebar.caption("New cards lean toward videos with the fewest labels and scenes nobody has "
+                       "reviewed yet.")
 
 with st.container(key="mainnav_tl"):   # the page's main menu — styled as tabs (menu_css)
     view = st.radio("View", ["🎯 Label", "📊 Progress", "📒 Vocabulary", "🧪 Trial results"], horizontal=True,
@@ -186,7 +196,9 @@ def label_view() -> None:
     st.caption(f"So far: 🏷️ {sm['tags']} frames tagged · ✂️ {sm['boundaries']} scene changes checked · "
                f"🎬 {sm['videos']} videos · vocabulary from **{vocab_source}**")
     if not deck:
-        st.info("No cards to show — no video has a preview copy here yet (or every frame is labelled).")
+        st.info("No student picks left — make new ones on the laptop (`student_tags.bat picks`) and ☁️ Sync."
+                if mix == "student" else
+                "No cards to show — no video has a preview copy here yet (or every frame is labelled).")
         return
     if pos >= len(deck):
         st.success(f"Round done — {len(deck)} cards. 🎉")
@@ -196,6 +208,10 @@ def label_view() -> None:
     st.progress(pos / len(deck), text=f"Card {pos + 1} of {len(deck)}")
     sc = "" if card.get("scene_id") is None else f" · scene {card['scene_id']}"
     extra = " · not reviewed yet" if card["type"] == "tags" and not card.get("reviewed") else ""
+    if card.get("why") or card.get("set") == "test":
+        st.caption(" · ".join(x for x in (
+            "🧪 Test-set moment — grows the test set" if card.get("set") == "test" else "",
+            f"🎓 The student isn't sure: {card['why']}" if card.get("why") else "") if x))
     st.caption(f"{'🏷️ Tags' if card['type'] == 'tags' else '✂️ Scene change'} · **{card['video_id']}** · "
                f"{format_mmss(card['t'])}{sc}{extra}")
     with st.container(key="tl_card", border=True):

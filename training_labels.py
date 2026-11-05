@@ -580,9 +580,59 @@ def pick_boundary_cards(videos: dict, n: int, items: list, ranges: dict = None, 
     return cards
 
 
+STUDENT_PICKS = CATALOGUE_DIR / "trial_results" / "student_picks.json"
+
+
+def load_student_picks() -> dict:
+    """The student model's picks (made on the laptop by student_tags.py picks, synced from Drive):
+    {"model", "created", "picks": [{"video_id", "t", "why", "tags", "set": "train" | "test"}]}, or {}."""
+    try:
+        data = json.loads(STUDENT_PICKS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def pick_student_cards(videos: dict, n: int, items: list, ranges: dict = None, *, has_media=None,
+                       picks: dict = None) -> list:
+    """The next n of the student's picks, in its order (most useful first): moments where it is least
+    sure about a tag the teacher is weak on, plus random 🧪 test-set moments that grow the test set.
+    Left out: videos with nothing to show, excluded scenes, moments outside the library range and
+    anything within 3 s of a moment you've labelled already. The student's own tags are prefilled."""
+    picks = load_student_picks() if picks is None else picks
+    ranges = ranges or {}
+    by_vid = {v["video_id"]: v for v in videos.values()}
+    taken = {}
+    for i in items:
+        if i.get("type") == "tags" and i.get("t") is not None:
+            taken.setdefault(i["video_id"], []).append(i["t"])
+    cards = []
+    for pk in picks.get("picks") or []:
+        if len(cards) >= n:
+            break
+        vid, t = pk.get("video_id"), pk.get("t")
+        if vid not in by_vid or t is None or (has_media and not has_media(vid)):
+            continue
+        t = round(float(t), 2)
+        hit = next(((sc, a, b) for sc, a, b in _usable_scenes(by_vid[vid], ranges.get(vid))
+                    if a + EDGE_SEC <= t <= b - EDGE_SEC), None)
+        if hit is None or _near_existing(vid, t, taken, 3.0):
+            continue
+        sc, a, b = hit
+        taken.setdefault(vid, []).append(t)
+        cards.append({"id": card_id("tags", vid, t), "type": "tags", "video_id": vid, "scene_id": sc["scene_id"],
+                      "t": t, "scene_start": sc["start"], "scene_end": sc["end"],
+                      "suggested": list(pk.get("tags") or []), "reviewed": bool(sc.get("reviewed")),
+                      "why": pk.get("why") or "", "set": pk.get("set") or "train"})
+    return cards
+
+
 def build_deck(videos: dict, n: int, mix: str, items: list, ranges: dict = None, *, seed=None,
                curves=None, has_media=None) -> list:
-    """A shuffled deck of n cards. mix: "tags", "boundary" or "mixed" (about 70 / 30)."""
+    """A shuffled deck of n cards. mix: "tags", "boundary" or "mixed" (about 70 / 30), or "student"
+    (the student model's picks, in its order — not shuffled)."""
+    if mix == "student":
+        return pick_student_cards(videos, n, items, ranges, has_media=has_media)
     n_b = 0 if mix == "tags" else n if mix == "boundary" else max(1, round(n * 0.3))
     deck = (pick_tag_cards(videos, n - n_b, items, ranges, seed=seed, has_media=has_media)
             + pick_boundary_cards(videos, n_b, items, ranges, seed=None if seed is None else seed + 1,

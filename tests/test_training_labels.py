@@ -186,6 +186,27 @@ def test_sharpest_change():
     assert TL.sharpest_change([1, 2], 10.0) is None
 
 
+def test_student_picks_cards():
+    videos = _videos()
+    vid = "vid_a"
+    v = next(x for x in videos.values() if x["video_id"] == vid)
+    sc = next(s for s in v["scenes"] if not s["excluded"] and s["end"] - s["start"] > 4)
+    mid = round((sc["start"] + sc["end"]) / 2, 2)
+    picks = {"model": "v5b", "picks": [
+        {"video_id": vid, "t": mid, "why": "reverse cowgirl 0.48", "tags": ["wide shot"], "set": "train"},
+        {"video_id": vid, "t": mid + 1.0, "why": "too close to the first", "tags": []},
+        {"video_id": "no_such_video", "t": 5.0, "tags": []},
+        {"video_id": vid, "t": sc["start"] + 0.1, "tags": []},              # on the scene's edge
+    ]}
+    cards = TL.pick_student_cards(videos, 10, [], picks=picks)
+    assert [c["t"] for c in cards] == [mid]
+    c = cards[0]
+    assert c["why"] == "reverse cowgirl 0.48" and c["suggested"] == ["wide shot"] and c["scene_id"] == sc["scene_id"]
+    done = [{"type": "tags", "video_id": vid, "t": mid + 0.5}]
+    assert TL.pick_student_cards(videos, 10, done, picks=picks) == []        # already labelled nearby
+    assert TL.pick_student_cards(videos, 10, [], has_media=lambda v: False, picks=picks) == []
+
+
 def test_build_deck_mix():
     videos = _videos()
     mixed = TL.build_deck(videos, 10, "mixed", [], seed=2)
@@ -270,6 +291,34 @@ def test_page_label_flow(proxy_for_vid_a):
     assert card["type"] == "boundary"
     next(b for b in at.button if b.label == "➖ No, same scene").click().run()
     assert TL.load_labels()[0]["verdict"] == "no_cut"
+
+
+def test_page_student_picks(proxy_for_vid_a):
+    from tests.apptest_util import errors, page_app
+    v = next(x for x in _videos().values() if x["video_id"] == "vid_a")
+    sc = next(s for s in v["scenes"] if not s["excluded"] and s["end"] - s["start"] > 4)
+    mid = round((sc["start"] + sc["end"]) / 2, 2)
+    TL.STUDENT_PICKS.parent.mkdir(parents=True, exist_ok=True)
+    had = TL.STUDENT_PICKS.read_bytes() if TL.STUDENT_PICKS.exists() else None
+    try:
+        TL.STUDENT_PICKS.write_text(json.dumps({"model": "v5b", "created": "2026-11-05 15:30", "picks": [
+            {"video_id": "vid_a", "t": mid, "why": "dance 0.51", "tags": ["dance"], "set": "test"}]}))
+        at = page_app("pages/6_Training_Labels.py")
+        at.session_state["tl_mix"] = "student"
+        at.run()
+        assert not errors(at), errors(at)
+        assert [c["t"] for c in at.session_state["tl_deck"]] == [mid]
+        shown = " ".join(c.value for c in at.caption)
+        assert "dance 0.51" in shown and "Test-set moment" in shown and "v5b" in " ".join(
+            c.value for c in at.sidebar.caption)
+        next(b for b in at.button if b.label == "✅ Save & next").click().run()
+        assert not errors(at), errors(at)
+        assert TL.load_labels()[0]["t"] == mid
+    finally:
+        if had is None:
+            TL.STUDENT_PICKS.unlink(missing_ok=True)
+        else:
+            TL.STUDENT_PICKS.write_bytes(had)
 
 
 @pytest.mark.parametrize("view", ["📊 Progress", "📒 Vocabulary"])

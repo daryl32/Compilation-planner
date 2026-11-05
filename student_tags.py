@@ -20,6 +20,7 @@ Usage (from the activated .venv in the scene-labeling folder, or student_tags.ba
     python student_tags.py score --name v1   score a model you trained before (no training)
     python student_tags.py all --name v3     fetch (incl. your Reviewer corrections) + train
     python student_tags.py export --name v4  every half second of every video → catalogue/student_scores
+    python student_tags.py picks --name v5b  the moments worth labelling next → 🎯 Training Labels → 🎓 Student's picks
 
 Everything is written to _student next to this script (genuine local disk, not Google Drive):
     _student/videos/<video_id>/  embeddings.npz, tags_32b.json, person_curve.npy
@@ -1047,7 +1048,7 @@ def predict_many(models: list, E_t, idx: np.ndarray) -> np.ndarray:
 
 
 def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, use_trust: bool = True,
-          use_pose: bool = False, use_context: bool = True) -> int:
+          use_pose: bool = False, use_context: bool = False) -> int:
     """k models, each trained with a different fifth of the training videos held out (it stops early on
     that fifth). Their held-out answers cover every training video, so each tag's cut-off is picked on
     all of them, not one small split; on the test set the k models' scores are averaged."""
@@ -1300,6 +1301,131 @@ def export(name: str, dest: Path = None, root: Path = None) -> int:
     return 0
 
 
+PICK_STEP = 4                             # candidates every 2 s (half-second steps)
+PICK_GAP = 10.0                           # picks in a video at least this far apart (s)
+PICK_PER_VIDEO = 12
+PICK_NEAR_LABEL = 3.0                     # never within this of a moment you've labelled
+
+
+def pick_priority(trust: dict, labels: list, tags: list) -> np.ndarray:
+    """How much a label on each tag is worth: more where the teacher is weak (your label is the only
+    real teacher there) and where you have few labels so far."""
+    counts = {}
+    for i in labels:
+        for t in i.get("tags") or []:
+            counts[str(t).lower()] = counts.get(str(t).lower(), 0) + 1
+    pr = []
+    for t in tags:
+        tr = (trust or {}).get(t.lower()) or {}
+        weak = 1.0 - (tr["weight"] if tr.get("f1") is not None else 0.5)
+        rare = 1.0 / np.sqrt(1.0 + counts.get(t.lower(), 0) / 25.0)
+        pr.append(max(weak, 0.15) * (0.5 + rare))
+    return np.asarray(pr, np.float32)
+
+
+def uncertainty(prob: np.ndarray, cutoffs: np.ndarray) -> np.ndarray:
+    """1 at a tag's cut-off (the student can't decide), falling to 0 at a sure yes or no."""
+    span = np.maximum(cutoffs, 1.0 - cutoffs)
+    return np.clip(1.0 - np.abs(prob - cutoffs) / span, 0.0, 1.0)
+
+
+def choose_picks(times: np.ndarray, value: np.ndarray, taken, n: int, gap: float = PICK_GAP) -> list:
+    """Greedy: the highest-value moments, at least `gap` apart and away from `taken` times."""
+    out = []
+    for k in np.argsort(-value):
+        if len(out) >= n or value[k] <= 0:
+            break
+        t = float(times[k])
+        if any(abs(t - u) < PICK_NEAR_LABEL for u in taken) or any(abs(t - u) < gap for u in out):
+            continue
+        out.append(t)
+    return out
+
+
+def make_picks(name: str, n: int = 300, n_test: int = 80, dest: Path = None, seed: int = SEED) -> int:
+    """student_picks.json for 🎯 Training Labels → 🎓 Student's picks (catalogue/trial_results on Drive):
+      • training videos: the moments where the student is least sure about a tag worth labelling
+        (the teacher is weak on it / you have few labels), most useful first, ≤12 per video, 10 s apart;
+      • 🧪 test-set videos: random moments (not chosen by the student, so the test set stays fair).
+    Every 5th card is a test-set one. The student's own tags come prefilled."""
+    models, meta = load_models(name)
+    if not models:
+        print(f"No model '{name}' in {WORK / 'models'} — train it first.")
+        return 1
+    ctx_models = load_ctx_models(name, meta)
+    tags = meta["tags"]
+    cutoffs = np.asarray(meta["thresholds"], np.float32)
+    labels, test = _labels(), set(meta.get("test_videos") or test_videos())
+    trust = meta.get("teacher_trust") or teacher_trust(_vocab(), labels, test, WORK / "videos")
+    prio = pick_priority(trust, labels, tags)
+    by_video = {}
+    for i in labels:
+        by_video.setdefault(i["video_id"], []).append(float(i["t"]))
+    rng = np.random.default_rng(seed)
+    train_picks, test_picks = [], []
+    use_pose = bool(meta.get("pose_dim"))
+    vdirs = sorted(p for p in (WORK / "videos").iterdir() if p.is_dir())
+    for k, vdir in enumerate(vdirs, 1):
+        v = vdir.name
+        et, prob = video_timeline(models, vdir, use_pose, meta["dim"])
+        if et is None:
+            continue
+        if ctx_models:
+            prob = predict_ctx(ctx_models, context_features(et, prob, video_cuts(vdir)))
+        sel = np.arange(0, len(et), PICK_STEP)
+        tt, pp = et[sel], prob[sel]
+        edge = (tt > et[0] + 2) & (tt < et[-1] - 2)
+        if v in test:
+            val = rng.random(len(tt)) * edge
+            for t in choose_picks(tt, val, by_video.get(v, []), max(2, n_test // max(len(test), 1))):
+                j = int(np.argmin(np.abs(tt - t)))
+                test_picks.append({"video_id": v, "t": round(t, 2), "set": "test", "why": "",
+                                   "tags": [x for x, p_, c in zip(tags, pp[j], cutoffs) if p_ >= c]})
+            continue
+        u = uncertainty(pp, cutoffs) * prio
+        best = u.argmax(axis=1)
+        val = u.max(axis=1) * edge
+        for t in choose_picks(tt, val, by_video.get(v, []), PICK_PER_VIDEO):
+            j = int(np.argmin(np.abs(tt - t)))
+            b = int(best[j])
+            train_picks.append({"video_id": v, "t": round(t, 2), "set": "train", "value": float(val[j]),
+                                "why": f"{tags[b]} ({pp[j, b]:.2f}, cut-off {cutoffs[b]:.2f})",
+                                "tags": [x for x, p_, c in zip(tags, pp[j], cutoffs) if p_ >= c]})
+        if k % 25 == 0:
+            print(f"   {k} of {len(vdirs)} videos", flush=True)
+    train_picks.sort(key=lambda x: -x["value"])
+    train_picks = train_picks[:n]
+    rng.shuffle(test_picks)
+    test_picks = test_picks[:n_test]
+    out, ti = [], iter(test_picks)
+    for i, pk in enumerate(train_picks, 1):
+        pk.pop("value", None)
+        out.append(pk)
+        if i % 4 == 0:
+            nxt = next(ti, None)
+            if nxt:
+                out.append(nxt)
+    out += list(ti)
+    if dest is None:
+        from config import CATALOGUE_DIR
+        dest = Path(CATALOGUE_DIR) / "trial_results" / "student_picks.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    data = {"model": name, "created": time.strftime("%Y-%m-%d %H:%M"), "picks": out}
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    tmp.replace(dest)
+    why = {}
+    for pk in out:
+        if pk["why"]:
+            t_ = pk["why"].split(" (")[0]
+            why[t_] = why.get(t_, 0) + 1
+    top = ", ".join(f"{t} {c}" for t, c in sorted(why.items(), key=lambda kv: -kv[1])[:8])
+    print(f"{len(out)} picks ({len(train_picks)} where the student is unsure, {len(test_picks)} test-set) → {dest}")
+    print(f"   most picked for: {top}")
+    print("   In the app: ☁️ Sync from Google Drive, then 🎯 Training Labels → Cards: 🎓 Student's picks.")
+    return 0
+
+
 def score(name: str, vs: str, label_weight: float) -> int:
     import torch
     models, meta = load_models(name)
@@ -1330,7 +1456,9 @@ def score(name: str, vs: str, label_weight: float) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Train / score the student tag model on the laptop.")
-    ap.add_argument("command", choices=["fetch", "train", "score", "export", "all"])
+    ap.add_argument("command", choices=["fetch", "train", "score", "export", "picks", "all"])
+    ap.add_argument("--n", type=int, default=300, help="picks: how many where the student is unsure (default 300)")
+    ap.add_argument("--n-test", type=int, default=80, help="picks: how many random test-set moments (default 80)")
     ap.add_argument("--name", default="v1", help="model name (default v1)")
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--label-weight", type=float, default=LABEL_WEIGHT,
@@ -1338,7 +1466,8 @@ def main(argv=None) -> int:
     ap.add_argument("--folds", type=int, default=5, help="models trained, each holding out a different share "
                     "of the training videos (default 5)")
     ap.add_argument("--pose", action="store_true", help="add the body pose (v6 — it didn't help: patchy detections)")
-    ap.add_argument("--no-context", action="store_true", help="no second step over ±10 s of scores (as v5b did)")
+    ap.add_argument("--context", action="store_true", help="add the second step over ±10 s of scores (v7: even "
+                    "overall — fewer wrong tags, more missed)")
     ap.add_argument("--no-teacher-trust", action="store_true",
                     help="count the teacher's answers fully on every tag (as v4 did)")
     ap.add_argument("--vs", default="", help="teacher test run id or label to compare with (default: newest try2)")
@@ -1350,9 +1479,11 @@ def main(argv=None) -> int:
             return rc
     if a.command in ("train", "all"):
         return train(a.name, a.epochs, a.label_weight, a.vs, max(2, a.folds), not a.no_teacher_trust,
-                     a.pose, not a.no_context)
+                     a.pose, a.context)
     if a.command == "export":
         return export(a.name)
+    if a.command == "picks":
+        return make_picks(a.name, a.n, a.n_test)
     return score(a.name, a.vs, a.label_weight)
 
 
