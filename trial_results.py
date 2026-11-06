@@ -221,6 +221,18 @@ def model_has(moment: dict, tag: str) -> bool:
     return any(tn in {norm(t) for t in r.get("tags") or []} for r in (moment.get("teachers") or {}).values())
 
 
+def still_to_review(moment: dict) -> list:
+    """On a batch-tagged frame: the model's tags you haven't said yes or no to yet."""
+    p = moment.get("partial") or {}
+    done = {norm(t) for t in (p.get("yes") or []) + (p.get("no") or [])}
+    out = {}
+    for r in (moment.get("teachers") or {}).values():
+        for t in r.get("tags") or []:
+            if norm(t) not in done:
+                out.setdefault(norm(t), t)
+    return sorted(out.values(), key=str.lower)
+
+
 def picked_by(moment: dict, tag: str, who: str = "any", skip_old: bool = False) -> bool:
     """Whether this moment has the tag as a confirmed pick by who: "mine" = your saved label, "model" =
     a model's tags (never its unsure ones), "both" = you and a model, "any" = you, a model, or (unless

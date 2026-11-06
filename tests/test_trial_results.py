@@ -781,3 +781,45 @@ def test_part_reviewed_toggle_and_finishing_a_frame(bundle, clean_labels):
     m = [m for m in _bundle()["videos"]["vid_a"]["moments"] if m["key"] == "s1_0"][0]
     TLB.save_label(TR.correction_card("vid_a", m, []), tags=["dance", "night"])
     assert [i["type"] for i in TLB.load_labels()] == ["tags"]
+
+
+def test_finish_partials_keeps_only_your_tags(clean_labels):
+    TLB = clean_labels
+    vocab = [dict(r, group_required=(r["group"] == "shot")) for r in VOCAB]
+    ms = [{"video_id": "v", "t": 5.0, "scene_id": 0}, {"video_id": "v", "t": 9.0, "scene_id": 1}]
+    TLB.batch_tag(ms, add=["Cowgirl"], rows=vocab)
+    TLB.batch_tag(ms[:1], add=["Medium shot"], rows=vocab)
+    res = TLB.finish_partials(ms, vocab)
+    assert res["done"] == 1 and res["skipped"] == [("v", 9.0, ["shot"])]     # no shot tag yet → left as it is
+    items = {i["id"]: i for i in TLB.load_labels()}
+    full = items[TLB.card_id("tags", "v", 5.0)]
+    assert full["type"] == "tags" and full["tags"] == ["Cowgirl", "Medium shot"] and full["from_batch"]
+    assert TLB.partial_id("v", 5.0) not in items and TLB.partial_id("v", 9.0) in items
+    TLB.undo_batch(res["undo"])
+    items = {i["id"]: i for i in TLB.load_labels()}
+    assert TLB.card_id("tags", "v", 5.0) not in items and items[TLB.partial_id("v", 5.0)]["type"] == "partial"
+
+
+def test_still_to_review_and_finish_button(bundle, clean_labels):
+    from tests.apptest_util import errors, page_app
+    TLB = clean_labels
+    TLB.batch_tag([{"video_id": "vid_a", "t": 12.0, "scene_id": 1}], add=["dance"])
+    m = [m for m in TR.with_saved_labels(_bundle()["videos"], TLB.load_labels())["vid_a"]["moments"]
+         if m["key"] == "s1_0"][0]
+    assert TR.still_to_review(m) == ["crowd"]                     # the 32B's other tag, not reviewed yet
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_sub"] = "🖼️ Compare tags"
+    at.session_state["tr_only_part"] = True
+    at.run()
+    assert not errors(at), errors(at)
+    assert "? crowd" in " ".join(x.value for x in at.markdown)
+    at.button(key="tr_finish_btn").click().run()
+    at.button(key="tr_finish_yes").click().run()
+    assert not errors(at), errors(at)
+    full = [i for i in TLB.load_labels() if i["type"] == "tags"]
+    assert len(full) == 1 and full[0]["tags"] == ["dance"]
+    assert not [i for i in TLB.load_labels() if i["type"] == "partial"]
+    at.session_state["tr_view"] = "grid"
+    at.run()
+    assert not errors(at), errors(at)

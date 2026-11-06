@@ -262,10 +262,16 @@ def _compare(data: dict) -> None:
                        help="Focus on the model's tags: the Tag filter matches only the model's tags (and "
                             "yours), and the Old row is hidden on the cards. Off = the old tags count and show "
                             "as before.")
-    only_part = st.toggle("🧩 Only part-reviewed frames", key="tr_only_part",
-                          help="Frames you've batch-tagged in ▦ Grid but not yet fully labelled — so you can finish "
-                               "them. ✏️ Correct starts from the model's tags with your batch answers applied; "
-                               "saving makes it a full label.")
+    with st.container(key="tl_wrap_tr_part"):
+        part_cols = st.columns([3, 3])
+    only_part = part_cols[0].toggle(
+        "🧩 Only part-reviewed frames", key="tr_only_part",
+        help="Frames you've batch-tagged in ▦ Grid but not yet fully labelled, with the model's tags you haven't "
+             "reviewed yet listed under each one. ✏️ Correct starts from the model's tags with your batch answers "
+             "applied; saving makes it a full label.")
+    u = st.session_state.get("tr_g_undo")
+    if u:
+        st.button(f"↩️ Undo: {u['what']}", key="tr_g_undo_btn", on_click=_gundo)
     all_tags = sorted({t for v in videos.values() for m in v["moments"]
                        for t in (m.get("mine") or []) + ([] if no_old else (m.get("old") or []))
                        + [x for r in m.get("teachers", {}).values() for x in r.get("tags") or []]},
@@ -320,8 +326,11 @@ def _compare(data: dict) -> None:
                   help="A new random sample. Frames you save drop out of “Not reviewed by me yet”.")
         moments = TR.ordered(moments, "random", st.session_state.get("tr_seed", 0))
 
+    if only_part:
+        with part_cols[1]:
+            _finish_panel(moments, vocab_rows)
     if mode == "grid":
-        _grid(moments, vocab_rows, tag)
+        _grid(moments, vocab_rows, tag, only_part)
         return
     _rules_panel(videos, vocab_rows)
     agr = TR.agreement([m for _, m in pool])
@@ -369,6 +378,8 @@ def _compare(data: dict) -> None:
                     rows.append(_row("You", mine, None))
                 elif m.get("partial"):
                     rows.append(_part_row(m["partial"]))
+                    if only_part:
+                        rows.append(_todo_html(TR.still_to_review(m)))
                 if not no_old:
                     rows.append(_row("Old", m.get("old") or [], mine))
                 for k in here:
@@ -518,7 +529,61 @@ def _gbar(where: str, items: list, rows: list) -> None:
                                 on_click=_gselect, args=(items, False))
 
 
-def _grid(moments: list, rows: list, tag: str) -> None:
+def _todo_html(todo: list, small: bool = False) -> str:
+    """The model's tags you haven't reviewed yet on a batch-tagged frame."""
+    if not todo:
+        return (f'<div class="mp-gstate" style="font-size:{".7rem" if small else ".8rem"};opacity:.7">'
+                "✔ nothing left to review</div>")
+    fs = ".7rem" if small else ".86rem"
+    chips = "".join(f'<span title="the model has it — not reviewed by you yet" style="display:inline-block;'
+                    f'margin:1px 4px 1px 0;padding:0 7px;border-radius:999px;font-size:{fs};color:rgb(214,150,40);'
+                    f'border:1px dashed rgba(214,150,40,.8)">? {html.escape(t)}</span>' for t in todo)
+    label = "" if small else ('<span style="display:inline-block;min-width:4.6rem;font-weight:600;font-size:.86rem">'
+                              "To review</span>")
+    return f'<div class="mp-gstate" style="margin:3px 0">{label}{chips}</div>'
+
+
+def _finish(items: list, rows: list) -> None:
+    res = TLB.finish_partials(items, rows)
+    st.session_state.pop("tr_finish_ask", None)
+    what = f"Finished {res['done']} part-reviewed frame{'s' if res['done'] != 1 else ''}"
+    if res["undo"]:
+        st.session_state["tr_g_undo"] = {"undo": res["undo"], "what": what}
+    st.session_state["tr_saved_note"] = what + (f" · {len(res['skipped'])} left (a needs-a-tag category is empty)"
+                                                if res["skipped"] else "")
+
+
+def _finish_panel(moments: list, rows: list) -> None:
+    """🧹 Remove all not-reviewed tags: every shown batch-tagged frame becomes a full label with only your tags."""
+    items = [{"video_id": v, "scene_id": m.get("scene_id"), "t": float(m["t"]),
+              "label_id": m.get("gold_id") or TR.moment_id(v, m),
+              "suggested": sorted({t for r in (m.get("teachers") or {}).values() for t in r.get("tags") or []})}
+             for v, m in moments if m.get("partial") and m.get("mine") is None]
+    if not st.session_state.get("tr_finish_ask"):
+        st.button(f"🧹 Remove all not-reviewed tags ({len(items)})", key="tr_finish_btn", width="stretch",
+                  disabled=not items, on_click=lambda: st.session_state.update(tr_finish_ask=True),
+                  help="For every frame shown: keep only the tags you added, drop every tag you haven't reviewed, "
+                       "and save it as a full label. Frames with a “needs a tag” category still empty are left.")
+        return
+    group_of = {r["tag"].lower(): r.get("group") or "other" for r in rows}
+    required = [g["group"] for g in TLB.group_settings(rows) if g["required"]]
+    by_pid = {}
+    for v, m in moments:
+        if m.get("partial") and m.get("mine") is None:
+            by_pid[(v, float(m["t"]))] = {group_of.get(t.lower(), "other") for t in m["partial"].get("yes") or []}
+    short = sum(1 for have in by_pid.values() if any(g not in have for g in required))
+    st.warning(f"Save **{len(items) - short}** frame{'s' if len(items) - short != 1 else ''} as full labels with "
+               "only the tags you added — every other tag counts as not there."
+               + (f" **{short}** stay part-reviewed: a “needs a tag” category ({', '.join(required)}) has "
+                  "nothing yet." if short else ""))
+    a, b = st.columns(2)
+    a.button("🧹 Yes, remove them", key="tr_finish_yes", type="primary", width="stretch",
+             on_click=_finish, args=(items, rows))
+    b.button("Cancel", key="tr_finish_no", width="stretch",
+             on_click=lambda: st.session_state.pop("tr_finish_ask", None))
+
+
+def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
     """Small thumbnails packed together: pick tags, tick frames, then ➕ Add / ➖ Remove."""
     st.markdown("<style>" + GRID_CSS + "</style>", unsafe_allow_html=True)
     groups = TLB.chip_groups(rows)
@@ -561,9 +626,6 @@ def _grid(moments: list, rows: list, tag: str) -> None:
                   on_click=lambda: st.session_state.update(tr_g_chosen=[]))
     else:
         st.caption("Pick the tag(s) first, then tick frames — ticks are kept until you press a button below.")
-    u = st.session_state.get("tr_g_undo")
-    if u:
-        st.button(f"↩️ Undo: {u['what']}", key="tr_g_undo_btn", on_click=_gundo)
     if not moments:
         st.info("Nothing matches these filters.")
         return
@@ -588,6 +650,8 @@ def _grid(moments: list, rows: list, tag: str) -> None:
                         st.caption("🖼️ not synced")
                     st.checkbox(format_mmss(m["t"]), key=_gtick_key(v, m), help=f"{v} · scene {m.get('scene_id')}")
                     state = _gstate(m, chosen)
+                    if only_part and m.get("partial") and m.get("mine") is None:
+                        state += _todo_html(TR.still_to_review(m), small=True)
                     if state:
                         st.markdown(state, unsafe_allow_html=True)
         _gbar("bottom", items, rows)

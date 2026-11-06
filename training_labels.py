@@ -492,6 +492,44 @@ def batch_tag(moments: list, add=(), remove=(), rows: list = None) -> dict:
     return out
 
 
+def finish_partials(moments: list, rows: list = None) -> dict:
+    """🧹 Turn batch-tagged frames into full labels holding only the tags you said yes to — every tag you
+    didn't add counts as not there. A frame missing a tag in a "needs a tag" category (🗂️ Category order) is
+    left as it is, so a skipped category never becomes "nothing there".
+    moments: [{"video_id", "scene_id", "t", "label_id"?, "suggested"?}].
+    Returns {"done": n, "skipped": [(video_id, t, [missing categories])], "undo": [(id, previous or None)]}."""
+    rows = rows or []
+    group_of = {r["tag"].lower(): r.get("group") or "other" for r in rows}
+    required = [g["group"] for g in group_settings(rows) if g["required"]]
+    items = load_labels()
+    by_id = {i["id"]: i for i in items}
+    now, ver = time.strftime("%Y-%m-%dT%H:%M:%S"), vocabulary_version()
+    out = {"done": 0, "skipped": [], "undo": []}
+    new = {}
+    for m in moments:
+        pid = partial_id(m["video_id"], float(m["t"]))
+        part = by_id.get(pid)
+        if not part or part.get("type") != "partial":
+            continue
+        yes = list(part.get("yes") or [])
+        have = {group_of.get(t.lower(), "other") for t in yes}
+        missing = [g for g in required if g not in have]
+        if missing:
+            out["skipped"].append((m["video_id"], float(m["t"]), missing))
+            continue
+        lid = m.get("label_id") or card_id("tags", m["video_id"], float(m["t"]))
+        out["undo"] += [(pid, part), (lid, by_id.get(lid))]
+        new[lid] = {"id": lid, "type": "tags", "video_id": m["video_id"], "scene_id": m.get("scene_id"),
+                    "t": float(m["t"]), "suggested": list(m.get("suggested") or yes), "tags": yes,
+                    "from_batch": True, "labelled_at": now, "vocab_version": ver}
+        new[pid] = None
+        out["done"] += 1
+    if out["done"]:
+        kept = [i for i in items if i["id"] not in new]
+        _write_labels(kept + [v for v in new.values() if v is not None])
+    return out
+
+
 def undo_batch(undo: list) -> int:
     """Put back what batch_tag changed (its "undo" list). Returns how many answers were restored."""
     if not undo:
