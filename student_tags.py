@@ -757,11 +757,16 @@ def split_videos(videos: list, test: set, share: float = VAL_SHARE, seed: int = 
 
 
 CUTOFF_MODE = "weighted"                  # "weighted" (v9 on) or "plain" (up to v8: --old-cutoffs)
+# The cut-offs a tag may get (v11 on). The old 0.25–0.85 let rare tags slide to the floor on a few
+# held-out moments: v10 fingering 0.50 → 0.25 (13 → 68 errors), POV 0.50 → 0.30 (43 → 76).
+CUTOFF_RANGE = (0.40, 0.70)
+WIDE_CUTOFF_RANGE = (0.25, 0.85)          # --wide-cutoffs: the v1–v10 range
 
 
 def pick_thresholds(prob: np.ndarray, truth: np.ndarray, min_pos: int = 10, gain: float = 0.01,
                     mask: np.ndarray = None, mode: str = None) -> np.ndarray:
-    """Per tag, the score cut-off (0.25–0.85) with the best F1 on the held-out moments; 0.5 for a
+    """Per tag, the score cut-off (within CUTOFF_RANGE: 0.40–0.70 since v11) with the best F1 on the
+    held-out moments; 0.5 for a
     tag with fewer than min_pos positives there (too few to choose from) or where no cut-off beats
     0.5 by at least `gain` F1 (a tiny edge on a few moments is chance, not a better cut-off).
     mode "weighted" (default since v9): each moment counts by its training weight (`mask`: your
@@ -770,7 +775,8 @@ def pick_thresholds(prob: np.ndarray, truth: np.ndarray, min_pos: int = 10, gain
     the best is taken, so one lucky point can't swing it (v8: POV 0.50 → 0.25, +43 errors).
     mode "plain": every moment with any weight counts once, best single point (v1–v8)."""
     mode = mode or CUTOFF_MODE
-    grid = np.round(np.arange(0.25, 0.851, 0.05), 2)
+    lo, hi = CUTOFF_RANGE
+    grid = np.round(np.arange(lo, hi + 0.001, 0.05), 2)
     out = np.full(prob.shape[1], 0.5, np.float32)
     i50 = int(np.argmin(np.abs(grid - 0.5)))
     for j in range(prob.shape[1]):
@@ -1257,7 +1263,7 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, 
             "train_minutes": round(minutes, 2), "videos": len(ds["videos"]), "test_videos": sorted(test),
             "labels_newest": max((i.get("labelled_at") or "" for i in labels), default=""),
             "context": ctx_meta, "step1_thresholds": [float(x) for x in step1_thresholds],
-            "cutoffs": CUTOFF_MODE}
+            "cutoffs": CUTOFF_MODE, "cutoff_range": list(CUTOFF_RANGE)}
     print(f"Trained in {minutes:.1f} min.", flush=True)
     step1 = None
     if ctx_meta and step1_test_prob is not None:
@@ -1631,6 +1637,8 @@ def main(argv=None) -> int:
                     "overall — fewer wrong tags, more missed)")
     ap.add_argument("--no-teacher-trust", action="store_true",
                     help="count the teacher's answers fully on every tag (as v4 did)")
+    ap.add_argument("--wide-cutoffs", action="store_true",
+                    help="let cut-offs go anywhere in 0.25–0.85, as up to v10 (default since v11: 0.40–0.70)")
     ap.add_argument("--old-cutoffs", action="store_true",
                     help="pick cut-offs the v1–v8 way (every held-out moment counts once, best single point)")
     ap.add_argument("--per-tag", type=int, default=PICK_PER_TAG,
@@ -1639,6 +1647,9 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     global CUTOFF_MODE
     CUTOFF_MODE = "plain" if a.old_cutoffs else "weighted"
+    global CUTOFF_RANGE
+    if a.wide_cutoffs:
+        CUTOFF_RANGE = WIDE_CUTOFF_RANGE
     WORK.mkdir(exist_ok=True)
     if a.command in ("fetch", "all"):
         rc = fetch()

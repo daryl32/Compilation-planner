@@ -318,7 +318,7 @@ def test_greedy_picks_cap_spreads_tags():
         assert len(ts) <= 12 and all(b - a >= 10 for a, b in zip(ts, ts[1:]))
 
 
-def test_weighted_cutoffs_follow_your_labels_not_a_weak_teacher():
+def test_weighted_cutoffs_follow_your_labels_not_a_weak_teacher(monkeypatch):
     """Teacher rows (weight 0.1) say 'yes' at low scores; your labels (×5) say only high scores are
     real. Plain picks a low cut-off to please the teacher; weighted follows your labels."""
     rng = np.random.default_rng(1)
@@ -327,6 +327,7 @@ def test_weighted_cutoffs_follow_your_labels_not_a_weak_teacher():
     prob = np.concatenate([t_p, l_pos, l_neg])[:, None]
     truth = np.concatenate([np.ones(400), np.ones(30), np.zeros(40)])[:, None]
     w = np.concatenate([np.full(400, 0.1), np.full(70, 5.0)])[:, None]
+    monkeypatch.setattr(S, "CUTOFF_RANGE", S.WIDE_CUTOFF_RANGE)
     assert S.pick_thresholds(prob, truth, mask=w, mode="plain")[0] <= 0.3
     assert S.pick_thresholds(prob, truth, mask=w, mode="weighted")[0] >= 0.5
 
@@ -386,3 +387,16 @@ def test_train_scores_batch_tagged_test_frames(tmp_path, monkeypatch):
     assert S.main(["train", "--name", "p1", "--epochs", "8", "--folds", "2"]) == 0
     report = (tmp_path / "student_report.md").read_text()
     assert "Your ▦ batch-tagged test frames" in report and "| dancing | 4 |" in report
+
+
+def test_cutoff_range_keeps_rare_tags_off_the_floor(monkeypatch):
+    """A tag whose held-out positives all score low: the wide range drops its cut-off to 0.25,
+    the v11 range stops at 0.40."""
+    rng = np.random.default_rng(2)
+    prob = np.concatenate([rng.uniform(0.26, 0.38, 30), rng.uniform(0.0, 0.2, 300)])[:, None]
+    truth = np.concatenate([np.ones(30), np.zeros(300)])[:, None]
+    monkeypatch.setattr(S, "CUTOFF_RANGE", S.WIDE_CUTOFF_RANGE)
+    assert S.pick_thresholds(prob, truth, mode="plain")[0] == 0.25
+    monkeypatch.setattr(S, "CUTOFF_RANGE", (0.40, 0.70))
+    th = S.pick_thresholds(prob, truth, mode="plain")[0]
+    assert 0.40 <= th <= 0.70
