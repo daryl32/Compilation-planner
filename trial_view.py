@@ -22,7 +22,70 @@ CHIP_STYLE = {
 }
 PER_PAGE = 12
 GRID_PAGE = 48
-GRID_ALL = "🗂️ All categories"   # ▦ Grid: every category's tags under each frame — the final check            # ▦ Grid: thumbnails per page
+GRID_ALL = "🗂️ All categories"
+# ▦ Grid on a touch screen, like Photos on the iPad: tap a picture to tick it; put a finger on a picture and
+# swipe sideways to tick (or untick) every frame you pass over — down the page too, a whole range at a time.
+# An up / down swipe still scrolls. It only clicks the frames' own tick boxes, so nothing reloads until ➕ / ➖.
+GRID_JS = r"""
+<script>
+(function () {
+  const W = window;
+  if (W.__mpGridSel) return;
+  W.__mpGridSel = true;
+  const CARD = "[class*='st-key-tr_gcard_']";
+  const cards = () => Array.from(document.querySelectorAll(CARD));
+  const box = (c) => c && c.querySelector("input[type=checkbox]");
+  const at = (x, y) => { const el = document.elementFromPoint(x, y); return el && el.closest(CARD); };
+  const set = (c, on) => { const b = box(c); if (b && b.checked !== on) b.click(); };
+  function scroller(el) {
+    for (let e = el; e && e !== document.body; e = e.parentElement) {
+      const o = getComputedStyle(e).overflowY;
+      if ((o === "auto" || o === "scroll") && e.scrollHeight > e.clientHeight) return e;
+    }
+    return document.scrollingElement;
+  }
+  let g = null, lastDrag = 0;
+  document.addEventListener("touchstart", (e) => {
+    g = null;
+    if (e.touches.length !== 1) return;
+    const t = e.touches[0], c = at(t.clientX, t.clientY);
+    if (c) g = { x: t.clientX, y: t.clientY, card: c, on: false, active: false, orig: null, all: null };
+  }, { passive: true });
+  document.addEventListener("touchmove", (e) => {
+    if (!g) return;
+    const t = e.touches[0], dx = t.clientX - g.x, dy = t.clientY - g.y;
+    if (!g.active) {
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+      if (Math.abs(dy) >= Math.abs(dx)) { g = null; return; }       // up / down: let it scroll
+      g.active = true;
+      g.all = cards();
+      g.orig = g.all.map((c) => { const b = box(c); return !!(b && b.checked); });
+      const b = box(g.card);
+      g.on = !(b && b.checked);
+      g.from = g.all.indexOf(g.card);
+      g.sc = scroller(g.card);
+    }
+    if (e.cancelable) e.preventDefault();
+    const c = at(t.clientX, t.clientY);
+    const to = c ? g.all.indexOf(c) : -1;
+    if (to >= 0) {
+      const lo = Math.min(g.from, to), hi = Math.max(g.from, to);
+      g.all.forEach((card, i) => set(card, i >= lo && i <= hi ? g.on : g.orig[i]));
+    }
+    const H = window.innerHeight;                                   // keep going past the screen edge
+    if (t.clientY > H - 70) g.sc.scrollBy(0, 14); else if (t.clientY < 90) g.sc.scrollBy(0, -14);
+  }, { passive: false });
+  document.addEventListener("touchend", () => { if (g && g.active) lastDrag = Date.now(); g = null; },
+                            { passive: true });
+  document.addEventListener("click", (e) => {                       // tap a picture = tick its box
+    const img = e.target.closest && e.target.closest(CARD + " [data-testid='stImage']");
+    if (!img || e.target.closest("button") || Date.now() - lastDrag < 400) return;
+    const b = box(img.closest(CARD));
+    if (b) b.click();
+  });
+})();
+</script>
+"""   # ▦ Grid: every category's tags under each frame — the final check            # ▦ Grid: thumbnails per page
 # ▦ Grid: 8 thumbnails a row with a mouse / trackpad, 6 on a touch tablet (iPad), 3 on a phone
 GRID_CSS = (
     ".st-key-tr_grid {display:grid!important;grid-template-columns:repeat(8,minmax(0,1fr));gap:.45rem;"
@@ -32,7 +95,12 @@ GRID_CSS = (
     "@media (max-width:640px) {.st-key-tr_grid {grid-template-columns:repeat(3,minmax(0,1fr))}}"
     "[class*='st-key-tr_gcard_'] {gap:.15rem!important}"
     "[class*='st-key-tr_gcard_'] [data-testid='stCheckbox'] label {font-size:.78rem}"
-    "[class*='st-key-tr_gcard_'] img {border-radius:.35rem}"
+    "[class*='st-key-tr_gcard_'] img {border-radius:.35rem;-webkit-touch-callout:none;-webkit-user-select:none;"
+    "user-select:none;cursor:pointer}"
+    # sideways swipes are ours (swipe-select), up / down still scrolls
+    ".st-key-tr_grid [class*='st-key-tr_gcard_'] {touch-action:pan-y;-webkit-user-select:none;user-select:none}"
+    # a ticked frame stands out
+    "[class*='st-key-tr_gcard_']:has(input:checked) img {outline:3px solid #ff4b4b;outline-offset:-3px}"
     # the ● / ✗ / ◆ marks: no negative markdown margin (it let the next row cover them), wrap, never cut
     "[class*='st-key-tr_gcard_'] [data-testid='stMarkdownContainer'] {margin-bottom:0!important;overflow:visible}"
     "[class*='st-key-tr_gcard_'] .mp-gstate {padding-bottom:3px;line-height:1.5;white-space:normal}"
@@ -58,7 +126,8 @@ def _chip(tag: str, status: str, faded: bool = False) -> str:
     if faded:
         extra += "opacity:.55;font-style:italic;"
         title = "unsure"
-    return (f'<span title="{title}" style="display:inline-block;margin:2px 4px 2px 0;padding:1px 9px;'
+    red = ' class="mp-red"' if status == TR.WRONG else ""
+    return (f'<span{red} title="{title}" style="display:inline-block;margin:2px 4px 2px 0;padding:1px 9px;'
             f'border-radius:999px;border:1px solid {border};background:{bg};font-size:.86rem;{extra}">'
             f'{mark + " " if mark else ""}{html.escape(tag)}{"?" if faded else ""}</span>')
 
@@ -73,7 +142,7 @@ def _row(label: str, pred, mine, unsure=()) -> str:
 
 def _part_row(p: dict) -> str:
     """Your ▦ batch answers on a frame you haven't fully labelled: yes tags, and struck-through no tags."""
-    no = "".join(f'<span title="you said it isn\'t there" style="display:inline-block;margin:2px 4px 2px 0;'
+    no = "".join(f'<span class="mp-red" title="you said it isn\'t there" style="display:inline-block;margin:2px 4px 2px 0;'
                  f'padding:1px 9px;border-radius:999px;border:1px dashed rgba(229,83,75,.7);font-size:.86rem;'
                  f'text-decoration:line-through;opacity:.8">{html.escape(t)}</span>' for t in p.get("no") or [])
     yes = "".join(_chip(t, TR.NEUTRAL) for t in p.get("yes") or [])
@@ -274,6 +343,11 @@ def _compare(data: dict) -> None:
         help="Frames you've batch-tagged in ▦ Grid but not yet fully labelled, with the model's tags you haven't "
              "reviewed yet listed under each one. ✏️ Correct starts from the model's tags with your batch answers "
              "applied; saving makes it a full label.")
+    if part_cols[0].toggle("🔴 Hide red tags", key="tr_hide_red",
+                           help="Hides every red tag on the cards and thumbnails — tags you've said aren't there, "
+                                "and the model's tags that aren't in your label — for a quick final look at "
+                                "what each frame keeps."):
+        st.markdown("<style>.mp-red {display:none!important}</style>", unsafe_allow_html=True)
     u = st.session_state.get("tr_g_undo")
     if u:
         st.button(f"↩️ Undo: {u['what']}", key="tr_g_undo_btn", on_click=_gundo)
@@ -490,7 +564,8 @@ def _gstate(m: dict, tags: list, picked=()) -> str:
         else:
             mark, col, tip = "·", "128,128,128", "nobody has it"
         short = t if len(t) <= 14 else t[:13] + "…"
-        bits.append(f'<span title="{html.escape(tip)}" style="display:inline-block;margin:0 3px 1px 0;'
+        red = ' class="mp-red"' if ans is False else ""
+        bits.append(f'<span{red} title="{html.escape(tip)}" style="display:inline-block;margin:0 3px 1px 0;'
                     f'padding:0 5px;border-radius:999px;font-size:.7rem;color:rgb({col});'
                     f'border:1px solid rgba({col},.55)">{mark} {html.escape(short)}</span>')
     return f'<div class="mp-gstate">{"".join(bits)}</div>' if bits else ""
@@ -605,6 +680,7 @@ def _finish_panel(moments: list, rows: list) -> None:
 def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
     """Small thumbnails packed together: pick tags, tick frames, then ➕ Add / ➖ Remove."""
     st.markdown("<style>" + GRID_CSS + "</style>", unsafe_allow_html=True)
+    st.html(GRID_JS, unsafe_allow_javascript=True)
     groups = TLB.chip_groups(rows)
     if not groups:
         st.info("No tag vocabulary yet — add tags in 📒 Vocabulary.")
@@ -657,6 +733,8 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
     page = st.number_input(f"Page (of {pages}) — {len(moments)} frames", 1, pages, 1, key="tr_gpage") \
         if pages > 1 else 1
     items = moments[(page - 1) * GRID_PAGE: page * GRID_PAGE]
+    st.caption("👆 Tap a picture to tick it, or put your finger on one and swipe sideways to tick a whole run "
+               "(swipe down as you go to take in more rows) — like selecting in Photos.")
     st.caption(f"Under each frame: {'every tag' if cat == GRID_ALL else 'the **' + cat + '** tags'} you or the model have there — ● you have it · ✗ you said it "
                "isn't there · ◆ only the model has it. Tick a frame and a picked tag it doesn't have yet shows as "
                "+ tag. "

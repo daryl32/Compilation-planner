@@ -859,3 +859,18 @@ def test_grid_all_categories(bundle, clean_labels):
     assert not errors(at), errors(at)
     rows, _ = __import__("training_labels").load_vocabulary()
     assert len(at.button_group[-1].options) == len({r["tag"] for r in rows})   # every tag as a pill
+
+
+def test_hide_red_and_swipe_script(bundle, clean_labels):
+    from tests.apptest_util import errors, page_app
+    import trial_view as TV
+    assert 'class="mp-red"' in TV._chip("x", TR.WRONG) and "mp-red" not in TV._chip("x", TR.RIGHT)
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_sub"] = "🖼️ Compare tags"
+    at.session_state["tr_view"] = "grid"
+    at.session_state["tr_hide_red"] = True
+    at.run()
+    assert not errors(at), errors(at)
+    assert any(".mp-red {display:none" in m.value for m in at.markdown)
+    assert "__mpGridSel" in TV.GRID_JS
