@@ -31,6 +31,12 @@ GRID_CSS = (
     "[class*='st-key-tr_gcard_'] {gap:.15rem!important}"
     "[class*='st-key-tr_gcard_'] [data-testid='stCheckbox'] label {font-size:.78rem}"
     "[class*='st-key-tr_gcard_'] img {border-radius:.35rem}"
+    # the ● / ✗ / ◆ marks: no negative markdown margin (it let the next row cover them), wrap, never cut
+    "[class*='st-key-tr_gcard_'] [data-testid='stMarkdownContainer'] {margin-bottom:0!important;overflow:visible}"
+    "[class*='st-key-tr_gcard_'] .mp-gstate {padding-bottom:3px;line-height:1.5;white-space:normal}"
+    "[class*='st-key-tr_gcard_'] .mp-gstate span {max-width:100%;overflow:hidden;text-overflow:ellipsis;"
+    "white-space:nowrap;vertical-align:top}"
+    ".st-key-tr_grid {row-gap:.9rem!important}"
     "[class*='st-key-tr_gbar_'] button {min-height:2.6rem}"
 )
 
@@ -58,6 +64,16 @@ def _row(label: str, pred, mine, unsure=()) -> str:
     body = "".join(parts) or '<span style="opacity:.55">no tags</span>'
     return (f'<div style="margin:3px 0"><span style="display:inline-block;min-width:4.6rem;font-weight:600;'
             f'font-size:.86rem">{label}</span>{body}</div>')
+
+
+def _part_row(p: dict) -> str:
+    """Your ▦ batch answers on a frame you haven't fully labelled: yes tags, and struck-through no tags."""
+    no = "".join(f'<span title="you said it isn\'t there" style="display:inline-block;margin:2px 4px 2px 0;'
+                 f'padding:1px 9px;border-radius:999px;border:1px dashed rgba(229,83,75,.7);font-size:.86rem;'
+                 f'text-decoration:line-through;opacity:.8">{html.escape(t)}</span>' for t in p.get("no") or [])
+    yes = "".join(_chip(t, TR.NEUTRAL) for t in p.get("yes") or [])
+    return (f'<div style="margin:3px 0"><span style="display:inline-block;min-width:4.6rem;font-weight:600;'
+            f'font-size:.86rem" title="Batch-tagged in ▦ Grid — only these tags are decided">You ▦</span>{yes}{no}</div>')
 
 
 def _save(card: dict, tags: list, key: str) -> None:
@@ -124,7 +140,12 @@ def _editor(vid: str, m: dict, teachers: list, ekey: str) -> None:
     if start is None:
         r = next(((m.get("teachers") or {}).get(k) for k in reversed(teachers) if (m.get("teachers") or {}).get(k)),
                  None)
-        start = (r or {}).get("tags") or m.get("old") or []
+        start = list((r or {}).get("tags") or m.get("old") or [])
+        part = m.get("partial") or {}
+        if part:                              # your ▦ batch answers on top of the model's tags
+            no = {TR.norm(t) for t in part.get("no") or []}
+            start = [t for t in start if TR.norm(t) not in no]
+            start += [t for t in part.get("yes") or [] if TR.norm(t) not in {TR.norm(x) for x in start}]
     start = [names.get(TR.norm(t), t) for t in start]
     picked = []
     for gi, (title, single, tags) in enumerate(TLB.chip_groups(vocab, extra=start)):
@@ -241,6 +262,10 @@ def _compare(data: dict) -> None:
                        help="Focus on the model's tags: the Tag filter matches only the model's tags (and "
                             "yours), and the Old row is hidden on the cards. Off = the old tags count and show "
                             "as before.")
+    only_part = st.toggle("🧩 Only part-reviewed frames", key="tr_only_part",
+                          help="Frames you've batch-tagged in ▦ Grid but not yet fully labelled — so you can finish "
+                               "them. ✏️ Correct starts from the model's tags with your batch answers applied; "
+                               "saving makes it a full label.")
     all_tags = sorted({t for v in videos.values() for m in v["moments"]
                        for t in (m.get("mine") or []) + ([] if no_old else (m.get("old") or []))
                        + [x for r in m.get("teachers", {}).values() for x in r.get("tags") or []]},
@@ -262,7 +287,8 @@ def _compare(data: dict) -> None:
     vocab_rows, _ = TLB.load_vocabulary()
     problems = (lambda tags: TLB.rule_problems(tags, vocab_rows))
     moments = [(v, m) for v, m in pool
-               if TR.filter_moments([m], how, None if tag == "(any tag)" else tag, problems, skip_old=no_old, by=by)]
+               if TR.filter_moments([m], how, None if tag == "(any tag)" else tag, problems, skip_old=no_old, by=by)
+               and (not only_part or (m.get("partial") and m.get("mine") is None))]
     sus, sus_runs = {}, []
     if how == "suspect":
         # 🔍 your labels that every chosen test run disagrees with — the likeliest mislabels
@@ -341,6 +367,8 @@ def _compare(data: dict) -> None:
                 rows = []
                 if mine is not None:
                     rows.append(_row("You", mine, None))
+                elif m.get("partial"):
+                    rows.append(_part_row(m["partial"]))
                 if not no_old:
                     rows.append(_row("Old", m.get("old") or [], mine))
                 for k in here:
@@ -435,7 +463,7 @@ def _gstate(m: dict, tags: list) -> str:
         bits.append(f'<span title="{html.escape(tip)}" style="display:inline-block;margin:0 3px 1px 0;'
                     f'padding:0 5px;border-radius:999px;font-size:.7rem;color:rgb({col});'
                     f'border:1px solid rgba({col},.55)">{mark} {html.escape(short)}</span>')
-    return f'<div style="line-height:1.25">{"".join(bits)}</div>' if bits else ""
+    return f'<div class="mp-gstate">{"".join(bits)}</div>' if bits else ""
 
 
 def _gtick_key(v: str, m: dict) -> str:

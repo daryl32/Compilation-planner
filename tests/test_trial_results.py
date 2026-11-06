@@ -762,3 +762,22 @@ def test_grid_view_batch_tags(bundle, clean_labels):
     at.button(key="tr_g_undo_btn").click().run()
     assert not errors(at), errors(at)
     assert not [i for i in TLB.load_labels() if i["type"] == "partial"]
+
+
+def test_part_reviewed_toggle_and_finishing_a_frame(bundle, clean_labels):
+    from tests.apptest_util import errors, page_app
+    TLB = clean_labels
+    TLB.batch_tag([{"video_id": "vid_a", "t": 12.0, "scene_id": 1}], add=["night"], remove=["crowd"])
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_sub"] = "🖼️ Compare tags"
+    at.session_state["tr_only_part"] = True
+    at.run()
+    assert not errors(at), errors(at)
+    md = " ".join(m.value for m in at.markdown)
+    assert "You ▦" in md and "Page (of" not in md
+    assert len([b for b in at.button if b.label == "✏️ Correct"]) == 1      # only the batch-tagged frame
+    # finishing it as a full label clears the batch answer
+    m = [m for m in _bundle()["videos"]["vid_a"]["moments"] if m["key"] == "s1_0"][0]
+    TLB.save_label(TR.correction_card("vid_a", m, []), tags=["dance", "night"])
+    assert [i["type"] for i in TLB.load_labels()] == ["tags"]

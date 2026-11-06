@@ -403,7 +403,10 @@ def save_label(card: dict, **answer) -> dict:
         item["verdict"] = answer["verdict"]
     item["labelled_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     item["vocab_version"] = vocabulary_version()
-    items = [i for i in load_labels() if i["id"] != item["id"]] + [item]
+    drop = {item["id"]}
+    if card["type"] == "tags" and not item.get("skipped") and card.get("video_id") and card.get("t") is not None:
+        drop.add(partial_id(card["video_id"], float(card["t"])))      # your full label replaces a ▦ batch answer
+    items = [i for i in load_labels() if i["id"] not in drop] + [item]
     _write_labels(items)
     return item
 
