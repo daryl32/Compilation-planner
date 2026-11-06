@@ -823,3 +823,14 @@ def test_still_to_review_and_finish_button(bundle, clean_labels):
     at.session_state["tr_view"] = "grid"
     at.run()
     assert not errors(at), errors(at)
+
+
+def test_grid_marks_show_the_whole_category():
+    import trial_view as TV
+    m = {"mine": None, "partial": {"yes": ["Doggy"], "no": ["Cowgirl"]},
+         "teachers": {"32b": {"tags": ["reverse cowgirl", "Medium shot"]}}}
+    cat = ["Cowgirl", "reverse cowgirl", "Doggy", "Missionary"]
+    assert TV._gtags(m, cat, ["Missionary"]) == ["Cowgirl", "reverse cowgirl", "Doggy", "Missionary"]
+    assert TV._gtags(m, cat, []) == ["Cowgirl", "reverse cowgirl", "Doggy"]
+    html_ = TV._gstate(m, TV._gtags(m, cat, ["Doggy"]), ["Doggy"])
+    assert "✗ Cowgirl" in html_ and "◆ reverse cowgi" in html_ and "● Doggy" in html_ and "font-weight:700" in html_

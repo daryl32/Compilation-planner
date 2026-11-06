@@ -456,9 +456,18 @@ def _compare(data: dict) -> None:
 # ▦ Grid: batch tagging many frames at once
 # ---------------------------------------------------------------------------
 
-def _gstate(m: dict, tags: list) -> str:
-    """Small marks under a thumbnail for each picked tag: ● you have it · ✗ you said no · ◆ only the
-    model has it · · nobody."""
+def _gtags(m: dict, in_cat: list, chosen: list) -> list:
+    """The tags to mark under a thumbnail: every tag of the open category that you or the model have on
+    this frame (or you've said no to in a batch), plus the picked tags — in vocabulary order."""
+    no = {TR.norm(t) for t in (m.get("partial") or {}).get("no") or []}
+    out = [t for t in in_cat if t in chosen or TR.your_answer(m, t) is True or TR.model_has(m, t)
+           or TR.norm(t) in no]
+    return out + [t for t in chosen if t not in out]
+
+
+def _gstate(m: dict, tags: list, picked=()) -> str:
+    """Small marks under a thumbnail for each tag: ● you have it · ✗ you said no · ◆ only the
+    model has it · · nobody. Picked tags (the ones ➕ / ➖ apply) are bold."""
     bits = []
     for t in tags:
         ans = TR.your_answer(m, t)
@@ -471,9 +480,11 @@ def _gstate(m: dict, tags: list) -> str:
         else:
             mark, col, tip = "·", "128,128,128", "nobody has it"
         short = t if len(t) <= 14 else t[:13] + "…"
-        bits.append(f'<span title="{html.escape(tip)}" style="display:inline-block;margin:0 3px 1px 0;'
-                    f'padding:0 5px;border-radius:999px;font-size:.7rem;color:rgb({col});'
-                    f'border:1px solid rgba({col},.55)">{mark} {html.escape(short)}</span>')
+        pick = t in picked
+        bits.append(f'<span title="{html.escape(tip)}{" · picked" if pick else ""}" style="display:inline-block;'
+                    f'margin:0 3px 1px 0;padding:0 5px;border-radius:999px;font-size:.7rem;color:rgb({col});'
+                    f'border:{"2px" if pick else "1px"} solid rgba({col},{".9" if pick else ".55"});'
+                    f'{"font-weight:700;background:rgba(" + col + ",.12);" if pick else ""}">{mark} {html.escape(short)}</span>')
     return f'<div class="mp-gstate">{"".join(bits)}</div>' if bits else ""
 
 
@@ -635,7 +646,8 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
     page = st.number_input(f"Page (of {pages}) — {len(moments)} frames", 1, pages, 1, key="tr_gpage") \
         if pages > 1 else 1
     items = moments[(page - 1) * GRID_PAGE: page * GRID_PAGE]
-    st.caption("● you have it · ✗ you said it isn't there · ◆ only the model has it · · nobody. "
+    st.caption(f"Under each frame: the **{cat}** tags you or the model have there, plus your picked tags (bold). "
+               "● you have it · ✗ you said it isn't there · ◆ only the model has it · · nobody. "
                "Frames you've only batch-tagged teach the student just those tags; the rest still come from "
                "the teacher.")
     with st.form("tr_grid_form", border=False, enter_to_submit=False):
@@ -649,7 +661,7 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
                     else:
                         st.caption("🖼️ not synced")
                     st.checkbox(format_mmss(m["t"]), key=_gtick_key(v, m), help=f"{v} · scene {m.get('scene_id')}")
-                    state = _gstate(m, chosen)
+                    state = _gstate(m, _gtags(m, in_cat, chosen), chosen)
                     if only_part and m.get("partial") and m.get("mine") is None:
                         state += _todo_html(TR.still_to_review(m), small=True)
                     if state:
