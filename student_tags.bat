@@ -19,6 +19,8 @@ rem      student_tags.bat train --label-weight 8    labels count more
 rem      student_tags.bat score --name v1           score again
 rem      student_tags.bat export --name v4          scores for every half
 rem                                                 second -> Drive catalogue
+rem      student_tags.bat rescore-all               every saved model on today's
+rem                                                 test labels (for the app)
 rem ============================================================
 
 cd /d "%~dp0scripts"

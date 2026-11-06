@@ -97,7 +97,7 @@ def test_view_without_results():
     assert any("No trial results here yet" in i.value for i in at.info)
 
 
-@pytest.mark.parametrize("sub", ["🖼️ Compare tags", "🕺 Motion", "📋 Report"])
+@pytest.mark.parametrize("sub", ["🖼️ Compare tags", "🕺 Motion", "🏋️ Training results"])
 def test_view(bundle, sub):
     from tests.apptest_util import errors, page_app
     at = page_app("pages/6_Training_Labels.py")
@@ -125,8 +125,8 @@ def test_view(bundle, sub):
         assert not errors(at), errors(at)
         assert not at.info                                        # you and the 32B both picked "dance"
         assert at.session_state["tr_by"] == "both"
-    elif sub == "📋 Report":
-        assert "Hello." in md
+    elif sub == "🏋️ Training results":
+        assert "Hello." in md                                     # the written report, in its fold-out
 
 
 @pytest.fixture
@@ -313,15 +313,21 @@ def test_teacher_label_and_batch_scorecard_fields():
 
 
 def test_summary_opens_first_with_scorecard(bundle, no_labels):
+    """📋 Summary opens first, as a landing page; the teacher's batch scorecard rows and the batch
+    fold-outs are on 🏋️ Training results."""
     from tests.apptest_util import errors, page_app
     at = page_app("pages/6_Training_Labels.py")
     at.session_state["tl_view"] = "🧪 Trial results"
     at.run()
     assert not errors(at), errors(at)
-    assert any("How well the teacher matches your tags" in m.value for m in at.markdown)
-    assert [e.label for e in at.expander][:4] == ["💷 Cost and time per batch", "🔎 Tagging detail per batch",
-                                                  "✂️ Scene changes per batch",
-                                                  "📄 Full written report (as at the last export)"]
+    md = [m.value for m in at.markdown]
+    assert "#### 🏋️ Training results" in md and "#### 🧪 Test results" in md
+    at.button(key="tr_go_train").click().run()
+    assert not errors(at), errors(at)
+    labels = [e.label for e in at.expander]
+    for want in ("💷 Cost and time per batch", "🔎 Tagging detail per batch", "✂️ Scene changes per batch",
+                 "📄 Full written report (as at the last export)"):
+        assert want in labels
 
 
 def test_fp8_only_batch_shows_one_named_row(no_labels):
@@ -469,10 +475,12 @@ def test_summary_shows_test_runs(bundle, no_labels):
                    tags=["close-up shot", "dance"])
     at = page_app("pages/6_Training_Labels.py")
     at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_sub"] = "🧪 Test results"
     at.run()
     assert not errors(at), errors(at)
-    assert any("Test set" in m.value for m in at.markdown)
-    assert any("Needs-a-tag fills" in d.value.columns for d in at.dataframe)          # the runs table
+    assert "#### 🧪 Test results" in [m.value for m in at.markdown]
+    runs = [d for d in at.dataframe if "Vs teacher" in d.value.columns]               # the runs table
+    assert runs and any("needs-a-tag fills" in str(s) or "2nd looks" in str(s) for s in runs[0].value["Settings"])
     assert any("Errors" in d.value.columns for d in at.dataframe)                     # per-tag changes
     assert any("dance · threshold" in c.value for c in at.caption)
 
