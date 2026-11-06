@@ -20,6 +20,19 @@ CHIP_STYLE = {
     TR.NEUTRAL: ("", "rgba(128,128,128,.12)", "rgba(128,128,128,.4)", ""),
 }
 PER_PAGE = 12
+GRID_PAGE = 48            # ▦ Grid: thumbnails per page
+# ▦ Grid: 8 thumbnails a row with a mouse / trackpad, 6 on a touch tablet (iPad), 3 on a phone
+GRID_CSS = (
+    ".st-key-tr_grid {display:grid!important;grid-template-columns:repeat(8,minmax(0,1fr));gap:.45rem;"
+    "align-items:start}"
+    ".st-key-tr_grid>div {width:auto!important;min-width:0}"
+    "@media (hover:none) and (pointer:coarse) {.st-key-tr_grid {grid-template-columns:repeat(6,minmax(0,1fr))}}"
+    "@media (max-width:640px) {.st-key-tr_grid {grid-template-columns:repeat(3,minmax(0,1fr))}}"
+    "[class*='st-key-tr_gcard_'] {gap:.15rem!important}"
+    "[class*='st-key-tr_gcard_'] [data-testid='stCheckbox'] label {font-size:.78rem}"
+    "[class*='st-key-tr_gcard_'] img {border-radius:.35rem}"
+    "[class*='st-key-tr_gbar_'] button {min-height:2.6rem}"
+)
 
 
 def _k(video_id: str, moment: dict) -> str:
@@ -217,6 +230,13 @@ def _compare(data: dict) -> None:
     order = c[3].selectbox("Order", ["video", "random"], key="tr_order",
                            format_func={"video": "By video and time", "random": "🎲 Random"}.get,
                            help="Random mixes frames from every video, so a review isn't stuck in one video.")
+    if st.session_state.get("tr_view") not in ("cards", "grid"):
+        st.session_state["tr_view"] = "cards"
+    mode = st.segmented_control(
+        "View", ["cards", "grid"], key="tr_view",
+        format_func={"cards": "🃏 Cards", "grid": "▦ Grid — batch tag"}.get,
+        help="▦ Grid: small thumbnails packed together — pick tags, tick frames, then ➕ Add or ➖ Remove "
+             "them on all of them at once.") or "cards"
     no_old = st.toggle("🙈 Ignore old tags", key="tr_no_old", value=True,
                        help="Focus on the model's tags: the Tag filter matches only the model's tags (and "
                             "yours), and the Old row is hidden on the cards. Off = the old tags count and show "
@@ -274,6 +294,9 @@ def _compare(data: dict) -> None:
                   help="A new random sample. Frames you save drop out of “Not reviewed by me yet”.")
         moments = TR.ordered(moments, "random", st.session_state.get("tr_seed", 0))
 
+    if mode == "grid":
+        _grid(moments, vocab_rows, tag)
+        return
     _rules_panel(videos, vocab_rows)
     agr = TR.agreement([m for _, m in pool])
     if agr:
@@ -388,6 +411,158 @@ def _compare(data: dict) -> None:
                                        on_click=_save,
                                        args=(TR.correction_card(v, m, tags), tags, ekey),
                                        help=f"Save {label(v, k)}'s tags as your tags for this frame.")
+
+
+# ---------------------------------------------------------------------------
+# ▦ Grid: batch tagging many frames at once
+# ---------------------------------------------------------------------------
+
+def _gstate(m: dict, tags: list) -> str:
+    """Small marks under a thumbnail for each picked tag: ● you have it · ✗ you said no · ◆ only the
+    model has it · · nobody."""
+    bits = []
+    for t in tags:
+        ans = TR.your_answer(m, t)
+        if ans is True:
+            mark, col, tip = "●", "46,160,67", "you have it"
+        elif ans is False:
+            mark, col, tip = "✗", "229,83,75", "you said it isn't there"
+        elif TR.model_has(m, t):
+            mark, col, tip = "◆", "56,139,253", "only the model has it"
+        else:
+            mark, col, tip = "·", "128,128,128", "nobody has it"
+        short = t if len(t) <= 14 else t[:13] + "…"
+        bits.append(f'<span title="{html.escape(tip)}" style="display:inline-block;margin:0 3px 1px 0;'
+                    f'padding:0 5px;border-radius:999px;font-size:.7rem;color:rgb({col});'
+                    f'border:1px solid rgba({col},.55)">{mark} {html.escape(short)}</span>')
+    return f'<div style="line-height:1.25">{"".join(bits)}</div>' if bits else ""
+
+
+def _gtick_key(v: str, m: dict) -> str:
+    return f"tr_gt_{_k(v, m)}"
+
+
+def _gselect(items: list, on: bool) -> None:
+    for v, m in items:
+        st.session_state[_gtick_key(v, m)] = on
+
+
+def _gapply(action: str, items: list, rows: list) -> None:
+    chosen = list(st.session_state.get("tr_g_chosen") or [])
+    ticked = [(v, m) for v, m in items if st.session_state.get(_gtick_key(v, m))]
+    if not chosen:
+        st.session_state["tr_saved_note"] = "Pick at least one tag first."
+        return
+    if not ticked:
+        st.session_state["tr_saved_note"] = "Tick at least one frame first."
+        return
+    res = TLB.batch_tag([{"video_id": v, "scene_id": m.get("scene_id"), "t": float(m["t"]),
+                          "label_id": m.get("gold_id") or TR.moment_id(v, m), "tags": m.get("mine")} for v, m in ticked],
+                        add=chosen if action == "add" else (), remove=chosen if action == "remove" else (),
+                        rows=rows)
+    _gselect(ticked, False)
+    verb = "Added" if action == "add" else "Removed"
+    what = f"{verb} {', '.join(chosen)} on {len(ticked)} frame{'s' if len(ticked) != 1 else ''}"
+    if res["undo"]:
+        st.session_state["tr_g_undo"] = {"undo": res["undo"], "what": what}
+    st.session_state["tr_saved_note"] = what + (" (nothing changed — they already had that)" if not res["undo"] else "")
+
+
+def _gundo() -> None:
+    u = st.session_state.pop("tr_g_undo", None)
+    if u:
+        TLB.undo_batch(u["undo"])
+        st.session_state["tr_saved_note"] = f"Undone: {u['what']}"
+
+
+def _gbar(where: str, items: list, rows: list) -> None:
+    with st.container(key=f"tr_gbar_{where}"):
+        c = st.columns(4)
+        c[0].form_submit_button("➕ Add tags", key=f"tr_g_add_{where}", type="primary", width="stretch",
+                                on_click=_gapply, args=("add", items, rows),
+                                help="Give every ticked frame the picked tags.")
+        c[1].form_submit_button("➖ Remove tags", key=f"tr_g_rm_{where}", width="stretch",
+                                on_click=_gapply, args=("remove", items, rows),
+                                help="Mark the picked tags as not there on every ticked frame.")
+        c[2].form_submit_button("☑️ Select all", key=f"tr_g_all_{where}", width="stretch",
+                                on_click=_gselect, args=(items, True))
+        c[3].form_submit_button("◻️ Clear ticks", key=f"tr_g_none_{where}", width="stretch",
+                                on_click=_gselect, args=(items, False))
+
+
+def _grid(moments: list, rows: list, tag: str) -> None:
+    """Small thumbnails packed together: pick tags, tick frames, then ➕ Add / ➖ Remove."""
+    st.markdown("<style>" + GRID_CSS + "</style>", unsafe_allow_html=True)
+    groups = TLB.chip_groups(rows)
+    if not groups:
+        st.info("No tag vocabulary yet — add tags in 📒 Vocabulary.")
+        return
+    titles = [g[0] for g in groups]
+    if tag != "(any tag)" and st.session_state.get("tr_g_lasttag") != tag:
+        # the Tag filter changed: open its category and pick it
+        st.session_state["tr_g_lasttag"] = tag
+        for title, _, tags in groups:
+            if any(t.lower() == tag.lower() for t in tags):
+                st.session_state["tr_g_cat"] = title
+                if tag not in (st.session_state.get("tr_g_chosen") or []):
+                    st.session_state["tr_g_chosen"] = list(st.session_state.get("tr_g_chosen") or []) + [tag]
+                break
+    if st.session_state.get("tr_g_cat") not in titles:
+        st.session_state["tr_g_cat"] = titles[0]
+    chosen = [t for t in st.session_state.get("tr_g_chosen") or []]
+    with st.container(key="tl_wrap_tr_gpick"):
+        a, b = st.columns([2, 7])
+        cat = a.selectbox("Category", titles, key="tr_g_cat")
+        in_cat = next(g[2] for g in groups if g[0] == cat)
+        pk = "tr_g_pills_" + hashlib.md5(cat.encode()).hexdigest()[:8]
+        st.session_state[pk] = [t for t in in_cat if t in chosen]
+
+        def _pick():
+            now = list(st.session_state.get("tr_g_chosen") or [])
+            st.session_state["tr_g_chosen"] = [t for t in now if t not in in_cat] + list(st.session_state[pk] or [])
+        with b:
+            st.pills("Tags", in_cat, selection_mode="multi", key=pk, on_change=_pick,
+                     help="The tags ➕ Add / ➖ Remove apply. You can pick tags from more than one category.")
+    chosen = list(st.session_state.get("tr_g_chosen") or [])
+    if chosen:
+        ruled = sorted(TLB._never_with(chosen, rows) - set(chosen), key=str.lower)
+        c1, c2 = st.columns([8, 2])
+        c1.caption("Picked: **" + "**, **".join(chosen) + "**"
+                   + (f" · ➕ Add also marks **{', '.join(ruled)}** as not there (your never-with rules)" if ruled else ""))
+        c2.button("✖ Clear tags", key="tr_g_clear", width="stretch",
+                  on_click=lambda: st.session_state.update(tr_g_chosen=[]))
+    else:
+        st.caption("Pick the tag(s) first, then tick frames — ticks are kept until you press a button below.")
+    u = st.session_state.get("tr_g_undo")
+    if u:
+        st.button(f"↩️ Undo: {u['what']}", key="tr_g_undo_btn", on_click=_gundo)
+    if not moments:
+        st.info("Nothing matches these filters.")
+        return
+    pages = max(1, -(-len(moments) // GRID_PAGE))
+    if st.session_state.get("tr_gpage", 1) > pages:
+        st.session_state["tr_gpage"] = pages
+    page = st.number_input(f"Page (of {pages}) — {len(moments)} frames", 1, pages, 1, key="tr_gpage") \
+        if pages > 1 else 1
+    items = moments[(page - 1) * GRID_PAGE: page * GRID_PAGE]
+    st.caption("● you have it · ✗ you said it isn't there · ◆ only the model has it · · nobody. "
+               "Frames you've only batch-tagged teach the student just those tags; the rest still come from "
+               "the teacher.")
+    with st.form("tr_grid_form", border=False, enter_to_submit=False):
+        _gbar("top", items, rows)
+        with st.container(key="tr_grid"):
+            for v, m in items:
+                with st.container(key=f"tr_gcard_{_k(v, m)}"):
+                    p = TR.frame_path(m)
+                    if p is not None and p.exists():
+                        safe_image(str(p), width="stretch")
+                    else:
+                        st.caption("🖼️ not synced")
+                    st.checkbox(format_mmss(m["t"]), key=_gtick_key(v, m), help=f"{v} · scene {m.get('scene_id')}")
+                    state = _gstate(m, chosen)
+                    if state:
+                        st.markdown(state, unsafe_allow_html=True)
+        _gbar("bottom", items, rows)
 
 
 def _motion_chart(v: dict, marks: list) -> None:

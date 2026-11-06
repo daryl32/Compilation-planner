@@ -58,8 +58,11 @@ def moment_id(video_id: str, moment: dict) -> str:
 
 def with_saved_labels(videos: dict, items: list) -> dict:
     """The results' moments with "mine" taken from your current training labels where you've
-    labelled (or corrected) that frame since the trial ran. Returns a new videos dict."""
+    labelled (or corrected) that frame since the trial ran, and "partial" ({"yes", "no"}) where you've
+    only batch-tagged it in ▦ Grid. Returns a new videos dict."""
+    import training_labels as TLB
     saved = {i["id"]: i for i in items if i.get("type") == "tags" and not i.get("skipped")}
+    part = {i["id"]: i for i in items if i.get("type") == "partial"}
     out = {}
     for vid, v in videos.items():
         ms = []
@@ -67,6 +70,10 @@ def with_saved_labels(videos: dict, items: list) -> dict:
             mid = m.get("gold_id") or moment_id(vid, m)
             if mid in saved:
                 m = {**m, "mine": list(saved[mid].get("tags") or []), "gold_id": mid}
+            pid = TLB.partial_id(vid, float(m["t"]))
+            if pid in part and m.get("mine") is None:
+                m = {**m, "partial": {"yes": list(part[pid].get("yes") or []),
+                                      "no": list(part[pid].get("no") or [])}}
             ms.append(m)
         out[vid] = {**v, "moments": ms}
     return out
@@ -195,13 +202,32 @@ PICKED_BY = {
 }
 
 
+def your_answer(moment: dict, tag: str):
+    """True / False if you've decided this tag on this frame (full label or ▦ batch tag), else None."""
+    tn = norm(tag)
+    if moment.get("mine") is not None:
+        return tn in {norm(t) for t in moment["mine"]}
+    p = moment.get("partial") or {}
+    if tn in {norm(t) for t in p.get("yes") or []}:
+        return True
+    if tn in {norm(t) for t in p.get("no") or []}:
+        return False
+    return None
+
+
+def model_has(moment: dict, tag: str) -> bool:
+    """A model confirmed the tag here (never its unsure ones)."""
+    tn = norm(tag)
+    return any(tn in {norm(t) for t in r.get("tags") or []} for r in (moment.get("teachers") or {}).values())
+
+
 def picked_by(moment: dict, tag: str, who: str = "any", skip_old: bool = False) -> bool:
     """Whether this moment has the tag as a confirmed pick by who: "mine" = your saved label, "model" =
     a model's tags (never its unsure ones), "both" = you and a model, "any" = you, a model, or (unless
     skip_old) the old tags."""
     tn = norm(tag)
     sets = tag_sets(moment)
-    mine = tn in sets.get("mine", set())
+    mine = tn in sets.get("mine", set()) or tn in {norm(t) for t in (moment.get("partial") or {}).get("yes") or []}
     model = any(tn in s for k, s in sets.items() if k not in ("mine", "old"))
     if who == "mine":
         return mine

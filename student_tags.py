@@ -314,6 +314,28 @@ def _labels() -> list:
             and not i.get("skipped") and i.get("t") is not None and i.get("video_id")]
 
 
+def _partials(labels: list = None) -> list:
+    """Your ▦ Grid batch tags (type "partial": {"yes", "no"}) — each speaks only for those tags. A moment
+    you've also labelled in full is left to the full label."""
+    data = _read_json(WORK / "library" / "training_labels.json", {}) or {}
+    full = {(i["video_id"], round(float(i["t"]), 2)) for i in (labels if labels is not None else _labels())}
+    return [i for i in data.get("items") or [] if isinstance(i, dict) and i.get("type") == "partial"
+            and i.get("t") is not None and i.get("video_id") and (i.get("yes") or i.get("no"))
+            and (i["video_id"], round(float(i["t"]), 2)) not in full]
+
+
+def apply_partial(y: np.ndarray, w: np.ndarray, item: dict, tag_ix: dict, weight: float) -> int:
+    """Your yes / no answers from a batch tag on this moment's targets (×weight, like a full label).
+    Every other tag keeps what it had. Returns how many tags it set."""
+    n = 0
+    for t, val in [(t, 1.0) for t in item.get("yes") or []] + [(t, 0.0) for t in item.get("no") or []]:
+        j = tag_ix.get(str(t).lower())
+        if j is not None:
+            y[j], w[j] = val, weight
+            n += 1
+    return n
+
+
 def _vocab() -> list:
     p = WORK / "library" / "tag_vocabulary.csv"
     try:
@@ -607,16 +629,18 @@ def hard_target(tags, tag_ix: dict, n: int) -> np.ndarray:
 
 def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LABEL_WEIGHT,
                   root: Path = None, scenes: dict = None, scene_weight: float = SCENE_WEIGHT,
-                  use_trust: bool = True, use_pose: bool = False) -> dict:
+                  use_trust: bool = True, use_pose: bool = False, partials: list = None) -> dict:
     """Every usable moment as an index window into one big embedding array, with a weight PER TAG
     (0 = this moment says nothing about that tag):
       • teacher moments: its soft answer, weight 1 (0.5 if copied); tags with the teacher switched off 0;
       • inside a scene you corrected in the Reviewer: that scene's answer for the trusted tags (×2),
         plus extra moments every 2 s that carry only the scene's answer;
-      • your 🎯 / ✏️ labels: every tag, ×label_weight (they replace anything at the same moment).
+      • your 🎯 / ✏️ labels: every tag, ×label_weight (they replace anything at the same moment);
+      • your ▦ Grid batch tags (partial labels): only the tags you decided, ×label_weight, on top of the
+        teacher's answer at that moment (or on their own where the teacher has no moment).
     Returns {"E" (frames × D, float16), "idx" (samples × 9), "y", "w" (samples × tags), "video",
-    "is_label", "gold_id", "t", "videos", "skipped", "tags", "counts"}. Test-set videos give label
-    rows only (for scoring) and are flagged so training never sees them."""
+    "is_label", "is_partial", "gold_id", "t", "videos", "skipped", "tags", "counts", "partial_test"}.
+    Test-set videos give label rows only (full and partial, for scoring) and training never sees them."""
     root = root or WORK / "videos"
     scenes = _reviewer_scenes() if scenes is None else scenes
     tags = [r["tag"] for r in vocab]
@@ -632,13 +656,19 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
     by_video = {}
     for i in labels:
         by_video.setdefault(i["video_id"], []).append(i)
-    E, idx, ys, ws, vids, is_lab, gids, ts = [], [], [], [], [], [], [], []
-    counts = {"teacher": 0, "teacher_in_scenes": 0, "scene_extra": 0, "labels": 0}
+    part_by = {}
+    for i in partials or []:
+        part_by.setdefault(i["video_id"], {})[round(float(i["t"]), 2)] = i
+    E, idx, ys, ws, vids, is_lab, is_part, gids, ts = [], [], [], [], [], [], [], [], []
+    counts = {"teacher": 0, "teacher_in_scenes": 0, "scene_extra": 0, "labels": 0,
+              "partial_on_teacher": 0, "partial_alone": 0, "partial_test": 0}
+    partial_test = {}
     offset, skipped, used = 0, [], []
 
-    def add(v, t, y, w, lab=False, gid=""):
+    def add(v, t, y, w, lab=False, gid="", part=False):
         idx.append(window_index(et, t) + offset)
-        ys.append(y); ws.append(w); vids.append(v); is_lab.append(lab); gids.append(gid); ts.append(t)
+        ys.append(y); ws.append(w); vids.append(v); is_lab.append(lab); is_part.append(part)
+        gids.append(gid); ts.append(t)
 
     vdirs = sorted(p for p in root.iterdir() if p.is_dir())
     for n_v, vdir in enumerate(vdirs, 1):
@@ -652,6 +682,7 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
         mine = by_video.get(v, [])
         lab_t = {round(float(i["t"]), 2) for i in mine}
         lab_id = {i["id"] for i in mine if i.get("id")}
+        vpart = {k: p for k, p in (part_by.get(v) or {}).items() if k not in lab_t}
         start_rows = len(idx)
         if v not in test:
             vscenes = scenes.get(v) or [] if trusted else []
@@ -670,7 +701,10 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
                     saw = {k for k, j in tag_ix.items() if y[j] >= 0.5}
                     if apply_scene(y, w, sc, tag_ix, rules, saw, scene_weight):
                         counts["teacher_in_scenes"] += 1
-                add(v, t, y, w)
+                p = vpart.pop(round(t, 2), None)
+                if p is not None and apply_partial(y, w, p, tag_ix, label_weight):
+                    counts["partial_on_teacher"] += 1
+                add(v, t, y, w, part=p is not None)
                 taken.append(t)
                 counts["teacher"] += 1
             # extra moments inside corrected scenes, away from the teacher's and your moments
@@ -683,6 +717,15 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
                     if apply_scene(y, w, sc, tag_ix, rules, set(), scene_weight):
                         add(v, float(t), y, w)
                         counts["scene_extra"] += 1
+        for tk, p in sorted(vpart.items()):        # batch tags with no teacher moment (and every test one)
+            y, w = np.zeros(n, np.float32), np.zeros(n, np.float32)
+            if apply_partial(y, w, p, tag_ix, label_weight):
+                add(v, float(p["t"]), y, w, part=True)
+                if v in test:
+                    partial_test[(v, tk)] = {"yes": list(p.get("yes") or []), "no": list(p.get("no") or [])}
+                    counts["partial_test"] += 1
+                else:
+                    counts["partial_alone"] += 1
         for i in mine:
             add(v, float(i["t"]), hard_target(i.get("tags"), tag_ix, n), np.full(n, label_weight, np.float32),
                 True, i.get("id") or "")
@@ -696,6 +739,7 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
         raise SystemExit(f"No usable videos in {root} — run `python student_tags.py fetch` first.")
     return {"E": np.concatenate(E), "idx": np.stack(idx).astype(np.int64), "y": np.stack(ys),
             "w": np.stack(ws).astype(np.float32), "video": np.asarray(vids), "is_label": np.asarray(is_lab),
+            "is_partial": np.asarray(is_part, bool), "partial_test": partial_test,
             "gold_id": np.asarray(gids), "t": np.asarray(ts), "videos": used, "skipped": skipped,
             "tags": tags, "counts": counts, "scene_tags_used": sorted(trusted),
             "scene_rules": {k: sorted(v) for k, v in rules.items()}, "scene_agreement": agreement,
@@ -1018,6 +1062,7 @@ def score_report(ds: dict, prob: np.ndarray, rows: np.ndarray, thresholds: np.nd
                       f"{'+' if d > 0 else ''}{d} |")
         else:
             md.append(f"| {t} | {ng_txt} | {f(s['f1'])} | {errs(s)} | {th[t]:.2f} |")
+    md += partial_markdown(ds, prob, rows, thresholds, svocab if best == "rules" else None, ref)
     n = res[best]["n"]
     md += ["", f"On {n} frames, F1 moves by about ±{max(0.02, round(0.5 / max(n, 1) ** 0.5, 2)):.2f} from "
                "chance alone — trust bigger gaps, and per-tag differences of several frames."]
@@ -1028,24 +1073,73 @@ def score_report(ds: dict, prob: np.ndarray, rows: np.ndarray, thresholds: np.nd
 # Commands
 # ---------------------------------------------------------------------------
 
+def partial_scores(ds: dict, prob: np.ndarray, rows: np.ndarray, thresholds: np.ndarray, svocab=None,
+                   ref: dict | None = None) -> dict:
+    """On your ▦ batch-tagged test frames: per tag, how many of your yes / no answers the student (and
+    the reference teacher run, on frames it tagged) got right. {tag: {"n", "right", "t_n", "t_right"}}."""
+    pt = ds.get("partial_test") or {}
+    if not pt:
+        return {}
+    tags = ds["tags"]
+    tframes = {}
+    if ref:
+        tframes = {(f["v"], round(float(f["t"]), 2)): {str(x).lower() for x in f.get("tags") or []}
+                   for f in ref.get("frames") or [] if f.get("t") is not None}
+    out = {}
+    for k, r in enumerate(rows):
+        key = (ds["video"][r], round(float(ds["t"][r]), 2))
+        if not ds["is_partial"][r] or key not in pt:
+            continue
+        said = {str(x).lower() for x in to_tags(prob[k], tags, thresholds, svocab)}
+        tsaid = tframes.get(key)
+        for t, want in [(t, True) for t in pt[key]["yes"]] + [(t, False) for t in pt[key]["no"]]:
+            s = out.setdefault(t, {"n": 0, "right": 0, "t_n": 0, "t_right": 0})
+            s["n"] += 1
+            s["right"] += (t.lower() in said) == want
+            if tsaid is not None:
+                s["t_n"] += 1
+                s["t_right"] += (t.lower() in tsaid) == want
+    return out
+
+
+def partial_markdown(ds: dict, prob, rows, thresholds, svocab=None, ref: dict | None = None) -> list:
+    sc = partial_scores(ds, prob, rows, thresholds, svocab, ref)
+    if not sc:
+        return []
+    md = ["", "## Your ▦ batch-tagged test frames (per tag)", "",
+          "Frames you batch-tagged in ▦ Grid only say yes / no for the tags you picked, so they're scored per tag "
+          "(not in the F1 above): how many of your answers each model matched.", "",
+          "| Tag | Your answers | Student right | " + ("Teacher right (frames it tagged) |" if ref else ""),
+          "|---|---|---|" + ("---|" if ref else "")]
+    for t, s in sorted(sc.items(), key=lambda x: (-x[1]["n"], x[0].lower())):
+        line = f"| {t} | {s['n']} | {s['right']} ({100 * s['right'] / s['n']:.0f}%) |"
+        if ref:
+            line += (f" {s['t_right']} of {s['t_n']} ({100 * s['t_right'] / s['t_n']:.0f}%) |" if s["t_n"] else " – |")
+        md.append(line)
+    return md
+
+
 def _prepare(label_weight: float, use_trust: bool = True, use_pose: bool = False):
     vocab, labels, test = _vocab(), _labels(), set(test_videos())
+    partials = _partials(labels)
     if not vocab:
         raise SystemExit("No tag_vocabulary.csv in _student/library — run `python student_tags.py fetch`.")
     if not test:
         print("⚠️ No test set downloaded (testset.json) — the model will train but can't be scored.")
-    ds = build_dataset(vocab, labels, test, label_weight, use_trust=use_trust, use_pose=use_pose)
+    ds = build_dataset(vocab, labels, test, label_weight, use_trust=use_trust, use_pose=use_pose,
+                       partials=partials)
     train_v, val_v = split_videos(ds["videos"], test)
     vids = ds["video"]
     train_rows = np.flatnonzero(np.isin(vids, train_v))
     val_rows = np.flatnonzero(np.isin(vids, val_v))
-    test_rows = np.flatnonzero(np.isin(vids, list(test)) & ds["is_label"])
+    # test rows: your full labels (the main score) and your ▦ batch tags (scored per tag only)
+    test_rows = np.flatnonzero(np.isin(vids, list(test)) & (ds["is_label"] | ds["is_partial"]))
     learn = np.flatnonzero(~np.isin(vids, list(test)))
     print(f"Data: {len(ds['videos'])} videos ({len(train_v) + len(val_v)} to learn from, "
           f"{len(set(vids[test_rows]))} test) · {len(ds['tags'])} tags · "
           f"{int((~ds['is_label'][learn]).sum())} teacher moments + "
           f"{int(ds['is_label'][learn].sum())} of your labels to learn from · "
-          f"{len(test_rows)} labelled test frames · {ds['E'].shape[0]:,} embeddings "
+          f"{int(ds['is_label'][test_rows].sum())} labelled test frames · {ds['E'].shape[0]:,} embeddings "
           f"({ds['E'].nbytes / 1e9:.1f} GB)")
     if ds.get("pose_dim"):
         has = float((ds["E"][:, -POSE_DIM].astype(np.float32) > 0.5).mean())
@@ -1054,6 +1148,10 @@ def _prepare(label_weight: float, use_trust: bool = True, use_pose: bool = False
     print(f"   Reviewer corrections: {c['teacher_in_scenes']} teacher moments given your scene's answer + "
           f"{c['scene_extra']} extra moments from your corrected scenes · tags used from them: "
           f"{len(ds['scene_tags_used'])} of {len(ds['tags'])}")
+    if partials:
+        print(f"   ▦ batch tags: {c['partial_on_teacher']} teacher moments given your yes / no answers + "
+              f"{c['partial_alone']} moments with only your answers · {c['partial_test']} test-set moments "
+              "(scored per tag)")
     if ds["skipped"]:
         print(f"   skipped {len(ds['skipped'])} video(s) with unreadable embeddings: {', '.join(ds['skipped'][:5])}")
     return vocab, labels, test, ds, train_rows, val_rows, test_rows
