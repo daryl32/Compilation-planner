@@ -843,3 +843,19 @@ def test_grid_marks_show_the_whole_category():
     assert "✗ Cowgirl" in html_ and "◆ reverse cowgi" in html_ and "● Doggy" in html_
     assert html_.count("mp-gpick") == 1 and "+ Missionary" in html_          # hidden until the frame is ticked
     assert "mp-gpick" in TV.GRID_CSS and ":has(input:checked)" in TV.GRID_CSS
+
+
+def test_grid_all_categories(bundle, clean_labels):
+    from tests.apptest_util import errors, page_app
+    import trial_view as TV
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_sub"] = "🖼️ Compare tags"
+    at.session_state["tr_view"] = "grid"
+    at.run()
+    assert not errors(at), errors(at)
+    assert TV.GRID_ALL in at.selectbox(key="tr_g_cat").options
+    at.selectbox(key="tr_g_cat").set_value(TV.GRID_ALL).run()
+    assert not errors(at), errors(at)
+    rows, _ = __import__("training_labels").load_vocabulary()
+    assert len(at.button_group[-1].options) == len({r["tag"] for r in rows})   # every tag as a pill

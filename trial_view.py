@@ -21,7 +21,8 @@ CHIP_STYLE = {
     TR.NEUTRAL: ("", "rgba(128,128,128,.12)", "rgba(128,128,128,.4)", ""),
 }
 PER_PAGE = 12
-GRID_PAGE = 48            # ▦ Grid: thumbnails per page
+GRID_PAGE = 48
+GRID_ALL = "🗂️ All categories"   # ▦ Grid: every category's tags under each frame — the final check            # ▦ Grid: thumbnails per page
 # ▦ Grid: 8 thumbnails a row with a mouse / trackpad, 6 on a touch tablet (iPad), 3 on a phone
 GRID_CSS = (
     ".st-key-tr_grid {display:grid!important;grid-template-columns:repeat(8,minmax(0,1fr));gap:.45rem;"
@@ -608,7 +609,7 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
     if not groups:
         st.info("No tag vocabulary yet — add tags in 📒 Vocabulary.")
         return
-    titles = [g[0] for g in groups]
+    titles = [g[0] for g in groups] + [GRID_ALL]
     if tag != "(any tag)" and st.session_state.get("tr_g_lasttag") != tag:
         # the Tag filter changed: open its category and pick it
         st.session_state["tr_g_lasttag"] = tag
@@ -623,8 +624,11 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
     chosen = [t for t in st.session_state.get("tr_g_chosen") or []]
     with st.container(key="tl_wrap_tr_gpick"):
         a, b = st.columns([2, 7])
-        cat = a.selectbox("Category", titles, key="tr_g_cat")
-        in_cat = next(g[2] for g in groups if g[0] == cat)
+        cat = a.selectbox("Category", titles, key="tr_g_cat",
+                          help=f"{GRID_ALL}: every category's tags under each frame — a final check that everything "
+                               "you've corrected is right.")
+        in_cat = (list(dict.fromkeys(t for g in groups for t in g[2])) if cat == GRID_ALL
+                  else next(g[2] for g in groups if g[0] == cat))
         pk = "tr_g_pills_" + hashlib.md5(cat.encode()).hexdigest()[:8]
         st.session_state[pk] = [t for t in in_cat if t in chosen]
 
@@ -653,7 +657,7 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
     page = st.number_input(f"Page (of {pages}) — {len(moments)} frames", 1, pages, 1, key="tr_gpage") \
         if pages > 1 else 1
     items = moments[(page - 1) * GRID_PAGE: page * GRID_PAGE]
-    st.caption(f"Under each frame: the **{cat}** tags you or the model have there — ● you have it · ✗ you said it "
+    st.caption(f"Under each frame: {'every tag' if cat == GRID_ALL else 'the **' + cat + '** tags'} you or the model have there — ● you have it · ✗ you said it "
                "isn't there · ◆ only the model has it. Tick a frame and a picked tag it doesn't have yet shows as "
                "+ tag. "
                "Frames you've only batch-tagged teach the student just those tags; the rest still come from "
