@@ -22,7 +22,8 @@ Usage (from the activated .venv in the scene-labeling folder, or student_tags.ba
     python student_tags.py export --name v4  every half second of every video → catalogue/student_scores
     python student_tags.py picks --name v5b  the moments worth labelling next → 🎯 Training Labels → 🎓 Student's picks
 
-Everything is written to _student next to this script (genuine local disk, not Google Drive):
+Everything is written to _student in config.py's WORK_DIR (else next to this script; genuine local disk,
+not Google Drive):
     _student/videos/<video_id>/  embeddings.npz, tags_32b.json, person_curve.npy
     _student/library/            training_labels.json, tag_vocabulary.csv (copied at fetch time)
     _student/testset.json, test_runs.json, batches.json
@@ -47,7 +48,19 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import trial_logic as TL  # noqa: E402
 
-WORK = HERE / "_student"
+
+
+def work_root() -> Path:
+    """Where the laptop keeps its working data: config.py's WORK_DIR when set (the scene-labeling
+    folder's data\\ since the 5 Nov tidy-up), else next to this script as before."""
+    try:
+        import config
+        return Path(getattr(config, "WORK_DIR", HERE))
+    except Exception:      # noqa: BLE001 — no config.py (tests, a bare checkout)
+        return HERE
+
+
+WORK = work_root() / "_student"
 VOLUME = "media-train"
 TEACHER_FILE = "tags_32b.json"            # 32b and 32b-fp8 (+ LoRA) all write this one
 VIDEO_FILES = ("embeddings.npz", TEACHER_FILE, "person_curve.npy", "detections.npz", "vision.json")
@@ -299,6 +312,28 @@ def _labels() -> list:
     data = _read_json(WORK / "library" / "training_labels.json", {}) or {}
     return [i for i in data.get("items") or [] if isinstance(i, dict) and i.get("type") == "tags"
             and not i.get("skipped") and i.get("t") is not None and i.get("video_id")]
+
+
+def _partials(labels: list = None) -> list:
+    """Your ▦ Grid batch tags (type "partial": {"yes", "no"}) — each speaks only for those tags. A moment
+    you've also labelled in full is left to the full label."""
+    data = _read_json(WORK / "library" / "training_labels.json", {}) or {}
+    full = {(i["video_id"], round(float(i["t"]), 2)) for i in (labels if labels is not None else _labels())}
+    return [i for i in data.get("items") or [] if isinstance(i, dict) and i.get("type") == "partial"
+            and i.get("t") is not None and i.get("video_id") and (i.get("yes") or i.get("no"))
+            and (i["video_id"], round(float(i["t"]), 2)) not in full]
+
+
+def apply_partial(y: np.ndarray, w: np.ndarray, item: dict, tag_ix: dict, weight: float) -> int:
+    """Your yes / no answers from a batch tag on this moment's targets (×weight, like a full label).
+    Every other tag keeps what it had. Returns how many tags it set."""
+    n = 0
+    for t, val in [(t, 1.0) for t in item.get("yes") or []] + [(t, 0.0) for t in item.get("no") or []]:
+        j = tag_ix.get(str(t).lower())
+        if j is not None:
+            y[j], w[j] = val, weight
+            n += 1
+    return n
 
 
 def _vocab() -> list:
@@ -594,16 +629,18 @@ def hard_target(tags, tag_ix: dict, n: int) -> np.ndarray:
 
 def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LABEL_WEIGHT,
                   root: Path = None, scenes: dict = None, scene_weight: float = SCENE_WEIGHT,
-                  use_trust: bool = True, use_pose: bool = False) -> dict:
+                  use_trust: bool = True, use_pose: bool = False, partials: list = None) -> dict:
     """Every usable moment as an index window into one big embedding array, with a weight PER TAG
     (0 = this moment says nothing about that tag):
       • teacher moments: its soft answer, weight 1 (0.5 if copied); tags with the teacher switched off 0;
       • inside a scene you corrected in the Reviewer: that scene's answer for the trusted tags (×2),
         plus extra moments every 2 s that carry only the scene's answer;
-      • your 🎯 / ✏️ labels: every tag, ×label_weight (they replace anything at the same moment).
+      • your 🎯 / ✏️ labels: every tag, ×label_weight (they replace anything at the same moment);
+      • your ▦ Grid batch tags (partial labels): only the tags you decided, ×label_weight, on top of the
+        teacher's answer at that moment (or on their own where the teacher has no moment).
     Returns {"E" (frames × D, float16), "idx" (samples × 9), "y", "w" (samples × tags), "video",
-    "is_label", "gold_id", "t", "videos", "skipped", "tags", "counts"}. Test-set videos give label
-    rows only (for scoring) and are flagged so training never sees them."""
+    "is_label", "is_partial", "gold_id", "t", "videos", "skipped", "tags", "counts", "partial_test"}.
+    Test-set videos give label rows only (full and partial, for scoring) and training never sees them."""
     root = root or WORK / "videos"
     scenes = _reviewer_scenes() if scenes is None else scenes
     tags = [r["tag"] for r in vocab]
@@ -619,13 +656,19 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
     by_video = {}
     for i in labels:
         by_video.setdefault(i["video_id"], []).append(i)
-    E, idx, ys, ws, vids, is_lab, gids, ts = [], [], [], [], [], [], [], []
-    counts = {"teacher": 0, "teacher_in_scenes": 0, "scene_extra": 0, "labels": 0}
+    part_by = {}
+    for i in partials or []:
+        part_by.setdefault(i["video_id"], {})[round(float(i["t"]), 2)] = i
+    E, idx, ys, ws, vids, is_lab, is_part, gids, ts = [], [], [], [], [], [], [], [], []
+    counts = {"teacher": 0, "teacher_in_scenes": 0, "scene_extra": 0, "labels": 0,
+              "partial_on_teacher": 0, "partial_alone": 0, "partial_test": 0}
+    partial_test = {}
     offset, skipped, used = 0, [], []
 
-    def add(v, t, y, w, lab=False, gid=""):
+    def add(v, t, y, w, lab=False, gid="", part=False):
         idx.append(window_index(et, t) + offset)
-        ys.append(y); ws.append(w); vids.append(v); is_lab.append(lab); gids.append(gid); ts.append(t)
+        ys.append(y); ws.append(w); vids.append(v); is_lab.append(lab); is_part.append(part)
+        gids.append(gid); ts.append(t)
 
     vdirs = sorted(p for p in root.iterdir() if p.is_dir())
     for n_v, vdir in enumerate(vdirs, 1):
@@ -639,6 +682,7 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
         mine = by_video.get(v, [])
         lab_t = {round(float(i["t"]), 2) for i in mine}
         lab_id = {i["id"] for i in mine if i.get("id")}
+        vpart = {k: p for k, p in (part_by.get(v) or {}).items() if k not in lab_t}
         start_rows = len(idx)
         if v not in test:
             vscenes = scenes.get(v) or [] if trusted else []
@@ -657,7 +701,10 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
                     saw = {k for k, j in tag_ix.items() if y[j] >= 0.5}
                     if apply_scene(y, w, sc, tag_ix, rules, saw, scene_weight):
                         counts["teacher_in_scenes"] += 1
-                add(v, t, y, w)
+                p = vpart.pop(round(t, 2), None)
+                if p is not None and apply_partial(y, w, p, tag_ix, label_weight):
+                    counts["partial_on_teacher"] += 1
+                add(v, t, y, w, part=p is not None)
                 taken.append(t)
                 counts["teacher"] += 1
             # extra moments inside corrected scenes, away from the teacher's and your moments
@@ -670,6 +717,15 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
                     if apply_scene(y, w, sc, tag_ix, rules, set(), scene_weight):
                         add(v, float(t), y, w)
                         counts["scene_extra"] += 1
+        for tk, p in sorted(vpart.items()):        # batch tags with no teacher moment (and every test one)
+            y, w = np.zeros(n, np.float32), np.zeros(n, np.float32)
+            if apply_partial(y, w, p, tag_ix, label_weight):
+                add(v, float(p["t"]), y, w, part=True)
+                if v in test:
+                    partial_test[(v, tk)] = {"yes": list(p.get("yes") or []), "no": list(p.get("no") or [])}
+                    counts["partial_test"] += 1
+                else:
+                    counts["partial_alone"] += 1
         for i in mine:
             add(v, float(i["t"]), hard_target(i.get("tags"), tag_ix, n), np.full(n, label_weight, np.float32),
                 True, i.get("id") or "")
@@ -683,6 +739,7 @@ def build_dataset(vocab: list, labels: list, test: set, label_weight: float = LA
         raise SystemExit(f"No usable videos in {root} — run `python student_tags.py fetch` first.")
     return {"E": np.concatenate(E), "idx": np.stack(idx).astype(np.int64), "y": np.stack(ys),
             "w": np.stack(ws).astype(np.float32), "video": np.asarray(vids), "is_label": np.asarray(is_lab),
+            "is_partial": np.asarray(is_part, bool), "partial_test": partial_test,
             "gold_id": np.asarray(gids), "t": np.asarray(ts), "videos": used, "skipped": skipped,
             "tags": tags, "counts": counts, "scene_tags_used": sorted(trusted),
             "scene_rules": {k: sorted(v) for k, v in rules.items()}, "scene_agreement": agreement,
@@ -699,30 +756,41 @@ def split_videos(videos: list, test: set, share: float = VAL_SHARE, seed: int = 
     return sorted(pool[k:]), sorted(pool[:k])
 
 
+CUTOFF_MODE = "weighted"                  # "weighted" (v9 on) or "plain" (up to v8: --old-cutoffs)
+
+
 def pick_thresholds(prob: np.ndarray, truth: np.ndarray, min_pos: int = 10, gain: float = 0.01,
-                    mask: np.ndarray = None) -> np.ndarray:
+                    mask: np.ndarray = None, mode: str = None) -> np.ndarray:
     """Per tag, the score cut-off (0.25–0.85) with the best F1 on the held-out moments; 0.5 for a
     tag with fewer than min_pos positives there (too few to choose from) or where no cut-off beats
-    0.5 by at least `gain` F1 (a tiny edge on a few moments is chance, not a better cut-off)."""
+    0.5 by at least `gain` F1 (a tiny edge on a few moments is chance, not a better cut-off).
+    mode "weighted" (default since v9): each moment counts by its training weight (`mask`: your
+    labels ×5, the teacher's answers by its trust on that tag), so a tag the teacher is weak on gets
+    a cut-off that fits YOUR labels; and the F1 curve is smoothed over neighbouring cut-offs before
+    the best is taken, so one lucky point can't swing it (v8: POV 0.50 → 0.25, +43 errors).
+    mode "plain": every moment with any weight counts once, best single point (v1–v8)."""
+    mode = mode or CUTOFF_MODE
     grid = np.round(np.arange(0.25, 0.851, 0.05), 2)
     out = np.full(prob.shape[1], 0.5, np.float32)
+    i50 = int(np.argmin(np.abs(grid - 0.5)))
     for j in range(prob.shape[1]):
-        keep = slice(None) if mask is None else mask[:, j] > 0
+        keep = np.ones(len(prob), bool) if mask is None else mask[:, j] > 0
         pj, g = prob[keep, j], truth[keep, j] >= 0.5
         if g.sum() < min_pos:
             continue
-        def f1_at(th):
-            p = pj >= th
-            return 2 * float((p & g).sum()) / max(float(p.sum() + g.sum()), 1.0)
-        base = f1_at(0.5)
-        best, bt = -1.0, 0.5
+        wt = (np.asarray(mask[keep, j], float) if (mode == "weighted" and mask is not None)
+              else np.ones(len(pj)))
+        f1 = []
         for th in grid:
             p = pj >= th
-            tp = float((p & g).sum())
-            f1 = 2 * tp / max(float(p.sum() + g.sum()), 1.0)
-            if f1 > best + 1e-9:
-                best, bt = f1, th
-        out[j] = bt if best >= base + gain else 0.5
+            tp = float(wt[p & g].sum())
+            f1.append(2 * tp / max(float(wt[p].sum() + wt[g].sum()), 1e-9))
+        f1 = np.asarray(f1)
+        if mode == "weighted":            # neighbours count half: [¼, ½, ¼], edges padded
+            pad = np.concatenate([f1[:1], f1, f1[-1:]])
+            f1 = 0.25 * pad[:-2] + 0.5 * pad[1:-1] + 0.25 * pad[2:]
+        k = int(np.argmax(f1 - 1e-9 * np.abs(np.arange(len(grid)) - i50)))   # ties → nearer 0.5
+        out[j] = grid[k] if f1[k] >= f1[i50] + gain else 0.5
     return out
 
 
@@ -994,6 +1062,7 @@ def score_report(ds: dict, prob: np.ndarray, rows: np.ndarray, thresholds: np.nd
                       f"{'+' if d > 0 else ''}{d} |")
         else:
             md.append(f"| {t} | {ng_txt} | {f(s['f1'])} | {errs(s)} | {th[t]:.2f} |")
+    md += partial_markdown(ds, prob, rows, thresholds, svocab if best == "rules" else None, ref)
     n = res[best]["n"]
     md += ["", f"On {n} frames, F1 moves by about ±{max(0.02, round(0.5 / max(n, 1) ** 0.5, 2)):.2f} from "
                "chance alone — trust bigger gaps, and per-tag differences of several frames."]
@@ -1004,24 +1073,73 @@ def score_report(ds: dict, prob: np.ndarray, rows: np.ndarray, thresholds: np.nd
 # Commands
 # ---------------------------------------------------------------------------
 
+def partial_scores(ds: dict, prob: np.ndarray, rows: np.ndarray, thresholds: np.ndarray, svocab=None,
+                   ref: dict | None = None) -> dict:
+    """On your ▦ batch-tagged test frames: per tag, how many of your yes / no answers the student (and
+    the reference teacher run, on frames it tagged) got right. {tag: {"n", "right", "t_n", "t_right"}}."""
+    pt = ds.get("partial_test") or {}
+    if not pt:
+        return {}
+    tags = ds["tags"]
+    tframes = {}
+    if ref:
+        tframes = {(f["v"], round(float(f["t"]), 2)): {str(x).lower() for x in f.get("tags") or []}
+                   for f in ref.get("frames") or [] if f.get("t") is not None}
+    out = {}
+    for k, r in enumerate(rows):
+        key = (ds["video"][r], round(float(ds["t"][r]), 2))
+        if not ds["is_partial"][r] or key not in pt:
+            continue
+        said = {str(x).lower() for x in to_tags(prob[k], tags, thresholds, svocab)}
+        tsaid = tframes.get(key)
+        for t, want in [(t, True) for t in pt[key]["yes"]] + [(t, False) for t in pt[key]["no"]]:
+            s = out.setdefault(t, {"n": 0, "right": 0, "t_n": 0, "t_right": 0})
+            s["n"] += 1
+            s["right"] += (t.lower() in said) == want
+            if tsaid is not None:
+                s["t_n"] += 1
+                s["t_right"] += (t.lower() in tsaid) == want
+    return out
+
+
+def partial_markdown(ds: dict, prob, rows, thresholds, svocab=None, ref: dict | None = None) -> list:
+    sc = partial_scores(ds, prob, rows, thresholds, svocab, ref)
+    if not sc:
+        return []
+    md = ["", "## Your ▦ batch-tagged test frames (per tag)", "",
+          "Frames you batch-tagged in ▦ Grid only say yes / no for the tags you picked, so they're scored per tag "
+          "(not in the F1 above): how many of your answers each model matched.", "",
+          "| Tag | Your answers | Student right | " + ("Teacher right (frames it tagged) |" if ref else ""),
+          "|---|---|---|" + ("---|" if ref else "")]
+    for t, s in sorted(sc.items(), key=lambda x: (-x[1]["n"], x[0].lower())):
+        line = f"| {t} | {s['n']} | {s['right']} ({100 * s['right'] / s['n']:.0f}%) |"
+        if ref:
+            line += (f" {s['t_right']} of {s['t_n']} ({100 * s['t_right'] / s['t_n']:.0f}%) |" if s["t_n"] else " – |")
+        md.append(line)
+    return md
+
+
 def _prepare(label_weight: float, use_trust: bool = True, use_pose: bool = False):
     vocab, labels, test = _vocab(), _labels(), set(test_videos())
+    partials = _partials(labels)
     if not vocab:
         raise SystemExit("No tag_vocabulary.csv in _student/library — run `python student_tags.py fetch`.")
     if not test:
         print("⚠️ No test set downloaded (testset.json) — the model will train but can't be scored.")
-    ds = build_dataset(vocab, labels, test, label_weight, use_trust=use_trust, use_pose=use_pose)
+    ds = build_dataset(vocab, labels, test, label_weight, use_trust=use_trust, use_pose=use_pose,
+                       partials=partials)
     train_v, val_v = split_videos(ds["videos"], test)
     vids = ds["video"]
     train_rows = np.flatnonzero(np.isin(vids, train_v))
     val_rows = np.flatnonzero(np.isin(vids, val_v))
-    test_rows = np.flatnonzero(np.isin(vids, list(test)) & ds["is_label"])
+    # test rows: your full labels (the main score) and your ▦ batch tags (scored per tag only)
+    test_rows = np.flatnonzero(np.isin(vids, list(test)) & (ds["is_label"] | ds["is_partial"]))
     learn = np.flatnonzero(~np.isin(vids, list(test)))
     print(f"Data: {len(ds['videos'])} videos ({len(train_v) + len(val_v)} to learn from, "
           f"{len(set(vids[test_rows]))} test) · {len(ds['tags'])} tags · "
           f"{int((~ds['is_label'][learn]).sum())} teacher moments + "
           f"{int(ds['is_label'][learn].sum())} of your labels to learn from · "
-          f"{len(test_rows)} labelled test frames · {ds['E'].shape[0]:,} embeddings "
+          f"{int(ds['is_label'][test_rows].sum())} labelled test frames · {ds['E'].shape[0]:,} embeddings "
           f"({ds['E'].nbytes / 1e9:.1f} GB)")
     if ds.get("pose_dim"):
         has = float((ds["E"][:, -POSE_DIM].astype(np.float32) > 0.5).mean())
@@ -1030,6 +1148,10 @@ def _prepare(label_weight: float, use_trust: bool = True, use_pose: bool = False
     print(f"   Reviewer corrections: {c['teacher_in_scenes']} teacher moments given your scene's answer + "
           f"{c['scene_extra']} extra moments from your corrected scenes · tags used from them: "
           f"{len(ds['scene_tags_used'])} of {len(ds['tags'])}")
+    if partials:
+        print(f"   ▦ batch tags: {c['partial_on_teacher']} teacher moments given your yes / no answers + "
+              f"{c['partial_alone']} moments with only your answers · {c['partial_test']} test-set moments "
+              "(scored per tag)")
     if ds["skipped"]:
         print(f"   skipped {len(ds['skipped'])} video(s) with unreadable embeddings: {', '.join(ds['skipped'][:5])}")
     return vocab, labels, test, ds, train_rows, val_rows, test_rows
@@ -1134,7 +1256,8 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, 
             "epochs_run": [len(h) for h in hists], "history": hists,
             "train_minutes": round(minutes, 2), "videos": len(ds["videos"]), "test_videos": sorted(test),
             "labels_newest": max((i.get("labelled_at") or "" for i in labels), default=""),
-            "context": ctx_meta, "step1_thresholds": [float(x) for x in step1_thresholds]}
+            "context": ctx_meta, "step1_thresholds": [float(x) for x in step1_thresholds],
+            "cutoffs": CUTOFF_MODE}
     print(f"Trained in {minutes:.1f} min.", flush=True)
     step1 = None
     if ctx_meta and step1_test_prob is not None:
@@ -1171,7 +1294,7 @@ def _score(models, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta
         md = "\n".join(lines)
     meta["reference_run"] = ref["id"] if ref else None
     md += "\n\n" + trust_markdown(ds) + "\n\n" + scene_rules_markdown(ds)
-    report = HERE / "student_report.md"
+    report = work_root() / "student_report.md"
     report.write_text(md, encoding="utf-8")
     (WORK / "models" / name / "student_report.md").write_text(md, encoding="utf-8")
     print("\n" + "\n".join(md.splitlines()[:14]) + f"\n\nFull report (per tag) → {report}")
@@ -1305,6 +1428,8 @@ PICK_STEP = 4                             # candidates every 2 s (half-second st
 PICK_GAP = 10.0                           # picks in a video at least this far apart (s)
 PICK_PER_VIDEO = 12
 PICK_NEAR_LABEL = 3.0                     # never within this of a moment you've labelled
+PICK_PER_TAG = 40                         # at most this many picks for one tag in a round (v8 round: ~all
+                                          # extreme close-up — the teacher's weakness there never changes)
 
 
 def pick_priority(trust: dict, labels: list, tags: list) -> np.ndarray:
@@ -1342,10 +1467,48 @@ def choose_picks(times: np.ndarray, value: np.ndarray, taken, n: int, gap: float
     return out
 
 
-def make_picks(name: str, n: int = 300, n_test: int = 80, dest: Path = None, seed: int = SEED) -> int:
+def greedy_picks(cand: list, n: int, per_tag: int, tags: list, per_video: int = PICK_PER_VIDEO,
+                 gap: float = PICK_GAP) -> list:
+    """One pass over every video's candidate moments: repeatedly the most useful moment left, where
+    a moment's value is its best tag that hasn't reached per_tag yet — so once a tag is full, a moment
+    the student is also unsure about on another tag still counts for that one. ≤ per_video per video,
+    ≥ gap seconds apart. cand = [(video, times, scores, value per tag)]. Returns [(video, t, tag, scores)]."""
+    if not cand:
+        return []
+    V = np.concatenate([np.full(len(c[1]), i) for i, c in enumerate(cand)])
+    T = np.concatenate([c[1] for c in cand]).astype(float)
+    P = np.concatenate([c[2] for c in cand])
+    U = np.concatenate([c[3] for c in cand]).astype(np.float32)
+    alive = np.ones(len(T), bool)
+    open_tag = np.ones(U.shape[1], bool)
+    used_tag = np.zeros(U.shape[1], int)
+    used_vid = np.zeros(len(cand), int)
+    out = []
+    while len(out) < n and open_tag.any():
+        val = np.where(alive, U[:, open_tag].max(axis=1), 0.0)
+        k = int(np.argmax(val))
+        if val[k] <= 0:
+            break
+        b = int(np.flatnonzero(open_tag)[np.argmax(U[k, open_tag])])
+        vi = int(V[k])
+        out.append((cand[vi][0], T[k], tags[b], P[k]))
+        used_tag[b] += 1
+        used_vid[vi] += 1
+        if per_tag and used_tag[b] >= per_tag:
+            open_tag[b] = False
+        same = V == vi
+        alive &= ~(same & (np.abs(T - T[k]) < gap))
+        if used_vid[vi] >= per_video:
+            alive &= ~same
+    return out
+
+
+def make_picks(name: str, n: int = 300, n_test: int = 80, dest: Path = None, seed: int = SEED,
+               per_tag: int = PICK_PER_TAG) -> int:
     """student_picks.json for 🎯 Training Labels → 🎓 Student's picks (catalogue/trial_results on Drive):
       • training videos: the moments where the student is least sure about a tag worth labelling
-        (the teacher is weak on it / you have few labels), most useful first, ≤12 per video, 10 s apart;
+        (the teacher is weak on it / you have few labels), most useful first, ≤12 per video, 10 s apart,
+        and ≤ per_tag for any one tag, so a round covers the weak tags rather than just the weakest;
       • 🧪 test-set videos: random moments (not chosen by the student, so the test set stays fair).
     Every 5th card is a test-set one. The student's own tags come prefilled."""
     models, meta = load_models(name)
@@ -1362,7 +1525,7 @@ def make_picks(name: str, n: int = 300, n_test: int = 80, dest: Path = None, see
     for i in labels:
         by_video.setdefault(i["video_id"], []).append(float(i["t"]))
     rng = np.random.default_rng(seed)
-    train_picks, test_picks = [], []
+    train_picks, test_picks, cand = [], [], []
     use_pose = bool(meta.get("pose_dim"))
     vdirs = sorted(p for p in (WORK / "videos").iterdir() if p.is_dir())
     for k, vdir in enumerate(vdirs, 1):
@@ -1382,24 +1545,22 @@ def make_picks(name: str, n: int = 300, n_test: int = 80, dest: Path = None, see
                 test_picks.append({"video_id": v, "t": round(t, 2), "set": "test", "why": "",
                                    "tags": [x for x, p_, c in zip(tags, pp[j], cutoffs) if p_ >= c]})
             continue
-        u = uncertainty(pp, cutoffs) * prio
-        best = u.argmax(axis=1)
-        val = u.max(axis=1) * edge
-        for t in choose_picks(tt, val, by_video.get(v, []), PICK_PER_VIDEO):
-            j = int(np.argmin(np.abs(tt - t)))
-            b = int(best[j])
-            train_picks.append({"video_id": v, "t": round(t, 2), "set": "train", "value": float(val[j]),
-                                "why": f"{tags[b]} ({pp[j, b]:.2f}, cut-off {cutoffs[b]:.2f})",
-                                "tags": [x for x, p_, c in zip(tags, pp[j], cutoffs) if p_ >= c]})
+        ok = edge.copy()
+        for u_ in by_video.get(v, []):            # never next to a moment you labelled
+            ok &= np.abs(tt - u_) >= PICK_NEAR_LABEL
+        if ok.any():
+            cand.append((v, tt[ok], pp[ok], uncertainty(pp[ok], cutoffs) * prio))
         if k % 25 == 0:
             print(f"   {k} of {len(vdirs)} videos", flush=True)
-    train_picks.sort(key=lambda x: -x["value"])
-    train_picks = train_picks[:n]
+    for v, t, tag, pr in greedy_picks(cand, n, per_tag, tags):
+        b = tags.index(tag)
+        train_picks.append({"video_id": v, "t": round(float(t), 2), "set": "train",
+                            "why": f"{tag} ({pr[b]:.2f}, cut-off {cutoffs[b]:.2f})",
+                            "tags": [x for x, p_, c in zip(tags, pr, cutoffs) if p_ >= c]})
     rng.shuffle(test_picks)
     test_picks = test_picks[:n_test]
     out, ti = [], iter(test_picks)
     for i, pk in enumerate(train_picks, 1):
-        pk.pop("value", None)
         out.append(pk)
         if i % 4 == 0:
             nxt = next(ti, None)
@@ -1470,8 +1631,14 @@ def main(argv=None) -> int:
                     "overall — fewer wrong tags, more missed)")
     ap.add_argument("--no-teacher-trust", action="store_true",
                     help="count the teacher's answers fully on every tag (as v4 did)")
+    ap.add_argument("--old-cutoffs", action="store_true",
+                    help="pick cut-offs the v1–v8 way (every held-out moment counts once, best single point)")
+    ap.add_argument("--per-tag", type=int, default=PICK_PER_TAG,
+                    help=f"picks: at most this many picks for one tag (default {PICK_PER_TAG})")
     ap.add_argument("--vs", default="", help="teacher test run id or label to compare with (default: newest try2)")
     a = ap.parse_args(argv)
+    global CUTOFF_MODE
+    CUTOFF_MODE = "plain" if a.old_cutoffs else "weighted"
     WORK.mkdir(exist_ok=True)
     if a.command in ("fetch", "all"):
         rc = fetch()
@@ -1483,7 +1650,7 @@ def main(argv=None) -> int:
     if a.command == "export":
         return export(a.name)
     if a.command == "picks":
-        return make_picks(a.name, a.n, a.n_test)
+        return make_picks(a.name, a.n, a.n_test, per_tag=a.per_tag)
     return score(a.name, a.vs, a.label_weight)
 
 

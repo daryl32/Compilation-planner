@@ -297,3 +297,92 @@ def test_picks(tmp_path, monkeypatch):
 def test_uncertainty_peaks_at_cutoff():
     u = S.uncertainty(np.array([[0.4, 0.95, 0.05]]), np.array([0.4, 0.4, 0.4]))
     assert u[0, 0] == 1 and u[0, 1] < 0.1 and u[0, 2] < 0.5
+
+
+def test_greedy_picks_cap_spreads_tags():
+    """With one tag far more 'useful' everywhere, the cap still hands the rest of the round to the
+    others — the moment's next-best tag counts once the first is full."""
+    rng = np.random.default_rng(0)
+    cand = []
+    for v in range(6):
+        t = np.arange(0, 600, 2.0)
+        u = np.stack([np.full(len(t), 0.9), rng.random(len(t)) * 0.5, rng.random(len(t)) * 0.4], 1)
+        cand.append((f"v{v}", t, rng.random((len(t), 3)), u.astype(np.float32)))
+    out = S.greedy_picks(cand, n=30, per_tag=10, tags=["a", "b", "c"], per_video=12, gap=10.0)
+    tags = [o[2] for o in out]
+    assert len(out) == 30 and tags.count("a") == 10 and tags.count("b") >= 10 and tags.count("c") >= 1
+    uncapped = S.greedy_picks(cand, n=30, per_tag=0, tags=["a", "b", "c"], per_video=12, gap=10.0)
+    assert [o[2] for o in uncapped].count("a") == 30
+    for v in {o[0] for o in out}:                      # per video: ≤12, ≥10 s apart
+        ts = sorted(o[1] for o in out if o[0] == v)
+        assert len(ts) <= 12 and all(b - a >= 10 for a, b in zip(ts, ts[1:]))
+
+
+def test_weighted_cutoffs_follow_your_labels_not_a_weak_teacher():
+    """Teacher rows (weight 0.1) say 'yes' at low scores; your labels (×5) say only high scores are
+    real. Plain picks a low cut-off to please the teacher; weighted follows your labels."""
+    rng = np.random.default_rng(1)
+    t_p = rng.uniform(0.25, 0.45, 400)                 # teacher: present, student scores low
+    l_pos, l_neg = rng.uniform(0.6, 0.9, 30), rng.uniform(0.25, 0.45, 40)
+    prob = np.concatenate([t_p, l_pos, l_neg])[:, None]
+    truth = np.concatenate([np.ones(400), np.ones(30), np.zeros(40)])[:, None]
+    w = np.concatenate([np.full(400, 0.1), np.full(70, 5.0)])[:, None]
+    assert S.pick_thresholds(prob, truth, mask=w, mode="plain")[0] <= 0.3
+    assert S.pick_thresholds(prob, truth, mask=w, mode="weighted")[0] >= 0.5
+
+
+def _add_partials(root, items):
+    p = root / "library" / "training_labels.json"
+    data = json.loads(p.read_text())
+    data["items"] += items
+    p.write_text(json.dumps(data))
+
+
+def test_partial_labels_set_only_their_tags(tmp_path):
+    labels, test = _library(tmp_path, n_videos=4)
+    vocab = TL.parse_vocabulary(VOCAB_CSV)
+    ix = {t: j for j, t in enumerate(TAGS)}
+    parts = [
+        # on a teacher moment (t=5) in a training video: kissing yes, wide no; the rest stays the teacher's
+        {"id": "partial:vid03:5.00", "type": "partial", "video_id": "vid03", "t": 5.0,
+         "yes": ["kissing"], "no": ["wide"]},
+        # no teacher moment there: a row with only these answers
+        {"id": "partial:vid03:7.50", "type": "partial", "video_id": "vid03", "t": 7.5, "yes": ["dancing"], "no": []},
+        # a test video: scored per tag, never trained on
+        {"id": "partial:vid00:30.50", "type": "partial", "video_id": "vid00", "t": 30.5, "yes": ["close-up"],
+         "no": ["dancing"]},
+        # a moment you also labelled in full: the full label wins, so this is ignored
+        {"id": "partial:vid03:3.00", "type": "partial", "video_id": "vid03", "t": 3.0, "yes": ["wide"], "no": []},
+    ]
+    _add_partials(tmp_path, parts)
+    import student_tags as S2
+    old = S2.WORK
+    S2.WORK = tmp_path
+    try:
+        got = S2._partials(labels)
+    finally:
+        S2.WORK = old
+    assert [p["t"] for p in got] == [5.0, 7.5, 30.5]
+    ds = S.build_dataset(vocab, labels, set(test), root=tmp_path / "videos", scenes={}, partials=got)
+    r = int(np.flatnonzero((ds["video"] == "vid03") & np.isclose(ds["t"], 5.0))[0])
+    assert ds["is_partial"][r] and not ds["is_label"][r]
+    assert ds["y"][r, ix["kissing"]] == 1 and ds["w"][r, ix["kissing"]] == S.LABEL_WEIGHT
+    assert ds["y"][r, ix["wide"]] == 0 and ds["w"][r, ix["wide"]] == S.LABEL_WEIGHT
+    assert ds["w"][r, ix["close-up"]] == 1.0                     # still the teacher's answer
+    r2 = int(np.flatnonzero((ds["video"] == "vid03") & np.isclose(ds["t"], 7.5))[0])
+    assert ds["w"][r2].tolist() == [0, 0, S.LABEL_WEIGHT, 0]
+    assert ds["partial_test"] == {("vid00", 30.5): {"yes": ["close-up"], "no": ["dancing"]}}
+    assert ds["counts"]["partial_on_teacher"] == 1 and ds["counts"]["partial_alone"] == 1
+
+
+def test_train_scores_batch_tagged_test_frames(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    _library(tmp_path, n_videos=8)
+    _add_partials(tmp_path, [{"id": f"partial:vid00:{t:.2f}", "type": "partial", "video_id": "vid00", "t": float(t),
+                              "yes": ["dancing"] if 40 <= t < 80 else [], "no": [] if 40 <= t < 80 else ["dancing"]}
+                             for t in (20.5, 50.5, 60.5, 100.5)])
+    monkeypatch.setattr(S, "WORK", tmp_path)
+    monkeypatch.setattr(S, "HERE", tmp_path)
+    assert S.main(["train", "--name", "p1", "--epochs", "8", "--folds", "2"]) == 0
+    report = (tmp_path / "student_report.md").read_text()
+    assert "Your ▦ batch-tagged test frames" in report and "| dancing | 4 |" in report

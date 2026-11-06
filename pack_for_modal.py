@@ -53,7 +53,8 @@ from config import CATALOGUE_DIR
 
 CATALOGUE_DIR = Path(CATALOGUE_DIR)
 PROXY_DIR = Path(getattr(config, "PROXY_DIR", CATALOGUE_DIR.parent / "proxies"))
-DEFAULT_OUT = Path(__file__).resolve().parent / "_modal_pack"
+# config.py's WORK_DIR on the laptop (scene-labeling\\data); next to this script elsewhere (the server)
+DEFAULT_OUT = Path(getattr(config, "WORK_DIR", Path(__file__).resolve().parent)) / "_modal_pack"
 VOLUME = "media-train"
 PACK_VERSION = 1
 

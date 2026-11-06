@@ -408,6 +408,99 @@ def save_label(card: dict, **answer) -> dict:
     return item
 
 
+def partial_id(video_id: str, t: float) -> str:
+    """The id of a batch-tagged (partial) answer for one moment."""
+    return card_id("partial", video_id, t)
+
+
+def _never_with(tags, rows: list) -> set:
+    """Tags that can't be there when `tags` are: never-with partners and the rest of a pick-one set."""
+    pairs = never_pairs(rows or [])
+    one_of = {r["tag"].lower(): r.get("one_of") for r in rows or []}
+    out = set()
+    for t in tags:
+        out |= set(pairs.get(t.lower(), ()))
+        s = one_of.get(t.lower())
+        if s:
+            out |= {r["tag"] for r in rows if r.get("one_of") == s and r["tag"].lower() != t.lower()}
+    return out
+
+
+def batch_tag(moments: list, add=(), remove=(), rows: list = None) -> dict:
+    """▦ Grid batch tagging: add and/or remove tags on many moments in one write.
+    moments: [{"video_id", "scene_id", "t", "label_id", "tags"?}] (label_id = the id a full 🎯 / ✏️ label of
+    that moment has; tags = your full label's tags as the results show them, if any). Where you have a full label, its tags are edited. Elsewhere the answer is stored as a
+    partial label — {"type": "partial", "yes": [...], "no": [...]} — that only speaks for those tags; every
+    other tag still comes from the teacher. Adding a tag also says "no" to the tags your vocabulary's
+    never-with rules (and pick-one sets) rule out next to it.
+    Returns {"full": n, "partial": n, "undo": [(id, previous item or None)]}."""
+    add = list(dict.fromkeys(add or []))
+    remove = [t for t in dict.fromkeys(remove or []) if t.lower() not in {a.lower() for a in add}]
+    ruled_out = {t for t in _never_with(add, rows) if t.lower() not in {a.lower() for a in add}}
+    drop = {t.lower() for t in remove} | {t.lower() for t in ruled_out}
+    items = load_labels()
+    by_id = {i["id"]: n for n, i in enumerate(items)}
+    now, ver = time.strftime("%Y-%m-%dT%H:%M:%S"), vocabulary_version()
+    out = {"full": 0, "partial": 0, "undo": []}
+    for m in moments:
+        lid = m.get("label_id") or card_id("tags", m["video_id"], float(m["t"]))
+        full = items[by_id[lid]] if lid in by_id else None
+        created = False
+        if full is None and m.get("tags") is not None:
+            # a full label the results know about but the labels file doesn't have: start it again
+            full = {"id": lid, "type": "tags", "video_id": m["video_id"], "scene_id": m.get("scene_id"),
+                    "t": float(m["t"]), "suggested": list(m["tags"]), "tags": list(m["tags"])}
+            by_id[lid] = len(items)
+            items.append(full)
+            created = True
+        if full is not None and full.get("type") == "tags" and not full.get("skipped"):
+            before = None if created else json.loads(json.dumps(full))
+            tags = [t for t in full.get("tags") or [] if t.lower() not in drop]
+            tags += [a for a in add if a.lower() not in {t.lower() for t in tags}]
+            if created or tags != list(full.get("tags") or []):
+                full.update(tags=tags, labelled_at=now, vocab_version=ver)
+                out["undo"].append((lid, before))
+                out["full"] += 1
+            continue
+        pid = partial_id(m["video_id"], float(m["t"]))
+        old = items[by_id[pid]] if pid in by_id else None
+        yes = {t.lower(): t for t in (old or {}).get("yes") or []}
+        no = {t.lower(): t for t in (old or {}).get("no") or []}
+        for t in add:
+            yes[t.lower()] = t
+            no.pop(t.lower(), None)
+        for t in list(remove) + sorted(ruled_out):
+            no[t.lower()] = t
+            yes.pop(t.lower(), None)
+        item = {"id": pid, "type": "partial", "video_id": m["video_id"], "scene_id": m.get("scene_id"),
+                "t": float(m["t"]), "yes": sorted(yes.values(), key=str.lower),
+                "no": sorted(no.values(), key=str.lower), "labelled_at": now, "vocab_version": ver}
+        if old is not None and old.get("yes") == item["yes"] and old.get("no") == item["no"]:
+            continue
+        out["undo"].append((pid, old))
+        if old is None:
+            by_id[pid] = len(items)
+            items.append(item)
+        else:
+            items[by_id[pid]] = item
+        out["partial"] += 1
+    if out["undo"]:
+        _write_labels(items)
+    return out
+
+
+def undo_batch(undo: list) -> int:
+    """Put back what batch_tag changed (its "undo" list). Returns how many answers were restored."""
+    if not undo:
+        return 0
+    items = load_labels()
+    prev = {i: b for i, b in undo}
+    kept = [i for i in items if i["id"] not in prev]
+    kept += [b for b in prev.values() if b is not None]
+    _write_labels(kept)
+    return len(prev)
+
+
 def remove_label(item_id: str) -> bool:
     items = load_labels()
     keep = [i for i in items if i["id"] != item_id]

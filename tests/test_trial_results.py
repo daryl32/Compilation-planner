@@ -678,3 +678,87 @@ def test_filter_picked_by_counts_confirmed_tags_only():
     assert f("both") == [both]
     assert f("any") == [me, model, both, unlabelled]
     assert f("any", skip=False) == [me, model, both, unlabelled, old_only]
+
+
+@pytest.fixture
+def clean_labels(tmp_path):
+    import training_labels as TLB
+    saved = tmp_path / "labels.bak"
+    had = TLB.LABELS_FILE.exists()
+    if had:
+        shutil.copy2(TLB.LABELS_FILE, saved)
+        TLB.LABELS_FILE.unlink()
+    yield TLB
+    if TLB.LABELS_FILE.exists():
+        TLB.LABELS_FILE.unlink()
+    if had:
+        shutil.copy2(saved, TLB.LABELS_FILE)
+
+
+VOCAB = [{"tag": "Cowgirl", "group": "position", "one_of": "", "never_with": "reverse cowgirl; Doggy"},
+         {"tag": "reverse cowgirl", "group": "position", "one_of": "", "never_with": ""},
+         {"tag": "Doggy", "group": "position", "one_of": "", "never_with": ""},
+         {"tag": "Medium shot", "group": "shot", "one_of": "", "never_with": ""}]
+
+
+def test_batch_tag_partial_full_and_undo(clean_labels):
+    TLB = clean_labels
+    TLB.save_label({"id": TLB.card_id("tags", "v", 5.0), "type": "tags", "video_id": "v", "t": 5.0},
+                   tags=["Doggy", "Medium shot"])
+    ms = [{"video_id": "v", "t": 5.0, "scene_id": 0}, {"video_id": "v", "t": 9.0, "scene_id": 1}]
+    res = TLB.batch_tag(ms, add=["Cowgirl"], rows=VOCAB)
+    assert (res["full"], res["partial"]) == (1, 1)
+    items = {i["id"]: i for i in TLB.load_labels()}
+    # the full label: Cowgirl added, Doggy (never-with) taken out, the rest kept
+    assert items[TLB.card_id("tags", "v", 5.0)]["tags"] == ["Medium shot", "Cowgirl"]
+    part = items[TLB.partial_id("v", 9.0)]
+    assert part["type"] == "partial" and part["yes"] == ["Cowgirl"]
+    assert part["no"] == ["Doggy", "reverse cowgirl"]
+    # removing later flips it; adding a ruled-out tag back takes it out of "no"
+    TLB.batch_tag(ms[1:], remove=["Cowgirl"], rows=VOCAB)
+    TLB.batch_tag(ms[1:], add=["Doggy"], rows=VOCAB)
+    part = {i["id"]: i for i in TLB.load_labels()}[TLB.partial_id("v", 9.0)]
+    assert part["yes"] == ["Doggy"] and part["no"] == ["Cowgirl", "reverse cowgirl"]
+    # undo the first batch only: back to the starting full label, no partial
+    TLB.undo_batch(res["undo"])
+    items = {i["id"]: i for i in TLB.load_labels()}
+    assert items[TLB.card_id("tags", "v", 5.0)]["tags"] == ["Doggy", "Medium shot"]
+    assert TLB.partial_id("v", 9.0) not in items
+    # partial answers never count as full labels anywhere else
+    assert TLB.summary(TLB.load_labels())["tags"] == 1
+
+
+def test_partial_labels_reach_the_view(clean_labels):
+    TLB = clean_labels
+    TLB.batch_tag([{"video_id": "vid_a", "t": 12.0, "scene_id": 1}], add=["crowd"], remove=["dance"])
+    videos = TR.with_saved_labels(_bundle()["videos"], TLB.load_labels())
+    m = [m for m in videos["vid_a"]["moments"] if m["key"] == "s1_0"][0]
+    assert m["partial"] == {"yes": ["crowd"], "no": ["dance"]}
+    assert TR.your_answer(m, "Crowd") is True and TR.your_answer(m, "dance") is False
+    assert TR.your_answer(m, "night") is None and TR.model_has(m, "dance")
+    assert TR.picked_by(m, "crowd", "mine") and TR.picked_by(m, "crowd", "both")
+
+
+def test_grid_view_batch_tags(bundle, clean_labels):
+    from tests.apptest_util import errors, page_app
+    TLB = clean_labels
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_sub"] = "🖼️ Compare tags"
+    at.session_state["tr_view"] = "grid"
+    at.run()
+    assert not errors(at), errors(at)
+    ticks = [c for c in at.checkbox if c.key and c.key.startswith("tr_gt_")]
+    assert len(ticks) == 3
+    at.session_state["tr_g_chosen"] = ["crowd"]
+    for c in ticks[1:]:
+        c.check()
+    at.button(key="tr_g_add_top").click().run()
+    assert not errors(at), errors(at)
+    items = TLB.load_labels()
+    parts = [i for i in items if i["type"] == "partial"]
+    assert sorted(i["t"] for i in parts) == [12.0, 20.0] and all(i["yes"] == ["crowd"] for i in parts)
+    assert not any(c.value for c in at.checkbox if c.key and c.key.startswith("tr_gt_"))   # ticks cleared
+    at.button(key="tr_g_undo_btn").click().run()
+    assert not errors(at), errors(at)
+    assert not [i for i in TLB.load_labels() if i["type"] == "partial"]

@@ -77,3 +77,8 @@ WHITELISTED_EMAILS = [
 # Optional: the app clears its caches when it uses more memory than this (MB). Default
 # 1800 (set for a 4 GB server); 3500 suits an 8 GB one.
 # MEMORY_LIMIT_MB = 3500
+
+# Optional (laptop): where the ML scripts keep their working data — _student, _modal_pack,
+# _vision_models, student_report.md. Since the 5 Nov tidy-up the laptop keeps the scripts in
+# scene-labeling\scripts and this data in scene-labeling\data. Default: next to the scripts.
+# WORK_DIR = Path(__file__).resolve().parent.parent / "data"
