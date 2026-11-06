@@ -120,6 +120,27 @@ def test_train_and_score_end_to_end(tmp_path, monkeypatch):
     assert "Student · with your vocabulary rules" in report and "| kissing |" in report
     # score again from the saved model, without training
     assert S.main(["score", "--name", "t1"]) == 0
+    # the run's record for the app: training-side score, per-tag test detail, settings, first score kept
+    meta = json.loads((tmp_path / "models" / "t1" / "meta.json").read_text())
+    tr = meta["training"]
+    assert tr["frames"] > 0 and 0 < tr["scores"]["f1"] <= 1 and "kissing" in tr["per_tag"]
+    assert sum(tr["labels_per_tag"].values()) >= tr["frames"]
+    assert meta["test"]["per_tag"]["kissing"]["f1"] is not None and meta["test"]["teacher_per_tag"]
+    assert meta["settings"]["folds"] == 3 and meta["settings"]["cutoff_range"] == [0.4, 0.7]
+    assert meta["test_first"]["scores"]["rules"]["f1"] == meta["scores"]["rules"]["f1"]
+    # a second run, then rescore-all and the export the app reads
+    assert S.main(["train", "--name", "t2", "--epochs", "8", "--folds", "2", "--wide-cutoffs"]) == 0
+    assert S.main(["rescore-all"]) == 0
+    import student_runs as SR
+    dest = tmp_path / "runs_out"
+    assert SR.export_runs(tmp_path / "models", dest, in_use="t1") == 2
+    idx = json.loads((dest / "index.json").read_text())
+    by = {r["name"]: r for r in idx["runs"]}
+    assert by["t1"]["in_use"] and not by["t2"]["in_use"]
+    assert "fold models 2 (was 3)" in by["t2"]["changed"] and "cut-off range 0.25–0.85 (was 0.40–0.70)" in by["t2"]["changed"]
+    assert by["t2"]["training"]["f1"] is not None and by["t2"]["test"]["student"]["f1"] is not None
+    detail = json.loads((dest / "t2.json").read_text())
+    assert detail["per_tag"]["kissing"]["test"]["f1"] is not None
 
 
 def test_scene_answers_and_teacher_off_tags(tmp_path):
@@ -400,3 +421,18 @@ def test_cutoff_range_keeps_rare_tags_off_the_floor(monkeypatch):
     monkeypatch.setattr(S, "CUTOFF_RANGE", (0.40, 0.70))
     th = S.pick_thresholds(prob, truth, mode="plain")[0]
     assert 0.40 <= th <= 0.70
+
+
+def test_what_changed_lines():
+    import student_runs as SR
+    old = {"name": "v10", "label_weight": 5.0, "folds": 5, "cutoffs": "plain", "counts": {"labels": 100},
+           "training": {"labels_per_tag": {"POV": 10, "Face": 5}}, "test": {"frames": 379}}
+    new = {"name": "v12", "settings": {"label_weight": 5.0, "folds": 5, "cutoffs": "plain",
+                                        "cutoff_range": [0.4, 0.7]},
+           "counts": {"labels": 160}, "training": {"labels_per_tag": {"POV": 50, "Face": 9}}, "test": {"frames": 432}}
+    line = SR.what_changed(old, new)
+    assert "+60 labels (POV +40, Face +4)" in line and "test frames 379 → 432" in line
+    assert "cut-off range" not in line                 # v10 didn't record a range: not a change
+    assert SR.what_changed(None, {"name": "v1"}).startswith("First student")
+    assert SR.what_changed(old, {**old, "name": "v5b"}).startswith("v5 retrained")
+    assert "chance" in SR.what_changed(old, {**old, "name": "v99"})

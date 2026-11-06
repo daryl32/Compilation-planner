@@ -21,6 +21,11 @@ Usage (from the activated .venv in the scene-labeling folder, or student_tags.ba
     python student_tags.py all --name v3     fetch (incl. your Reviewer corrections) + train
     python student_tags.py export --name v4  every half second of every video → catalogue/student_scores
     python student_tags.py picks --name v5b  the moments worth labelling next → 🎯 Training Labels → 🎓 Student's picks
+    python student_tags.py rescore-all       every saved model scored again on today's test labels (after a
+                                             test-labelling session), so the app compares runs on the same frames
+    python student_tags.py runs              just rewrite catalogue/student_runs (every run, for the app)
+Every train / score / rescore-all / export also writes catalogue/student_runs on Drive: one record per run
+(training-side and test scores, per tag, settings, what changed) for 🎯 Training Labels → 🧪 Trial results.
 
 Everything is written to _student in config.py's WORK_DIR (else next to this script; genuine local disk,
 not Google Drive):
@@ -1163,6 +1168,36 @@ def _prepare(label_weight: float, use_trust: bool = True, use_pose: bool = False
     return vocab, labels, test, ds, train_rows, val_rows, test_rows
 
 
+def training_scores(ds: dict, rows: np.ndarray, prob: np.ndarray, thresholds: np.ndarray) -> dict:
+    """The run's score on the TRAINING videos: each fold model's answers on the videos it didn't train
+    on (rows / prob = the held-out predictions), against your labels only — overall and per tag, plus
+    how many of your labels each tag had. For 🏋️ Training results in the app."""
+    tags = ds["tags"]
+    pairs, counts = [], {}
+    for k, r in enumerate(rows):
+        if not ds["is_label"][r]:
+            continue
+        gold = [tags[j] for j in np.flatnonzero(ds["y"][r] >= 0.5)]
+        for t in gold:
+            counts[t] = counts.get(t, 0) + 1
+        pairs.append((to_tags(prob[k], tags, thresholds), gold))
+    sc = TL.score_tags(pairs, tags)
+    return {"frames": sc["n"], "scores": sc["overall"], "per_tag": sc["per_tag"], "labels_per_tag": counts}
+
+
+def publish_runs() -> None:
+    """catalogue/student_runs/ on Drive — every run for 🎯 Training Labels → 🧪 Trial results."""
+    try:
+        import student_runs as SR
+        from config import CATALOGUE_DIR
+        cat = Path(CATALOGUE_DIR)
+        in_use = (_read_json(cat / "student_scores" / "index.json", {}) or {}).get("model")
+        n = SR.export_runs(WORK / "models", cat / "student_runs", in_use)
+        print(f"Run records for the app: {n} runs → {cat / 'student_runs'} (☁️ Sync in the app to see them)")
+    except Exception as e:      # noqa: BLE001 — never fail a training run over this
+        print(f"(Couldn't write the run records for the app: {e})")
+
+
 def fold_videos(videos: list, test: set, k: int, seed: int = SEED) -> list:
     """The training videos (test set left out) shuffled into k groups of about the same size."""
     pool = sorted(v for v in videos if v not in test)
@@ -1209,6 +1244,7 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, 
     rows = np.concatenate(oof_rows)
     thresholds = pick_thresholds(np.concatenate(oof_prob), ds["y"][rows], mask=ds["w"][rows])
     step1_thresholds = thresholds
+    training = training_scores(ds, rows, np.concatenate(oof_prob), thresholds)
     test_prob = predict_many(models, E_t, ds["idx"][test_rows]) if len(test_rows) else None
     step1_test_prob = test_prob
     ctx_models, ctx_meta = [], None
@@ -1242,6 +1278,7 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, 
             ctx_models.append(m2)
         r2 = np.concatenate(oof2_rows)
         thresholds = pick_thresholds(np.concatenate(oof2_prob), ds["y"][r2], mask=ds["w"][r2])
+        training = training_scores(ds, r2, np.concatenate(oof2_prob), thresholds)
         if len(test_rows):
             test_prob = predict_ctx(ctx_models, X[test_rows])
         ctx_meta = {"spans": list(CTX_SPANS), "max": CTX_MAX, "k": CTX_K}
@@ -1263,8 +1300,13 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, 
             "train_minutes": round(minutes, 2), "videos": len(ds["videos"]), "test_videos": sorted(test),
             "labels_newest": max((i.get("labelled_at") or "" for i in labels), default=""),
             "context": ctx_meta, "step1_thresholds": [float(x) for x in step1_thresholds],
-            "cutoffs": CUTOFF_MODE, "cutoff_range": list(CUTOFF_RANGE)}
-    print(f"Trained in {minutes:.1f} min.", flush=True)
+            "cutoffs": CUTOFF_MODE, "cutoff_range": list(CUTOFF_RANGE), "training": training,
+            "settings": {"label_weight": label_weight, "folds": folds, "epochs": epochs, "teacher_trust": use_trust,
+                         "pose": use_pose, "context": use_context, "cutoffs": CUTOFF_MODE,
+                         "cutoff_range": list(CUTOFF_RANGE)}}
+    o = training["scores"]
+    print(f"Trained in {minutes:.1f} min. On your labels in the training videos (each checked by the fold model "
+          f"that didn't train on it): F1 {o['f1']:.2f} over {training['frames']} frames.", flush=True)
     step1 = None
     if ctx_meta and step1_test_prob is not None:
         step1 = (step1_test_prob, step1_thresholds)
@@ -1272,13 +1314,17 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, 
                 step1=step1)
     (out / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     print(f"Model saved → {out}")
+    publish_runs()
     return rc
 
 
-def _score(models, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta, prob=None, step1=None) -> int:
+def _score(models, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta, prob=None, step1=None,
+           main_report: bool = True) -> int:
     if not len(test_rows):
         print("No labelled test-set frames to score on.")
         return 0
+    if meta.get("scores") and "test_first" not in meta:      # scored before: keep that first score
+        meta["test_first"] = meta.get("test") or {"scores": meta["scores"], "frames": None}
     if prob is None:
         prob = predict_many(models, E_t, ds["idx"][test_rows])
     runs = teacher_runs()
@@ -1287,6 +1333,12 @@ def _score(models, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta
         print(f"⚠️ No teacher test run called '{vs}' — scoring the student alone.")
     md, res = score_report(ds, prob, test_rows, thresholds, vocab, labels, ref, name)
     meta["scores"] = {k: v["overall"] for k, v in res.items()}
+    best = "rules" if (res["rules"]["overall"]["f1"] or 0) >= (res["plain"]["overall"]["f1"] or 0) else "plain"
+    meta["test"] = {"frames": res[best]["n"], "best": best, "scored_at": time.strftime("%Y-%m-%d %H:%M"),
+                    "scores": {k: {**v["overall"], "n": v["n"]} for k, v in res.items()},
+                    "per_tag": res[best]["per_tag"],
+                    "teacher_per_tag": res["teacher"]["per_tag"] if "teacher" in res else None,
+                    "all_frames_n": res["rules_all_frames"]["n"]}
     if step1 is not None:                   # the same run without step 2, on the same frames
         _, r1 = score_report(ds, step1[0], test_rows, step1[1], vocab, labels, ref, name)
         meta["scores_step1"] = {k: v["overall"] for k, v in r1.items()}
@@ -1300,9 +1352,11 @@ def _score(models, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta
         md = "\n".join(lines)
     meta["reference_run"] = ref["id"] if ref else None
     md += "\n\n" + trust_markdown(ds) + "\n\n" + scene_rules_markdown(ds)
+    (WORK / "models" / name / "student_report.md").write_text(md, encoding="utf-8")
+    if not main_report:
+        return 0
     report = work_root() / "student_report.md"
     report.write_text(md, encoding="utf-8")
-    (WORK / "models" / name / "student_report.md").write_text(md, encoding="utf-8")
     print("\n" + "\n".join(md.splitlines()[:14]) + f"\n\nFull report (per tag) → {report}")
     return 0
 
@@ -1593,16 +1647,13 @@ def make_picks(name: str, n: int = 300, n_test: int = 80, dest: Path = None, see
     return 0
 
 
-def score(name: str, vs: str, label_weight: float) -> int:
+def _score_saved(name: str, models: list, meta: dict, prepared: tuple, vs: str, main_report: bool = True) -> int:
+    """Score a saved model on the test set as it is now (prepared = _prepare's result)."""
     import torch
-    models, meta = load_models(name)
-    if not models:
-        print(f"No model '{name}' in {WORK / 'models'}.")
-        return 1
-    vocab, labels, test, ds, _, _, test_rows = _prepare(label_weight, use_pose=bool(meta.get("pose_dim")))
+    vocab, labels, test, ds, _, _, test_rows = prepared
     if ds["tags"] != meta["tags"]:
-        print("⚠️ Your vocabulary has changed since this model was trained — retrain it (train) to score "
-              "it on today's tags.")
+        print(f"⚠️ {name}: your vocabulary has changed since it was trained — retrain it (train) to score it "
+              "on today's tags.")
         return 1
     ctx_models = load_ctx_models(name, meta)
     prob = None
@@ -1616,14 +1667,53 @@ def score(name: str, vs: str, label_weight: float) -> int:
         prob = predict_ctx(ctx_models, rows_context(ds, test_rows, timelines))
     E_t = torch.as_tensor(ds["E"], device=_device())
     rc = _score(models, E_t, ds, test_rows, np.asarray(meta["thresholds"], np.float32), vocab, labels, vs,
-                name, meta, prob=prob)
+                name, meta, prob=prob, main_report=main_report)
     (WORK / "models" / name / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     return rc
 
 
+def score(name: str, vs: str, label_weight: float) -> int:
+    models, meta = load_models(name)
+    if not models:
+        print(f"No model '{name}' in {WORK / 'models'}.")
+        return 1
+    rc = _score_saved(name, models, meta, _prepare(label_weight, use_pose=bool(meta.get("pose_dim"))), vs)
+    publish_runs()
+    return rc
+
+
+def rescore_all(vs: str, label_weight: float) -> int:
+    """Every saved model scored again on today's test labels, so the app's 🧪 Test results compare
+    every run on the same frames (each run's first score is kept as test_first)."""
+    names = sorted(d.name for d in (WORK / "models").iterdir()
+                   if (d / "meta.json").exists() and any(d.glob("head*.pt"))) if (WORK / "models").exists() else []
+    if not names:
+        print(f"No saved models in {WORK / 'models'}.")
+        return 1
+    prepared, done, skipped = {}, [], []
+    for k, name in enumerate(names, 1):
+        models, meta = load_models(name)
+        pose = bool(meta.get("pose_dim"))
+        if pose not in prepared:
+            print(f"Building the dataset{' with body pose' if pose else ''}…", flush=True)
+            prepared[pose] = _prepare(label_weight, use_pose=pose)
+        print(f"[{k}/{len(names)}] {name}", flush=True)
+        if _score_saved(name, models, meta, prepared[pose], vs, main_report=False) == 0:
+            sc = (meta.get("test") or {})
+            o = (sc.get("scores") or {}).get(sc.get("best") or "plain") or {}
+            done.append(f"{name} {o.get('f1') or 0:.2f}")
+        else:
+            skipped.append(name)
+    print("\nOn today's test labels (F1, best of plain / rules): " + " · ".join(done))
+    if skipped:
+        print("Not rescored (vocabulary changed since they were trained): " + ", ".join(skipped))
+    publish_runs()
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Train / score the student tag model on the laptop.")
-    ap.add_argument("command", choices=["fetch", "train", "score", "export", "picks", "all"])
+    ap.add_argument("command", choices=["fetch", "train", "score", "export", "picks", "all", "rescore-all", "runs"])
     ap.add_argument("--n", type=int, default=300, help="picks: how many where the student is unsure (default 300)")
     ap.add_argument("--n-test", type=int, default=80, help="picks: how many random test-set moments (default 80)")
     ap.add_argument("--name", default="v1", help="model name (default v1)")
@@ -1659,7 +1749,14 @@ def main(argv=None) -> int:
         return train(a.name, a.epochs, a.label_weight, a.vs, max(2, a.folds), not a.no_teacher_trust,
                      a.pose, a.context)
     if a.command == "export":
-        return export(a.name)
+        rc = export(a.name)
+        publish_runs()                     # ⭐ in use moves to this run
+        return rc
+    if a.command == "rescore-all":
+        return rescore_all(a.vs, a.label_weight)
+    if a.command == "runs":                # just rewrite catalogue/student_runs from the saved runs
+        publish_runs()
+        return 0
     if a.command == "picks":
         return make_picks(a.name, a.n, a.n_test, per_tag=a.per_tag)
     return score(a.name, a.vs, a.label_weight)
