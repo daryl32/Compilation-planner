@@ -830,7 +830,8 @@ def test_grid_marks_show_the_whole_category():
     m = {"mine": None, "partial": {"yes": ["Doggy"], "no": ["Cowgirl"]},
          "teachers": {"32b": {"tags": ["reverse cowgirl", "Medium shot"]}}}
     cat = ["Cowgirl", "reverse cowgirl", "Doggy", "Missionary"]
-    assert TV._gtags(m, cat, ["Missionary"]) == ["Cowgirl", "reverse cowgirl", "Doggy", "Missionary"]
-    assert TV._gtags(m, cat, []) == ["Cowgirl", "reverse cowgirl", "Doggy"]
-    html_ = TV._gstate(m, TV._gtags(m, cat, ["Doggy"]), ["Doggy"])
-    assert "✗ Cowgirl" in html_ and "◆ reverse cowgi" in html_ and "● Doggy" in html_ and "font-weight:700" in html_
+    assert TV._gtags(m, cat) == ["Cowgirl", "reverse cowgirl", "Doggy"]        # Missionary: nobody has it
+    html_ = TV._gstate(m, TV._gtags(m, cat), ["Doggy", "Missionary"])
+    assert "✗ Cowgirl" in html_ and "◆ reverse cowgi" in html_ and "● Doggy" in html_
+    assert html_.count("mp-gpick") == 1 and "+ Missionary" in html_          # hidden until the frame is ticked
+    assert "mp-gpick" in TV.GRID_CSS and ":has(input:checked)" in TV.GRID_CSS
