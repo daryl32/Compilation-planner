@@ -444,3 +444,21 @@ def test_work_dir_from_the_environment(monkeypatch, tmp_path):
     assert S.work_root() == tmp_path
     monkeypatch.delenv("STUDENT_WORK_DIR")
     assert S.work_root() != tmp_path
+
+
+def test_export_runs_keeps_runs_made_on_another_machine(tmp_path):
+    """The server lists its own runs and keeps the laptop's (already in catalogue/student_runs)."""
+    import student_runs as SR
+    dest = tmp_path / "student_runs"
+    dest.mkdir()
+    (dest / "v12.json").write_text("{}")
+    (dest / "index.json").write_text(json.dumps({"in_use": "v12", "runs": [
+        {"name": "v12", "created": "2026-11-06 16:45", "in_use": True},
+        {"name": "gone", "created": "2026-11-01 10:00", "in_use": False}]}))   # no detail file → dropped
+    models = tmp_path / "models" / "v13"
+    models.mkdir(parents=True)
+    (models / "meta.json").write_text(json.dumps({"name": "v13", "created": "2026-11-08 10:00"}))
+    assert SR.export_runs(tmp_path / "models", dest, in_use="v13") == 2
+    idx = json.loads((dest / "index.json").read_text())
+    assert [r["name"] for r in idx["runs"]] == ["v12", "v13"]
+    assert idx["in_use"] == "v13" and [r["in_use"] for r in idx["runs"]] == [False, True]

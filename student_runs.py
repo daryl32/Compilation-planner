@@ -152,7 +152,8 @@ def run_detail(meta: dict) -> dict:
 
 
 def export_runs(models_dir: Path, dest: Path, in_use: str | None = None) -> int:
-    """catalogue/student_runs/ from every run in models_dir. Returns how many runs."""
+    """catalogue/student_runs/ from every run in models_dir, keeping the lines of runs made elsewhere (another
+    machine's models) that are already there. Returns how many runs are listed."""
     metas = []
     for d in sorted(Path(models_dir).iterdir()) if Path(models_dir).exists() else []:
         m = _read(d / "meta.json")
@@ -168,7 +169,16 @@ def export_runs(models_dir: Path, dest: Path, in_use: str | None = None) -> int:
         tmp.write_text(json.dumps(run_detail(m)), encoding="utf-8")
         tmp.replace(dest / f"{m['name']}.json")
         prev = m
-    idx = {"created": time.strftime("%Y-%m-%d %H:%M"), "in_use": in_use, "runs": lines}
+    # Runs this machine doesn't have (e.g. the laptop's, when the server runs the student) keep their
+    # lines, so the app's list never loses history because of where a command ran.
+    have = {ln.get("name") for ln in lines}
+    old = _read(dest / "index.json", {}) or {}
+    kept = [dict(ln, in_use=ln.get("name") == in_use) if in_use else ln
+            for ln in (old.get("runs") or []) if isinstance(ln, dict) and ln.get("name") not in have
+            and (dest / f"{ln['name']}.json").exists()]
+    if kept:
+        lines = sorted(kept + lines, key=lambda ln: (ln.get("created") or "", ln.get("name") or ""))
+    idx = {"created": time.strftime("%Y-%m-%d %H:%M"), "in_use": in_use or old.get("in_use"), "runs": lines}
     tmp = dest / "index.json.tmp"
     tmp.write_text(json.dumps(idx, indent=1), encoding="utf-8")
     tmp.replace(dest / "index.json")
