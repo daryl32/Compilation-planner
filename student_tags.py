@@ -56,8 +56,12 @@ import trial_logic as TL  # noqa: E402
 
 
 def work_root() -> Path:
-    """Where the laptop keeps its working data: config.py's WORK_DIR when set (the scene-labeling
-    folder's data\\ since the 5 Nov tidy-up), else next to this script as before."""
+    """Where the working data lives: STUDENT_WORK_DIR when set (the server: its Hetzner Volume, see
+    deploy/student.sh), else config.py's WORK_DIR (the laptop's scene-labeling data\\ since the 5 Nov
+    tidy-up), else next to this script as before."""
+    import os
+    if os.environ.get("STUDENT_WORK_DIR"):
+        return Path(os.environ["STUDENT_WORK_DIR"])
     try:
         import config
         return Path(getattr(config, "WORK_DIR", HERE))

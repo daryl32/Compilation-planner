@@ -436,3 +436,11 @@ def test_what_changed_lines():
     assert SR.what_changed(None, {"name": "v1"}).startswith("First student")
     assert SR.what_changed(old, {**old, "name": "v5b"}).startswith("v5 retrained")
     assert "chance" in SR.what_changed(old, {**old, "name": "v99"})
+
+
+def test_work_dir_from_the_environment(monkeypatch, tmp_path):
+    """The server (deploy/student.sh) keeps the student's data on its Hetzner Volume via STUDENT_WORK_DIR."""
+    monkeypatch.setenv("STUDENT_WORK_DIR", str(tmp_path))
+    assert S.work_root() == tmp_path
+    monkeypatch.delenv("STUDENT_WORK_DIR")
+    assert S.work_root() != tmp_path

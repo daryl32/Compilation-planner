@@ -55,3 +55,19 @@ sudo systemctl start mediaplanner-dev
   `.streamlit/secrets.toml`. The test copy's `config.py` ends with a
   "TEST COPY overrides" block (`APP_ENV = "test"`, `DRIVE_WRITES = False`,
   data paths).
+
+## Student tag model on the server (`deploy/student.sh`, 7 Nov 2026)
+
+The same commands as the laptop's `student_tags.bat`, run on the server's CPU at low priority with a 4 GB memory
+cap (`STUDENT_MEM`), 3 threads (`STUDENT_THREADS`), logged to `/root/data/logs/student.log`. Data lives on the Hetzner
+Volume (`/mnt/HC_Volume_*/student/_student`, set through `STUDENT_WORK_DIR`); runs, picks and scores are written
+straight into `/root/data/catalogue`, so the live app sees them at once.
+
+```bash
+cd /root/Compilation-planner
+deploy/student.sh setup                 # one-off: CPU PyTorch + numpy into /root/modal-venv
+tmux new -A -s student                  # long runs: detach with Ctrl+B then D
+deploy/student.sh all --name v13        # fetch from Modal (free) + train + score
+deploy/student.sh rescore-all
+deploy/student.sh picks --name v13
+```
