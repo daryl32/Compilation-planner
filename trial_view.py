@@ -75,26 +75,42 @@ GRID_JS = r"""
     const H = window.innerHeight;                                   // keep going past the screen edge
     if (t.clientY > H - 70) g.sc.scrollBy(0, 14); else if (t.clientY < 90) g.sc.scrollBy(0, -14);
   }, { passive: false });
-  document.addEventListener("touchend", () => { if (g && g.active) lastDrag = Date.now(); g = null; },
-                            { passive: true });
-  document.addEventListener("click", (e) => {                       // tap a picture = tick its box
+  let lastTap = 0;
+  document.addEventListener("touchend", (e) => {
+    // a tap on a picture ticks it right away — and cancels the tap's own click, so Safari doesn't spend
+    // it on a hover or open the picture instead
+    if (g && !g.active) {
+      const img = e.target.closest && e.target.closest(CARD + " [data-testid='stImage']");
+      if (img) {
+        if (e.cancelable) e.preventDefault();
+        const b = box(img.closest(CARD));
+        if (b) b.click();
+        lastTap = Date.now();
+      }
+    }
+    if (g && g.active) lastDrag = Date.now();
+    g = null;
+  }, { passive: false });
+  document.addEventListener("click", (e) => {                       // a mouse click on a picture (laptop)
     const img = e.target.closest && e.target.closest(CARD + " [data-testid='stImage']");
-    if (!img || e.target.closest("button") || Date.now() - lastDrag < 400) return;
+    if (!img || e.target.closest("button") || Date.now() - lastDrag < 400 || Date.now() - lastTap < 700) return;
     const b = box(img.closest(CARD));
     if (b) b.click();
-  });
+  }, true);
 })();
 </script>
 """   # ▦ Grid: every category's tags under each frame — the final check            # ▦ Grid: thumbnails per page
-# ▦ Grid: 8 thumbnails a row with a mouse / trackpad, 6 on a touch tablet (iPad), 3 on a phone
+# ▦ Grid: 8 thumbnails a row with a mouse / trackpad, 5 on a touch tablet (iPad), 3 on a phone
 GRID_CSS = (
     ".st-key-tr_grid {display:grid!important;grid-template-columns:repeat(8,minmax(0,1fr));gap:.45rem;"
     "align-items:start}"
     ".st-key-tr_grid>div {width:auto!important;min-width:0}"
-    "@media (hover:none) and (pointer:coarse) {.st-key-tr_grid {grid-template-columns:repeat(6,minmax(0,1fr))}}"
+    "@media (hover:none) and (pointer:coarse) {.st-key-tr_grid {grid-template-columns:repeat(5,minmax(0,1fr))}}"
     "@media (max-width:640px) {.st-key-tr_grid {grid-template-columns:repeat(3,minmax(0,1fr))}}"
     "[class*='st-key-tr_gcard_'] {gap:.15rem!important}"
     "[class*='st-key-tr_gcard_'] [data-testid='stCheckbox'] label {font-size:.78rem}"
+    # no ⛶ fullscreen button on the thumbnails: on the iPad the first tap only showed it (and could open it)
+    "[class*='st-key-tr_gcard_'] [data-testid='stElementToolbar'] {display:none!important}"
     "[class*='st-key-tr_gcard_'] img {border-radius:.35rem;-webkit-touch-callout:none;-webkit-user-select:none;"
     "user-select:none;cursor:pointer}"
     # sideways swipes are ours (swipe-select), up / down still scrolls
@@ -697,23 +713,7 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
                 break
     if st.session_state.get("tr_g_cat") not in titles:
         st.session_state["tr_g_cat"] = titles[0]
-    chosen = [t for t in st.session_state.get("tr_g_chosen") or []]
-    with st.container(key="tl_wrap_tr_gpick"):
-        a, b = st.columns([2, 7])
-        cat = a.selectbox("Category", titles, key="tr_g_cat",
-                          help=f"{GRID_ALL}: every category's tags under each frame — a final check that everything "
-                               "you've corrected is right.")
-        in_cat = (list(dict.fromkeys(t for g in groups for t in g[2])) if cat == GRID_ALL
-                  else next(g[2] for g in groups if g[0] == cat))
-        pk = "tr_g_pills_" + hashlib.md5(cat.encode()).hexdigest()[:8]
-        st.session_state[pk] = [t for t in in_cat if t in chosen]
-
-        def _pick():
-            now = list(st.session_state.get("tr_g_chosen") or [])
-            st.session_state["tr_g_chosen"] = [t for t in now if t not in in_cat] + list(st.session_state[pk] or [])
-        with b:
-            st.pills("Tags", in_cat, selection_mode="multi", key=pk, on_change=_pick,
-                     help="The tags ➕ Add / ➖ Remove apply. You can pick tags from more than one category.")
+    cat, in_cat = _gpicker(groups, titles, "")
     chosen = list(st.session_state.get("tr_g_chosen") or [])
     if chosen:
         ruled = sorted(TLB._never_with(chosen, rows) - set(chosen), key=str.lower)
@@ -757,6 +757,39 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
                     if state:
                         st.markdown(state, unsafe_allow_html=True)
         _gbar("bottom", items, rows)
+    # the tag picker and the page box again at the bottom, so a long page needs no scrolling back up
+    _gpicker(groups, titles, "_b")
+    if pages > 1:
+        st.session_state["tr_gpage_b"] = page
+        st.number_input(f"Page (of {pages}) — {len(moments)} frames", 1, pages, key="tr_gpage_b",
+                        on_change=lambda: st.session_state.update(tr_gpage=st.session_state["tr_gpage_b"]))
+
+
+def _gpicker(groups: list, titles: list, sfx: str) -> tuple:
+    """The Category box and its tag pills (sfx "" at the top, "_b" the copy at the bottom). Both copies
+    share one category (tr_g_cat) and one set of picked tags (tr_g_chosen). Returns (category, its tags)."""
+    if sfx:                                   # the bottom copy follows the top one
+        st.session_state["tr_g_cat" + sfx] = st.session_state["tr_g_cat"]
+    chosen = list(st.session_state.get("tr_g_chosen") or [])
+    with st.container(key=f"tl_wrap_tr_gpick{sfx}"):
+        a, b = st.columns([2, 7])
+        cat = a.selectbox("Category", titles, key="tr_g_cat" + sfx,
+                          on_change=(lambda: st.session_state.update(tr_g_cat=st.session_state["tr_g_cat" + sfx]))
+                          if sfx else None,
+                          help=f"{GRID_ALL}: every category's tags under each frame — a final check that everything "
+                               "you've corrected is right.")
+        in_cat = (list(dict.fromkeys(t for g in groups for t in g[2])) if cat == GRID_ALL
+                  else next(g[2] for g in groups if g[0] == cat))
+        pk = "tr_g_pills_" + hashlib.md5(cat.encode()).hexdigest()[:8] + sfx
+        st.session_state[pk] = [t for t in in_cat if t in chosen]
+
+        def _pick():
+            now = list(st.session_state.get("tr_g_chosen") or [])
+            st.session_state["tr_g_chosen"] = [t for t in now if t not in in_cat] + list(st.session_state[pk] or [])
+        with b:
+            st.pills("Tags", in_cat, selection_mode="multi", key=pk, on_change=_pick,
+                     help="The tags ➕ Add / ➖ Remove apply. You can pick tags from more than one category.")
+    return cat, in_cat
 
 
 def _motion_chart(v: dict, marks: list) -> None:

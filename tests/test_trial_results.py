@@ -874,3 +874,19 @@ def test_hide_red_and_swipe_script(bundle, clean_labels):
     assert not errors(at), errors(at)
     assert any(".mp-red {display:none" in m.value for m in at.markdown)
     assert "__mpGridSel" in TV.GRID_JS
+
+
+def test_grid_bottom_picker_follows_the_top(bundle, clean_labels):
+    from tests.apptest_util import errors, page_app
+    import trial_view as TV
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_sub"] = "🖼️ Compare tags"
+    at.session_state["tr_view"] = "grid"
+    at.run()
+    assert not errors(at), errors(at)
+    assert at.selectbox(key="tr_g_cat_b").value == at.selectbox(key="tr_g_cat").value
+    at.selectbox(key="tr_g_cat_b").set_value(TV.GRID_ALL).run()           # change it at the bottom …
+    assert not errors(at), errors(at)
+    assert at.selectbox(key="tr_g_cat").value == TV.GRID_ALL             # … and the top follows
+    assert "stElementToolbar" in TV.GRID_CSS and "repeat(5," in TV.GRID_CSS
