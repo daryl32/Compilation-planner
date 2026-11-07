@@ -94,11 +94,38 @@ def disk_usage(path: Path = None) -> dict:
             "pct": 100.0 * u.used / u.total}
 
 
+def extra_disks() -> list:
+    """[(label, mount point, disk_usage)] for the disks the app's folders live on besides the main one —
+    e.g. the Hetzner Volume the preview copies were moved to (7 Nov 2026)."""
+    out, seen = [], set()
+    try:
+        main_dev = Path(DATA_ROOT).resolve().stat().st_dev
+    except OSError:
+        return out
+    for label, p in (("Preview copies", PROXY_DIR),):
+        try:
+            real = Path(p).resolve()
+            dev = real.stat().st_dev
+        except OSError:
+            continue
+        if dev == main_dev or dev in seen:
+            continue
+        seen.add(dev)
+        mount = real
+        while mount.parent != mount and mount.parent.stat().st_dev == dev:
+            mount = mount.parent
+        out.append((label, mount, disk_usage(mount)))
+    return out
+
+
 def du(path: Path) -> int | None:
-    """Bytes used by a file or folder (None if it isn't there)."""
+    """Bytes used by a file or folder (None if it isn't there). A folder that is a link (e.g. the preview
+    copies on the Hetzner Volume) is measured where it points."""
     path = Path(path)
     if not path.exists():
         return None
+    if path.is_symlink():
+        path = path.resolve()
     try:
         out = subprocess.run(["du", "-sxb", str(path)], capture_output=True, text=True, timeout=120)
         return int(out.stdout.split()[0])

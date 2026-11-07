@@ -4,6 +4,7 @@ clearing what can be fetched again (see storage.py).
 """
 
 import datetime
+from pathlib import Path
 
 import streamlit as st
 
@@ -356,6 +357,20 @@ with st.container(border=True):
     elif d["pct"] >= 70:
         st.warning("Over 70% full — worth clearing what's below.")
 
+# The Hetzner Volume (preview copies live there since 7 Nov 2026)
+for v_label, v_mount, v in SG.extra_disks():
+    with st.container(border=True):
+        c = st.columns([3, 1, 1, 1, 1])
+        c[0].markdown(f"**💾 Volume: {v['pct']:.0f}% used** — {v_label.lower()}  \n`{v_mount}`")
+        c[0].progress(min(v["pct"] / 100, 1.0))
+        c[1].metric("Used", SG.fmt_bytes(v["used"]))
+        c[2].metric("Free", SG.fmt_bytes(v["free"]))
+        c[3].metric("Reserved", SG.fmt_bytes(v.get("reserved", 0)))
+        c[4].metric("Size", SG.fmt_bytes(v["total"]))
+        if v["pct"] >= 80:
+            st.warning("The Volume is over 80% full — make it bigger: Hetzner console → Volume → Resize, then "
+                       f"`resize2fs $(findmnt -no SOURCE {v_mount})` on the server.")
+
 # ---------------------------------------------------------------------------
 # What's using it
 # ---------------------------------------------------------------------------
@@ -367,9 +382,11 @@ if hc[1].button("🔄 Measure again", width="stretch"):
 rows = breakdown()
 for label, path, size, note in rows:
     rc = st.columns([3, 1, 3])
-    rc[0].markdown(f"**{label}**" + (f"  \n`{path}`" if path else ""))
+    on_vol = bool(path) and Path(path).is_symlink()
+    rc[0].markdown(f"**{label}**" + (f"  \n`{path}`" if path else "") + ("  \n💾 on the Volume" if on_vol else ""))
     rc[1].markdown(SG.fmt_bytes(size))
-    rc[2].progress(min(size / max(d["total"], 1), 1.0), text=note)
+    total = SG.disk_usage(Path(path).resolve())["total"] if on_vol else d["total"]
+    rc[2].progress(min(size / max(total, 1), 1.0), text=note)
 
 # ---------------------------------------------------------------------------
 # Clean-up
