@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import hashlib
 import html
+import tempfile
+from pathlib import Path
 
 import streamlit as st
 
@@ -425,7 +427,7 @@ def _compare(data: dict) -> None:
         with part_cols[1]:
             _finish_panel(moments, vocab_rows)
     if mode == "grid":
-        _grid(moments, vocab_rows, tag, only_part)
+        _grid_fragment(moments, vocab_rows, tag, only_part)
         return
     _rules_panel(videos, vocab_rows)
     agr = TR.agreement([m for _, m in pool])
@@ -597,6 +599,7 @@ def _gselect(items: list, on: bool) -> None:
 
 
 def _gapply(action: str, items: list, rows: list) -> None:
+    st.session_state["tr_g_full"] = True       # the grid is a fragment: refresh the whole page after this
     chosen = list(st.session_state.get("tr_g_chosen") or [])
     ticked = [(v, m) for v, m in items if st.session_state.get(_gtick_key(v, m))]
     if not chosen:
@@ -693,6 +696,41 @@ def _finish_panel(moments: list, rows: list) -> None:
              on_click=lambda: st.session_state.pop("tr_finish_ask", None))
 
 
+GRID_THUMB_DIR = Path(tempfile.gettempdir()) / "mp_grid_thumbs"
+GRID_THUMB_PX = 400          # wide enough for a tile on a retina iPad (5 a row), a third of the bytes of a frame
+
+
+def _thumb(p: Path) -> Path:
+    """A small copy of a frame for the grid (made once, kept until the frame changes); the frame itself
+    if anything goes wrong."""
+    try:
+        stt = p.stat()
+        out = GRID_THUMB_DIR / (hashlib.md5(f"{p}|{stt.st_mtime_ns}|{stt.st_size}".encode()).hexdigest() + ".jpg")
+        if not out.exists():
+            from PIL import Image
+            with Image.open(p) as im:
+                if im.width <= GRID_THUMB_PX:
+                    return p
+                im = im.convert("RGB")
+                im.thumbnail((GRID_THUMB_PX, GRID_THUMB_PX * 2))
+                GRID_THUMB_DIR.mkdir(parents=True, exist_ok=True)
+                tmp = out.with_suffix(".tmp.jpg")
+                im.save(tmp, "JPEG", quality=78)
+                tmp.replace(out)
+        return out
+    except Exception:
+        return p
+
+
+@st.fragment
+def _grid_fragment(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
+    """The grid on its own: picking tags, changing category or page and Select all reload only the grid, not
+    the whole page. ➕ / ➖ / 🧹 refresh everything (the filters may change)."""
+    if st.session_state.pop("tr_g_full", False):
+        st.rerun(scope="app")
+    _grid(moments, rows, tag, only_part)
+
+
 def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
     """Small thumbnails packed together: pick tags, tick frames, then ➕ Add / ➖ Remove."""
     st.markdown("<style>" + GRID_CSS + "</style>", unsafe_allow_html=True)
@@ -747,7 +785,7 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
                 with st.container(key=f"tr_gcard_{_k(v, m)}"):
                     p = TR.frame_path(m)
                     if p is not None and p.exists():
-                        safe_image(str(p), width="stretch")
+                        safe_image(str(_thumb(p)), width="stretch")
                     else:
                         st.caption("🖼️ not synced")
                     st.checkbox(format_mmss(m["t"]), key=_gtick_key(v, m), help=f"{v} · scene {m.get('scene_id')}")

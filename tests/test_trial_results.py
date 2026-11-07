@@ -890,3 +890,15 @@ def test_grid_bottom_picker_follows_the_top(bundle, clean_labels):
     assert not errors(at), errors(at)
     assert at.selectbox(key="tr_g_cat").value == TV.GRID_ALL             # … and the top follows
     assert "stElementToolbar" in TV.GRID_CSS and "repeat(5," in TV.GRID_CSS
+
+
+def test_grid_thumbnails_are_small(tmp_path):
+    import trial_view as TV
+    from PIL import Image
+    big = tmp_path / "f.jpg"
+    Image.effect_noise((640, 360), 60).convert("RGB").save(big, quality=90)
+    th = TV._thumb(big)
+    assert th != big and Image.open(th).size == (400, 225)
+    assert th.stat().st_size < big.stat().st_size / 2
+    assert TV._thumb(th) == th or Image.open(TV._thumb(th)).width == 400          # already small: kept
+    assert TV._thumb(tmp_path / "missing.jpg") == tmp_path / "missing.jpg"
