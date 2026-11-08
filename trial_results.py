@@ -422,10 +422,15 @@ def test_run_scores(runs: list, labels: list, tags: list) -> list:
              "copied": TLG.copied_scored(r.get("frames") or [], gold)} for r in runs]
 
 
-def test_set_videos() -> set:
-    """The 🧪 test set's video ids (empty if there's no test set yet)."""
-    return {x.get("video_id") for x in (((load_test_runs() or {}).get("set") or {}).get("videos") or [])
-            if x.get("video_id")}
+def test_set_videos(extra: bool = True) -> set:
+    """The 🧪 test set's video ids: the original Modal test set, plus (extra) the videos you've added to it
+    (🎯 Training Labels → 🧪 New test videos). Empty if there's no test set yet."""
+    out = {x.get("video_id") for x in (((load_test_runs() or {}).get("set") or {}).get("videos") or [])
+           if x.get("video_id")}
+    if extra:
+        import training_labels as TLB
+        out |= set(TLB.load_extra_test())
+    return out
 
 
 def tag_changes(a: dict, b: dict) -> list:

@@ -71,6 +71,11 @@ VOCAB_PENDING = f"cat:{VOCAB_FILE.name}"
 LOOK_FILE = CATALOGUE_DIR / "look_steps.json"
 LOOK_PENDING = f"cat:{LOOK_FILE.name}"
 LABELS_FILE = CATALOGUE_DIR / "training_labels.json"
+# 🧪 New test videos (8 Nov 2026): videos you add to the test set on top of the original Modal test set —
+# never trained on (student), labelled as cards with nothing prefilled.
+EXTRA_TEST_FILE = CATALOGUE_DIR / "test_set_extra.json"
+EXTRA_TEST_PENDING = f"cat:{EXTRA_TEST_FILE.name}"
+TEST_MOMENTS_PER_VIDEO = 60
 LABELS_STEM = LABELS_FILE.stem
 
 VOCAB_COLUMNS = ["tag", "group", "kind", "one_of", "teacher", "threshold", "double_check", "description",
@@ -761,12 +766,104 @@ def pick_student_cards(videos: dict, n: int, items: list, ranges: dict = None, *
     return cards
 
 
+def load_extra_test() -> list:
+    """The video ids you've added to the 🧪 test set (beyond the original Modal test set)."""
+    try:
+        data = json.loads(EXTRA_TEST_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [x["video_id"] for x in (data.get("videos") or []) if isinstance(x, dict) and x.get("video_id")]
+
+
+def save_extra_test(video_ids) -> list:
+    """Save the added test videos (kept in the order given, duplicates dropped); synced to Drive with
+    ☁️ Save edits. Returns the list saved."""
+    old = {x: None for x in load_extra_test()}
+    try:
+        data = json.loads(EXTRA_TEST_FILE.read_text(encoding="utf-8"))
+        added = {x["video_id"]: x.get("added") for x in data.get("videos") or [] if isinstance(x, dict)}
+    except (OSError, ValueError):
+        added = {}
+    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    ids = list(dict.fromkeys(video_ids))
+    _atomic_write(EXTRA_TEST_FILE, json.dumps({"version": 1, "videos": [
+        {"video_id": v, "added": added.get(v) or now} for v in ids]}, indent=1))
+    if ids != list(old):
+        from library_common import mark_pending
+        mark_pending(EXTRA_TEST_PENDING)
+    return ids
+
+
+def test_moments(video: dict, rng_limits=None, n: int = TEST_MOMENTS_PER_VIDEO) -> list:
+    """n moments spread evenly over a video's usable time (library range, excluded scenes left out):
+    [(t, scene)], in time order."""
+    segs = [(s, a + EDGE_SEC, b - EDGE_SEC) for s, a, b in _usable_scenes(video, rng_limits)]
+    segs = [(s, a, b) for s, a, b in segs if b > a]
+    total = sum(b - a for _, a, b in segs)
+    if total <= 0 or n <= 0:
+        return []
+    out, k = [], 0
+    pos = [(i + 0.5) * total / n for i in range(n)]
+    acc = 0.0
+    for s, a, b in segs:
+        while k < len(pos) and pos[k] <= acc + (b - a):
+            out.append((round(a + pos[k] - acc, 2), s))
+            k += 1
+        acc += b - a
+    return out
+
+
+def pick_new_test_cards(videos: dict, n: int, items: list, ranges: dict = None, *, has_media=None,
+                        extra: list = None) -> list:
+    """The next n unlabelled moments of your added 🧪 test videos: TEST_MOMENTS_PER_VIDEO per video, spread
+    evenly, video by video in the order you added them. Nothing prefilled — so the test can't lean towards
+    any model's guesses. A moment you've answered (or skipped) within 1 s doesn't come back."""
+    extra = load_extra_test() if extra is None else extra
+    ranges = ranges or {}
+    by_vid = {v["video_id"]: v for v in videos.values()}
+    done = {}
+    for i in items:
+        if i.get("type") in ("tags", "partial") and i.get("t") is not None:
+            done.setdefault(i["video_id"], []).append(float(i["t"]))
+    cards = []
+    for vid in extra:
+        if vid not in by_vid or (has_media and not has_media(vid)):
+            continue
+        for t, sc in test_moments(by_vid[vid], ranges.get(vid)):
+            if len(cards) >= n:
+                return cards
+            if _near_existing(vid, t, done, 1.0):
+                continue
+            cards.append({"id": card_id("tags", vid, t), "type": "tags", "video_id": vid,
+                          "scene_id": sc["scene_id"], "t": t, "scene_start": sc["start"], "scene_end": sc["end"],
+                          "suggested": [], "reviewed": bool(sc.get("reviewed")), "set": "test_new"})
+    return cards
+
+
+def new_test_progress(videos: dict, items: list, ranges: dict = None, extra: list = None) -> list:
+    """[(video_id, labelled, planned)] for each added test video."""
+    extra = load_extra_test() if extra is None else extra
+    ranges = ranges or {}
+    by_vid = {v["video_id"]: v for v in videos.values()}
+    done = {}
+    for i in items:
+        if i.get("type") in ("tags", "partial") and i.get("t") is not None:
+            done.setdefault(i["video_id"], []).append(float(i["t"]))
+    out = []
+    for vid in extra:
+        ms = test_moments(by_vid[vid], ranges.get(vid)) if vid in by_vid else []
+        out.append((vid, sum(1 for t, _ in ms if _near_existing(vid, t, done, 1.0)), len(ms)))
+    return out
+
+
 def build_deck(videos: dict, n: int, mix: str, items: list, ranges: dict = None, *, seed=None,
                curves=None, has_media=None) -> list:
     """A shuffled deck of n cards. mix: "tags", "boundary" or "mixed" (about 70 / 30), or "student"
     (the student model's picks, in its order — not shuffled)."""
     if mix == "student":
         return pick_student_cards(videos, n, items, ranges, has_media=has_media)
+    if mix == "newtest":
+        return pick_new_test_cards(videos, n, items, ranges, has_media=has_media)
     n_b = 0 if mix == "tags" else n if mix == "boundary" else max(1, round(n * 0.3))
     deck = (pick_tag_cards(videos, n - n_b, items, ranges, seed=seed, has_media=has_media)
             + pick_boundary_cards(videos, n_b, items, ranges, seed=None if seed is None else seed + 1,

@@ -11,6 +11,8 @@ models are trained and judged against (claude/ml-redesign-plan.md, Phase 4).
                    a cut the detector made, the sharpest change inside a long scene, or a random
                    point. ✂️ Yes / ➖ No / 🤷 Not sure.
                  ⏭️ Skip (bad frame) is remembered, so that frame never comes back.
+                 • 🧪 New test videos — videos you add to the test set: 60 moments each, spread evenly,
+                   nothing prefilled (so the test can't lean towards a model's guesses).
   📊 Progress    how many of each, which tags still need examples, recent answers (with ↩️ undo).
   📒 Vocabulary  tag_vocabulary.csv — edit it here, upload your Excel copy, or download it.
   🧪 Trial results  the latest Modal trial (trial_view.py): every tagged frame with your tags, the
@@ -39,7 +41,7 @@ top_button("tl-top", wrap_css("tl_wrap", 120) + menu_css()
            "[class*='st-key-tl_card'] [data-testid='stButtonGroup'] button{min-height:2.4rem;font-size:.98rem}")
 
 MIXES = {"mixed": "🎲 Mixed", "tags": "🏷️ Tags only", "boundary": "✂️ Scene changes only",
-         "student": "🎓 Student's picks"}
+         "student": "🎓 Student's picks", "newtest": "🧪 New test videos"}
 VERDICTS = {"cut": "✂️ Yes, new scene", "no_cut": "➖ No, same scene", "unsure": "🤷 Not sure"}
 SOURCE_QUESTION = {
     "detected": "The scene detector cut here. **Is this really a new scene?**",
@@ -64,6 +66,10 @@ if mix == "student":
                            "🧪 test-set moments. Its own tags are filled in — fix them.")
     else:
         st.sidebar.caption("No picks yet — run `student_tags.bat picks --name v5b` on the laptop, then ☁️ Sync.")
+elif mix == "newtest":
+    st.sidebar.caption(f"The videos you've added to the 🧪 test set: {TL.TEST_MOMENTS_PER_VIDEO} moments each, "
+                       "spread evenly, video by video. **Nothing is filled in** — tick everything that's there, so "
+                       "the test stays fair to every model.")
 else:
     st.sidebar.caption("New cards lean toward videos with the fewest labels and scenes nobody has "
                        "reviewed yet.")
@@ -185,10 +191,51 @@ def boundary_card(card: dict) -> None:
                        disabled=not st.session_state.get("tl_done"), help="Undo the last answer.")
 
 
+def _save_test_choice(cands: list) -> None:
+    chosen = [v for v in cands if st.session_state.get(f"tl_nt_{v}")]
+    TL.save_extra_test(chosen)
+    st.session_state.pop("tl_deck", None)          # deal again from the new list
+
+
+def new_test_chooser() -> None:
+    """Pick which new videos join the 🧪 test set: ones no Modal batch has tagged and that aren't in the
+    original test set — newest first."""
+    import trial_results as TR
+    videos = CS.video_index()
+    in_batches = set(((TR.load() or {}).get("videos") or {}))
+    original = TR.test_set_videos(extra=False)
+    chosen = TL.load_extra_test()
+    cands = sorted((v["video_id"] for v in videos.values() if v["video_id"] not in in_batches | original),
+                   key=lambda v: -next((x.get("added") or 0 for x in videos.values() if x["video_id"] == v), 0))
+    cands = chosen + [v for v in cands if v not in chosen]
+    prog = {v: (d, n) for v, d, n in TL.new_test_progress(videos, TL.load_labels(),
+                                                         library_ranges() if use_range else {}, chosen)}
+    done = sum(d for d, _ in prog.values())
+    planned = sum(n for _, n in prog.values())
+    with st.expander(f"🧪 New test videos — {len(chosen)} chosen · {done} of {planned} moments labelled",
+                     expanded=not chosen):
+        st.caption("Videos no Modal batch has tagged and that aren't in the original test set, newest first. "
+                   "Pick a varied mix (performers, positions, shot styles) — 8–10 is plenty. The student never "
+                   "trains on these. **On the laptop**, each needs `local_vision.bat` and then "
+                   "`student_tags.bat upload-local`, so the server's student has its data.")
+        if not cands:
+            st.info("No new videos found — every video has been through a Modal batch or is already in the test set.")
+            return
+        with st.form("tl_nt_form", border=False):
+            for v in cands:
+                d, n = prog.get(v, (0, 0))
+                st.checkbox(v + (f"  ·  {d} of {n} labelled" if v in chosen else ""), value=v in chosen,
+                            key=f"tl_nt_{v}")
+            st.form_submit_button("💾 Save the test videos", type="primary", on_click=_save_test_choice,
+                                  args=(cands,))
+
+
 def label_view() -> None:
     if not vocab:
         st.info("No tags yet — add some in 📒 Vocabulary (or the Reviewer's labels) first.")
         return
+    if mix == "newtest":
+        new_test_chooser()
     if st.session_state.get("tl_deck_conf") != (mix, deck_size, use_range) or "tl_deck" not in st.session_state:
         new_deck()
     deck, pos = st.session_state["tl_deck"], st.session_state.get("tl_pos", 0)
@@ -198,6 +245,8 @@ def label_view() -> None:
     if not deck:
         st.info("No student picks left — make new ones on the laptop (`student_tags.bat picks`) and ☁️ Sync."
                 if mix == "student" else
+                "No moments left to label — choose the new test videos above (or they're all done 🎉)."
+                if mix == "newtest" else
                 "No cards to show — no video has a preview copy here yet (or every frame is labelled).")
         return
     if pos >= len(deck):
@@ -208,6 +257,8 @@ def label_view() -> None:
     st.progress(pos / len(deck), text=f"Card {pos + 1} of {len(deck)}")
     sc = "" if card.get("scene_id") is None else f" · scene {card['scene_id']}"
     extra = " · not reviewed yet" if card["type"] == "tags" and not card.get("reviewed") else ""
+    if card.get("set") == "test_new":
+        st.caption("🧪 New test video — nothing is filled in on purpose: tick everything that's there.")
     if card.get("why") or card.get("set") == "test":
         st.caption(" · ".join(x for x in (
             "🧪 Test-set moment — grows the test set" if card.get("set") == "test" else "",

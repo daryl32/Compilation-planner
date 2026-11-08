@@ -477,3 +477,58 @@ def test_scene_weight_setting(tmp_path, monkeypatch):
     assert meta["settings"]["scene_weight"] == 0
     assert meta["counts"]["scene_extra"] == 0 and meta["counts"]["teacher_in_scenes"] == 0
     S.SCENE_WEIGHT_RUN = S.SCENE_WEIGHT
+
+
+def test_new_test_videos_scored_on_their_own(tmp_path, monkeypatch):
+    """Videos added to the test set in the app: never trained on, scored in their own report line."""
+    pytest.importorskip("torch")
+    labels, test = _library(tmp_path, n_videos=8)
+    (tmp_path / "library" / "test_set_extra.json").write_text(json.dumps({"videos": [{"video_id": "vid07"}]}))
+    monkeypatch.setattr(S, "WORK", tmp_path)
+    monkeypatch.setattr(S, "HERE", tmp_path)
+    assert S.extra_test_videos() == ["vid07"] and S.test_videos() == test + ["vid07"]
+    assert S.main(["train", "--name", "n1", "--epochs", "4", "--folds", "2"]) == 0
+    meta = json.loads((tmp_path / "models" / "n1" / "meta.json").read_text())
+    assert "vid07" in meta["test_videos"] and meta["scores"]["new_test"]["f1"] is not None
+    assert "🧪 New test videos" in (tmp_path / "student_report.md").read_text()
+    # picks: nothing from the new test videos (they have their own deck, nothing prefilled)
+    out = tmp_path / "picks_out.json"
+    S.make_picks("n1", 20, 6, dest=out)
+    picks = json.loads(out.read_text())["picks"]
+    assert picks and not [p for p in picks if p["video_id"] == "vid07"]
+
+
+def test_upload_local_sends_laptop_only_videos(tmp_path, monkeypatch):
+    import sys
+    import types
+    sent = []
+
+    class Batch:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def put_file(self, local, remote):
+            sent.append(remote)
+
+    class Vol:
+        def listdir(self, path, recursive=False):
+            return [types.SimpleNamespace(path="local/lv1/vision.json", size=(tmp_path / "videos/lv1/vision.json").stat().st_size)]
+
+        def batch_upload(self, force=False):
+            return Batch()
+
+    fake = types.SimpleNamespace(Volume=types.SimpleNamespace(from_name=lambda name: Vol()))
+    monkeypatch.setitem(sys.modules, "modal", fake)
+    monkeypatch.setattr(S, "WORK", tmp_path)
+    for v, teacher in (("lv1", False), ("modal1", True)):
+        d = tmp_path / "videos" / v
+        d.mkdir(parents=True)
+        np.savez_compressed(d / "embeddings.npz", frame_times=np.arange(4.0), frame_embs=np.zeros((4, 3), np.float16))
+        (d / "vision.json").write_text("{}")
+        if teacher:
+            (d / S.TEACHER_FILE).write_text("{}")
+    assert S.main(["upload-local"]) == 0
+    assert sent == ["local/lv1/embeddings.npz"]            # vision.json already there; modal1 is Modal's own

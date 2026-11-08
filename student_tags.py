@@ -141,6 +141,18 @@ def fetch() -> int:
                 todo.append((path, dest, e.size))
         elif path in singles and not _fresh(singles[path], e):
             todo.append((path, singles[path], e.size))
+    # Videos processed on the laptop (local_vision.py) and sent up with `upload-local`: local/<video>/…
+    try:
+        local = {e.path.lstrip("/"): e for e in vol.listdir("local", recursive=True)}
+    except Exception:                   # noqa: BLE001 — no local/ folder yet
+        local = {}
+    for path, e in local.items():
+        parts = path.split("/")
+        if len(parts) == 3 and parts[2] in VIDEO_FILES and f"trial/{parts[1]}/{parts[2]}" not in entries:
+            videos.add(parts[1])
+            dest = WORK / "videos" / parts[1] / parts[2]
+            if not _fresh(dest, e):
+                todo.append((path, dest, e.size))
     with_tags = {v for v in videos if f"trial/{v}/{TEACHER_FILE}" in entries
                  and f"trial/{v}/embeddings.npz" in entries}
     mb = sum(s for _, _, s in todo) / 1e6
@@ -160,12 +172,20 @@ def fetch() -> int:
         return 1
     lib = WORK / "library"
     lib.mkdir(parents=True, exist_ok=True)
-    for name in ("training_labels.json", "tag_vocabulary.csv"):
+    for name in ("training_labels.json", "tag_vocabulary.csv", "test_set_extra.json"):
         src = newest_copy(name)
         if src is None:
-            print(f"   ⚠️ {name} not found in the catalogue folder.")
+            if name != "test_set_extra.json":
+                print(f"   ⚠️ {name} not found in the catalogue folder.")
             continue
         (lib / name).write_bytes(src.read_bytes())
+    extra = extra_test_videos()
+    if extra:
+        have = [v for v in extra if (WORK / "videos" / v / "embeddings.npz").exists()]
+        print(f"🧪 New test videos: {len(extra)} chosen in the app, {len(have)} with data here"
+              + ("" if len(have) == len(extra) else
+                 f" — missing: {', '.join(v for v in extra if v not in have)} (on the laptop: local_vision.bat, "
+                 "then student_tags.bat upload-local, then fetch again)"))
     n_sc = write_reviewer_scenes()
     if n_sc is not None:
         print(f"Your Reviewer corrections: {n_sc['scenes']} corrected scenes in {n_sc['videos']} videos.")
@@ -175,6 +195,40 @@ def fetch() -> int:
           f"newest saved {newest.replace('T', ' ') or '—'}.")
     print("   (Not seeing today's corrections? Press ☁️ Save edits to Drive in the app, wait for Drive "
           "to sync to this laptop, then run fetch again.)")
+    return 0
+
+
+def upload_local(only: list = None) -> int:
+    """Laptop → Modal Volume (local/<video>/): the vision data local_vision.py made for videos Modal never
+    processed, so the server's student (deploy/student.sh fetch) has them too — e.g. 🧪 new test videos.
+    Free: a file upload, no GPU. Skips files already there at the same size."""
+    try:
+        import modal
+    except ImportError:
+        print("modal isn't installed in this venv:  pip install modal  then  modal setup")
+        return 1
+    root = WORK / "videos"
+    vids = sorted(d.name for d in root.iterdir() if d.is_dir() and (d / "embeddings.npz").exists()
+                  and (d / "vision.json").exists() and not (d / TEACHER_FILE).exists()) if root.exists() else []
+    if only:
+        vids = [v for v in vids if v in set(only)]
+    if not vids:
+        print("Nothing to upload — no laptop-only videos with vision data (run local_vision.bat first).")
+        return 0
+    vol = modal.Volume.from_name(VOLUME)
+    try:
+        there = {e.path.lstrip("/"): e.size for e in vol.listdir("local", recursive=True)}
+    except Exception:                   # noqa: BLE001
+        there = {}
+    todo = [(root / v / f, f"local/{v}/{f}") for v in vids for f in VIDEO_FILES
+            if (root / v / f).exists() and there.get(f"local/{v}/{f}") != (root / v / f).stat().st_size]
+    mb = sum(p.stat().st_size for p, _ in todo) / 1e6
+    print(f"{len(vids)} laptop-only video(s); {len(todo)} file(s) to upload ({mb:.0f} MB).", flush=True)
+    if todo:
+        with vol.batch_upload(force=True) as batch:
+            for p, remote in todo:
+                batch.put_file(str(p), remote)
+    print("Done — on the server: deploy/student.sh fetch")
     return 0
 
 
@@ -355,8 +409,16 @@ def _vocab() -> list:
         return []
 
 
+def extra_test_videos() -> list:
+    """The videos you've added to the 🧪 test set in the app (🎯 Training Labels → 🧪 New test videos),
+    copied at fetch time. They have no teacher answers; scored in their own section of the report."""
+    data = _read_json(WORK / "library" / "test_set_extra.json", {}) or {}
+    return [x["video_id"] for x in data.get("videos") or [] if isinstance(x, dict) and x.get("video_id")]
+
+
 def test_videos() -> list:
-    return [x["video_id"] for x in (_read_json(WORK / "testset.json", {}) or {}).get("videos") or []]
+    orig = [x["video_id"] for x in (_read_json(WORK / "testset.json", {}) or {}).get("videos") or []]
+    return orig + [v for v in extra_test_videos() if v not in orig]
 
 
 def window_index(times: np.ndarray, t: float, half: int = HALF, step: float = STEP) -> np.ndarray:
@@ -1000,7 +1062,8 @@ def score_report(ds: dict, prob: np.ndarray, rows: np.ndarray, thresholds: np.nd
             f = by_id.get(i.get("id")) or by_t.get(key)
             if f is not None:
                 ref_pairs_by_key[key] = (f.get("tags") or [], i.get("tags") or [])
-    plain, ruled, ref_pairs, every = [], [], [], []
+    plain, ruled, ref_pairs, every, new = [], [], [], [], []
+    extra = set(extra_test_videos())
     for k, r in enumerate(rows):
         key = (ds["video"][r], round(float(ds["t"][r]), 2))
         i = gold_by.get(key)
@@ -1008,6 +1071,8 @@ def score_report(ds: dict, prob: np.ndarray, rows: np.ndarray, thresholds: np.nd
             continue
         g = i.get("tags") or []
         every.append((to_tags(prob[k], tags, thresholds, svocab), g))
+        if key[0] in extra:
+            new.append((to_tags(prob[k], tags, thresholds, svocab), g))
         if ref and key not in ref_pairs_by_key:
             continue                        # compare on exactly the frames the teacher run has
         plain.append((to_tags(prob[k], tags, thresholds), g))
@@ -1017,6 +1082,8 @@ def score_report(ds: dict, prob: np.ndarray, rows: np.ndarray, thresholds: np.nd
     res = {"plain": TL.score_tags(plain, tags), "rules": TL.score_tags(ruled, tags),
            "plain_teacher_tags": TL.score_tags(plain, teacher_tags),
            "rules_teacher_tags": TL.score_tags(ruled, teacher_tags), "rules_all_frames": TL.score_tags(every, tags)}
+    if new:
+        res["new_test"] = TL.score_tags(new, tags)
     if ref:
         res["teacher"] = TL.score_tags(ref_pairs, tags)
         res["teacher_teacher_tags"] = TL.score_tags(ref_pairs, teacher_tags)
@@ -1046,6 +1113,12 @@ def score_report(ds: dict, prob: np.ndarray, rows: np.ndarray, thresholds: np.nd
     if ref and res["rules_all_frames"]["n"] > res["rules"]["n"]:
         md += ["", f"On all {res['rules_all_frames']['n']} of your labelled test frames (including ones labelled "
                    f"after that teacher run): student F1 {f(res['rules_all_frames']['overall']['f1'])} (with rules)."]
+    if new:
+        o = res["new_test"]["overall"]
+        n_vid = len({v for v in extra if any(ds["video"][r] == v for r in rows)})
+        md += ["", f"**🧪 New test videos** ({n_vid} video(s) you added, {o['n'] if 'n' in o else len(new)} labelled "
+                   f"frames, no teacher answers yet): student F1 **{f(o['f1'])}** (with rules) · right "
+                   f"{f(o['precision'])} · found {f(o['recall'])} · {o['fp']} wrong · {o['fn']} missed."]
     n_teacher_only = len(tags) - len(teacher_tags)
     if n_teacher_only:
         md += ["", f"{n_teacher_only} tag(s) have the teacher switched off (learned from your labels only). "
@@ -1591,6 +1664,8 @@ def make_picks(name: str, n: int = 300, n_test: int = 80, dest: Path = None, see
     cutoffs = np.asarray(meta["thresholds"], np.float32)
     labels, test = _labels(), set(meta.get("test_videos") or test_videos())
     trust = meta.get("teacher_trust") or teacher_trust(_vocab(), labels, test, WORK / "videos")
+    new_test = set(extra_test_videos())          # labelled through their own deck, nothing prefilled
+    test -= new_test
     prio = pick_priority(trust, labels, tags)
     by_video = {}
     for i in labels:
@@ -1601,6 +1676,8 @@ def make_picks(name: str, n: int = 300, n_test: int = 80, dest: Path = None, see
     vdirs = sorted(p for p in (WORK / "videos").iterdir() if p.is_dir())
     for k, vdir in enumerate(vdirs, 1):
         v = vdir.name
+        if v in new_test:
+            continue
         et, prob = video_timeline(models, vdir, use_pose, meta["dim"])
         if et is None:
             continue
@@ -1724,7 +1801,9 @@ def rescore_all(vs: str, label_weight: float) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Train / score the student tag model on the laptop.")
-    ap.add_argument("command", choices=["fetch", "train", "score", "export", "picks", "all", "rescore-all", "runs"])
+    ap.add_argument("command", choices=["fetch", "train", "score", "export", "picks", "all", "rescore-all", "runs",
+                                        "upload-local"])
+    ap.add_argument("--only", nargs="*", default=None, help="upload-local: just these video ids")
     ap.add_argument("--n", type=int, default=300, help="picks: how many where the student is unsure (default 300)")
     ap.add_argument("--n-test", type=int, default=80, help="picks: how many random test-set moments (default 80)")
     ap.add_argument("--name", default="v1", help="model name (default v1)")
@@ -1757,6 +1836,8 @@ def main(argv=None) -> int:
     global SCENE_WEIGHT_RUN
     SCENE_WEIGHT_RUN = max(0.0, a.scene_weight)
     WORK.mkdir(exist_ok=True)
+    if a.command == "upload-local":
+        return upload_local(a.only)
     if a.command in ("fetch", "all"):
         rc = fetch()
         if rc or a.command == "fetch":

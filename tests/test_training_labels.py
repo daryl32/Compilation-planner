@@ -19,13 +19,13 @@ def clean_files(tmp_path):
     """Run with no vocabulary / labels file and an untouched pending list; restore afterwards."""
     from library_common import PENDING_FILE
     saved = {}
-    for p in (TL.VOCAB_FILE, TL.LABELS_FILE, TL.LOOK_FILE, PENDING_FILE):
+    for p in (TL.VOCAB_FILE, TL.LABELS_FILE, TL.LOOK_FILE, TL.EXTRA_TEST_FILE, PENDING_FILE):
         if p.exists():
             saved[p] = tmp_path / p.name
             shutil.copy2(p, saved[p])
             p.unlink()
     yield
-    for p in (TL.VOCAB_FILE, TL.LABELS_FILE, TL.LOOK_FILE, PENDING_FILE):
+    for p in (TL.VOCAB_FILE, TL.LABELS_FILE, TL.LOOK_FILE, TL.EXTRA_TEST_FILE, PENDING_FILE):
         p.unlink(missing_ok=True)
         if p in saved:
             shutil.copy2(saved[p], p)
@@ -563,3 +563,51 @@ def test_page_category_order_threshold_and_double_check(clean_files):
     r = next(r for r in TL.load_vocabulary()[0] if r["tag"] == "dance")
     assert r["threshold"] == 75 and r["double_check"] and r["tell_apart"] == "feet moving to a beat"
     assert TL.group_settings(TL.load_vocabulary()[0])[0]["group"] == groups[-1]   # order kept
+
+
+# ---------------------------------------------------------------------------
+# 🧪 New test videos
+# ---------------------------------------------------------------------------
+
+def test_new_test_videos_list_moments_and_cards(clean_files):
+    from library_common import read_pending
+    videos = _videos()
+    v = videos["vid_a"]
+    ms = TL.test_moments(v, n=60)
+    assert len(ms) == 60 and [t for t, _ in ms] == sorted(t for t, _ in ms)
+    usable = TL._usable_scenes(v, None)
+    for t, sc in ms:                                    # inside a usable scene, away from its edges
+        assert not sc["excluded"] and sc["start"] + TL.EDGE_SEC - 1e-6 <= t <= sc["end"] - TL.EDGE_SEC + 1e-6
+    gaps = [b - a for (a, _), (b, _) in zip(ms, ms[1:])]
+    assert max(gaps) < 3 * min(gaps) + 1                # spread evenly (scene gaps aside)
+    assert TL.load_extra_test() == []
+    assert TL.save_extra_test(["vid_a", "vid_a"]) == ["vid_a"]
+    assert TL.load_extra_test() == ["vid_a"] and TL.EXTRA_TEST_PENDING in read_pending()
+    cards = TL.build_deck(videos, 20, "newtest", [])
+    assert len(cards) == 20 and all(c["suggested"] == [] and c["set"] == "test_new" for c in cards)
+    assert [c["t"] for c in cards] == [t for t, _ in ms[:20]]
+    done = [{"type": "tags", "video_id": "vid_a", "t": ms[0][0] + 0.3}, {"type": "partial", "video_id": "vid_a",
+                                                                          "t": ms[1][0]}]
+    assert TL.build_deck(videos, 2, "newtest", done)[0]["t"] == ms[2][0]
+    assert TL.new_test_progress(videos, done) == [("vid_a", 2, 60)]
+    import trial_results as TR
+    assert "vid_a" in TR.test_set_videos() and "vid_a" not in TR.test_set_videos(extra=False)
+
+
+def test_page_new_test_videos(proxy_for_vid_a):
+    from tests.apptest_util import errors, page_app
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_mix"] = "newtest"
+    at.run()
+    assert not errors(at), errors(at)
+    assert any("No moments left" in i.value for i in at.info)            # nothing chosen yet
+    at.checkbox(key="tl_nt_vid_a").check()
+    next(b for b in at.button if b.label == "💾 Save the test videos").click().run()
+    assert not errors(at), errors(at)
+    assert TL.load_extra_test() == ["vid_a"]
+    deck = at.session_state["tl_deck"]
+    assert deck and all(c["video_id"] == "vid_a" and not c["suggested"] for c in deck)
+    assert "nothing is filled in" in " ".join(c.value for c in at.caption)
+    next(b for b in at.button if b.label == "✅ Save & next").click().run()
+    assert not errors(at), errors(at)
+    assert TL.load_labels()[0]["tags"] == []                             # saved as you ticked it: nothing
