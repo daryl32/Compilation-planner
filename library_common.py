@@ -329,10 +329,12 @@ def _hair_entry(entry) -> dict:
     mine = entry.get("hair") if isinstance(entry.get("hair"), dict) else {}
     vote = entry.get("hair_vote") if isinstance(entry.get("hair_vote"), dict) else {}
     mine_c, vote_c = _hair_list(mine.get("colours")), _hair_list(vote.get("colours"))
+    extra = {"vote_model": vote.get("model"), "vote_created": vote.get("created"),
+             "vote_scores": vote.get("scores") or {}, "vote_unsure": bool(vote.get("unsure"))} if vote else {}
     if mine_c:
-        return {"colours": mine_c, "source": "you", "unsure": False, "vote": vote_c}
+        return {"colours": mine_c, "source": "you", "unsure": False, "vote": vote_c, **extra}
     if vote_c or vote.get("unsure"):
-        return {"colours": vote_c, "source": "vote", "unsure": bool(vote.get("unsure")), "vote": vote_c}
+        return {"colours": vote_c, "source": "vote", "unsure": bool(vote.get("unsure")), "vote": vote_c, **extra}
     return {"colours": [], "source": None, "unsure": False, "vote": []}
 
 
@@ -379,7 +381,8 @@ def set_video_hair(video_id: str, colours) -> None:
 
 
 def set_hair_votes(votes: dict) -> None:
-    """The model's votes, many videos in one save: {video_id: {"colours", "unsure", "scores", "model"}
+    """The model's votes, many videos in one save: {video_id: {"colours", "unsure", "scores", "shares",
+    "seen_sec", "model", "created"}
     or None to remove}. Daryl's answers ("hair") are never touched."""
     meta = load_library_meta()
     for video_id, vote in votes.items():
@@ -388,7 +391,7 @@ def set_hair_votes(votes: dict) -> None:
             entry.pop("hair_vote", None)
         else:
             clean = {"colours": _hair_list(vote.get("colours")), "unsure": bool(vote.get("unsure"))}
-            for k in ("scores", "model"):
+            for k in ("scores", "shares", "seen_sec", "model", "created"):
                 if vote.get(k) is not None:
                     clean[k] = vote[k]
             entry["hair_vote"] = clean

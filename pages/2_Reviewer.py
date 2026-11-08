@@ -32,7 +32,7 @@ from library_common import (safe_image, image_ok, video_details, set_video_detai
                             all_video_tags, suggest_video_tags, matches_details, mark_pending, master_thumbnail_scenes, set_master_thumbnail,
                             proxy_path, library_ranges, tc_to_seconds, format_mmss, overlap_with_range,
                             scene_tags, HAIR_COLOURS, HAIR_EMOJI, video_hair, hair_of, hair_label,
-                            hair_needs_confirming, hair_unsure, set_video_hair, matches_hair)
+                            hair_needs_confirming, hair_unsure, set_video_hair, set_hair_votes, matches_hair)
 import catalogue_store as CS
 import scene_edits as SE
 import scene_roles as SR
@@ -312,6 +312,35 @@ def video_facts(v: dict) -> dict:
 
 facts = {stem: video_facts(v) for stem, v in index.items()}
 
+
+def _run_hair_votes() -> None:
+    """🤖 The model's hair vote for every video with student scores (Daryl's answers untouched)."""
+    import hair_vote as HV
+    votes, problem = HV.vote_all(index, ranges)
+    if problem:
+        st.session_state["rev_saved_msg"] = problem
+        return
+    set_hair_votes(votes)
+    n_unsure = sum(v["unsure"] for v in votes.values())
+    st.session_state["rev_saved_msg"] = (f"🤖 Hair votes updated for {len(votes)} videos — {n_unsure} unsure (❓). "
+                                         "Your confirmed answers are unchanged.")
+
+
+def _hair_vote_row() -> None:
+    import hair_vote as HV
+    hidx = HV.load_index()
+    if not hidx:
+        return
+    if HV.stale(hidx, video_hair()):
+        hr = st.columns([4, 1], vertical_alignment="center")
+        hr[0].caption(f"💇 New student scores ({hidx.get('model')}, {hidx.get('created')}) — the hair votes "
+                      "haven't been worked out from them yet.")
+        hr[1].button("🤖 Vote hair", key="rev_hair_vote", on_click=_run_hair_votes, width="stretch",
+                     help="Each video's hair colour from the student's half-second scores: the main colour, plus a "
+                          "second one only when it wins whole scenes (a second actress). Your answers always win.")
+
+_hair_vote_row()
+
 with st.container(border=True, key="rev_wrap_find"):
     fc = st.columns([3, 4, 2], vertical_alignment="bottom")
     name_query = fc[0].text_input("Find a video", placeholder="part of a video name", key="rev_find_name")
@@ -348,6 +377,9 @@ with st.container(border=True, key="rev_wrap_find"):
         find_hair_only = hc[1].toggle("Only these", key="rev_find_hair_only", disabled=not find_hair,
                                       help="Off: the video has any of these. On: every hair colour in the video is "
                                            "one of these (only Blonde leaves out a Blonde + Brunette video).")
+        st.button("🤖 Re-vote hair colours", key="rev_hair_revote", on_click=_run_hair_votes,
+                  help="Work the model's hair votes out again from the current student scores "
+                       "(your confirmed answers stay).")
         find_all = st.toggle("Must have all of them", key="rev_find_all",
                              disabled=not (find_actors or find_vtags or find_roles),
                              help="Off: any of the picked actors / tags / roles. On: every one of them.")
@@ -566,8 +598,11 @@ with st.expander(f"🎬 Video details — {len(_vd['actors'])} actor(s), {len(_v
             _hc += f" The model voted {hair_label(_vh['vote'])}."
         hrow[0].caption(_hc)
     elif _vh["source"] == "vote":
-        hrow[0].caption("🤖 The model's vote" + (" — it couldn't decide, so check this one." if _vh["unsure"]
-                                                 else " — tap ✅ if it's right."))
+        _vs = _vh.get("vote_scores") or {}
+        _vs_txt = " · ".join(f"{c} {_vs[c]:.2f}" for c in HAIR_COLOURS if c in _vs)
+        hrow[0].caption(f"🤖 The model's vote ({_vh.get('vote_model') or '?'}"
+                        + (f": {_vs_txt} — 1.00 = at the cut-off" if _vs_txt else "") + ")"
+                        + (" — it couldn't decide, so check this one." if _vh["unsure"] else " — tap ✅ if it's right."))
     else:
         hrow[0].caption("No vote yet — pick the colours and tap ✅.")
     vc = st.columns(2)

@@ -20,7 +20,7 @@ def test_answer_wins_over_vote_and_clearing_shows_vote_again():
         assert LC.hair_needs_confirming("vid_a") and not LC.hair_unsure("vid_a")
         LC.set_video_hair("vid_a", ["Redhead", "blonde", "Purple"])      # order + unknowns tidied
         h = LC.hair_of("vid_a")
-        assert h == {"colours": ["Blonde", "Redhead"], "source": "you", "unsure": False, "vote": ["Brunette"]}
+        assert (h["colours"], h["source"], h["vote"], h["vote_model"]) == (["Blonde", "Redhead"], "you", ["Brunette"], "v13")
         assert not LC.hair_needs_confirming("vid_a")
         # A new vote never overwrites the answer.
         LC.set_hair_votes({"vid_a": {"colours": ["Blonde"], "unsure": True}})
@@ -87,4 +87,136 @@ def test_reviewer_confirm_hair_and_find_flags():
         assert not errors(at), errors(at)
         assert stem in shown()      # (the open video stays listed too, as with the other filters)
     finally:
+        LC.save_library_meta(before)
+
+
+# ---------------------------------------------------------------------------
+# 🤖 The vote (hair_vote.py)
+# ---------------------------------------------------------------------------
+
+def _scores(*blocks):
+    """blocks of (seconds, (blonde, brunette, redhead) 0–100) → times, scores."""
+    import numpy as np
+    rows = []
+    for sec, val in blocks:
+        rows += [val] * int(sec / 0.5)
+    times = np.arange(len(rows), dtype=np.float32) * 0.5
+    return times, np.asarray(rows, np.uint8)
+
+
+CUTS = None
+
+
+def _cuts():
+    import numpy as np
+    return np.asarray([0.5, 0.5, 0.5], np.float32)
+
+
+def test_vote_lighting_flips_stay_one_colour():
+    import hair_vote as HV
+    # Blonde mostly, short brunette-looking flips scattered through one long scene.
+    blocks = []
+    for _ in range(10):
+        blocks += [(25, (80, 30, 10)), (4, (35, 70, 10))]
+    t, s = _scores(*blocks)
+    v = HV.vote_video(t, s, _cuts())
+    assert v["colours"] == ["Blonde"] and not v["unsure"]
+
+
+def test_vote_second_actress_needs_whole_scenes():
+    import hair_vote as HV
+    t, s = _scores((120, (80, 20, 10)), (60, (20, 85, 10)))
+    spans = [(0, 120), (120, 180)]
+    v = HV.vote_video(t, s, _cuts(), spans)
+    assert v["colours"] == ["Blonde", "Brunette"] and not v["unsure"]
+    # The same brunette time in one scene with the blonde → she never wins a scene → lighting.
+    v = HV.vote_video(t, s, _cuts(), [(0, 180)])
+    assert v["colours"] == ["Blonde"]
+
+
+def test_vote_unsure_and_not_seen():
+    import hair_vote as HV
+    t, s = _scores((60, (62, 60, 10)))
+    v = HV.vote_video(t, s, _cuts())
+    assert v["unsure"] and v["colours"] == ["Blonde"]          # too close to call
+    t, s = _scores((60, (10, 12, 5)))                           # no hair visible anywhere
+    v = HV.vote_video(t, s, _cuts())
+    assert v["unsure"] and v["colours"] == []
+    # Excluded scenes / outside the library range don't count.
+    t, s = _scores((60, (10, 80, 5)), (60, (80, 10, 5)))
+    v = HV.vote_video(t, s, _cuts(), HV.usable_spans(
+        [{"start": 0, "end": 60, "excluded": True}, {"start": 60, "end": 120}]))
+    assert v["colours"] == ["Blonde"]
+
+
+def test_vote_reads_scores_relative_to_cutoffs():
+    import numpy as np
+    import hair_vote as HV
+    # Redhead's cut-off is low (shy tag): 45 is well over it, 55 blonde is barely at its 0.6 cut-off.
+    t, s = _scores((60, (55, 10, 45)))
+    v = HV.vote_video(t, s, np.asarray([0.6, 0.5, 0.3], np.float32))
+    assert v["colours"] == ["Redhead"]
+
+
+def test_vote_all_reads_export_and_saves(tmp_path):
+    import json
+    import numpy as np
+    import catalogue_store as CS
+    import hair_vote as HV
+    import library_common as LC
+    idx = CS.video_index()
+    vids = [v["video_id"] for v in idx.values()]
+    t, s = _scores((60, (80, 20, 10)))
+    other = np.zeros((len(t), 2), np.uint8)
+    for vid in vids[:1]:
+        np.savez_compressed(tmp_path / f"{vid}.npz", times=t, scores=np.hstack([other, s]))
+    (tmp_path / "index.json").write_text(json.dumps({
+        "model": "v14", "created": "2026-11-08 22:00", "step": 0.5,
+        "tags": ["Face", "POV", "Blonde", "Brunette", "Redhead"], "cutoffs": [50, 50, 50, 50, 50]}))
+    votes, problem = HV.vote_all({k: {**v, "scenes": []} for k, v in idx.items()}, {}, tmp_path)
+    assert problem is None and list(votes) == vids[:1]
+    assert votes[vids[0]]["colours"] == ["Blonde"] and votes[vids[0]]["model"] == "v14"
+    before = LC.load_library_meta()
+    try:
+        assert HV.stale(HV.load_index(tmp_path), LC.video_hair())
+        LC.set_hair_votes(votes)
+        assert not HV.stale(HV.load_index(tmp_path), LC.video_hair())
+        assert LC.hair_of(vids[0])["colours"] == ["Blonde"]
+    finally:
+        LC.save_library_meta(before)
+    assert HV.vote_all(idx, {}, tmp_path / "nothing")[1]       # no export → a message, no crash
+
+
+def test_reviewer_vote_button_then_confirm():
+    import json
+    import shutil
+    import numpy as np
+    import catalogue_store as CS
+    import hair_vote as HV
+    import library_common as LC
+    from tests.apptest_util import errors, page_app
+    folder = HV.scores_dir()
+    assert not folder.exists()
+    before = LC.load_library_meta()
+    try:
+        folder.mkdir(parents=True)
+        t, s = _scores((60, (20, 80, 10)))
+        vids = [v["video_id"] for v in CS.video_index().values()]
+        for vid in vids:
+            np.savez_compressed(folder / f"{vid}.npz", times=t, scores=s)
+        (folder / "index.json").write_text(json.dumps({
+            "model": "v14", "created": "2026-11-08 22:00", "step": 0.5,
+            "tags": ["Blonde", "Brunette", "Redhead"], "cutoffs": [50, 50, 50]}))
+        at = page_app("pages/2_Reviewer.py", timeout=120)
+        at.run()
+        assert not errors(at), errors(at)
+        at.button(key="rev_hair_vote").click().run()
+        assert not errors(at), errors(at)
+        assert all(LC.hair_of(v)["colours"] == ["Brunette"] for v in vids)
+        assert not [b for b in at.button if b.key == "rev_hair_vote"]     # notice gone once voted
+        stem = at.session_state["rev_video"]
+        at.button(key=f"vd_hair_save_{stem}").click().run()          # ✅ the vote in one tap
+        assert LC.hair_of(CS.load_catalogue(stem)["video_id"])["source"] == "you"
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
         LC.save_library_meta(before)
