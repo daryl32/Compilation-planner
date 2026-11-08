@@ -304,6 +304,121 @@ def matches_details(video_id: str, details: dict, actors=(), tags=(), match_all:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Hair colour per video (library_meta.json) — claude/hair-colour-plan.md
+# Hair colour belongs to the person, not the moment (lighting flips it), and is
+# only used to pick videos. Each video keeps:
+#   entry["hair"]      = {"colours": [...], "source": "you"}   — Daryl's answer, always wins
+#   entry["hair_vote"] = {"colours": [...], "unsure": bool, "scores": {...}, "model": str}
+#                        — the model's vote (written by the vote step), never overwrites "hair"
+# ---------------------------------------------------------------------------
+
+HAIR_COLOURS = ("Blonde", "Brunette", "Redhead")
+HAIR_EMOJI = {"Blonde": "💛", "Brunette": "🤎", "Redhead": "❤️"}
+
+
+def _hair_list(values) -> list:
+    """Known hair colours only, in HAIR_COLOURS order, any case accepted."""
+    want = {str(v).strip().lower() for v in values or []}
+    return [c for c in HAIR_COLOURS if c.lower() in want]
+
+
+def _hair_entry(entry) -> dict:
+    """{"colours", "source": "you" | "vote" | None, "unsure", "vote"} for one library_meta entry."""
+    entry = entry if isinstance(entry, dict) else {}
+    mine = entry.get("hair") if isinstance(entry.get("hair"), dict) else {}
+    vote = entry.get("hair_vote") if isinstance(entry.get("hair_vote"), dict) else {}
+    mine_c, vote_c = _hair_list(mine.get("colours")), _hair_list(vote.get("colours"))
+    extra = {"vote_model": vote.get("model"), "vote_created": vote.get("created"),
+             "vote_scores": vote.get("scores") or {}, "vote_unsure": bool(vote.get("unsure"))} if vote else {}
+    if mine_c:
+        return {"colours": mine_c, "source": "you", "unsure": False, "vote": vote_c, **extra}
+    if vote_c or vote.get("unsure"):
+        return {"colours": vote_c, "source": "vote", "unsure": bool(vote.get("unsure")), "vote": vote_c, **extra}
+    return {"colours": [], "source": None, "unsure": False, "vote": []}
+
+
+def video_hair() -> dict:
+    """{video_id: hair info (see _hair_entry)} for videos with a confirmed answer or a vote."""
+    out = {}
+    for vid, entry in load_library_meta().items():
+        h = _hair_entry(entry)
+        if h["source"]:
+            out[vid] = h
+    return out
+
+
+def hair_of(video_id: str, hair: dict = None) -> dict:
+    hair = video_hair() if hair is None else hair
+    return hair.get(video_id) or {"colours": [], "source": None, "unsure": False, "vote": []}
+
+
+def hair_needs_confirming(video_id: str, hair: dict = None) -> bool:
+    """No answer from Daryl yet (whatever the vote says)."""
+    return hair_of(video_id, hair)["source"] != "you"
+
+
+def hair_unsure(video_id: str, hair: dict = None) -> bool:
+    """❓ The vote couldn't decide and Daryl hasn't answered."""
+    h = hair_of(video_id, hair)
+    return h["source"] == "vote" and h["unsure"]
+
+
+def set_video_hair(video_id: str, colours) -> None:
+    """Daryl's answer for this video (empty / None = clear it, the vote shows again)."""
+    meta = load_library_meta()
+    entry = meta.get(video_id) if isinstance(meta.get(video_id), dict) else {}
+    colours = _hair_list(colours)
+    if colours:
+        entry["hair"] = {"colours": colours, "source": "you"}
+    else:
+        entry.pop("hair", None)
+    if entry:
+        meta[video_id] = entry
+    else:
+        meta.pop(video_id, None)
+    save_library_meta(meta)
+
+
+def set_hair_votes(votes: dict) -> None:
+    """The model's votes, many videos in one save: {video_id: {"colours", "unsure", "scores", "shares",
+    "seen_sec", "model", "created"}
+    or None to remove}. Daryl's answers ("hair") are never touched."""
+    meta = load_library_meta()
+    for video_id, vote in votes.items():
+        entry = meta.get(video_id) if isinstance(meta.get(video_id), dict) else {}
+        if vote is None:
+            entry.pop("hair_vote", None)
+        else:
+            clean = {"colours": _hair_list(vote.get("colours")), "unsure": bool(vote.get("unsure"))}
+            for k in ("scores", "shares", "seen_sec", "model", "created"):
+                if vote.get(k) is not None:
+                    clean[k] = vote[k]
+            entry["hair_vote"] = clean
+        if entry:
+            meta[video_id] = entry
+        else:
+            meta.pop(video_id, None)
+    save_library_meta(meta)
+
+
+def matches_hair(video_id: str, hair: dict, wanted=(), only: bool = False) -> bool:
+    """Picking by hair: includes = the video's set has any wanted colour;
+    only = every colour in the video's set is a wanted one (e.g. only Blonde
+    leaves out a Blonde + Brunette video)."""
+    if not wanted:
+        return True
+    want = set(_hair_list(wanted))
+    have = set(hair_of(video_id, hair)["colours"])
+    if not have:
+        return False
+    return have <= want if only else bool(have & want)
+
+
+def hair_label(colours) -> str:
+    return " + ".join(f"{HAIR_EMOJI.get(c, '')} {c}".strip() for c in colours) if colours else "—"
+
+
 def scene_thumbnail_path(video_id: str, scene: dict):
     """Local path of a scene's (first) thumbnail image, or None if it isn't here.
     Always built from CATALOGUE_DIR — never trust the stored path, which was
