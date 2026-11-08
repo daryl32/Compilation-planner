@@ -238,3 +238,28 @@ def test_reviewer_test_set_filter(monkeypatch):
         assert [o.split("  ·  ")[0] for o in at.selectbox(key="rev_video").options] == [stems[0]]
     finally:
         TRR.test_set_videos = orig
+
+
+def test_hair_left_out_of_overall_f1():
+    import trial_logic as TL
+    pairs = [(["Blowjob", "Blonde"], ["Blowjob", "Brunette"])]
+    s = TL.score_tags(pairs, ["Blowjob", "Blonde", "Brunette", "Redhead"])
+    assert s["overall"]["f1"] == 1.0 and s["overall"]["fp"] == 0
+    assert s["per_tag"]["Blonde"]["fp"] == 1 and s["per_tag"]["Brunette"]["fn"] == 1
+    assert set(s["left_out"]) == {"Blonde", "Brunette", "Redhead"}
+
+
+def test_hair_test_check():
+    import hair_vote as HV
+    y = lambda colours, vote, unsure=False, sc=None: {"colours": colours, "source": "you", "vote": vote,
+                                                       "vote_model": "v13", "vote_unsure": unsure,
+                                                       "vote_scores": sc or {}}
+    hair = {"a": y(["Blonde"], ["Blonde"]),
+            "b": y(["Blonde", "Brunette"], ["Blonde"], sc={"Blonde": 1.4, "Brunette": 0.9, "Redhead": 0.2}),
+            "c": y(["Redhead"], ["Brunette"], unsure=True, sc={"Brunette": 1.0, "Redhead": 0.95, "Blonde": 0.1}),
+            "d": {"colours": ["Blonde"], "source": "vote", "vote": ["Blonde"], "vote_model": "v13"},
+            "e": {"colours": ["Blonde"], "source": "you", "vote": []}}
+    c = HV.test_check({"a", "b", "c", "d", "e", "f"}, hair)
+    assert (c["videos"], c["confirmed"], c["checked"], c["right"], c["main_right"], c["unsure"], c["no_vote"]) \
+        == (6, 4, 3, 1, 2, 1, 1)
+    assert [w["video_id"] for w in c["wrong"]] == ["b", "c"] and c["models"] == ["v13"]

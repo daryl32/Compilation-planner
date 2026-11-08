@@ -14,6 +14,7 @@ import streamlit as st
 import student_results as SRS
 import training_labels as TLB
 import trial_results as TR
+from trial_logic import VIDEO_LEVEL_TAGS
 
 TRAINING, TEST = "🏋️ Training results", "🧪 Test results"
 
@@ -244,6 +245,45 @@ def training(data: dict | None) -> None:
 # 🧪 Test results
 # ---------------------------------------------------------------------------
 
+def _hair_check() -> None:
+    """💇 The model's hair vote vs your confirmed answers on the 🧪 test videos (claude/hair-colour-plan.md)."""
+    import hair_vote as HV
+    import library_common as LC
+    import trial_results as TRR
+    try:
+        vids = TRR.test_set_videos()
+    except Exception:
+        vids = set()
+    if not vids:
+        return
+    c = HV.test_check(vids, LC.video_hair())
+    with st.container(border=True):
+        if not c["confirmed"]:
+            st.markdown("**💇 Hair colour per video** — confirm the test videos' hair in the Reviewer "
+                        "(🧪 In the test set + 💇 Hair not confirmed) to check the vote here.")
+            return
+        if not c["checked"]:
+            st.markdown(f"**💇 Hair colour per video** — {c['confirmed']} test videos confirmed, but no vote yet "
+                        "(Reviewer → 🤖 Vote hair).")
+            return
+        m = st.columns(3)
+        m[0].metric("💇 Hair right", f"{c['right']} / {c['checked']}",
+                    help="Test videos where the vote's colours are exactly yours (a ❓ unsure vote isn't counted "
+                         "as right).")
+        m[1].metric("Main colour right", f"{c['main_right']} / {c['checked']}",
+                    help="The vote's top colour is one of yours — even if it missed or added a second actress.")
+        m[2].metric("❓ Unsure", c["unsure"], help="Votes that sent the video to you instead of guessing.")
+        bits = [f"Vote from **{', '.join(c['models'])}**", f"{c['confirmed']} of {c['videos']} test videos confirmed"]
+        if c["no_vote"]:
+            bits.append(f"{c['no_vote']} confirmed without a vote (no student scores)")
+        st.caption(" · ".join(bits) + ".")
+        if c["wrong"]:
+            with st.expander(f"Where the vote differs ({len(c['wrong'])})", expanded=False):
+                st.dataframe(pd.DataFrame([{"Video": w["video_id"], "Vote": LC.hair_label(w["vote"]) + (" ❓" if w["unsure"] else ""),
+                                            "Yours": LC.hair_label(w["yours"])} for w in c["wrong"]]),
+                             hide_index=True, width="stretch", key="srv_hair_wrong")
+
+
 def test() -> None:
     import trial_view as TV
     idx = SRS.load_index()
@@ -256,7 +296,10 @@ def test() -> None:
                "today's labels (`student_tags.bat rescore-all` after a test-labelling session), on the frames "
                "the reference teacher run also tagged, so every row is the same frames. **Vs teacher** = the "
                "student minus that teacher run on them. **F1 at the time** = its score when it was trained."
-               + (f" At {frames} frames a difference under ±{SRS.noise_f1(frames):.2f} F1 is chance." if frames else ""))
+               + (f" At {frames} frames a difference under ±{SRS.noise_f1(frames):.2f} F1 is chance." if frames else "")
+               + " 💇 Hair colour (Blonde / Brunette / Redhead) is left out of every F1 — it's checked per video "
+                 "below.")
+    _hair_check()
     pts = []
     for r in runs:
         t = r.get("test") or {}
@@ -307,6 +350,8 @@ def test() -> None:
             if not n and not es and not et:
                 continue
             diff = None if es is None or et is None else es - et
+            if t.lower() in {v.lower() for v in VIDEO_LEVEL_TAGS}:
+                t = f"{t} 💇 (per video — not in F1)"
             per.append({"Tag": t, "Your labels": n, "Student F1": _f1(s.get("f1")), "Student errors": es,
                         "Teacher F1": _f1(te.get("f1")) if te else None, "Teacher errors": et, "Difference": diff})
         per.sort(key=lambda p: (-(p["Difference"] if p["Difference"] is not None else -999), p["Tag"].lower()))

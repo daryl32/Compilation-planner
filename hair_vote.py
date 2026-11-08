@@ -160,3 +160,39 @@ def stale(index: dict, hair: dict) -> bool:
         return False
     made = {(h.get("vote_model"), h.get("vote_created")) for h in hair.values() if h.get("vote_model")}
     return (index.get("model"), index.get("created")) not in made
+
+
+def main_colour(h: dict) -> str | None:
+    """The vote's top colour (highest average), from a library_common hair entry."""
+    sc = h.get("vote_scores") or {}
+    return max(sc, key=sc.get) if sc else ((h.get("vote") or [None])[0])
+
+
+def test_check(test_vids, hair: dict) -> dict:
+    """💇 The vote vs your confirmed answers on the 🧪 test videos.
+    → {"videos", "confirmed", "checked", "right", "main_right", "unsure", "no_vote", "model",
+       "wrong": [{"video_id", "vote", "yours", "unsure"}]}
+    right = the vote's set is exactly yours; main_right = its top colour is one of yours. Unsure votes
+    count as checked (a ❓ that sends you to look is fine, but it isn't a right answer)."""
+    out = {"videos": len(test_vids), "confirmed": 0, "checked": 0, "right": 0, "main_right": 0, "unsure": 0,
+           "no_vote": 0, "models": set(), "wrong": []}
+    for vid in sorted(test_vids):
+        h = hair.get(vid) or {}
+        if h.get("source") != "you":
+            continue
+        out["confirmed"] += 1
+        if not h.get("vote_model"):
+            out["no_vote"] += 1
+            continue
+        out["checked"] += 1
+        out["models"].add(h["vote_model"])
+        yours, vote = list(h["colours"]), list(h.get("vote") or [])
+        out["unsure"] += bool(h.get("vote_unsure"))
+        if vote == yours and not h.get("vote_unsure"):
+            out["right"] += 1
+        else:
+            out["wrong"].append({"video_id": vid, "vote": vote, "yours": yours, "unsure": bool(h.get("vote_unsure"))})
+        if main_colour(h) in yours:
+            out["main_right"] += 1
+    out["models"] = sorted(out["models"])
+    return out

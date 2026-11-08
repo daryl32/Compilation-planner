@@ -1027,10 +1027,16 @@ def _prf(tp: int, fp: int, fn: int) -> dict:
             "f1": None if f is None else round(f, 3), "tp": tp, "fp": fp, "fn": fn}
 
 
+# Tags judged once per video, not per moment (claude/hair-colour-plan.md): the same actress can look blonde,
+# brunette or red from shot to shot, and hair is only used to pick videos. They keep their per-tag scores
+# but are left out of the overall F1, so they can't pull it down; the 💇 per-video check scores them instead.
+VIDEO_LEVEL_TAGS = ("Blonde", "Brunette", "Redhead")
+
+
 def score_tags(pairs: list, vocab_tags: list) -> dict:
     """pairs: [(predicted tags, gold tags)]. Gold labels are complete (an unticked tag is "not
     there"), so a predicted tag not in gold is a false positive. Returns per-tag and overall
-    precision / recall / F1."""
+    precision / recall / F1 — overall without VIDEO_LEVEL_TAGS (listed in "left_out")."""
     # Matched ignoring case and spaces, so "close-up shot", "Close-Up Shot" and "close-upshot"
     # all count as the same tag.
     norm = lambda t: "".join(str(t).split()).lower()
@@ -1045,9 +1051,12 @@ def score_tags(pairs: list, vocab_tags: list) -> dict:
             per[t][1] += 1
         for t in g - p:
             per[t][2] += 1
-    tot = np.array(list(per.values())).sum(axis=0) if per else np.zeros(3, int)
+    video_level = {norm(t) for t in VIDEO_LEVEL_TAGS}
+    counted = [v for t, v in per.items() if norm(t) not in video_level]
+    tot = np.array(counted).sum(axis=0) if counted else np.zeros(3, int)
     return {"n": len(pairs), "overall": _prf(*map(int, tot)),
-            "per_tag": {t: _prf(*v) for t, v in per.items()}}
+            "per_tag": {t: _prf(*v) for t, v in per.items()},
+            "left_out": [t for t in per if norm(t) in video_level]}
 
 
 def cut_near(times, t: float, window: float = 0.5) -> bool:

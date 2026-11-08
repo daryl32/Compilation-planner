@@ -102,3 +102,32 @@ def test_pages(runs, sub):
         assert at.selectbox(key="srv_test_tag_run").value == "v12"   # 🏆 best opens first
         assert "chance" in text
     shutil.rmtree(TR.RESULTS_DIR, ignore_errors=True)
+
+
+def test_test_page_hair_check(runs):
+    import library_common as LC
+    import trial_results as TR
+    from tests.apptest_util import errors, page_app
+    before = LC.load_library_meta()
+    orig = TR.test_set_videos
+    try:
+        LC.set_hair_votes({"vid_a": {"colours": ["Blonde"], "scores": {"Blonde": 1.3}, "model": "v13"},
+                           "vid_b": {"colours": ["Brunette"], "model": "v13"}})
+        LC.set_video_hair("vid_a", ["Blonde"])
+        LC.set_video_hair("vid_b", ["Blonde", "Brunette"])
+        TR.test_set_videos = lambda extra=True: {"vid_a", "vid_b"}
+        from tests.test_trial_results import _bundle
+        shutil.rmtree(TR.RESULTS_DIR, ignore_errors=True)
+        TR.RESULTS_DIR.mkdir(parents=True)
+        (TR.RESULTS_DIR / "results.json").write_text(json.dumps(_bundle()))
+        at = page_app("pages/6_Training_Labels.py")
+        at.session_state["tl_view"] = "🧪 Trial results"
+        at.session_state["tr_sub"] = "🧪 Test results"
+        at.run()
+        assert not errors(at), errors(at)
+        got = {m.label: m.value for m in at.metric}
+        assert got["💇 Hair right"] == "1 / 2" and got["Main colour right"] == "2 / 2"
+    finally:
+        TR.test_set_videos = orig
+        LC.save_library_meta(before)
+        shutil.rmtree(TR.RESULTS_DIR, ignore_errors=True)
