@@ -78,7 +78,8 @@ STEP = 0.5                                # the embeddings are 2 per second
 HALF = 4                                  # ±4 steps = ±2 s around the moment → 9 embeddings
 LABEL_WEIGHT = 5.0                        # one of your labels counts as this many teacher answers
 COPY_WEIGHT = 0.5                         # a teacher answer copied from a near-identical moment
-SCENE_WEIGHT = 2.0                        # a moment inside a scene you corrected in the Reviewer
+SCENE_WEIGHT = 1.0                        # a moment inside a scene you corrected in the Reviewer
+#                                           (2 up to v13; v13-halfscenes at 1 was best: F1 0.78, fewer wrong tags)
 SCENE_WEIGHT_RUN = SCENE_WEIGHT           # this run's (--scene-weight; 0 = leave the Reviewer scenes out)
 SCENE_STEP = 2.0                          # extra moments taken every this many seconds in those scenes
 SCENE_EDGE = 1.0                          # …but not this close to the scene's start / end (cuts)
