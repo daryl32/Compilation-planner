@@ -220,3 +220,21 @@ def test_reviewer_vote_button_then_confirm():
     finally:
         shutil.rmtree(folder, ignore_errors=True)
         LC.save_library_meta(before)
+
+
+def test_reviewer_test_set_filter(monkeypatch):
+    import catalogue_store as CS
+    import trial_results as TRR
+    from tests.apptest_util import errors, page_app
+    stems = list(CS.video_index())
+    vid = CS.load_catalogue(stems[0])["video_id"]
+    at = page_app("pages/2_Reviewer.py", timeout=120)
+    at.run()
+    orig = TRR.test_set_videos
+    TRR.test_set_videos = lambda extra=True: {vid}
+    try:
+        at.multiselect(key="rev_find_flags").set_value(["🧪 In the test set"]).run()
+        assert not errors(at), errors(at)
+        assert [o.split("  ·  ")[0] for o in at.selectbox(key="rev_video").options] == [stems[0]]
+    finally:
+        TRR.test_set_videos = orig

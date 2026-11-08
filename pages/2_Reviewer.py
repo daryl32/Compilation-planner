@@ -270,6 +270,7 @@ FIND_NO_ACTORS = "👤 No actors yet"
 FIND_NO_VTAGS = "🏷️ No video tags yet"
 FIND_HAIR_TODO = "💇 Hair not confirmed"
 FIND_HAIR_UNSURE = "❓ Hair to confirm (vote unsure)"
+FIND_TEST = "🧪 In the test set"
 FIND_NO_THUMB = "⭐ No custom thumbnail"
 FIND_SPLIT = "✂️ Has split suggestions"
 FIND_MERGE = "🔗 Has combine suggestions"
@@ -347,7 +348,7 @@ with st.container(border=True, key="rev_wrap_find"):
     find_flags = fc[1].multiselect(
         "Only videos that…",
         [FIND_TODAY, FIND_3DAYS, FIND_NEW, FIND_UNTAGGED, FIND_UNROLED, FIND_NO_THUMB, FIND_SPLIT, FIND_MERGE,
-         FIND_NO_OUTRO, FIND_NO_INTRO, FIND_NO_ACTORS, FIND_NO_VTAGS, FIND_HAIR_TODO, FIND_HAIR_UNSURE],
+         FIND_NO_OUTRO, FIND_NO_INTRO, FIND_NO_ACTORS, FIND_NO_VTAGS, FIND_HAIR_TODO, FIND_HAIR_UNSURE, FIND_TEST],
         key="rev_find_flags", placeholder="any video",
         help="Pick several to narrow it down further (a video must match all of them). "
              "Split/combine suggestions use the sidebar settings and the library range.",
@@ -355,6 +356,13 @@ with st.container(border=True, key="rev_wrap_find"):
 
     _details = video_details()
     _hair = video_hair()
+    _test_vids = set()
+    if FIND_TEST in find_flags:
+        try:
+            import trial_results as TRR
+            _test_vids = TRR.test_set_videos()      # the original 🧪 test set + 🧪 New test videos
+        except Exception:
+            _test_vids = set()
     _roles = SR.roles_by_id()
     # Actors / video tags / roles: less used, so in a popover (its label counts the ones in use).
     _n_more = sum(bool(st.session_state.get(k)) for k in
@@ -415,6 +423,7 @@ with st.container(border=True, key="rev_wrap_find"):
             FIND_NO_VTAGS: not (_details.get(vid) or {}).get("tags"),
             FIND_HAIR_TODO: hair_needs_confirming(vid, _hair),
             FIND_HAIR_UNSURE: hair_unsure(vid, _hair),
+            FIND_TEST: vid in _test_vids,
         }
         return all(checks[flag] for flag in find_flags)
 
