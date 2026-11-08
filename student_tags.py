@@ -79,6 +79,7 @@ HALF = 4                                  # ±4 steps = ±2 s around the moment 
 LABEL_WEIGHT = 5.0                        # one of your labels counts as this many teacher answers
 COPY_WEIGHT = 0.5                         # a teacher answer copied from a near-identical moment
 SCENE_WEIGHT = 2.0                        # a moment inside a scene you corrected in the Reviewer
+SCENE_WEIGHT_RUN = SCENE_WEIGHT           # this run's (--scene-weight; 0 = leave the Reviewer scenes out)
 SCENE_STEP = 2.0                          # extra moments taken every this many seconds in those scenes
 SCENE_EDGE = 1.0                          # …but not this close to the scene's start / end (cuts)
 TRUST_MIN_LABELS = 10                     # your labels with a tag (training videos) before its teacher trust is measured
@@ -1142,7 +1143,8 @@ def _prepare(label_weight: float, use_trust: bool = True, use_pose: bool = False
     if not test:
         print("⚠️ No test set downloaded (testset.json) — the model will train but can't be scored.")
     ds = build_dataset(vocab, labels, test, label_weight, use_trust=use_trust, use_pose=use_pose,
-                       partials=partials)
+                       partials=partials, scene_weight=SCENE_WEIGHT_RUN,
+                       scenes={} if SCENE_WEIGHT_RUN <= 0 else None)
     train_v, val_v = split_videos(ds["videos"], test)
     vids = ds["video"]
     train_rows = np.flatnonzero(np.isin(vids, train_v))
@@ -1163,6 +1165,10 @@ def _prepare(label_weight: float, use_trust: bool = True, use_pose: bool = False
     print(f"   Reviewer corrections: {c['teacher_in_scenes']} teacher moments given your scene's answer + "
           f"{c['scene_extra']} extra moments from your corrected scenes · tags used from them: "
           f"{len(ds['scene_tags_used'])} of {len(ds['tags'])}")
+    if SCENE_WEIGHT_RUN <= 0:
+        print("   (Reviewer scene answers left out: --scene-weight 0)")
+    elif SCENE_WEIGHT_RUN != SCENE_WEIGHT:
+        print(f"   (Reviewer scene answers count ×{SCENE_WEIGHT_RUN:g} per moment: --scene-weight)")
     if partials:
         print(f"   ▦ batch tags: {c['partial_on_teacher']} teacher moments given your yes / no answers + "
               f"{c['partial_alone']} moments with only your answers · {c['partial_test']} test-set moments "
@@ -1307,7 +1313,7 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, 
             "cutoffs": CUTOFF_MODE, "cutoff_range": list(CUTOFF_RANGE), "training": training,
             "settings": {"label_weight": label_weight, "folds": folds, "epochs": epochs, "teacher_trust": use_trust,
                          "pose": use_pose, "context": use_context, "cutoffs": CUTOFF_MODE,
-                         "cutoff_range": list(CUTOFF_RANGE)}}
+                         "cutoff_range": list(CUTOFF_RANGE), "scene_weight": SCENE_WEIGHT_RUN}}
     o = training["scores"]
     print(f"Trained in {minutes:.1f} min. On your labels in the training videos (each checked by the fold model "
           f"that didn't train on it): F1 {o['f1']:.2f} over {training['frames']} frames.", flush=True)
@@ -1733,6 +1739,9 @@ def main(argv=None) -> int:
                     help="count the teacher's answers fully on every tag (as v4 did)")
     ap.add_argument("--wide-cutoffs", action="store_true",
                     help="let cut-offs go anywhere in 0.25–0.85, as up to v10 (default since v11: 0.40–0.70)")
+    ap.add_argument("--scene-weight", type=float, default=SCENE_WEIGHT,
+                    help=f"how much your Reviewer scene answers count per moment (default {SCENE_WEIGHT:g}; "
+                         "0 = leave them out, e.g. 1 = half)")
     ap.add_argument("--old-cutoffs", action="store_true",
                     help="pick cut-offs the v1–v8 way (every held-out moment counts once, best single point)")
     ap.add_argument("--per-tag", type=int, default=PICK_PER_TAG,
@@ -1744,6 +1753,8 @@ def main(argv=None) -> int:
     global CUTOFF_RANGE
     if a.wide_cutoffs:
         CUTOFF_RANGE = WIDE_CUTOFF_RANGE
+    global SCENE_WEIGHT_RUN
+    SCENE_WEIGHT_RUN = max(0.0, a.scene_weight)
     WORK.mkdir(exist_ok=True)
     if a.command in ("fetch", "all"):
         rc = fetch()

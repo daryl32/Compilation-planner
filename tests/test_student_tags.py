@@ -462,3 +462,18 @@ def test_export_runs_keeps_runs_made_on_another_machine(tmp_path):
     idx = json.loads((dest / "index.json").read_text())
     assert [r["name"] for r in idx["runs"]] == ["v12", "v13"]
     assert idx["in_use"] == "v13" and [r["in_use"] for r in idx["runs"]] == [False, True]
+
+
+def test_scene_weight_setting(tmp_path, monkeypatch):
+    """--scene-weight: how much the Reviewer scene answers count (0 = left out), kept in the run's settings."""
+    pytest.importorskip("torch")
+    _library(tmp_path, n_videos=6)
+    scenes = {"vid03": [[0.0, 60.0, ["close-up", "dancing"]]]}
+    (tmp_path / "library" / "reviewer_scenes.json").write_text(json.dumps({"videos": scenes}))
+    monkeypatch.setattr(S, "WORK", tmp_path)
+    monkeypatch.setattr(S, "HERE", tmp_path)
+    assert S.main(["train", "--name", "s0", "--epochs", "3", "--folds", "2", "--scene-weight", "0"]) == 0
+    meta = json.loads((tmp_path / "models" / "s0" / "meta.json").read_text())
+    assert meta["settings"]["scene_weight"] == 0
+    assert meta["counts"]["scene_extra"] == 0 and meta["counts"]["teacher_in_scenes"] == 0
+    S.SCENE_WEIGHT_RUN = S.SCENE_WEIGHT

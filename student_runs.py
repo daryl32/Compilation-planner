@@ -63,6 +63,7 @@ def settings_of(meta: dict) -> dict:
         s.setdefault("cutoffs", meta["cutoffs"])
     if meta.get("cutoff_range"):
         s.setdefault("cutoff_range", list(meta["cutoff_range"]))
+    s.setdefault("scene_weight", 2.0 if meta.get("scene_tags_used") else None)   # before --scene-weight: 2 when used
     return {k: v for k, v in s.items() if v is not None}
 
 
