@@ -771,6 +771,11 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
     page = st.number_input(f"Page (of {pages}) — {len(moments)} frames", 1, pages, 1, key="tr_gpage") \
         if pages > 1 else 1
     items = moments[(page - 1) * GRID_PAGE: page * GRID_PAGE]
+    need = [m for _, m in items if m.get("proxy_frame")]
+    if need:                                   # 🧪 new test videos: cut this page's frames 3 at a time
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(3) as ex:
+            list(ex.map(TR.frame_path, need))
     st.caption("👆 Tap a picture to tick it, or put your finger on one and swipe sideways to tick a whole run "
                "(swipe down as you go to take in more rows) — like selecting in Photos.")
     st.caption(f"Under each frame: {'every tag' if cat == GRID_ALL else 'the **' + cat + '** tags'} you or the model have there — ● you have it · ✗ you said it "
@@ -1235,11 +1240,17 @@ def render() -> None:
     if "?" in blist:
         st.caption("Batch numbers appear after the next export — on the server: "
                    "`modal run modal_trial.py --stage results`.")
-    names = {None: "All batches", **{b: f"Batch {b}" if b != "?" else "Batch not recorded" for b in blist}}
+    names = {None: "All batches", **{b: f"Batch {b}" if b != "?" else "Batch not recorded" for b in blist},
+             TR.NEW_TEST_BATCH: "🧪 New test videos"}
+    opts = [None] + blist + ([TR.NEW_TEST_BATCH] if TLB.load_extra_test() else [])
+    if st.session_state.get("tr_batch") not in opts:
+        st.session_state.pop("tr_batch", None)
     with st.container(key="tl_wrap_tr_top"):
         a, b = st.columns([1, 3])
-        batch = a.selectbox("Batch", [None] + blist, format_func=names.get, key="tr_batch",
-                            help="Look at one batch run on its own, or all of them together.")
+        batch = a.selectbox("Batch", opts, format_func=names.get, key="tr_batch",
+                            help="Look at one batch run on its own, or all of them together. 🧪 New test videos = "
+                                 "the videos you added to the test set (🎯 Cards → 🧪 New test videos): 60 moments "
+                                 "each, label them here in ▦ Grid.")
         with b:
             with st.container(key="subnav_tr"):
                 sub = st.radio("Trial", ["📋 Summary", SRV.TRAINING, SRV.TEST, "🖼️ Compare tags", "📊 Scores", "🕺 Motion",
@@ -1256,6 +1267,21 @@ def render() -> None:
         return
     if sub == SRV.TEST:
         SRV.test()
+        return
+    if batch == TR.NEW_TEST_BATCH:
+        if sub != "🖼️ Compare tags":
+            st.info("🧪 New test videos have no Modal run yet — they're only in 🖼️ Compare tags (for labelling).")
+            return
+        import catalogue_store as CS
+        from library_common import library_ranges
+        view = {**data, "teachers": {}, "videos": TR.new_test_videos(CS.video_index(), library_ranges())}
+        if not view["videos"]:
+            st.info("None of your new test videos has a catalogue here yet.")
+            return
+        st.caption("🧪 Your new test videos — 60 moments each, spread evenly, nothing from any model. Label them in "
+                   "▦ Grid one category at a time, then 🧩 Only part-reviewed frames → 🧹 to finish them as full labels "
+                   "(only full labels count in the test).")
+        _compare(view)
         return
     view = {**data, "videos": TR.in_batch(data["videos"], batch)}
     if not view["videos"]:

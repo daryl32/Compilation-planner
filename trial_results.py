@@ -86,8 +86,41 @@ def correction_card(video_id: str, moment: dict, prefill: list) -> dict:
             "suggested": list(prefill)}
 
 
+NEW_TEST_BATCH = "new test"     # the Batch box entry for your 🧪 new test videos
+
+
 def frame_path(moment: dict) -> Path | None:
+    """The moment's picture: the trial's saved frame, or — for a 🧪 new test video (no Modal run) — a frame
+    taken from the preview copy (made once, then cached)."""
+    if moment.get("proxy_frame"):
+        import training_labels as TLB
+        from library_common import proxy_path
+        try:
+            return TLB.extract_frame(proxy_path(moment["video_id"]), float(moment["t"]))
+        except Exception:           # noqa: BLE001 — no preview copy / ffmpeg trouble: "not synced"
+            return None
     return RESULTS_DIR / moment["frame"] if moment.get("frame") else None
+
+
+def new_test_videos(index: dict, ranges: dict = None, extra: list = None) -> dict:
+    """Your 🧪 new test videos as Compare-tags videos: the same evenly spread moments as their 🎯 cards
+    (training_labels.test_moments — so a card and a grid tick are one label), pictures from the preview
+    copies, no teacher answers. Batch NEW_TEST_BATCH. {video_id: {"batch", "moments", "new_test"}}."""
+    import training_labels as TLB
+    extra = TLB.load_extra_test() if extra is None else extra
+    ranges = ranges or {}
+    by_vid = {v["video_id"]: v for v in index.values()}
+    out = {}
+    for vid in extra:
+        v = by_vid.get(vid)
+        if v is None:
+            continue
+        ms = [{"key": f"nt_{t:.2f}", "t": t, "scene_id": sc["scene_id"], "video_id": vid, "proxy_frame": True,
+               "mine": None, "old": list(sc.get("tags") or []), "teachers": {}}
+              for t, sc in TLB.test_moments(v, ranges.get(vid))]
+        if ms:
+            out[vid] = {"batch": NEW_TEST_BATCH, "moments": ms, "new_test": True, "duration": v.get("duration")}
+    return out
 
 
 def norm(tag) -> str:

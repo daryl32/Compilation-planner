@@ -902,3 +902,53 @@ def test_grid_thumbnails_are_small(tmp_path):
     assert th.stat().st_size < big.stat().st_size / 2
     assert TV._thumb(th) == th or Image.open(TV._thumb(th)).width == 400          # already small: kept
     assert TV._thumb(tmp_path / "missing.jpg") == tmp_path / "missing.jpg"
+
+
+def test_new_test_videos_in_compare_tags(bundle, clean_labels):
+    """🧪 New test videos show in Compare tags (Batch box) with frames from the preview copy, for the grid."""
+    import subprocess
+    import catalogue_store as CS
+    from library_common import proxy_path
+    from tests.apptest_util import errors, page_app
+    TLB = clean_labels
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+    p = proxy_path("vid_a")
+    existed = p.exists()
+    if not existed:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        dur = max(s["end"] for s in CS.video_index()["vid_a"]["scenes"]) + 1
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                        f"testsrc=size=320x180:rate=10:duration={dur:.0f}", "-pix_fmt", "yuv420p", str(p)], check=True)
+    had_extra = TLB.EXTRA_TEST_FILE.read_bytes() if TLB.EXTRA_TEST_FILE.exists() else None
+    try:
+        TLB.save_extra_test(["vid_a"])
+        vids = TR.new_test_videos(CS.video_index())
+        ms = vids["vid_a"]["moments"]
+        assert len(ms) == TLB.TEST_MOMENTS_PER_VIDEO and TR.frame_path(ms[0]).exists()
+        assert TR.moment_id("vid_a", ms[0]) == TLB.card_id("tags", "vid_a", ms[0]["t"])   # same label as its card
+        at = page_app("pages/6_Training_Labels.py")
+        at.session_state["tl_view"] = "🧪 Trial results"
+        at.session_state["tr_sub"] = "🖼️ Compare tags"
+        at.session_state["tr_batch"] = TR.NEW_TEST_BATCH
+        at.session_state["tr_view"] = "grid"
+        at.run()
+        assert not errors(at), errors(at)
+        ticks = [c for c in at.checkbox if c.key and c.key.startswith("tr_gt_")]
+        assert len(ticks) == 48
+        at.session_state["tr_g_chosen"] = ["dance"]
+        ticks[0].check()
+        at.button(key="tr_g_add_top").click().run()
+        assert not errors(at), errors(at)
+        part = [i for i in TLB.load_labels() if i["type"] == "partial"]
+        assert len(part) == 1 and part[0]["video_id"] == "vid_a" and part[0]["t"] == ms[0]["t"]
+        at.session_state["tr_sub"] = "📊 Scores"
+        at.run()
+        assert any("only in 🖼️ Compare tags" in i.value for i in at.info)
+    finally:
+        if had_extra is None:
+            TLB.EXTRA_TEST_FILE.unlink(missing_ok=True)
+        else:
+            TLB.EXTRA_TEST_FILE.write_bytes(had_extra)
+        if not existed:
+            p.unlink(missing_ok=True)
