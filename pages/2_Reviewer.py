@@ -31,7 +31,8 @@ from config import CATALOGUE_DIR
 from library_common import (safe_image, image_ok, video_details, set_video_details, all_actors,
                             all_video_tags, suggest_video_tags, matches_details, mark_pending, master_thumbnail_scenes, set_master_thumbnail,
                             proxy_path, library_ranges, tc_to_seconds, format_mmss, overlap_with_range,
-                            scene_tags)
+                            scene_tags, HAIR_COLOURS, HAIR_EMOJI, video_hair, hair_of, hair_label,
+                            hair_needs_confirming, hair_unsure, set_video_hair, matches_hair)
 import catalogue_store as CS
 import scene_edits as SE
 import scene_roles as SR
@@ -267,6 +268,8 @@ masters = master_thumbnail_scenes()
 
 FIND_NO_ACTORS = "👤 No actors yet"
 FIND_NO_VTAGS = "🏷️ No video tags yet"
+FIND_HAIR_TODO = "💇 Hair not confirmed"
+FIND_HAIR_UNSURE = "❓ Hair to confirm (vote unsure)"
 FIND_NO_THUMB = "⭐ No custom thumbnail"
 FIND_SPLIT = "✂️ Has split suggestions"
 FIND_MERGE = "🔗 Has combine suggestions"
@@ -315,17 +318,18 @@ with st.container(border=True, key="rev_wrap_find"):
     find_flags = fc[1].multiselect(
         "Only videos that…",
         [FIND_TODAY, FIND_3DAYS, FIND_NEW, FIND_UNTAGGED, FIND_UNROLED, FIND_NO_THUMB, FIND_SPLIT, FIND_MERGE,
-         FIND_NO_OUTRO, FIND_NO_INTRO, FIND_NO_ACTORS, FIND_NO_VTAGS],
+         FIND_NO_OUTRO, FIND_NO_INTRO, FIND_NO_ACTORS, FIND_NO_VTAGS, FIND_HAIR_TODO, FIND_HAIR_UNSURE],
         key="rev_find_flags", placeholder="any video",
         help="Pick several to narrow it down further (a video must match all of them). "
              "Split/combine suggestions use the sidebar settings and the library range.",
     )
 
     _details = video_details()
+    _hair = video_hair()
     _roles = SR.roles_by_id()
     # Actors / video tags / roles: less used, so in a popover (its label counts the ones in use).
     _n_more = sum(bool(st.session_state.get(k)) for k in
-                  ("rev_find_actors", "rev_find_vtags", "rev_find_roles", "rev_find_no_roles"))
+                  ("rev_find_actors", "rev_find_vtags", "rev_find_roles", "rev_find_no_roles", "rev_find_hair"))
     with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", width="stretch"):
         find_actors = st.multiselect("With actors", all_actors(), key="rev_find_actors", placeholder="anyone")
         find_vtags = st.multiselect("With video tags", all_video_tags(), key="rev_find_vtags", placeholder="any")
@@ -336,6 +340,14 @@ with st.container(border=True, key="rev_wrap_find"):
                                        placeholder="—", format_func=lambda r: SR.label(r, _roles),
                                        help="Videos with no (not excluded) scene in that role yet — "
                                             "handy for finding videos still to mark.")
+        hc = st.columns([3, 2], vertical_alignment="bottom")
+        find_hair = hc[0].multiselect("With hair colour", list(HAIR_COLOURS), key="rev_find_hair", placeholder="any",
+                                      format_func=lambda c: f"{HAIR_EMOJI[c]} {c}",
+                                      help="The video's hair colours — yours where you've confirmed them, "
+                                           "otherwise the model's vote.")
+        find_hair_only = hc[1].toggle("Only these", key="rev_find_hair_only", disabled=not find_hair,
+                                      help="Off: the video has any of these. On: every hair colour in the video is "
+                                           "one of these (only Blonde leaves out a Blonde + Brunette video).")
         find_all = st.toggle("Must have all of them", key="rev_find_all",
                              disabled=not (find_actors or find_vtags or find_roles),
                              help="Off: any of the picked actors / tags / roles. On: every one of them.")
@@ -349,6 +361,8 @@ with st.container(border=True, key="rev_wrap_find"):
             return False
         vid = index[stem]["video_id"]
         if not matches_details(vid, _details, find_actors, find_vtags, find_all):
+            return False
+        if not matches_hair(vid, _hair, find_hair, find_hair_only):
             return False
         if find_roles and not (all if find_all else any)(r in f["roles"] for r in find_roles):
             return False
@@ -367,6 +381,8 @@ with st.container(border=True, key="rev_wrap_find"):
             FIND_TODAY: f["added"] >= _today_start,
             FIND_NO_ACTORS: not (_details.get(vid) or {}).get("actors"),
             FIND_NO_VTAGS: not (_details.get(vid) or {}).get("tags"),
+            FIND_HAIR_TODO: hair_needs_confirming(vid, _hair),
+            FIND_HAIR_UNSURE: hair_unsure(vid, _hair),
         }
         return all(checks[flag] for flag in find_flags)
 
@@ -511,10 +527,49 @@ def _vd_add_actor(key_actors: str, key_new: str) -> None:
 
 
 _vd = video_details().get(video_id) or {"actors": [], "tags": []}
+_vh = hair_of(video_id)
 _ka, _kt, _kn = f"vd_actors_{selected}", f"vd_tags_{selected}", f"vd_new_actor_{selected}"
+# The pick's key follows the saved answer / vote, so a new vote (or a save) prefills it afresh.
+_kh = f"vd_hair_{selected}_{_vh['source']}_{'-'.join(_vh['colours'])}"
 _sugg = suggest_video_tags(data["scenes"], ranges.get(video_id))
-with st.expander(f"🎬 Video details — {len(_vd['actors'])} actor(s), {len(_vd['tags'])} video tag(s)",
-                 expanded=not (_vd["actors"] or _vd["tags"])):
+_hair_bit = ("💇 " + hair_label(_vh["colours"]) + ("" if _vh["source"] == "you" else " (vote — to confirm)")
+             if _vh["colours"] else ("❓ hair to confirm" if _vh["unsure"] else "💇 hair not set"))
+with st.expander(f"🎬 Video details — {len(_vd['actors'])} actor(s), {len(_vd['tags'])} video tag(s) · {_hair_bit}",
+                 expanded=not (_vd["actors"] or _vd["tags"]) or _vh["source"] != "you"):
+    # 💇 Hair colour: one answer for the whole video (claude/hair-colour-plan.md) — the
+    # same actress can look blonde / brunette / red from shot to shot, so it isn't tagged per clip.
+    hrow = st.columns([3, 1], vertical_alignment="bottom")
+    with hrow[0]:
+        _now_h = st.pills("💇 Hair colour", list(HAIR_COLOURS), selection_mode="multi", default=_vh["colours"],
+                          key=_kh, format_func=lambda c: f"{HAIR_EMOJI[c]} {c}",
+                          help="Everyone's hair in this video — pick two for two actresses. Used only for "
+                               "picking videos. Prefilled from the model's vote; your answer always wins.")
+    _now_h = [c for c in HAIR_COLOURS if c in (_now_h or [])]
+    _hair_done = _vh["source"] == "you" and _now_h == _vh["colours"]
+    _hair_clear = _vh["source"] == "you" and not _now_h
+    if _hair_clear:
+        _hb = hrow[1].button("🗑️ Clear answer", key=f"vd_hair_save_{selected}", width="stretch",
+                             help="Remove your answer — the model's vote shows again.")
+    else:
+        _hb = hrow[1].button("✅ Confirmed" if _hair_done else "✅ Confirm hair", key=f"vd_hair_save_{selected}",
+                             type="secondary" if _hair_done else "primary", disabled=_hair_done or not _now_h,
+                             width="stretch")
+    if _hb:
+        set_video_hair(video_id, _now_h)
+        st.session_state.pop(_kh, None)
+        st.session_state["rev_saved_msg"] = (f"Hair colour saved: {hair_label(_now_h)}." if _now_h
+                                             else "Hair colour answer cleared.")
+        st.rerun()
+    if _vh["source"] == "you":
+        _hc = "✅ Your answer."
+        if _vh["vote"] and _vh["vote"] != _vh["colours"]:
+            _hc += f" The model voted {hair_label(_vh['vote'])}."
+        hrow[0].caption(_hc)
+    elif _vh["source"] == "vote":
+        hrow[0].caption("🤖 The model's vote" + (" — it couldn't decide, so check this one." if _vh["unsure"]
+                                                 else " — tap ✅ if it's right."))
+    else:
+        hrow[0].caption("No vote yet — pick the colours and tap ✅.")
     vc = st.columns(2)
     with vc[0]:
         _actor_opts = sorted(set(all_actors()) | set(_vd["actors"]) | set(st.session_state.get(_ka) or [])
