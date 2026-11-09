@@ -139,8 +139,9 @@ def render_sections(tracks: dict, track_bits, play=None) -> None:
     def suggest():
         return _to_editor(ST.snap(ST.suggest(analysis, STM.saved_map(tid)), cuts)) if analysis else regions
 
+    play_part = (lambda r, lead, key: play(track, r, lead, key)) if play else None     # the editor calls play(r, lead, key)
     SME.render_editor(track, segs, ns="sec", get_regions=lambda: _state().get("regions") or [], set_regions=_set,
-                      version=s.get("v", 0), analysis=analysis, play=play, roles=ST.types_as_roles(), suggest=suggest,
+                      version=s.get("v", 0), analysis=analysis, play=play_part, roles=ST.types_as_roles(), suggest=suggest,
                       allow_none=False, thing="type", clear=False)
 
 
