@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import math
 
+from pathlib import Path
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
@@ -277,3 +278,79 @@ def render_editor(track: dict, segs: list, *, ns: str, get_regions, set_regions,
 
 
 __all__ = ["render_editor", "render_empty", "story_chart"]
+
+
+# ---------------------------------------------------------------------------
+# ▶ A player with a synced cursor — the part's loudness curve, its cuts and a line that moves with the music
+# ---------------------------------------------------------------------------
+
+def synced_player(clip_path, track: dict, r: dict, lead: float, cut_times: list, key: str,
+                  colour: str = "#ff4b4b", height: int = 150) -> None:
+    """Plays the clip (st.audio can't report where it is) with its own small graph: the loudness over this
+    part (plus the lead-in, greyed), the cuts as thin lines, and a cursor synced to the audio. Times along the
+    bottom are track times, so what you hear lines up with the handles above."""
+    import base64
+    import json as _json
+    from streamlit.components.v1 import html as _html
+    a = max(0.0, float(r["start"]) - float(lead))
+    b = float(r["end"])
+    try:
+        data = base64.b64encode(Path(clip_path).read_bytes()).decode("ascii")
+    except OSError:
+        st.audio(str(clip_path), autoplay=True)
+        return
+    hires = track.get("hires") or {}
+    xs, ys = [], []
+    if hires.get("rms"):
+        rate = float(hires["rate"])
+        rms = np.asarray(hires["rms"], dtype=float)
+        lo, hi = int(a * rate), max(int(a * rate) + 1, int(b * rate))
+        seg = rms[lo:hi]
+        if seg.size:
+            step = max(1, seg.size // 600)
+            seg = seg[: (seg.size // step) * step].reshape(-1, step).mean(axis=1) if seg.size >= step else seg
+            ys = (seg / max(float(rms.max()), 1e-9)).round(3).tolist()
+            xs = (a + np.arange(len(ys)) * (b - a) / max(len(ys), 1)).round(3).tolist()
+    cuts = [round(float(c), 3) for c in cut_times if a < c < b]
+    cfg = _json.dumps({"a": a, "b": b, "start": float(r["start"]), "xs": xs, "ys": ys, "cuts": cuts, "colour": colour})
+    _html(f"""
+<div id="sp_{key}" style="font-family:sans-serif;color:#ddd">
+ <canvas id="c_{key}" width="900" height="{height - 50}" style="width:100%;height:{height - 50}px;display:block"></canvas>
+ <div style="display:flex;align-items:center;gap:.6rem;margin-top:.3rem">
+  <audio id="a_{key}" controls autoplay style="flex:1;height:32px" src="data:audio/mp4;base64,{data}"></audio>
+  <span id="t_{key}" style="min-width:4.5rem;text-align:right;font-variant-numeric:tabular-nums"></span>
+ </div>
+</div>
+<script>
+(function() {{
+ const cfg = {cfg};
+ const cv = document.getElementById("c_{key}"), ctx = cv.getContext("2d");
+ const au = document.getElementById("a_{key}"), tt = document.getElementById("t_{key}");
+ const W = cv.width, H = cv.height, span = Math.max(cfg.b - cfg.a, 0.001);
+ const x = t => (t - cfg.a) / span * W;
+ const mmss = t => {{ const m = Math.floor(t / 60), s = t - m * 60; return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1); }};
+ function draw(now) {{
+  ctx.clearRect(0, 0, W, H);
+  if (cfg.start > cfg.a) {{ ctx.fillStyle = "rgba(128,128,128,0.18)"; ctx.fillRect(0, 0, x(cfg.start), H); }}
+  ctx.strokeStyle = "rgba(128,128,128,0.45)"; ctx.lineWidth = 1;
+  for (const c of cfg.cuts) {{ ctx.beginPath(); ctx.moveTo(x(c), 0); ctx.lineTo(x(c), H); ctx.stroke(); }}
+  if (cfg.ys.length) {{
+   ctx.strokeStyle = "rgba(80,120,220,0.9)"; ctx.lineWidth = 1.5; ctx.beginPath();
+   cfg.xs.forEach((t, i) => {{ const px = x(t), py = H - 4 - cfg.ys[i] * (H - 10); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }});
+   ctx.stroke();
+  }}
+  ctx.strokeStyle = cfg.colour; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(x(now), 0); ctx.lineTo(x(now), H); ctx.stroke();
+  ctx.fillStyle = "#bbb"; ctx.font = "11px sans-serif"; ctx.textAlign = "left"; ctx.fillText(mmss(cfg.a), 3, H - 2);
+  ctx.textAlign = "right"; ctx.fillText(mmss(cfg.b), W - 3, H - 2);
+  tt.textContent = mmss(now);
+ }}
+ let raf = null;
+ function tick() {{ draw(cfg.a + au.currentTime); raf = requestAnimationFrame(tick); }}
+ au.addEventListener("play", () => {{ if (!raf) tick(); }});
+ au.addEventListener("pause", () => {{ cancelAnimationFrame(raf); raf = null; draw(cfg.a + au.currentTime); }});
+ au.addEventListener("ended", () => {{ cancelAnimationFrame(raf); raf = null; draw(cfg.b); }});
+ cv.addEventListener("click", ev => {{ const rect = cv.getBoundingClientRect();
+   au.currentTime = Math.max(0, (ev.clientX - rect.left) / rect.width * span); draw(cfg.a + au.currentTime); }});
+ draw(cfg.a);
+}})();
+</script>""", height=height)

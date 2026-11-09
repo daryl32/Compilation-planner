@@ -119,7 +119,7 @@ def _fold_ratio_fit(mbpm: np.ndarray, track_bpm: float) -> np.ndarray:
 def _shape_scores(move: np.ndarray, n: int, audio_curve: np.ndarray) -> np.ndarray:
     """Correlation of every n-point movement window with the block's music shape → 0–1."""
     T = len(move)
-    if T < n or n < 3:
+    if T < n or n < 3 or audio_curve is None or len(audio_curve) == 0:
         return np.full(max(T - n + 1, 0), 0.5)
     a = resample_curve(audio_curve, n)
     a = a - a.mean()

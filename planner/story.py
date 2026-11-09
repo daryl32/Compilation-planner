@@ -209,7 +209,10 @@ def _story_play_audio(track: dict, r: dict, lead: bool, key: str) -> None:
     if err:
         st.error(f"Couldn't cut the music: {err}")
     else:
-        st.audio(str(clip), autoplay=True)
+        import smart_cuts as SMC
+        import story_map_editor as SME
+        segs = SMC.build_smart_segments(track, {"beats_per_bar": 4})
+        SME.synced_player(clip, track, r, 2.0 if lead else 0.0, [sg["start"] for sg in segs] + [float(track["duration_sec"])], key)
 
 
 def _add_new_videos(video_ids: list) -> None:

@@ -149,57 +149,91 @@ def _section_regions(track: dict) -> list:
         return []
 
 
-def track_fit(video_ids: list, track: dict, index: dict, music_story: float = 0.5) -> dict | None:
-    """How well these videos' footage suits this track's sections: Σ (share of the track in a type) ×
-    (the videos' best-window fit for that type). Returns {"fit", "per_type": {type: fit}} or None."""
+@st.cache_data(max_entries=400, show_spinner=False)
+def _regions_cached(track_id: str, audio_mtime: float, maps_mtime: float) -> list:
+    """A track's section map (saved, else suggested) — the suggestion reads the whole song, so it's kept."""
+    return _section_regions(_load_track(track_id))
+
+
+def _maps_mtime() -> float:
+    try:
+        return ST._file().stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+@st.cache_data(max_entries=16, show_spinner=False, ttl=600)
+def _type_fits(video_ids: tuple, tl_sig: tuple, music_story: float = 0.5) -> dict:
+    """{type_id: fit} — how well these videos' footage suits each section type, worked out ONCE for the video set
+    (movement band + trend + the recipe's tags; the song-specific parts — shape, beat — are left out of the
+    shortlist). Each type's fit = the mean over the videos of their best tenth of windows."""
     import core.story_matcher as SMX
-    from core.shape import get_block_audio_curve
-    regions = _section_regions(track)
-    if not regions:
-        return None
-    all_recipes = RC.load_all()
-    duration = float(track["duration_sec"])
-    bpm = float(track.get("bpm") or 0.0)
+    index = FT.load_index()
     vids = []
     for vid in video_ids:
         tl = FT.load(vid, index=index)
         if tl is not None and len(tl):
             vids.append(SMX._Video(tl, index))
+    out = {}
     if not vids:
-        return None
-    by_type = {}
-    for r in regions:
-        by_type.setdefault(r["type"], []).append(r)
-    total, per_type = 0.0, {}
-    for t_id, regs in by_type.items():
-        share = sum(float(r["end"]) - float(r["start"]) for r in regs) / max(duration, 1e-9)
-        recipe = all_recipes.get(t_id) or RC.default("rhythmic")
+        return out
+    for t_id, recipe in RC.load_all().items():
         n = max(2, int(round(SCUT.pace_at(recipe, 0.5) / FT.STEP)))
-        r0 = regs[0]
-        audio = get_block_audio_curve(track, float(r0["start"]), float(min(r0["end"], duration)))
         fits = []
         for v in vids:
-            fit, _, _ = SMX._score_video(v, n, recipe, audio, bpm, music_story)
+            fit, _, _ = SMX._score_video(v, n, recipe, None, 0.0, music_story)
             if len(fit):
                 k = max(1, len(fit) // 10)
                 fits.append(float(np.sort(fit)[-k:].mean()))
         if fits:
-            f = float(np.mean(fits))
-            per_type[t_id] = round(f, 3)
-            total += share * f
+            out[t_id] = round(float(np.mean(fits)), 3)
+    return out
+
+
+def track_fit(video_ids: list, track: dict, index: dict = None, music_story: float = 0.5, type_fits: dict = None) -> dict | None:
+    """How well these videos suit this track: Σ (share of the track in a type) × (the videos' fit for that type)."""
+    regions = _regions_cached(track["track_id"], _audio_mtime(track["track_id"]), _maps_mtime())
+    if not regions:
+        return None
+    if type_fits is None:
+        type_fits = _type_fits(tuple(video_ids), FT.signature(), music_story)
+    if not type_fits:
+        return None
+    duration = float(track["duration_sec"])
+    total, per_type = 0.0, {}
+    for r in regions:
+        t_id = r.get("type")
+        f = type_fits.get(t_id)
+        if f is None:
+            continue
+        share = (float(r["end"]) - float(r["start"])) / max(duration, 1e-9)
+        total += share * f
+        per_type[t_id] = f
     return {"fit": round(total, 3), "per_type": per_type}
 
 
-@st.cache_data(max_entries=8, show_spinner=False, ttl=600)
-def suggest_tracks(video_ids: tuple, audio_sig: tuple, tl_sig: tuple, top: int = 6) -> list:
-    index = FT.load_index()
+def _audio_mtime(track_id: str) -> float:
+    from track_files import track_file
+    try:
+        return track_file(track_id, AUDIO_DIR).stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def suggest_tracks(video_ids: tuple, audio_sig: tuple, tl_sig: tuple, top: int = 6, _progress=None) -> list:
+    """Not cached itself (it drives a progress bar): the heavy parts — the videos' per-type fits and each track's
+    section map — are cached, so a repeat is quick."""
+    type_fits = _type_fits(video_ids, tl_sig)
+    summaries = audio_summaries(audio_sig)
     out = []
-    for tid in audio_summaries(audio_sig):
+    for k, tid in enumerate(summaries, 1):
+        if _progress:
+            _progress(k, len(summaries), tid)
         try:
             track = _load_track(tid)
         except Exception:          # noqa: BLE001
             continue
-        f = track_fit(list(video_ids), track, index)
+        f = track_fit(list(video_ids), track, type_fits=type_fits)
         if f:
             out.append({"track_id": tid, **f})
     return sorted(out, key=lambda r: -r["fit"])[:top]
@@ -429,22 +463,36 @@ def render_by_video(rows: dict, have_tl: set) -> None:
         else:
             col.caption(vid)
     tl_sig = FT.signature()
-    with st.spinner("Looking for songs and videos that fit…"):
-        tracks = suggest_tracks(tuple(start), _audio_signature(), tl_sig)
-        others = suggest_videos(tuple(start), tl_sig)
+    st.markdown("**Stage 1 — 🎵 songs that suit this footage**")
+    if st.button("🎵 Find songs", key=ns + "find", type="primary", width="stretch"):
+        st.session_state[ns + "songs_for"] = tuple(start)
+    if st.session_state.get(ns + "songs_for") != tuple(start):
+        st.caption("Press 🎵 Find songs — every track is scored against the chosen footage (a few seconds the first "
+                   "time a track's sections are read; quick after that).")
+        return
+    bar = st.progress(0.0, text="Scoring songs…")
+    tracks = suggest_tracks(tuple(start), _audio_signature(), tl_sig,
+                            _progress=lambda k, n, t: bar.progress(k / max(n, 1), text=f"Scoring songs… {k}/{n} · {t}"))
+    bar.empty()
     if not tracks:
         st.warning("No song could be scored — the chosen videos need a 🧭 timeline and the tracks their sections.")
         return
-    st.markdown("**🎵 Songs that suit this footage**")
     tid = st.radio("Song", [t["track_id"] for t in tracks], key=ns + "track", label_visibility="collapsed",
                    format_func=lambda t: f"{t} · fit {next(x['fit'] for x in tracks if x['track_id'] == t):.2f}  —  "
                                          + ", ".join(f"{ST.label(k)} {v:.2f}" for k, v in sorted(
                                              next(x['per_type'] for x in tracks if x['track_id'] == t).items(), key=lambda kv: -kv[1])[:3]))
     _track_line(tid)
     extra = []
-    if others:
-        st.markdown("**🎬 Other videos that go with them** — untick any you don't want")
-        ocols = st.columns(min(len(others), 4))
+    st.markdown("**Stage 2 — 🎬 other videos that go with them** (optional)")
+    if st.button("🎬 Suggest other videos", key=ns + "more", width="stretch",
+                 help="Videos that look like the chosen ones and share their main tags. Skip it to match just your videos."):
+        st.session_state[ns + "others_for"] = tuple(start)
+    if st.session_state.get(ns + "others_for") == tuple(start):
+        with st.spinner("Looking for videos like these…"):
+            others = suggest_videos(tuple(start), tl_sig)
+        if not others:
+            st.caption("Nothing close enough found.")
+        ocols = st.columns(min(len(others), 4)) if others else []
         for k, o in enumerate(others):
             with ocols[k % len(ocols)]:
                 p = LC.master_thumbnail_path(o["video_id"], rows.get(o["video_id"], {}).get("scenes") or [], masters)

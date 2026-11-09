@@ -79,7 +79,11 @@ def test_planner_landing_and_new_matcher_pages(monkeypatch):
         assert not errors(at), errors(at)
         at.multiselect(key="cv_start").set_value(["vid_a"]).run()
         assert not errors(at), errors(at)
+        at.button(key="cv_find").click().run()                 # stage 1: songs
+        assert not errors(at), errors(at)
         assert at.radio(key="cv_track").value
+        at.button(key="cv_more").click().run()                 # stage 2: other videos (optional)
+        assert not errors(at), errors(at)
         at.button(key="cv_go").click().run()
         assert not errors(at), errors(at)
         assert at.session_state[PC_RESULT()]["way"] == "video"
