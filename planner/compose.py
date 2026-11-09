@@ -575,8 +575,11 @@ def render_result(res: dict) -> None:
                 key = (s["video_id"], s["scene_id"])
                 r = st.columns([1.2, 1.4, 3.5, 2.2, 0.7], vertical_alignment="center")
                 thumb = get_nearest_thumbnail(cats, s["video_id"], s.get("clip_start_sec", 0.0))
-                if thumb is not None:
-                    r[0].image(str(thumb), width=90)
+                with r[0]:
+                    if thumb is not None:
+                        LC.safe_image(thumb, width=90)          # a PIL image cropped from the sprite sheet
+                    elif s.get("thumbnail") and Path(s["thumbnail"]).exists():
+                        LC.safe_image(s["thumbnail"], width=90)
                 r[1].markdown(f"**{format_mmss(a)}–{format_mmss(b)}**  \n{ST.label(info.get('type'))}")
                 r[2].markdown(f"`{s['video_id']}` #{s['scene_id']} at {format_mmss(s['clip_start_sec'])} · {s['clip_duration_sec']:.1f} s"
                               + (f"  \n{', '.join(s.get('tags') or [])}" if s.get("tags") else ""))
