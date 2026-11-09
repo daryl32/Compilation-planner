@@ -15,6 +15,9 @@ sort and "More filters" — in the page, and a floating ⬆️ back-to-top butto
   Renders: the saved Render Preview MP4s — track, length, the videos and clips
           each one used, the planner settings behind it; play, rate, keep,
           download its plan, delete, and clean up old ones.
+  Timeline: 🧭 the footage timeline per video for the new matcher (footage_timeline.py,
+          footage_timeline_view.py) — build it, then see movement, tags, shot size,
+          people and rhythm along one video.
 """
 
 import datetime
@@ -45,7 +48,7 @@ PAGE_SIZE = 20
 page_setup("Media Library", "pages/3_Media_Library.py", title="📁 Media Library", anchor="library-top")
 top_button("library-top", wrap_css("ml_wrap", 120) + menu_css())   # rows wrap on narrow screens (iPad portrait)
 with st.container(key="mainnav_lib"):   # the page's main menu — styled as tabs (menu_css)
-    library_kind = st.radio("Library", ["🎬 Videos", "🎵 Audio", "🎚️ Mix", "🎞️ Renders", "📈 Analytics"],
+    library_kind = st.radio("Library", ["🎬 Videos", "🎵 Audio", "🎚️ Mix", "🎞️ Renders", "📈 Analytics", "🧭 Timeline"],
                             horizontal=True, key="lib_kind", label_visibility="collapsed")
 
 
@@ -2265,5 +2268,8 @@ elif library_kind == "🎞️ Renders":
     render_renders()
 elif library_kind == "📈 Analytics":
     render_analytics_tab()
+elif library_kind == "🧭 Timeline":
+    import footage_timeline_view
+    footage_timeline_view.render()
 else:
     render_videos()
