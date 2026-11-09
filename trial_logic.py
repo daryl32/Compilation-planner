@@ -1050,10 +1050,16 @@ def shot_step(tag) -> int | None:
     return _SHOT_STEP.get(_shot_key(tag))
 
 
+# Tags the matcher doesn't use as tags (claude/tag-levels.md): text on screen catches every caption, not the
+# title screens / junk footage wanted — that's found from "nobody on screen" instead.
+NOT_USED_TAGS = ("text on screen",)
+
+
 def not_in_f1(tag) -> bool:
-    """Hair (per video) and shot size (scale) — scored on their own, never in the overall F1."""
+    """Hair (per video), shot size (scale) and unused tags — never in the overall F1."""
     n = "".join(str(tag).split()).lower()
-    return n in {"".join(t.split()).lower() for t in VIDEO_LEVEL_TAGS} or shot_step(tag) is not None
+    return (n in {"".join(t.split()).lower() for t in VIDEO_LEVEL_TAGS + NOT_USED_TAGS}
+            or shot_step(tag) is not None)
 
 
 def score_shot(pairs: list) -> dict:

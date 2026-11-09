@@ -8,7 +8,8 @@ import streamlit as st
 import catalogue_store as CStore
 import scene_roles as SR
 from library_common import (safe_image, video_details, all_actors, all_video_tags, matches_details, render_range_picker, library_ranges, memory_check,
-                            HAIR_COLOURS, HAIR_EMOJI, video_hair, matches_hair)
+                            HAIR_COLOURS, HAIR_EMOJI, video_hair, matches_hair,
+                            CAST_MAX, CAST_ANY, video_cast, matches_cast)
 from core.matching import format_mmss
 
 from planner.state import (
@@ -105,10 +106,20 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
         _f_hair_only = st.toggle("Only this hair", key="vid_hair_only", disabled=not _f_hair,
                                  help="Off: the video has any of these hair colours. On: everyone's hair in it is "
                                       "one of these (only Blonde leaves out a Blonde + Brunette video).")
+    _cc = st.columns([4, 4, 3, 2], vertical_alignment="bottom")
+    _cfmt = lambda x: f"{x}+" if x == CAST_MAX else str(x)
+    _f_women = _cc[0].selectbox("👩 Women", [CAST_ANY, 1, 2, 3, CAST_MAX], key="vid_women_filter", format_func=_cfmt,
+                                help="👥 Cast, set in the Reviewer's 🎬 Video details.")
+    _f_men = _cc[1].selectbox("👨 Men", [CAST_ANY, 0, 1, 2, 3, CAST_MAX], key="vid_men_filter", format_func=_cfmt,
+                              help="👥 Cast (the cameraman counts in POV videos).")
+    _f_gg = _cc[2].toggle("👭 Girl / girl", key="vid_gg_filter", help="2 or more women and no men (👥 cast).")
+    _cast_on = _f_women != CAST_ANY or _f_men != CAST_ANY or _f_gg
     _hair = video_hair() if _f_hair else {}
+    _cast = video_cast() if _cast_on else {}
     _allowed = (frozenset(v for v in all_video_ids if matches_details(v, _details, _f_actors, _f_vtags, _f_all)
-                          and matches_hair(v, _hair, _f_hair, _f_hair_only))
-                if (_f_actors or _f_vtags or _f_hair) else None)
+                          and matches_hair(v, _hair, _f_hair, _f_hair_only)
+                          and matches_cast(v, _cast, _f_women, _f_men, _f_gg))
+                if (_f_actors or _f_vtags or _f_hair or _cast_on) else None)
     if _allowed is not None:
         st.caption(f"👤🏷️💇 {len(_allowed)} of {len(all_video_ids)} videos match — the recommendations and the "
                    f"'add another video' list only include those. Videos you've already ticked stay ticked.")

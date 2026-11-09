@@ -1519,10 +1519,33 @@ def load_ctx_models(name: str, meta: dict) -> list:
     return out
 
 
+def people_at(vdir: Path, times: np.ndarray) -> np.ndarray | None:
+    """People on screen at each time (uint8): the median number of pose detections over the ~half second
+    around it (15 fps). From detections.npz; None when the video has none. Used by the app for "nobody on
+    screen" exclude suggestions and the 👥 cast hint (claude/tag-levels.md)."""
+    try:
+        with np.load(vdir / "detections.npz") as z:
+            frames = np.asarray(z["frame"], np.int64)
+            n_frames = int(z["n_frames"])
+    except (OSError, KeyError, ValueError):
+        return None
+    if n_frames <= 0:
+        return None
+    counts = np.bincount(frames[(frames >= 0) & (frames < n_frames)], minlength=n_frames)
+    half = int(round(TL.POSE_FPS / 4))
+    out = np.zeros(len(times), np.uint8)
+    for k, t in enumerate(times):
+        c = int(round(float(t) * TL.POSE_FPS))
+        w = counts[max(0, c - half): min(n_frames, c + half + 1)]
+        out[k] = min(int(np.median(w)), 255) if w.size else 0
+    return out
+
+
 def export(name: str, dest: Path = None, root: Path = None) -> int:
     """Every half second of every downloaded video → the student's score per tag (0–100), one small
     file per video in the catalogue's student_scores folder on Drive (or `dest`):
-        student_scores/<video_id>.npz   times (s, float32), scores (moments × tags, uint8)
+        student_scores/<video_id>.npz   times (s, float32), scores (moments × tags, uint8), people (uint8,
+                                        people on screen — when the video has pose detections)
         student_scores/index.json       model, created, tags, cut-offs (0–100), test-set videos, videos
     A score at or above the tag's cut-off means "visible here" (the moment meaning — see the new-matcher
     design: scene tags are for choosing / filtering, these are for what's on screen)."""
@@ -1555,7 +1578,9 @@ def export(name: str, dest: Path = None, root: Path = None) -> int:
             prob = predict_ctx(ctx_models, context_features(et, prob, video_cuts(vdir)))
         scores = np.clip(np.rint(prob * 100), 0, 100).astype(np.uint8)
         tmp = dest / f"{vdir.name}.tmp.npz"
-        np.savez_compressed(tmp, times=et.astype(np.float32), scores=scores)
+        people = people_at(vdir, et)
+        extra = {} if people is None else {"people": people}
+        np.savez_compressed(tmp, times=et.astype(np.float32), scores=scores, **extra)
         tmp.replace(dest / f"{vdir.name}.npz")
         done.append(vdir.name)
         if k % 20 == 0 or k == len(vdirs):

@@ -419,6 +419,72 @@ def hair_label(colours) -> str:
     return " + ".join(f"{HAIR_EMOJI.get(c, '')} {c}".strip() for c in colours) if colours else "—"
 
 
+# ---------------------------------------------------------------------------
+# 👥 Cast per video (library_meta.json) — claude/tag-levels.md
+# How many women and men are in the video, set once by Daryl (the pose model can count people but can't tell
+# women from men, and misses the cameraman in POV). entry["cast"] = {"women": n, "men": n}; 4 means 4 or more.
+# ---------------------------------------------------------------------------
+
+CAST_MAX = 4          # 4 = "4+"
+CAST_ANY = "Any"
+
+
+def video_cast() -> dict:
+    """{video_id: {"women": int, "men": int}} for videos with a cast set."""
+    out = {}
+    for vid, entry in load_library_meta().items():
+        c = entry.get("cast") if isinstance(entry, dict) else None
+        if isinstance(c, dict) and isinstance(c.get("women"), int) and isinstance(c.get("men"), int):
+            out[vid] = {"women": c["women"], "men": c["men"]}
+    return out
+
+
+def set_video_cast(video_id: str, women, men) -> None:
+    """Save the cast (women / men counts, capped at CAST_MAX = 4+); None for either clears it."""
+    meta = load_library_meta()
+    entry = meta.get(video_id) if isinstance(meta.get(video_id), dict) else {}
+    if women is None or men is None:
+        entry.pop("cast", None)
+    else:
+        entry["cast"] = {"women": max(0, min(int(women), CAST_MAX)), "men": max(0, min(int(men), CAST_MAX))}
+    if entry:
+        meta[video_id] = entry
+    else:
+        meta.pop(video_id, None)
+    save_library_meta(meta)
+
+
+def is_girl_girl(c: dict | None) -> bool:
+    return bool(c) and c["women"] >= 2 and c["men"] == 0
+
+
+def _count_ok(have: int, want) -> bool:
+    if want in (None, CAST_ANY, ""):
+        return True
+    want = int(str(want).rstrip("+"))
+    return have >= CAST_MAX if want >= CAST_MAX else have == want
+
+
+def matches_cast(video_id: str, cast: dict, women=None, men=None, girl_girl: bool = False) -> bool:
+    """Picking by cast: women / men = a count (4 = 4+) or None / "Any"; girl_girl = 2+ women and no men.
+    With any filter set, videos without a cast are left out."""
+    if women in (None, CAST_ANY, "") and men in (None, CAST_ANY, "") and not girl_girl:
+        return True
+    c = cast.get(video_id)
+    if not c:
+        return False
+    if girl_girl and not is_girl_girl(c):
+        return False
+    return _count_ok(c["women"], women) and _count_ok(c["men"], men)
+
+
+def cast_label(c: dict | None) -> str:
+    if not c:
+        return "—"
+    n = lambda k: f"{c[k]}+" if c[k] >= CAST_MAX else str(c[k])
+    return f"👩 {n('women')} · 👨 {n('men')}" + (" · 👭 girl / girl" if is_girl_girl(c) else "")
+
+
 def scene_thumbnail_path(video_id: str, scene: dict):
     """Local path of a scene's (first) thumbnail image, or None if it isn't here.
     Always built from CATALOGUE_DIR — never trust the stored path, which was

@@ -131,3 +131,25 @@ def test_test_page_hair_check(runs):
         TR.test_set_videos = orig
         LC.save_library_meta(before)
         shutil.rmtree(TR.RESULTS_DIR, ignore_errors=True)
+
+
+def test_test_page_group_card(runs, monkeypatch):
+    import training_labels as TLB
+    import trial_results as TR
+    from tests.apptest_util import errors, page_app
+    from tests.test_trial_results import _bundle
+    monkeypatch.setattr(TLB, "load_vocabulary", lambda: ([
+        {"tag": "kissing", "group": "action"}, {"tag": "POV", "group": "shot"},
+        {"tag": "close-up", "group": "shot"}], "x"))
+    shutil.rmtree(TR.RESULTS_DIR, ignore_errors=True)
+    TR.RESULTS_DIR.mkdir(parents=True)
+    (TR.RESULTS_DIR / "results.json").write_text(json.dumps(_bundle()))
+    try:
+        at = page_app("pages/6_Training_Labels.py")
+        at.session_state["tl_view"] = "🧪 Trial results"
+        at.session_state["tr_sub"] = "🧪 Test results"
+        at.run()
+        assert not errors(at), errors(at)
+        assert any("By tag group" in m.value for m in at.markdown)
+    finally:
+        shutil.rmtree(TR.RESULTS_DIR, ignore_errors=True)

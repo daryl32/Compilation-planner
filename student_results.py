@@ -86,6 +86,46 @@ def noise_f1(frames) -> float:
 
 PER_TAG_NOISE = 3          # a per-tag change of this many errors or fewer is chance
 
+# How much the matcher leans on each tag group (Daryl's table, claude/tag-levels.md). Shot is scored on its 🎥
+# scale, appearance (hair) per video and overlay not at all, so only these count towards the group F1s.
+GROUP_IMPORTANCE = {"position": "High", "action": "High", "camera": "High",
+                    "clothing": "Medium", "prop": "Medium"}
+IMPORTANCE_ORDER = ("High", "Medium")
+
+
+def _f1_of(tp: int, fp: int, fn: int) -> dict:
+    p = tp / (tp + fp) if tp + fp else None
+    r = tp / (tp + fn) if tp + fn else None
+    f = 2 * p * r / (p + r) if p and r else (0.0 if p is not None and r is not None else None)
+    return {"f1": None if f is None else round(f, 3), "tp": tp, "fp": fp, "fn": fn}
+
+
+def group_of_tags(vocab_rows: list) -> dict:
+    """{tag (lower case): group (lower case)} from the vocabulary."""
+    return {str(r["tag"]).lower(): str(r.get("group") or "").strip().lower() for r in vocab_rows or []}
+
+
+def group_scores(per_tag: dict, groups: dict) -> dict:
+    """Per tag group and per importance (High / Medium), F1 from the per-tag counts:
+    {"groups": {group: {"f1", "tp", "fp", "fn"}}, "importance": {"High": {...}, "Medium": {...}}}.
+    Tags left out of the overall F1 (hair, shot, text on screen) and groups the matcher doesn't use don't count."""
+    from trial_logic import not_in_f1
+    g_tot, i_tot = {}, {}
+    for t, s in (per_tag or {}).items():
+        if not s or not_in_f1(t):
+            continue
+        g = groups.get(str(t).lower())
+        imp = GROUP_IMPORTANCE.get(g)
+        if not imp:
+            continue
+        for tot, key in ((g_tot, g), (i_tot, imp)):
+            a = tot.setdefault(key, [0, 0, 0])
+            a[0] += s.get("tp") or 0
+            a[1] += s.get("fp") or 0
+            a[2] += s.get("fn") or 0
+    return {"groups": {g: _f1_of(*v) for g, v in g_tot.items()},
+            "importance": {k: _f1_of(*v) for k, v in i_tot.items()}}
+
 
 def best_on_test(runs: list) -> str | None:
     """The student run with the best test F1 (on today's frames, after rescore-all)."""
