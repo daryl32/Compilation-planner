@@ -1422,7 +1422,8 @@ def _score(models, E_t, ds, test_rows, thresholds, vocab, labels, vs, name, meta
                     "scores": {k: {**v["overall"], "n": v["n"]} for k, v in res.items()},
                     "per_tag": res[best]["per_tag"],
                     "teacher_per_tag": res["teacher"]["per_tag"] if "teacher" in res else None,
-                    "all_frames_n": res["rules_all_frames"]["n"]}
+                    "all_frames_n": res["rules_all_frames"]["n"],
+                    "shot": {k: v.get("shot") for k, v in res.items()}}
     if step1 is not None:                   # the same run without step 2, on the same frames
         _, r1 = score_report(ds, step1[0], test_rows, step1[1], vocab, labels, ref, name)
         meta["scores_step1"] = {k: v["overall"] for k, v in r1.items()}

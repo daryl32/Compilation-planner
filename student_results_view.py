@@ -14,7 +14,7 @@ import streamlit as st
 import student_results as SRS
 import training_labels as TLB
 import trial_results as TR
-from trial_logic import VIDEO_LEVEL_TAGS
+from trial_logic import VIDEO_LEVEL_TAGS, shot_step
 
 TRAINING, TEST = "🏋️ Training results", "🧪 Test results"
 
@@ -284,6 +284,34 @@ def _hair_check() -> None:
                              hide_index=True, width="stretch", key="srv_hair_wrong")
 
 
+def _shot_check(runs: list, scored: list, best: str | None) -> None:
+    """🎥 Shot size on its scale (extreme close-up → close-up → medium → wide): the matcher only cares how
+    far apart two shots are, so within one step is the number that counts."""
+    rows = []
+    for r in reversed(runs):
+        sh = (r.get("test") or {}).get("shot")
+        if sh and sh.get("frames"):
+            rows.append({"Run": _marks(r, best) + r["name"], "Who": "Student", "Frames": sh["frames"],
+                         "Within one step": _pct(sh.get("within_one")), "Exact": _pct(sh.get("exact")),
+                         "Big misses": _pct(sh.get("big_miss")), "No shot given": _pct(sh.get("none_given"))})
+    for x in reversed(scored):
+        sh = x["score"].get("shot") or {}
+        if sh.get("frames"):
+            run = x["run"]
+            rows.append({"Run": run.get("label") or run["id"], "Who": "Teacher", "Frames": sh["frames"],
+                         "Within one step": _pct(sh.get("within_one")), "Exact": _pct(sh.get("exact")),
+                         "Big misses": _pct(sh.get("big_miss")), "No shot given": _pct(sh.get("none_given"))})
+    with st.container(border=True):
+        st.markdown("**🎥 Shot size** — on the scale extreme close-up → close-up → medium → wide")
+        if not rows:
+            st.caption("No shot scores yet — run `deploy/student.sh rescore-all` on the server.")
+            return
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", key="srv_shot_table")
+        st.caption("**Within one step** is what the matcher needs (close-up next to medium is fine). **Big "
+                   "misses** = 2+ steps, e.g. close-up ↔ wide — those are worth relabelling. Frames = your "
+                   "labelled test frames with exactly one shot tag.")
+
+
 def test() -> None:
     import trial_view as TV
     idx = SRS.load_index()
@@ -297,9 +325,9 @@ def test() -> None:
                "the reference teacher run also tagged, so every row is the same frames. **Vs teacher** = the "
                "student minus that teacher run on them. **F1 at the time** = its score when it was trained."
                + (f" At {frames} frames a difference under ±{SRS.noise_f1(frames):.2f} F1 is chance." if frames else "")
-               + " 💇 Hair colour (Blonde / Brunette / Redhead) is left out of every F1 — it's checked per video "
-                 "below.")
+               + " 💇 Hair colour and 🎥 shot size are left out of every F1 — each has its own check below.")
     _hair_check()
+    _shot_check(runs, scored, best)
     pts = []
     for r in runs:
         t = r.get("test") or {}
@@ -352,6 +380,8 @@ def test() -> None:
             diff = None if es is None or et is None else es - et
             if t.lower() in {v.lower() for v in VIDEO_LEVEL_TAGS}:
                 t = f"{t} 💇 (per video — not in F1)"
+            elif shot_step(t) is not None:
+                t = f"{t} 🎥 (shot scale — not in F1)"
             per.append({"Tag": t, "Your labels": n, "Student F1": _f1(s.get("f1")), "Student errors": es,
                         "Teacher F1": _f1(te.get("f1")) if te else None, "Teacher errors": et, "Difference": diff})
         per.sort(key=lambda p: (-(p["Difference"] if p["Difference"] is not None else -999), p["Tag"].lower()))

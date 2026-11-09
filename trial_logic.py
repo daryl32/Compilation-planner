@@ -1032,11 +1032,58 @@ def _prf(tp: int, fp: int, fn: int) -> dict:
 # but are left out of the overall F1, so they can't pull it down; the 💇 per-video check scores them instead.
 VIDEO_LEVEL_TAGS = ("Blonde", "Brunette", "Redhead")
 
+# Shot size is one scale, not four separate tags (claude/new-matcher-design.md, "Shot size"): the matcher
+# only cares how far apart two shots are, so close-up vs medium is a small miss and close-up vs wide a big
+# one. Shot tags are left out of the overall F1 too and scored on the scale by score_shot().
+SHOT_SCALE = ("extreme close-up", "close-up", "medium", "wide")
+
+
+def _shot_key(t) -> str:
+    return "".join(str(t).split()).lower().replace("shot", "").strip("-_ ")
+
+
+_SHOT_STEP = {_shot_key(t): k for k, t in enumerate(SHOT_SCALE)}
+
+
+def shot_step(tag) -> int | None:
+    """0 extreme close-up · 1 close-up · 2 medium · 3 wide (any spelling: "close-up shot", "Wide Shot"), else None."""
+    return _SHOT_STEP.get(_shot_key(tag))
+
+
+def not_in_f1(tag) -> bool:
+    """Hair (per video) and shot size (scale) — scored on their own, never in the overall F1."""
+    n = "".join(str(tag).split()).lower()
+    return n in {"".join(t.split()).lower() for t in VIDEO_LEVEL_TAGS} or shot_step(tag) is not None
+
+
+def score_shot(pairs: list) -> dict:
+    """Shot size on the scale, on frames where your label has exactly one shot tag:
+    exact · within one step (what matters for the matcher) · big misses (2+ steps, e.g. close-up ↔ wide) ·
+    none given (no shot tag predicted). Several predicted shot tags count as their average step."""
+    n = exact = near = big = none = 0
+    for pred, gold in pairs:
+        g = [shot_step(t) for t in gold if shot_step(t) is not None]
+        if len(g) != 1:
+            continue
+        n += 1
+        p = [shot_step(t) for t in pred if shot_step(t) is not None]
+        if not p:
+            none += 1
+            continue
+        d = abs(sum(p) / len(p) - g[0])
+        exact += d < 0.5
+        near += d <= 1.0
+        big += d >= 2.0
+    rate = lambda x: round(x / n, 3) if n else None
+    return {"frames": n, "exact": rate(exact), "within_one": rate(near), "big_miss": rate(big),
+            "none_given": rate(none), "big_miss_n": big}
+
 
 def score_tags(pairs: list, vocab_tags: list) -> dict:
     """pairs: [(predicted tags, gold tags)]. Gold labels are complete (an unticked tag is "not
     there"), so a predicted tag not in gold is a false positive. Returns per-tag and overall
-    precision / recall / F1 — overall without VIDEO_LEVEL_TAGS (listed in "left_out")."""
+    precision / recall / F1 — overall without hair and shot tags (not_in_f1, listed in "left_out");
+    shot size scored on its scale in "shot"."""
     # Matched ignoring case and spaces, so "close-up shot", "Close-Up Shot" and "close-upshot"
     # all count as the same tag.
     norm = lambda t: "".join(str(t).split()).lower()
@@ -1051,12 +1098,12 @@ def score_tags(pairs: list, vocab_tags: list) -> dict:
             per[t][1] += 1
         for t in g - p:
             per[t][2] += 1
-    video_level = {norm(t) for t in VIDEO_LEVEL_TAGS}
-    counted = [v for t, v in per.items() if norm(t) not in video_level]
+    counted = [v for t, v in per.items() if not not_in_f1(t)]
     tot = np.array(counted).sum(axis=0) if counted else np.zeros(3, int)
     return {"n": len(pairs), "overall": _prf(*map(int, tot)),
             "per_tag": {t: _prf(*v) for t, v in per.items()},
-            "left_out": [t for t in per if norm(t) in video_level]}
+            "left_out": [t for t in per if not_in_f1(t)],
+            "shot": score_shot(pairs)}
 
 
 def cut_near(times, t: float, window: float = 0.5) -> bool:

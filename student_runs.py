@@ -130,7 +130,9 @@ def run_line(meta: dict, changed: str, in_use: bool) -> dict:
                  "all_frames": _overall(sc.get("rules_all_frames")),
                  "all_frames_n": test.get("all_frames_n"), "reference": meta.get("reference_run"),
                  "first_f1": (first.get(best) or {}).get("f1") if first else None,
-                 "first_frames": (meta.get("test_first") or {}).get("frames")} if sc else None,
+                 "first_frames": (meta.get("test_first") or {}).get("frames"),
+                 "shot": (test.get("shot") or {}).get(best),
+                 "teacher_shot": (test.get("shot") or {}).get("teacher")} if sc else None,
     }
 
 

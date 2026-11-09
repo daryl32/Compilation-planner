@@ -933,16 +933,16 @@ def test_tag_with_categories_and_second_look(tmp_path, monkeypatch):
 
 
 def test_run_pairs_and_test_markdown():
-    gold = [{"id": "tags:v:5.00", "video_id": "v", "t": 5.0, "tags": ["close-up"]},
-            {"id": "tags:v:9.00", "video_id": "v", "t": 9.0, "tags": ["wide", "dancing"]},
-            {"id": "tags:w:1.00", "video_id": "w", "t": 1.0, "tags": ["wide"]}]          # not in the run
-    a = {"id": "run-a", "frames": [{"v": "v", "t": 5.0, "g": "tags:v:5.00", "tags": ["close-up", "dancing"]},
-                                   {"v": "v", "t": 9.0, "g": None, "tags": ["wide"]}], "cost": 0.5, "looks": 2,
+    gold = [{"id": "tags:v:5.00", "video_id": "v", "t": 5.0, "tags": ["kissing"]},
+            {"id": "tags:v:9.00", "video_id": "v", "t": 9.0, "tags": ["hugging", "dancing"]},
+            {"id": "tags:w:1.00", "video_id": "w", "t": 1.0, "tags": ["hugging"]}]          # not in the run
+    a = {"id": "run-a", "frames": [{"v": "v", "t": 5.0, "g": "tags:v:5.00", "tags": ["kissing", "dancing"]},
+                                   {"v": "v", "t": 9.0, "g": None, "tags": ["hugging"]}], "cost": 0.5, "looks": 2,
          "look_added": 1, "look_removed": 1, "required_fills": 3}
-    b = {"id": "run-b", "frames": [{"v": "v", "t": 5.0, "g": "tags:v:5.00", "tags": ["close-up"]},
-                                   {"v": "v", "t": 9.0, "g": None, "tags": ["wide", "dancing"]}], "cost": 0.6}
-    assert TL.run_pairs(a["frames"], gold) == [(["close-up", "dancing"], ["close-up"]), (["wide"], ["wide", "dancing"])]
-    md = TL.test_runs_markdown([a, b], gold, ["close-up", "wide", "dancing"])
+    b = {"id": "run-b", "frames": [{"v": "v", "t": 5.0, "g": "tags:v:5.00", "tags": ["kissing"]},
+                                   {"v": "v", "t": 9.0, "g": None, "tags": ["hugging", "dancing"]}], "cost": 0.6}
+    assert TL.run_pairs(a["frames"], gold) == [(["kissing", "dancing"], ["kissing"]), (["hugging"], ["hugging", "dancing"])]
+    md = TL.test_runs_markdown([a, b], gold, ["kissing", "hugging", "dancing"])
     assert "| run-a | 2 | 0.67 |" in md and "| run-b | 2 | 1.00 |" in md and "2 (+1 / −1)" in md
     assert "| dancing | 1 → 0 | 1 → 0 | -2 |" in md
     assert TL.test_runs_markdown([], gold, []) == "No test runs yet."
