@@ -516,7 +516,10 @@ def _missing_sources(plan: dict) -> list:
     from planner.data import load_all_catalogues
     from render_preview import colab_to_local
     cats = load_all_catalogues()
-    needed = {plan["track_source_path"]}
+    try:
+        needed = {_load_track(plan["track_id"])["source_path"]}      # the raw Drive path, not the local one
+    except Exception:          # noqa: BLE001
+        needed = {plan["track_source_path"]}
     for e in plan["timeline"]:
         for slot in e["scenes"]:
             for link in slot["chain"]:
