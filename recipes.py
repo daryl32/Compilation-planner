@@ -14,6 +14,9 @@ A recipe:
     description  ""                         an optional short line, compared with the pictures (SigLIP2 text side)
     shot_change  "hold" | "allow" | "change"   shot-size / POV consistency across the section's cuts
                  (hold = keep it steady, allow = a change is fine, change = contrast welcome — e.g. at a drop)
+    pace         {"lo": s, "hi": s}   how long the clips should be in this section (seconds). The 🤖 new matcher
+                 cuts each section on the beat at this pace — a "rise" trend shortens the clips through the
+                 section, a "fall" lengthens them (section_cuts.py). Classic ignores it.
 
 Defaults below are v1 best judgement from Daryl's vocabulary (9 Nov 2026) — his edits are saved as overrides in
 catalogue/section_recipes.json; ↩️ Reset returns a type to the default. No Streamlit in here.
@@ -37,6 +40,7 @@ DEFAULTS = {
         "avoid": ["penetration", "creampie", "deepthroat", "orgasm"],
         "scene_require": [], "scene_prefer": [],
         "description": "teasing, slow, still dressed", "shot_change": "allow",
+        "pace": {"lo": 4.0, "hi": 8.0},
     },
     "buildup": {
         "movement": {"lo": 0.3, "hi": 0.7, "trend": "rise"}, "beat_lock": 0.5,
@@ -44,6 +48,7 @@ DEFAULTS = {
         "avoid": ["creampie", "orgasm", "squirt"],
         "scene_require": [], "scene_prefer": [],
         "description": "foreplay building, getting closer", "shot_change": "hold",
+        "pace": {"lo": 2.0, "hi": 4.0},
     },
     "warmup": {
         "movement": {"lo": 0.2, "hi": 0.5, "trend": "rise"}, "beat_lock": 0.3,
@@ -51,6 +56,7 @@ DEFAULTS = {
         "avoid": ["penetration", "creampie", "orgasm"],
         "scene_require": [], "scene_prefer": [],
         "description": "", "shot_change": "allow",
+        "pace": {"lo": 3.0, "hi": 6.0},
     },
     "slow": {
         "movement": {"lo": 0.0, "hi": 0.35, "trend": "flat"}, "beat_lock": 0.1,
@@ -58,6 +64,7 @@ DEFAULTS = {
         "avoid": ["creampie", "squirt"],
         "scene_require": [], "scene_prefer": [],
         "description": "slow, close, sensual", "shot_change": "hold",
+        "pace": {"lo": 5.0, "hi": 10.0},
     },
     "rhythmic": {
         "movement": {"lo": 0.4, "hi": 0.7, "trend": "flat"}, "beat_lock": 0.9,
@@ -65,6 +72,7 @@ DEFAULTS = {
         "avoid": ["creampie"],
         "scene_require": [], "scene_prefer": [],
         "description": "steady rhythm", "shot_change": "hold",
+        "pace": {"lo": 2.0, "hi": 4.0},
     },
     "drop": {
         "movement": {"lo": 0.7, "hi": 1.0, "trend": "flat"}, "beat_lock": 0.8,
@@ -72,6 +80,7 @@ DEFAULTS = {
         "avoid": ["masturbation", "Handjob", "lingerie"],
         "scene_require": [], "scene_prefer": [],
         "description": "hard, fast, full energy", "shot_change": "change",
+        "pace": {"lo": 1.0, "hi": 2.0},
     },
     "warmdown": {
         "movement": {"lo": 0.2, "hi": 0.5, "trend": "fall"}, "beat_lock": 0.3,
@@ -79,6 +88,7 @@ DEFAULTS = {
         "avoid": [],
         "scene_require": [], "scene_prefer": [],
         "description": "", "shot_change": "allow",
+        "pace": {"lo": 3.0, "hi": 6.0},
     },
     "fast": {
         "movement": {"lo": 0.75, "hi": 1.0, "trend": "flat"}, "beat_lock": 1.0,
@@ -86,6 +96,7 @@ DEFAULTS = {
         "avoid": ["masturbation", "Blowjob", "lingerie"],
         "scene_require": [], "scene_prefer": [],
         "description": "", "shot_change": "change",
+        "pace": {"lo": 0.75, "hi": 1.5},
     },
     "action": {
         "movement": {"lo": 0.55, "hi": 0.9, "trend": "flat"}, "beat_lock": 0.6,
@@ -93,6 +104,7 @@ DEFAULTS = {
         "avoid": ["lingerie"],
         "scene_require": [], "scene_prefer": [],
         "description": "", "shot_change": "allow",
+        "pace": {"lo": 1.5, "hi": 3.0},
     },
     "ending": {
         "movement": {"lo": 0.0, "hi": 0.6, "trend": "fall"}, "beat_lock": 0.2,
@@ -100,6 +112,7 @@ DEFAULTS = {
         "avoid": [],
         "scene_require": [], "scene_prefer": [],
         "description": "the finish", "shot_change": "allow",
+        "pace": {"lo": 4.0, "hi": 8.0},
     },
 }
 assert set(DEFAULTS) == set(TYPE_IDS)
@@ -135,6 +148,13 @@ def normalise(r: dict, type_id: str) -> dict:
         out["description"] = " ".join(r["description"].split())
     if r.get("shot_change") in SHOT_CHANGES:
         out["shot_change"] = r["shot_change"]
+    pc = r.get("pace") if isinstance(r.get("pace"), dict) else {}
+    try:
+        lo = float(min(max(pc.get("lo", base["pace"]["lo"]), 0.25), 30.0))
+        hi = float(min(max(pc.get("hi", base["pace"]["hi"]), 0.25), 30.0))
+        out["pace"] = {"lo": min(lo, hi), "hi": max(lo, hi)}
+    except (TypeError, ValueError):
+        pass
     return out
 
 
@@ -210,7 +230,9 @@ def summary(recipe: dict) -> str:
     """One line for a card: movement band, beat lock, the top tags."""
     mv = recipe["movement"]
     top = sorted(recipe["tags"].items(), key=lambda kv: -kv[1])[:4]
-    parts = [f"movement {mv['lo']:.1f}–{mv['hi']:.1f} {TRENDS[mv['trend']]}", f"beat lock {recipe['beat_lock']:.1f}"]
+    pc = recipe.get("pace") or {}
+    parts = [f"movement {mv['lo']:.1f}–{mv['hi']:.1f} {TRENDS[mv['trend']]}", f"beat lock {recipe['beat_lock']:.1f}",
+             f"clips {pc.get('lo', 0):g}–{pc.get('hi', 0):g} s"]
     if top:
         parts.append("wants " + ", ".join(t for t, _ in top))
     if recipe["avoid"]:

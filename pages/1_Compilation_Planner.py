@@ -613,6 +613,17 @@ st.markdown("""<style>
 .st-key-stepstatus [data-testid="stCaptionContainer"] { padding: 0 .9rem; }
 </style>""", unsafe_allow_html=True)
 import ui_mode
+# 🎛️ Classic (every step, every dial) or 🤖 New matcher (the data does the work — planner/compose.py).
+from page_setup import menu_css as _menu_css
+st.markdown(f"<style>{_menu_css()}</style>", unsafe_allow_html=True)
+with st.container(key="mainnav_planner"):
+    planner_mode = st.radio("Planner", ["🎛️ Classic", "🤖 New matcher"], horizontal=True, key="planner_mode",
+                            label_visibility="collapsed")
+if planner_mode == "🤖 New matcher":
+    import planner.compose as _compose
+    _compose.render()
+    _record_page_run()
+    st.stop()
 _sw = st.columns([6, 1])
 _advanced = ui_mode.switch(_sw[1])
 with st.container(key="stepnav"):

@@ -146,6 +146,7 @@ DIAL_DEFAULTS = {
     "allow_same_video": False,
     "prefer_intro_outro": False,
     "matching_mode": "Auto",
+    "planner_mode": "🎛️ Classic",         # the page's landing: 🎛️ Classic (the steps) or 🤖 New matcher (planner/compose.py)
     "matcher_engine": "Classic",          # Auto mode's engine: Classic (core/matching.py) or 🤖 Auto story (core/story_matcher.py)
     "story_music_story": 0.5,             # 🤖 Auto story: 0 = all music fit, 1 = all story (tags) fit
     "story_smooth_contrast": 0.5,         # 🤖 Auto story: 0 = steady shots, 1 = contrast welcome at changes

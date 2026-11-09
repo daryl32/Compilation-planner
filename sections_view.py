@@ -217,7 +217,9 @@ def _save_recipe(type_id: str, ns: str) -> None:
             continue
         if t:
             tags[t] = w
+    p_lo, p_hi = st.session_state.get(ns + "pace", (2.0, 4.0))
     recipe = {"movement": {"lo": lo, "hi": hi, "trend": trend}, "beat_lock": st.session_state.get(ns + "beat", 0.5),
+              "pace": {"lo": p_lo, "hi": p_hi},
               "tags": tags, "avoid": st.session_state.get(ns + "avoid", []),
               "scene_require": st.session_state.get(ns + "req", []), "scene_prefer": st.session_state.get(ns + "pref", []),
               "description": st.session_state.get(ns + "desc", ""), "shot_change": shot}
@@ -255,6 +257,11 @@ def render_recipes() -> None:
             c = st.columns([3, 2, 2])
             c[0].slider("Movement band", 0.0, 1.0, (float(r["movement"]["lo"]), float(r["movement"]["hi"])), 0.05,
                         key=ns + "move", help="0 = the library's calmest footage, 1 = its busiest.")
+            pc = r.get("pace") or {"lo": 2.0, "hi": 4.0}
+            st.slider("Clip length (s) — the 🤖 new matcher cuts this section at this pace", 0.25, 20.0,
+                      (float(pc["lo"]), float(pc["hi"])), 0.25, key=ns + "pace",
+                      help="A building section shortens its clips from the long end to the short end; a falling "
+                           "one lengthens them. Classic's own cutting settings are unaffected.")
             c[1].radio("Over the section", list(RC.TRENDS.values()), index=list(RC.TRENDS).index(r["movement"]["trend"]),
                        key=ns + "trend", horizontal=True)
             c[2].slider("Beat lock", 0.0, 1.0, float(r["beat_lock"]), 0.1, key=ns + "beat",
