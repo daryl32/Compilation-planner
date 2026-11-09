@@ -510,40 +510,11 @@ def test_new_test_videos_scored_on_their_own(tmp_path, monkeypatch):
     assert picks and not [p for p in picks if p["video_id"] == "vid07"]
 
 
-def test_upload_local_sends_laptop_only_videos(tmp_path, monkeypatch):
-    import sys
-    import types
-    sent = []
-
-    class Batch:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def put_file(self, local, remote):
-            sent.append(remote)
-
-    class Vol:
-        def listdir(self, path, recursive=False):
-            return [types.SimpleNamespace(path="local/lv1/vision.json", size=(tmp_path / "videos/lv1/vision.json").stat().st_size)]
-
-        def batch_upload(self, force=False):
-            return Batch()
-
-    fake = types.SimpleNamespace(Volume=types.SimpleNamespace(from_name=lambda name: Vol()))
-    monkeypatch.setitem(sys.modules, "modal", fake)
+def test_upload_local_needs_a_server(tmp_path, monkeypatch):
+    """upload-local sends laptop-only videos to the server (test_server_hub_…); without a server set it says so."""
+    monkeypatch.delenv("STUDENT_SERVER", raising=False)
     monkeypatch.setattr(S, "WORK", tmp_path)
-    for v, teacher in (("lv1", False), ("modal1", True)):
-        d = tmp_path / "videos" / v
-        d.mkdir(parents=True)
-        np.savez_compressed(d / "embeddings.npz", frame_times=np.arange(4.0), frame_embs=np.zeros((4, 3), np.float16))
-        (d / "vision.json").write_text("{}")
-        if teacher:
-            (d / S.TEACHER_FILE).write_text("{}")
-    assert S.main(["upload-local"]) == 0
-    assert sent == ["local/lv1/embeddings.npz"]            # vision.json already there; modal1 is Modal's own
+    assert S.main(["upload-local"]) == 1
 
 
 def test_server_hub_models_runs_and_videos(tmp_path, monkeypatch):
