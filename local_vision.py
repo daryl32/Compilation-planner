@@ -301,16 +301,17 @@ def motion_step(vg: dict, man: dict, path: str, out_dir: str) -> dict:
     import modal_trial as MT
     out = Path(out_dir)
     t0 = time.time()
-    z = np.load(out / "detections.npz")
-    det = {k: z[k] for k in ("frame", "box", "kxy", "kconf")}
-    n_frames = int(z["n_frames"])
+    # `with` closes each .npz at once — on Windows an open npz can't be deleted (WinError 32).
+    with np.load(out / "detections.npz") as z:
+        det = {k: z[k] for k in ("frame", "box", "kxy", "kconf")}
+        n_frames = int(z["n_frames"])
     cmd, w, h = MT._pose_cmd(path, man)
     tracks, people, tracker_name = MT._track_offline(MT._frames(cmd, w, h), det, n_frames)
     t_track = time.time() - t0
     t1 = time.time()
     curve = TL.movement_curve(tracks, n_frames)
-    fe = np.load(out / "frame_embs.npz")
-    et, emb = fe["frame_times"], fe["frame_embs"]
+    with np.load(out / "frame_embs.npz") as fe:
+        et, emb = fe["frame_times"], fe["frame_embs"]
     scenes, scene_ids, scene_embs = TL.scene_features(man["scenes"], vg["duration"], curve, people, et, emb)
     np.savez_compressed(out / "embeddings.npz", frame_times=et, frame_embs=emb,
                         scene_ids=np.array(scene_ids), scene_embs=np.array(scene_embs))
@@ -323,7 +324,10 @@ def motion_step(vg: dict, man: dict, path: str, out_dir: str) -> dict:
     tmp = out / "vision.json.part"
     tmp.write_text(json.dumps(result), encoding="utf-8")
     tmp.replace(out / "vision.json")
-    (out / "frame_embs.npz").unlink(missing_ok=True)
+    try:
+        (out / "frame_embs.npz").unlink(missing_ok=True)    # only a working copy — embeddings.npz has it all
+    except OSError:
+        pass
     return {"video_id": vg["video_id"], "cpu": cpu, "tracks": len(tracks)}
 
 
