@@ -59,6 +59,8 @@ class StoryOptions:
     smooth_contrast: float = 0.5        # 0 = keep shots steady everywhere, 1 = contrast welcome at changes
     track_recipes: dict | None = None   # ✍️ Custom: {type_id: recipe} overriding the shared recipes
     section_map: list | None = None     # the track's section map; None → suggested from the song
+    max_videos: int = 0                 # at most this many different videos in the plan (0 = no limit)
+    progress: object = None             # progress(done_blocks, total_blocks) — for a progress bar
     notes: list = field(default_factory=list)
 
 
@@ -302,7 +304,13 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
     prev_shot, prev_pov, prev_type = float("nan"), None, None
     confirmed = {}
 
+    max_videos = int(options.max_videos or 0)
     for i, seg in enumerate(segments):
+        if options.progress:
+            try:
+                options.progress(i, len(segments))
+            except Exception:          # noqa: BLE001 — a progress bar must never break the plan
+                pass
         d = seg["end"] - seg["start"]
         n = max(2, int(round(d / STEP)))
         n_picks = max(0, counts[i] - segment_clip_reduction.get(i, 0))
@@ -360,6 +368,11 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
                               "offset": float(v.times[s] - span["scene_start_sec"]), "shot": start_shot,
                               "end_shot": _shot_at(v, min(s + n - 1, v.n - 1)), "pov": bool(v.pov[s])})
         cands.sort(key=lambda c: -c["total"])
+        budget_spent = bool(max_videos) and len(uses) >= max_videos
+        if budget_spent:
+            # the video budget is spent: only the videos already in the plan (Classic's fallback fills the rest,
+            # preferring them too — a new video only if nothing else can fill the block)
+            cands = [c for c in cands if c["video_id"] in uses]
 
         # 2. fill the slots
         slots, used = [], set()
@@ -386,9 +399,15 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
                 prev_shot, prev_pov = c["end_shot"], c["pov"]
         # 3. Classic's chain fill for anything left
         for _ in range(n_picks - len(slots)):
-            avoid = used if not allow_same_video else set()
-            chain, unfilled = fill_slot(seg.get("intensity", seg["energy"]), d, queues, sequential, excluded_here,
-                                        excluded_all, avoid, min_clip_len_sec, role, None, ctx=pctx)
+            avoid = set(used) if not allow_same_video else set()
+            chain, unfilled = None, 0.0
+            if budget_spent:
+                outside = {v for v in queues if v not in uses}
+                chain, unfilled = fill_slot(seg.get("intensity", seg["energy"]), d, queues, sequential, excluded_here,
+                                            excluded_all, avoid | outside, min_clip_len_sec, role, None, ctx=pctx)
+            if not chain:
+                chain, unfilled = fill_slot(seg.get("intensity", seg["energy"]), d, queues, sequential, excluded_here,
+                                            excluded_all, avoid, min_clip_len_sec, role, None, ctx=pctx)
             if not chain:
                 break
             slots.append({"chain": chain, "video_id": chain[0]["video_id"], "scene_id": chain[0]["scene_id"],
@@ -415,6 +434,11 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
                          "clip_count": len(slots), "split_screen": len(slots) > 1,
                          "manually_edited": i in segment_exclusions or i in segment_clip_reduction,
                          "section_type": t_id, "scenes": slots})
+    if options.progress:
+        try:
+            options.progress(len(segments), len(segments))
+        except Exception:          # noqa: BLE001
+            pass
     return timeline, shortfall, unfilled_total
 
 
@@ -432,5 +456,6 @@ def plan_summary(timeline: list) -> dict:
                 fallback += 1
             else:
                 fits.append(info["fit"])
-    return {"types": types, "slots": total, "fallback": fallback,
+    videos = {c["video_id"] for e in timeline for s in e.get("scenes") or [] for c in s.get("chain") or []}
+    return {"types": types, "slots": total, "fallback": fallback, "videos": len(videos),
             "mean_fit": round(float(np.mean(fits)), 3) if fits else None}

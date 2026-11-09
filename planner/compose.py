@@ -244,7 +244,7 @@ def suggest_videos(video_ids: tuple, tl_sig: tuple, top: int = 8) -> list:
 # ---------------------------------------------------------------------------
 
 def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, music_story: float = 0.5,
-                 smooth_contrast: float = 0.5, excluded: set = None) -> dict:
+                 smooth_contrast: float = 0.5, excluded: set = None, max_videos: int = 0, progress=None) -> dict:
     import core.story_matcher as SMX
     from planner.data import build_footage_queues, load_all_catalogues
     from render_preview import colab_to_local
@@ -253,7 +253,8 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     all_recipes = RC.load_all()
     segments = SCUT.story_segments(track, regions, all_recipes)
     queues = build_footage_queues(tuple(video_ids), (), LC.library_ranges())
-    opts = SMX.StoryOptions(music_story=music_story, smooth_contrast=smooth_contrast, section_map=regions or None)
+    opts = SMX.StoryOptions(music_story=music_story, smooth_contrast=smooth_contrast, section_map=regions or None,
+                            max_videos=int(max_videos or 0), progress=progress)
     max_clips = 3 if split_screen else 1
     timeline, shortfall, unfilled = SMX.match_story(
         segments, queues, track, min_clips=1, max_clips=max_clips, ramp_start=0.5, ramp_end=0.9,
@@ -272,7 +273,7 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
         "tag_filter": [], "selected_videos": list(video_ids), "split_screen_enabled": split_screen,
         "min_clips": 1, "max_clips": max_clips, "ramp_start": 0.5, "ramp_end": 0.9, "density_contrast": 1.0,
         "vary_clip_count": False, "clip_count_seed": 0, "min_clip_len_sec": 1.0, "allow_same_video": False,
-        "story": {"music_story": music_story, "smooth_contrast": smooth_contrast},
+        "story": {"music_story": music_story, "smooth_contrast": smooth_contrast, "max_videos": int(max_videos or 0)},
         "timeline": timeline,
     }
     return {"plan": plan, "segments": segments, "notes": list(opts.notes), "shortfall": shortfall,
@@ -281,28 +282,45 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
 
 
 def _run_compile(track_id: str, video_ids: list, ns: str) -> None:
+    """The button's callback only queues the compile — the page body runs it, so its progress bar shows."""
     if not video_ids:
         st.session_state["compose_msg"] = ("warning", "No videos to match — widen the video filters.")
         return
+    st.session_state["compose_pending"] = {"track_id": track_id, "video_ids": list(video_ids), "way": ns}
+
+
+def _do_pending_compile() -> None:
+    job = st.session_state.pop("compose_pending", None)
+    if not job:
+        return
+    bar = st.progress(0.0, text="🤖 Compiling… reading the song's sections")
     try:
-        res = compile_plan(track_id, video_ids, split_screen=bool(st.session_state.get("compose_split")),
+        res = compile_plan(job["track_id"], job["video_ids"], split_screen=bool(st.session_state.get("compose_split")),
                            music_story=float(st.session_state.get("compose_music_story", 0.5)),
                            smooth_contrast=float(st.session_state.get("compose_smooth", 0.5)),
-                           excluded=set(st.session_state.get("compose_excluded") or ()))
+                           excluded=set(st.session_state.get("compose_excluded") or ()),
+                           max_videos=int(st.session_state.get("compose_max_videos", 0) or 0),
+                           progress=lambda d, t: bar.progress(min(d / max(t, 1), 1.0), text=f"🤖 Compiling… block {d} of {t}"))
     except Exception as e:          # noqa: BLE001
+        bar.empty()
         st.session_state["compose_msg"] = ("error", f"Couldn't compile: {e}")
         return
-    res["video_ids"] = list(video_ids)
-    res["way"] = ns
+    bar.empty()
+    res["video_ids"] = job["video_ids"]
+    res["way"] = job["way"]
     st.session_state[RESULT_KEY] = res
+    st.session_state.pop("compose_render", None)
 
 
 def _options_row(ns: str) -> None:
-    c = st.columns([1.3, 2, 2])
+    c = st.columns([1.3, 1.6, 2, 2])
     c[0].toggle("🪟 Split screen", key="compose_split", help="Off: one clip per block. On: up to three at the loudest blocks.")
-    c[1].slider("Music ↔ Story", 0.0, 1.0, 0.5, 0.05, key="compose_music_story",
+    c[1].number_input("Max different videos", 0, 60, 0, key="compose_max_videos",
+                      help="0 = no limit. A limit keeps the plan to fewer source videos — quicker renders, and fewer "
+                           "files to fetch. Once the budget is spent, later blocks stay with the videos already in.")
+    c[2].slider("Music ↔ Story", 0.0, 1.0, 0.5, 0.05, key="compose_music_story",
                 help="Left: the music fit decides. Right: the recipes' tags decide.")
-    c[2].slider("Smooth ↔ Contrast", 0.0, 1.0, 0.5, 0.05, key="compose_smooth",
+    c[3].slider("Smooth ↔ Contrast", 0.0, 1.0, 0.5, 0.05, key="compose_smooth",
                 help="Left: shot sizes kept steady. Right: changes welcome at drops and section changes.")
 
 
@@ -493,25 +511,89 @@ def _save(res: dict) -> None:
         st.session_state["compose_msg"] = ("success", f"Saved locally: {out.name}")
 
 
-def _render(res: dict) -> None:
+def _missing_sources(plan: dict) -> list:
+    """(raw source, local path) for the track and every video the plan uses that isn't on this machine."""
+    from planner.data import load_all_catalogues
+    from render_preview import colab_to_local
+    cats = load_all_catalogues()
+    needed = {plan["track_source_path"]}
+    for e in plan["timeline"]:
+        for slot in e["scenes"]:
+            for link in slot["chain"]:
+                needed.add(cats[link["video_id"]]["source_path"])
+    out = []
+    for raw in sorted(needed):
+        local = Path(colab_to_local(raw))
+        if not local.exists():
+            out.append((raw, local))
+    return out
+
+
+def _download_sources(missing: list) -> list:
+    """Download the missing files from Google Drive (the ⚙️ 'download first' way). Returns error strings."""
+    try:
+        from drive_sync import download_source_video, credentials_available
+        ok = credentials_available()
+    except ImportError:
+        ok = False
+    errors = []
+    for n, (raw, local) in enumerate(missing, 1):
+        if not (ok and "MyDrive/" in raw):
+            errors.append(f"{local.name}: not on the server and Drive download isn't available")
+            continue
+        bar = st.progress(0.0, text=f"Downloading {local.name} ({n}/{len(missing)})…")
+        err = download_source_video(raw.split("MyDrive/", 1)[1], local,
+                                    progress_callback=lambda p, _b=bar, _n=local.name, _i=n: _b.progress(
+                                        min(p, 1.0), text=f"Downloading {_n} ({_i}/{len(missing)})…"))
+        bar.empty()
+        if err:
+            errors.append(f"{local.name}: {err}")
+    return errors
+
+
+def _do_pending_render(res: dict) -> None:
+    """The 🎬 button only queues the render; the page body runs it here so the progress bar shows."""
+    if not st.session_state.pop("compose_do_render", False):
+        return
     from page_setup import drive_token, APP_VERSION
     from render_preview import render_plan_dict
     from renders import upload_render, clear_local, render_files, auto_clear_enabled
     from planner.state import sanitize_filename
     import fnmatch, re
     plan = res["plan"]
+    stream = bool(st.session_state.get("compose_stream", True))
+    if not stream:
+        missing = _missing_sources(plan)
+        if missing:
+            errs = _download_sources(missing)
+            if errs:
+                st.error("Can't render — some source files are missing and couldn't be downloaded:\n\n"
+                         + "\n".join(f"- {e}" for e in errs))
+                return
     safe = sanitize_filename(plan["track_id"])
     used = [int(m.group(1)) for p in render_files() if (m := re.search(r"\.(\d{3})\.mp4$", p.name))
             and fnmatch.fnmatch(p.name, f"temp-Video-preview-{safe}.*.mp4")]
     Path(PREVIEW_DIR).mkdir(parents=True, exist_ok=True)
     out = Path(PREVIEW_DIR) / f"temp-Video-preview-{safe}.{(max(used) + 1) if used else 1:03d}.mp4"
     bar = st.progress(0.0, text="Rendering…")
+    last = [0.0]
+    t0 = time.time()
+
+    def _prog(d, t):
+        last[0] = d / max(t, 1)
+        secs = time.time() - t0
+        eta = f" · about {int((secs / d) * (t - d))} s left" if d else ""
+        bar.progress(last[0], text=f"Rendering segment {d}/{t}{eta}")
+
     try:
-        render_plan_dict(plan, str(out), progress_callback=lambda d, t: bar.progress(d / t, text=f"Rendering segment {d}/{t}…"),
-                         stream=True, notice=lambda txt: bar.progress(0.0, text=txt), app_version=APP_VERSION,
-                         extra_meta={"project_name": f"🤖 {plan['track_id']}"})
+        stats = render_plan_dict(plan, str(out), progress_callback=_prog, stream=stream,
+                                 notice=lambda txt: bar.progress(last[0], text=txt), app_version=APP_VERSION,
+                                 extra_meta={"project_name": f"🤖 {plan['track_id']}"}) or {}
+        secs = time.time() - t0
+        how = [f"{stats[k]} {w}" for k, w in (("streamed", "streamed from Drive"), ("downloaded", "downloaded"),
+                                             ("local", "already on the server")) if stats.get(k)]
         token = drive_token()
-        note = ("info", f"Rendered {out.name}. Connect Google Drive (sidebar) to save renders there.")
+        note = ("info", f"Rendered {out.name} in {int(secs // 60)}:{int(secs % 60):02d}. Connect Google Drive (sidebar) to save renders there.")
         if token:
             bar.progress(1.0, text="Uploading to Google Drive…")
             err = upload_render(out, token)
@@ -519,15 +601,22 @@ def _render(res: dict) -> None:
                 note = ("warning", f"Rendered, but the Drive upload failed: {err}")
             elif auto_clear_enabled():
                 clear_local(out)
-                note = ("success", f"Rendered {out.name}, saved to Google Drive and cleared from the server.")
+                note = ("success", f"Rendered {out.name} in {int(secs // 60)}:{int(secs % 60):02d}, saved to Google Drive and cleared from the server.")
             else:
-                note = ("success", f"Rendered {out.name} and saved to Google Drive.")
+                note = ("success", f"Rendered {out.name} in {int(secs // 60)}:{int(secs % 60):02d} and saved to Google Drive.")
+        if how:
+            note = (note[0], note[1] + " Source files: " + ", ".join(how) + ".")
         bar.empty()
         st.session_state["compose_msg"] = note
         st.session_state["compose_render"] = out.name
+        st.rerun()
     except Exception as e:          # noqa: BLE001
         bar.empty()
-        st.session_state["compose_msg"] = ("error", f"Render failed: {e}")
+        st.error(f"Render failed: {e}")
+
+
+def _queue_render() -> None:
+    st.session_state["compose_do_render"] = True
 
 
 def _open_in_classic(res: dict) -> None:
@@ -552,11 +641,13 @@ def _toggle_reject(key: tuple) -> None:
 
 def render_result(res: dict) -> None:
     plan, summary = res["plan"], res["summary"]
+    _do_pending_render(res)
     c = st.columns([5, 1.4])
     c[0].subheader(f"🤖 {plan['track_id']}")
     c[1].button("← Change", key="compose_back", width="stretch", on_click=lambda: st.session_state.pop(RESULT_KEY, None))
     types = " · ".join(f"{ST.label(t)} {n}" for t, n in sorted(summary["types"].items(), key=lambda kv: -kv[1]))
-    st.caption(f"{len(plan['timeline'])} blocks · {len(plan['selected_videos'])} videos · {types}"
+    st.caption(f"{len(plan['timeline'])} blocks · {summary.get('videos', 0)} different videos used "
+               f"(of {len(plan['selected_videos'])} in play) · {types}"
                + (f" · mean fit {summary['mean_fit']:.2f}" if summary.get("mean_fit") is not None else "")
                + (f" · {summary['fallback']} Classic pick(s)" if summary.get("fallback") else "")
                + (f" · ⚠️ {res['shortfall']} slot(s) unfilled" if res.get("shortfall") else ""))
@@ -587,15 +678,23 @@ def render_result(res: dict) -> None:
                              if info.get("fit") is not None else "Classic's pick")
                 r[4].button("✅" if key in excluded else "🚫", key=f"compose_rej_{e['segment_index']}_{s['video_id']}_{s['scene_id']}",
                             help="Put back" if key in excluded else "Leave this clip out", on_click=_toggle_reject, args=(key,))
-    b = st.columns([1.6, 1.4, 1.4, 1.4, 1.6])
-    b[0].button("🎬 Render preview", key="compose_render_btn", type="primary", width="stretch", on_click=_render, args=(res,))
-    b[1].button("💾 Save plan", key="compose_save", width="stretch", on_click=_save, args=(res,))
-    b[2].download_button("⬇️ Download", data=json.dumps(plan, indent=2), file_name=f"{plan['track_id']}_plan.json",
+    b = st.columns([1.6, 0.5, 1.4, 1.4, 1.4, 1.6])
+    b[0].button("🎬 Render preview", key="compose_render_btn", type="primary", width="stretch", on_click=_queue_render)
+    with b[1].popover("⚙️", width="stretch", help="Render options"):
+        st.toggle("Stream original videos from Google Drive", value=True, key="compose_stream",
+                  help="On: only the seconds each clip uses are fetched from Drive while rendering — nothing stored. "
+                       "Off: every missing source file is downloaded to the server first (slower the first time, "
+                       "faster for every render after). Fewer different videos (the limit above) = less to fetch.")
+        missing = _missing_sources(plan)
+        st.caption(f"{len(missing)} source file{'s' if len(missing) != 1 else ''} not on the server yet"
+                   if missing else "Every source file is on the server — renders are quick.")
+    b[2].button("💾 Save plan", key="compose_save", width="stretch", on_click=_save, args=(res,))
+    b[3].download_button("⬇️ Download", data=json.dumps(plan, indent=2), file_name=f"{plan['track_id']}_plan.json",
                          mime="application/json", width="stretch", key="compose_dl")
-    b[3].button("↻ Recompile", key="compose_again", width="stretch",
+    b[4].button("↻ Recompile", key="compose_again", width="stretch",
                 help="Build the plan again — without the 🚫 clips, with the current Split screen / slider settings.",
                 on_click=_run_compile, args=(plan["track_id"], res["video_ids"], res.get("way", "song")))
-    b[4].button("🎛️ Open in Classic", key="compose_classic", width="stretch", on_click=_open_in_classic, args=(res,))
+    b[5].button("🎛️ Open in Classic", key="compose_classic", width="stretch", on_click=_open_in_classic, args=(res,))
     if name := st.session_state.get("compose_render"):
         from library_common import show_render_player
         from renders import load_render
@@ -614,6 +713,7 @@ def render() -> None:
     msg = st.session_state.pop("compose_msg", None)
     if msg:
         getattr(st, msg[0])(msg[1])
+    _do_pending_compile()
     res = st.session_state.get(RESULT_KEY)
     if res:
         render_result(res)

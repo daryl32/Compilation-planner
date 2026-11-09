@@ -173,3 +173,23 @@ def test_planner_page_auto_story_end_to_end(monkeypatch):
         assert "clip_start_sec" in text or "clip_start" in text
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def test_max_videos_limit_and_progress(monkeypatch):
+    out = _setup(monkeypatch)
+    try:
+        import core.story_matcher as SMX
+        track, queues, segments, regions = _plan_inputs(["drop"] * 12)
+        seen = []
+        opts = SMX.StoryOptions(section_map=regions, max_videos=2, progress=lambda d, t: seen.append((d, t)))
+        import copy
+        free, _, _ = SMX.match_story(segments, copy.deepcopy(queues), track, options=SMX.StoryOptions(section_map=regions))
+        timeline, _, _ = SMX.match_story(segments, queues, track, options=opts)
+        story_used = {c["video_id"] for e in timeline for s in e["scenes"] for c in s["chain"]
+                      if not (s.get("story") or {}).get("fallback")}
+        assert len(story_used) <= 2                                    # the timeline picks respect the limit
+        assert SMX.plan_summary(timeline)["videos"] <= SMX.plan_summary(free)["videos"]
+        assert seen[0] == (0, 12) and seen[-1] == (12, 12)
+        assert SMX.plan_summary(timeline)["videos"] >= 1
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
