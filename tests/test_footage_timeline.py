@@ -119,6 +119,9 @@ def test_derived_scene_tags_tag_time_and_skip_rules(tmp_path, monkeypatch):
     assert d[1]["tags"] == ["Blowjob"] and d[2]["tags"] == ["Cowgirl"]
     assert "close-up" not in d[1]["share"] and "Blonde" not in d[1]["share"]     # shot / hair have their own levels
     assert d[1]["share"]["Blowjob"] < 1.0                                        # the partial "no" at 5 s took some
+    # a library range: clips wholly outside it are skipped, not an error
+    d = FT.derived_scene_tags(tl, scenes, min_share=0.5, time_range=(12.0, 30.0))
+    assert 1 not in d and d[2]["tags"] == ["Cowgirl"]
     tt = dict(FT.tag_time(tl))
     assert tt["Blowjob"] > 7 and "wide" not in tt
     # a second build with nothing changed builds nothing; a new export's model rebuilds

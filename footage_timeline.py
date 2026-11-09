@@ -668,7 +668,7 @@ def derived_scene_tags(tl: Timeline, scenes: list, min_share: float = 0.5, time_
             continue
         if time_range is not None:
             a, b = overlap_with_range(a, b, time_range)
-            if b <= a:
+            if a is None or b is None or b <= a:
                 continue
         sel = tl.select(a, b)
         n = int(sel.sum())
