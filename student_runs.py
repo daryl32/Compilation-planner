@@ -15,8 +15,8 @@ the server), one set of files per machine so no machine ever overwrites another'
     runs@<machine>.json     one line per run this machine has: when, the headline numbers, what changed
     <run>@<machine>.json    the per-tag detail for one run, as this machine last scored it
 The app (student_results.load_index) merges every machine's lines — where a run was scored on several
-machines, the newest score wins. The models themselves are shared through the Modal Volume
-(student_tags.py push_models / pull_models), so any machine can rescore every run.
+machines, the newest score wins. The laptop sends its records and models straight to the server
+(student_hub.py, student_tags.py push_runs / push_models / pull_models), so any machine can rescore every run.
 "What changed" is worked out here, by comparing each run with the one trained before it. Runs from
 before 6 Nov have no settings record, so their line comes from HISTORY (the session summaries' table).
 """

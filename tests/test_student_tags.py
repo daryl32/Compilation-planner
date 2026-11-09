@@ -546,49 +546,40 @@ def test_upload_local_sends_laptop_only_videos(tmp_path, monkeypatch):
     assert sent == ["local/lv1/embeddings.npz"]            # vision.json already there; modal1 is Modal's own
 
 
-def test_models_shared_through_the_volume(tmp_path, monkeypatch):
-    """push_models uploads a run once; pull_models on another machine downloads runs it doesn't have."""
+def test_server_hub_models_runs_and_videos(tmp_path, monkeypatch):
+    """The laptop sends models / run records / vision data to the server over ssh and pulls the server's models.
+    (ssh is stood in for by a script that runs the command here.)"""
     import sys
-    import types
-    store = {}
-
-    class Entry:
-        def __init__(self, path):
-            self.path, self.size = path, len(store[path])
-
-    class Batch:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def put_file(self, local, remote):
-            store[remote] = open(local, "rb").read()
-
-    class Vol:
-        def listdir(self, prefix, recursive=False):
-            hits = [Entry(p) for p in store if p.startswith(prefix + "/")]
-            if not hits:
-                raise FileNotFoundError(prefix)
-            return hits
-
-        def batch_upload(self, force=False):
-            return Batch()
-
-        def read_file_into_fileobj(self, remote, fh):
-            fh.write(store[remote])
-
-    fake = types.SimpleNamespace(Volume=types.SimpleNamespace(from_name=lambda name: Vol()))
-    monkeypatch.setitem(sys.modules, "modal", fake)
-    a, b = tmp_path / "laptop", tmp_path / "server"
-    (a / "models" / "v14").mkdir(parents=True)
-    (a / "models" / "v14" / "meta.json").write_text('{"name": "v14"}')
-    (a / "models" / "v14" / "head0.pt").write_bytes(b"weights")
-    (a / "models" / "v14" / "notes.txt").write_text("not shared")
-    monkeypatch.setattr(S, "WORK", a)
-    assert S.push_models(["v14"]) == 2 and S.push_models(["v14"]) == 0          # second time: nothing new
-    assert set(store) == {"student_models/v14/meta.json", "student_models/v14/head0.pt"}
-    monkeypatch.setattr(S, "WORK", b)
-    assert S.pull_models() == 1 and (b / "models" / "v14" / "head0.pt").read_bytes() == b"weights"
-    assert S.pull_models() == 0
+    import student_hub as H
+    import student_runs as SR
+    fake = tmp_path / "fake_ssh.py"
+    fake.write_text("import subprocess, sys\nsys.exit(subprocess.run(['sh', '-c', sys.argv[2]]).returncode)\n")
+    srv = tmp_path / "server"
+    (srv / "student" / "_student" / "models" / "v13").mkdir(parents=True)
+    (srv / "student" / "_student" / "models" / "v13" / "meta.json").write_text('{"name": "v13"}')
+    (srv / "student" / "_student" / "models" / "v13" / "head0.pt").write_bytes(b"server weights")
+    monkeypatch.setenv("STUDENT_SERVER", "root@test")
+    monkeypatch.setenv("STUDENT_SSH", f"{sys.executable} {fake}")
+    monkeypatch.setenv("STUDENT_WORK_DIR", str(srv / "student"))      # read on the "server" side
+    monkeypatch.setenv("STUDENT_SERVER_CATALOGUE", str(srv / "catalogue"))
+    H._PATHS.clear()
+    lap = tmp_path / "laptop"
+    (lap / "models" / "v14").mkdir(parents=True)
+    (lap / "models" / "v14" / "meta.json").write_text('{"name": "v14", "created": "2026-11-09 15:01"}')
+    (lap / "models" / "v14" / "head0.pt").write_bytes(b"laptop weights")
+    vid = lap / "videos" / "Jane and Kyle - a video"                  # spaces travel fine
+    vid.mkdir(parents=True)
+    for f in ("embeddings.npz", "vision.json"):
+        (vid / f).write_text("x")
+    monkeypatch.setattr(S, "WORK", lap)
+    assert S.push_models() == 1
+    assert (srv / "student" / "_student" / "models" / "v14" / "head0.pt").read_bytes() == b"laptop weights"
+    assert S.pull_models() == 1 and (lap / "models" / "v13" / "head0.pt").read_bytes() == b"server weights"
+    assert S.upload_local() == 0
+    assert (srv / "student" / "_student" / "videos" / "Jane and Kyle - a video" / "vision.json").exists()
+    dest = lap / "student_runs"
+    SR.export_runs(lap / "models", dest, machine="laptop")
+    assert S.push_runs(dest, "laptop") >= 2
+    assert (srv / "catalogue" / "student_runs" / "runs@laptop.json").exists()
+    monkeypatch.delenv("STUDENT_SERVER")
+    assert S.push_models() == 0 and S.pull_models() == 0               # on the server: nothing to do

@@ -4,8 +4,7 @@
 #   deploy/student.sh setup                 one-off: CPU PyTorch + numpy into /root/modal-venv
 #   deploy/student.sh fetch                 new / changed video data from Modal (free) + your labels
 #   deploy/student.sh all --name v13        fetch, train, score
-#   deploy/student.sh rescore-all           every model (yours + shared from the laptop) on today's test labels
-#   deploy/student.sh push-models           share every saved model on Modal (once — new runs share themselves)
+#   deploy/student.sh rescore-all           every model (the server's + the ones the laptop sent) on today's test labels
 #   deploy/student.sh picks --name v13      🎓 Student's picks for 🎯 Training Labels
 #   deploy/student.sh export --name v13     scores for every half second → catalogue/student_scores
 #

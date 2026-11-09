@@ -185,7 +185,7 @@ def fetch() -> int:
         print(f"🧪 New test videos: {len(extra)} chosen in the app, {len(have)} with data here"
               + ("" if len(have) == len(extra) else
                  f" — missing: {', '.join(v for v in extra if v not in have)} (on the laptop: local_vision.bat, "
-                 "then student_tags.bat upload-local, then fetch again)"))
+                 "then student_tags.bat upload-local)"))
     n_sc = write_reviewer_scenes()
     if n_sc is not None:
         print(f"Your Reviewer corrections: {n_sc['scenes']} corrected scenes in {n_sc['videos']} videos.")
@@ -200,13 +200,13 @@ def fetch() -> int:
 
 
 def upload_local(only: list = None) -> int:
-    """Laptop → Modal Volume (local/<video>/): the vision data local_vision.py made for videos Modal never
-    processed, so the server's student (deploy/student.sh fetch) has them too — e.g. 🧪 new test videos.
-    Free: a file upload, no GPU. Skips files already there at the same size."""
-    try:
-        import modal
-    except ImportError:
-        print("modal isn't installed in this venv:  pip install modal  then  modal setup")
+    """Laptop → server: the vision data local_vision.py made for videos Modal never processed (e.g. 🧪 new test
+    videos), straight into the server's student videos folder — no fetch needed there. Skips videos the server
+    already has."""
+    import student_hub as H
+    if not H.server():
+        print("No server set — add STUDENT_SERVER = \"root@<server address>\" to config.py (see "
+              "claude/results-pages-audit.md).")
         return 1
     root = WORK / "videos"
     vids = sorted(d.name for d in root.iterdir() if d.is_dir() and (d / "embeddings.npz").exists()
@@ -216,28 +216,26 @@ def upload_local(only: list = None) -> int:
     if not vids:
         print("Nothing to upload — no laptop-only videos with vision data (run local_vision.bat first).")
         return 0
-    vol = modal.Volume.from_name(VOLUME)
     try:
-        there = {e.path.lstrip("/"): e.size for e in vol.listdir("local", recursive=True)}
-    except Exception:                   # noqa: BLE001
-        there = {}
-    todo = [(root / v / f, f"local/{v}/{f}") for v in vids for f in VIDEO_FILES
-            if (root / v / f).exists() and there.get(f"local/{v}/{f}") != (root / v / f).stat().st_size]
-    mb = sum(p.stat().st_size for p, _ in todo) / 1e6
-    print(f"{len(vids)} laptop-only video(s); {len(todo)} file(s) to upload ({mb:.0f} MB).", flush=True)
-    if todo:
-        with vol.batch_upload(force=True) as batch:
-            for p, remote in todo:
-                batch.put_file(str(p), remote)
-    print("Done — on the server: deploy/student.sh fetch")
+        remote = f"{H.remote_paths()['work']}/videos"
+        there = set(H.remote_ls(remote))
+        todo = [v for v in vids if v not in there]
+        items = [(root / v / f, f"{v}/{f}") for v in todo for f in VIDEO_FILES if (root / v / f).exists()]
+        mb = sum(p.stat().st_size for p, _ in items) / 1e6
+        print(f"{len(vids)} laptop-only video(s); {len(todo)} new on the server ({mb:.0f} MB)…", flush=True)
+        H.send(items, remote)
+    except Exception as e:              # noqa: BLE001
+        print(f"Couldn't send them to the server: {e}")
+        return 1
+    print("Done — they're on the server (no fetch needed there).")
     return 0
 
 
 # ---------------------------------------------------------------------------
-# Models shared through the Modal Volume (student_models/<run>/…): train anywhere, rescore everywhere
+# The server as the hub (student_hub.py): models, run records and laptop vision data all live there, so a run
+# can be trained or scored on any machine. On the server itself these do nothing (everything is already local).
 # ---------------------------------------------------------------------------
 
-MODELS_REMOTE = "student_models"
 MODEL_FILES = ("meta.json", "student_report.md")      # plus every *.pt
 
 
@@ -246,61 +244,59 @@ def _model_files(d: Path) -> list:
 
 
 def push_models(names: list = None) -> int:
-    """Upload saved models (all, or just `names`) to the Modal Volume so the other machines' fetch picks
-    them up. Free (a file upload); files already there at the same size are skipped. Never fails a run."""
-    try:
-        import modal
-    except ImportError:
-        print("(modal isn't installed here — the model stays on this machine only)")
+    """Send saved models (just `names`, or every one the server doesn't have) to the server. Never fails a run."""
+    import student_hub as H
+    if not H.server():
         return 0
     root = WORK / "models"
-    dirs = [root / n for n in names] if names else (sorted(d for d in root.iterdir() if d.is_dir())
-                                                     if root.exists() else [])
-    dirs = [d for d in dirs if (d / "meta.json").exists() and any(d.glob("head*.pt"))]
-    if not dirs:
-        return 0
     try:
-        vol = modal.Volume.from_name(VOLUME)
-        try:
-            there = {e.path.lstrip("/"): e.size for e in vol.listdir(MODELS_REMOTE, recursive=True)}
-        except Exception:               # noqa: BLE001 — no student_models/ yet
-            there = {}
-        todo = [(p, f"{MODELS_REMOTE}/{d.name}/{p.name}") for d in dirs for p in _model_files(d)
-                if there.get(f"{MODELS_REMOTE}/{d.name}/{p.name}") != p.stat().st_size]
-        if todo:
-            with vol.batch_upload(force=True) as batch:
-                for p, remote in todo:
-                    batch.put_file(str(p), remote)
-        print(f"Models shared on Modal: {len(dirs)} checked, {len(todo)} file(s) uploaded.")
-        return len(todo)
+        remote = f"{H.remote_paths()['work']}/models"
+        if names:
+            dirs = [root / n for n in names]
+        else:
+            there = set(H.remote_ls(remote))
+            dirs = [d for d in sorted(root.iterdir()) if d.is_dir() and d.name not in there] if root.exists() else []
+        dirs = [d for d in dirs if (d / "meta.json").exists() and any(d.glob("head*.pt"))]
+        items = [(p, f"{d.name}/{p.name}") for d in dirs for p in _model_files(d)]
+        H.send(items, remote)
+        if dirs:
+            print(f"Models sent to the server: {', '.join(d.name for d in dirs)}")
+        return len(dirs)
     except Exception as e:              # noqa: BLE001
-        print(f"(Couldn't share the model(s) on Modal: {e})")
+        print(f"(Couldn't send the model(s) to the server: {e})")
         return 0
 
 
 def pull_models() -> int:
-    """Download the models other machines shared that this machine doesn't have yet. Returns how many."""
-    try:
-        import modal
-    except ImportError:
+    """Copy the models the server has and this machine doesn't. Returns how many."""
+    import student_hub as H
+    if not H.server():
         return 0
     try:
-        vol = modal.Volume.from_name(VOLUME)
-        entries = [e for e in vol.listdir(MODELS_REMOTE, recursive=True)]
-    except Exception:                   # noqa: BLE001 — no shared models yet
+        remote = f"{H.remote_paths()['work']}/models"
+        have = {d.name for d in (WORK / "models").iterdir()} if (WORK / "models").exists() else set()
+        new = [n for n in H.remote_ls(remote) if n not in have]
+        H.fetch_dirs(new, remote, WORK / "models")
+        if new:
+            print(f"Models from the server: {', '.join(sorted(new))}")
+        return len(new)
+    except Exception as e:              # noqa: BLE001
+        print(f"(Couldn't get the models from the server: {e})")
         return 0
-    by_model = {}
-    for e in entries:
-        parts = e.path.lstrip("/").split("/")
-        if len(parts) == 3:
-            by_model.setdefault(parts[1], []).append(e)
-    new = [n for n in by_model if not (WORK / "models" / n / "meta.json").exists()]
-    for n in new:
-        for e in by_model[n]:
-            _download(vol, e.path.lstrip("/"), WORK / "models" / n / e.path.split("/")[-1])
-    if new:
-        print(f"Models from the other machines: {', '.join(sorted(new))}")
-    return len(new)
+
+
+def push_runs(dest: Path, machine: str) -> int:
+    """This machine's run records → the server's catalogue/student_runs (where the app reads them)."""
+    import student_hub as H
+    if not H.server():
+        return 0
+    files = sorted(p for p in Path(dest).glob(f"*@{machine}.json"))
+    try:
+        H.send([(p, p.name) for p in files], f"{H.remote_paths()['catalogue']}/student_runs")
+        return len(files)
+    except Exception as e:              # noqa: BLE001
+        print(f"(Couldn't send the run records to the server: {e})")
+        return 0
 
 
 def write_reviewer_scenes():
@@ -1348,8 +1344,9 @@ def publish_runs() -> None:
         cat = Path(CATALOGUE_DIR)
         in_use = (_read_json(cat / "student_scores" / "index.json", {}) or {}).get("model")
         n = SR.export_runs(WORK / "models", cat / "student_runs", in_use)
-        print(f"Run records for the app: {n} runs from {SR.machine_name()} → {cat / 'student_runs'} "
-              "(laptop: ☁️ Sync from Google Drive in the app to see them)")
+        sent = push_runs(cat / "student_runs", SR.machine_name())
+        print(f"Run records for the app: {n} runs from {SR.machine_name()} → {cat / 'student_runs'}"
+              + (" and the server (📊 Results shows them now)" if sent else ""))
     except Exception as e:      # noqa: BLE001 — never fail a training run over this
         print(f"(Couldn't write the run records for the app: {e})")
 
@@ -1936,7 +1933,7 @@ def main(argv=None) -> int:
     WORK.mkdir(exist_ok=True)
     if a.command == "upload-local":
         return upload_local(a.only)
-    if a.command == "push-models":         # share every saved model (once, for models from before 9 Nov)
+    if a.command == "push-models":         # send the server every model it doesn't have (once, for older runs)
         push_models()
         return 0
     if a.command in ("fetch", "all"):
@@ -1947,7 +1944,7 @@ def main(argv=None) -> int:
         rc = train(a.name, a.epochs, a.label_weight, a.vs, max(2, a.folds), not a.no_teacher_trust,
                    a.pose, a.context)
         if rc == 0:
-            push_models([a.name])          # so every machine can rescore it
+            push_models([a.name])          # to the server, so every machine can rescore it
         return rc
     if a.command == "export":
         rc = export(a.name)
