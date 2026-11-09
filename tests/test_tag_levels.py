@@ -157,3 +157,38 @@ def test_planner_and_library_cast_filters():
         assert "vid_a" in text and "vid_b" not in text
     finally:
         LC.save_library_meta(before)
+
+
+def test_progress_counts_batch_answers_and_test_frames():
+    import training_labels as TLB
+    items = [
+        {"id": "a", "type": "tags", "video_id": "train1", "t": 1.0, "tags": ["Cowgirl position", "Blonde"],
+         "labelled_at": "2026-11-09T10:00:00"},
+        {"id": "b", "type": "partial", "video_id": "train1", "t": 5.0, "yes": ["reverse cowgirl"],
+         "no": ["Cowgirl position"], "labelled_at": "2026-11-09T11:00:00"},
+        {"id": "c", "type": "tags", "video_id": "test1", "t": 2.0, "tags": ["Missionary", "medium shot"],
+         "labelled_at": "2026-11-08T09:00:00"},
+        {"id": "d", "type": "partial", "video_id": "test1", "t": 9.0, "yes": ["Face"]},
+        {"id": "e", "type": "tags", "video_id": "train2", "t": 3.0, "skipped": True},
+    ]
+    vocab = [{"tag": t, "group": g} for t, g in (("Cowgirl position", "position"), ("reverse cowgirl", "position"),
+                                                ("Missionary", "position"), ("lingerie", "clothing"),
+                                                ("Blonde", "appearance"), ("medium shot", "shot"))]
+    p = TLB.progress(items, {"test1"}, vocab, today="2026-11-09")
+    assert (p["train_full"], p["train_batch_frames"], p["batch_yes"], p["batch_no"]) == (1, 1, 1, 1)
+    assert (p["test_full"], p["test_part"], p["today"]) == (1, 1, 2)
+    by = {r["tag"]: r for r in p["tags"]}
+    assert "Blonde" not in by and "medium shot" not in by                    # hair / shot sizes not listed
+    assert by["Cowgirl position"]["train_yes"] == 1 and by["Cowgirl position"]["train_no"] == 1
+    assert by["Missionary"]["test_yes"] == 1 and by["lingerie"]["train_yes"] == 0
+    assert [r["importance"] for r in p["tags"]][:3] == ["High"] * 3 and p["tags"][-1]["tag"] == "lingerie"
+    assert TLB.describe_answer(items[1]) == "▦ ✅ reverse cowgirl · ❌ Cowgirl position"
+
+
+def test_progress_page_renders():
+    from tests.apptest_util import errors, page_app
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "📊 Progress"
+    at.run()
+    assert not errors(at), errors(at)
+    assert any(m.label == "Batch answers" for m in at.metric)

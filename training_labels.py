@@ -598,6 +598,81 @@ def summary(items: list) -> dict:
     }
 
 
+def progress(items: list, test_videos, vocab_rows: list, today: str = None) -> dict:
+    """📊 Progress (9 Nov): what you've labelled, split training / 🧪 test, batch answers included.
+    → {"train_full", "train_batch_frames", "batch_yes", "batch_no", "test_full", "test_part", "today",
+       "tags": [{"tag", "group", "importance", "train_yes", "train_no", "test_yes", "last"}]}
+    Full labels count every ticked tag as yes; batch answers count their own yes / no. Tags left out of every F1
+    (hair, shot sizes, text on screen) aren't listed."""
+    from trial_logic import not_in_f1
+    try:
+        from student_results import GROUP_IMPORTANCE, IMPORTANCE_ORDER
+    except Exception:                   # noqa: BLE001 — the laptop has no student_results
+        GROUP_IMPORTANCE, IMPORTANCE_ORDER = {}, ()
+    test_videos = set(test_videos or ())
+    today = today or time.strftime("%Y-%m-%d")
+    out = {"train_full": 0, "train_batch_frames": 0, "batch_yes": 0, "batch_no": 0, "test_full": 0,
+           "test_part": 0, "today": 0}
+    per = {}
+
+    def bump(tag, key, when):
+        r = per.setdefault(str(tag).lower(), {"tag": tag, "train_yes": 0, "train_no": 0, "test_yes": 0, "last": ""})
+        r[key] += 1
+        r["last"] = max(r["last"], when or "")
+
+    for i in items:
+        if i.get("skipped") or i.get("type") not in ("tags", "partial"):
+            continue
+        when = i.get("labelled_at") or ""
+        out["today"] += when.startswith(today)
+        test = i.get("video_id") in test_videos
+        if i["type"] == "tags":
+            out["test_full" if test else "train_full"] += 1
+            for t in i.get("tags") or []:
+                bump(t, "test_yes" if test else "train_yes", when)
+        elif test:
+            out["test_part"] += 1           # only full labels count in the test
+        else:
+            out["train_batch_frames"] += 1
+            out["batch_yes"] += len(i.get("yes") or [])
+            out["batch_no"] += len(i.get("no") or [])
+            for t in i.get("yes") or []:
+                bump(t, "train_yes", when)
+            for t in i.get("no") or []:
+                bump(t, "train_no", when)
+    groups = {str(r["tag"]).lower(): str(r.get("group") or "").strip().lower() for r in vocab_rows or []}
+    names = {str(r["tag"]).lower(): r["tag"] for r in vocab_rows or []}
+    for low, name in names.items():          # every vocabulary tag shows, even with nothing yet
+        per.setdefault(low, {"tag": name, "train_yes": 0, "train_no": 0, "test_yes": 0, "last": ""})
+    rows = []
+    for low, r in per.items():
+        if not_in_f1(r["tag"]):
+            continue
+        g = groups.get(low, "")
+        imp = GROUP_IMPORTANCE.get(g, "")
+        rows.append({**r, "tag": names.get(low, r["tag"]), "group": g or "—", "importance": imp or "—"})
+    order = {imp: k for k, imp in enumerate(IMPORTANCE_ORDER)}
+    rows.sort(key=lambda r: (order.get(r["importance"], 9), r["group"], r["train_yes"], r["tag"].lower()))
+    out["tags"] = rows
+    return out
+
+
+def describe_answer(item: dict) -> str:
+    """One line for 📊 Progress → Recent answers."""
+    if item.get("skipped"):
+        return f"⏭️ skipped ({item.get('reason') or 'bad frame'})"
+    if item.get("type") == "tags":
+        return "🏷️ " + (", ".join(item.get("tags") or []) or "no tags")
+    if item.get("type") == "partial":
+        bits = []
+        if item.get("yes"):
+            bits.append("✅ " + ", ".join(item["yes"]))
+        if item.get("no"):
+            bits.append("❌ " + ", ".join(item["no"]))
+        return "▦ " + (" · ".join(bits) or "no answers")
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Picking cards
 # ---------------------------------------------------------------------------
