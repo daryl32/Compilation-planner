@@ -4,9 +4,11 @@
 #   deploy/student.sh setup                 one-off: CPU PyTorch + numpy into /root/modal-venv
 #   deploy/student.sh fetch                 new / changed video data from Modal (free) + your labels
 #   deploy/student.sh all --name v13        fetch, train, score
-#   deploy/student.sh rescore-all           every saved model on today's test labels
+#   deploy/student.sh rescore-all           every model (the server's + the ones the laptop sent) on today's test labels
 #   deploy/student.sh picks --name v13      🎓 Student's picks for 🎯 Training Labels
 #   deploy/student.sh export --name v13     scores for every half second → catalogue/student_scores
+#   deploy/student.sh timeline [--redo]     🧭 footage timeline per video (footage_timeline.py) from the
+#                                           vision data + the export — also a button in 📁 Media Library
 #
 # Runs at low priority with a memory cap, so the live app always comes first, and logs to
 # /root/data/logs/student.log. Long runs: start it inside tmux (tmux new -A -s student) and detach.
@@ -22,6 +24,7 @@ export STUDENT_WORK_DIR=${STUDENT_WORK_DIR:-/root/data/student}
 THREADS=${STUDENT_THREADS:-3}            # leave a core for the app (the server has 4)
 MEM=${STUDENT_MEM:-4G}                   # the run is stopped past this, never the app
 LOG=${STUDENT_LOG:-/root/data/logs/student.log}
+export STUDENT_MACHINE=${STUDENT_MACHINE:-server}   # its run records are runs@server.json in 📊 Results
 
 if [ "${1:-}" = "setup" ]; then
   echo "Installing CPU PyTorch + numpy into $(dirname "$(dirname "$PY")") (about 700 MB on disk)…"
@@ -31,6 +34,16 @@ if [ "${1:-}" = "setup" ]; then
   mkdir -p "$STUDENT_WORK_DIR"
   echo "Student data folder: $STUDENT_WORK_DIR"
   exit 0
+fi
+
+if [ "${1:-}" = "timeline" ]; then
+  shift
+  mkdir -p "$(dirname "$LOG")"
+  cd "$APP" || exit 1
+  export OMP_NUM_THREADS=$THREADS MKL_NUM_THREADS=$THREADS OPENBLAS_NUM_THREADS=$THREADS
+  echo "=== $(date '+%F %T') footage timeline $* (vision data: $STUDENT_WORK_DIR)" | tee -a "$LOG"
+  nice -n 10 "$APP/venv/bin/python" -u footage_timeline.py build "$@" 2>&1 | tee -a "$LOG"
+  exit "${PIPESTATUS[0]}"
 fi
 
 if [ $# -eq 0 ]; then

@@ -21,9 +21,13 @@ rem      student_tags.bat export --name v4          scores for every half
 rem                                                 second -> Drive catalogue
 rem      student_tags.bat rescore-all               every saved model on today's
 rem                                                 test labels (for the app)
+rem      student_tags.bat push-models               send the server every model it
+rem                                                 lacks (once; new runs go by themselves)
+rem      student_tags.bat upload-local              new videos' vision data -> server
 rem ============================================================
 
 cd /d "%~dp0scripts"
+if not defined STUDENT_MACHINE set STUDENT_MACHINE=laptop
 set VENV=..\.venv
 
 if not exist "%VENV%\Scripts\activate.bat" (

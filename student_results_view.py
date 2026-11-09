@@ -136,7 +136,8 @@ def _runs_table(rows: list, baseline: dict | None, best: str | None, details: bo
             line.update({"vs teacher": r["vs_teacher"], "Right %": _pct(r["precision"]), "Found %": _pct(r["recall"]),
                          "Wrong": r["fp"], "Missed": r["fn"], "Frames": r["frames"], "Training F1": _f1(r["train_f1"]),
                          "Your labels": r["labels"], "Batch answers": r["partial"],
-                         "F1 when trained": _f1(r["first_f1"]), "Min": r["minutes"], "Settings": r["settings"]})
+                         "F1 when trained": _f1(r["first_f1"]), "Min": r["minutes"], "Settings": r["settings"],
+                         "Scored on": f"{r['machine']} {r['scored_at'] or ''}".strip() or None})
         line["What changed"] = r["changed"]
         out.append(line)
     if baseline:

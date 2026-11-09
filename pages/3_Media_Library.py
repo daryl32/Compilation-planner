@@ -1,11 +1,16 @@
 """
 Media Library — the libraries, picked at the top of the page (each has its finder — search,
 sort and "More filters" — in the page, and a floating ⬆️ back-to-top button):
-  Videos: search, filter and sort, and set each video's library time range
-          (the part of the video the Compilation Planner should use).
-  Audio:  search, filter and sort the music tracks, see their energy shape
-          and play them; analyse new tracks (and add the extra cut-finding
-          analysis to existing ones) on the server.
+  Videos: 🎬 search, filter and sort, and set each video's library time range
+          (the part of the video the Compilation Planner should use);
+          🧭 Timeline — the footage timeline per video for the new matcher
+          (footage_timeline.py, footage_timeline_view.py).
+  Audio:  🎵 Tracks — search, filter and sort the music tracks, see their energy
+          shape and play them; analyse new tracks (and add the extra cut-finding
+          analysis to existing ones) on the server; 🎭 story maps.
+          🧩 Sections — each track in section types (Intro, Build-up, Drop…) and
+          🍳 Recipes — what footage each type wants (section_types.py, recipes.py,
+          sections_view.py).
   Mix:    🎚️ make new tracks from existing ones — extend / shorten a track,
           mashups of several (mix_ui.py, mixer.py, mixes.py).
   Analytics: 📚 Library — progress (split pass, review, roles, actors), actors,
@@ -1057,7 +1062,7 @@ def _sm_play(track: dict, r: dict, lead: bool, key: str) -> None:
     import preview_snippets
     path = Path(colab_to_local(track.get("source_path", "")))
     if not path.exists():
-        _render_audio_player(st.session_state[SM_EDIT]["track_id"], track.get("source_path", ""))
+        _render_audio_player(track.get("track_id") or (st.session_state.get(SM_EDIT) or {}).get("track_id"), track.get("source_path", ""))
         return
     with st.spinner("Cutting the music…"):
         clip, err = preview_snippets.make_audio_snippet(PREVIEW_DIR / "snippets", path, r["start"],
@@ -2256,8 +2261,25 @@ def render_rating_analytics():
 # Page
 # ---------------------------------------------------------------------------
 
+def _sec_track_bits(track_id: str):
+    return _sm_track_bits(track_id, track_file(track_id, AUDIO_DIR).stat().st_mtime)
+
+
 if library_kind == "🎵 Audio":
-    render_audio()
+    if st.session_state.get(SM_EDIT):
+        render_audio()                   # the 🎭 story-map editor takes the page
+    else:
+        with st.container(key="subnav_aud"):   # a sub menu — chips (menu_css)
+            audio_kind = st.radio("Audio", ["🎵 Tracks", "🧩 Sections", "🍳 Recipes"], horizontal=True, key="aud_kind",
+                                  label_visibility="collapsed")
+        if audio_kind == "🧩 Sections":
+            import sections_view
+            sections_view.render_sections(load_audio_library(_audio_signature()), _sec_track_bits, play=_sm_play)
+        elif audio_kind == "🍳 Recipes":
+            import sections_view
+            sections_view.render_recipes()
+        else:
+            render_audio()
 elif library_kind == "🎚️ Mix":
     import mix_ui
     mix_ui.render(load_audio_library(_audio_signature()))
@@ -2266,4 +2288,11 @@ elif library_kind == "🎞️ Renders":
 elif library_kind == "📈 Analytics":
     render_analytics_tab()
 else:
-    render_videos()
+    with st.container(key="subnav_vid"):   # a sub menu — chips (menu_css)
+        video_kind = st.radio("Videos", ["🎬 Videos", "🧭 Timeline"], horizontal=True, key="vid_kind",
+                              label_visibility="collapsed")
+    if video_kind == "🧭 Timeline":
+        import footage_timeline_view
+        footage_timeline_view.render()
+    else:
+        render_videos()

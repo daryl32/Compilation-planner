@@ -304,11 +304,13 @@ def sync_pull(catalogue_dir: Path, audio_dir: Path, progress_callback=None,
                     for f in _list_files(service, vid_folder["id"]):
                         tasks.append((f, catalogue_dir / "trial_results" / "frames" / vid_folder["name"] / f["name"]))
 
-        # student_runs (subfolder of catalogue): one record per student model run, written on the
-        # laptop by student_tags.py — 🏋️ Training / 🧪 Test results in Training Labels
+        # student_runs (subfolder of catalogue): the laptop's student run records (student_tags.py) —
+        # merged with the server's own in 📊 Results
         for runs_id in ids("student_runs", cat_folder_id):
             for f in _list_files(service, runs_id):
-                if f["name"].endswith(".json"):
+                # one set of files per machine (runs@<machine>.json …); the old single index.json
+                # is skipped so it can't stand in for the server's own records
+                if f["name"].endswith(".json") and f["name"] != "index.json":
                     tasks.append((f, catalogue_dir / "student_runs" / f["name"]))
 
     _record_added_dates(catalogue_dir, created)

@@ -1,0 +1,118 @@
+"""🧩 Section types and 🍳 recipes (Stage 3 step 4): suggesting a track's sections from the song's structure with
+story-map roles as hints, saving maps, recipe defaults / overrides / reset, and the Media Library sub-menus."""
+from __future__ import annotations
+
+from tests.support import DATA  # noqa: F401  (installs the test config first)
+
+
+def _unit(start, end, pct, build=0.0, drop=False, breakdown=0.0, vocal=0.0, first=False, last=False):
+    return {"start": start, "end": end, "pct": pct, "build": build, "drop": drop, "breakdown": breakdown,
+            "vocal": vocal, "first": first, "last": last, "label": "?", "intensity": pct}
+
+
+def _analysis():
+    units = [
+        _unit(0, 20, 0.1, first=True),                   # intro
+        _unit(20, 40, 0.45),                             # warm-up (middling, before the first peak)
+        _unit(40, 56, 0.55, build=0.8),                  # build-up
+        _unit(56, 86, 0.95, drop=True),                  # drop
+        _unit(86, 110, 0.2, breakdown=0.9),              # slow (breakdown)
+        _unit(110, 126, 0.6, build=0.6),                 # build-up
+        _unit(126, 156, 0.9, drop=True, vocal=0.1),      # drop
+        _unit(156, 176, 0.8, vocal=0.1),                 # fast (intense, no vocals)
+        _unit(176, 196, 0.5),                            # rhythmic
+        _unit(196, 216, 0.3),                            # warm-down (late, after the peaks)
+        _unit(216, 240, 0.1, last=True),                 # ending
+    ]
+    return {"units": units, "duration": 240.0, "drops": [56.0, 126.0], "builds": [], "bar_sec": 2.0}
+
+
+def test_suggest_types_from_the_song():
+    import section_types as ST
+    regions = ST.suggest(_analysis())
+    assert [r["type"] for r in regions] == ["intro", "warmup", "buildup", "drop", "slow", "buildup", "drop", "fast",
+                                            "rhythmic", "warmdown", "ending"]
+    assert regions[0]["start"] == 0.0 and regions[-1]["end"] == 240.0
+    assert ST.type_at(regions, 60.0) == "drop" and ST.totals(regions)["drop"] == 60.0
+
+
+def test_story_map_roles_steer_the_types():
+    import section_types as ST
+    story = [{"start": 176, "end": 196, "role": "action"},      # the rhythmic stretch is marked 💥 Action
+             {"start": 86, "end": 110, "role": "slow"}]
+    regions = ST.suggest(_analysis(), story)
+    assert ST.type_at(regions, 180.0) == "action"
+    assert ST.type_at(regions, 90.0) == "slow"
+    # a role covering under HINT_SHARE of the stretch doesn't steer it
+    regions = ST.suggest(_analysis(), [{"start": 176, "end": 180, "role": "action"}])
+    assert ST.type_at(regions, 180.0) == "rhythmic"
+
+
+def test_edit_and_save_a_section_map():
+    import section_types as ST
+    regions = ST.suggest(_analysis())
+    regions = ST.set_type(regions, 1, "slow")
+    assert regions[1]["type"] == "slow" and regions[1]["why"] == "set by you"
+    n = len(regions)
+    regions = ST.split(regions, 3, 70.0)
+    assert len(regions) == n + 1 and regions[3]["end"] == 70.0 and regions[4]["start"] == 70.0
+    regions = ST.merge_next(regions, 3)
+    assert len(regions) == n and regions[3]["end"] == 86.0
+    try:
+        ST.save_map("trk_test", regions)
+        assert ST.saved_map("trk_test")[3]["type"] == "drop" and "trk_test" in ST.saved_maps()
+        ST.save_map("trk_test", None)
+        assert ST.saved_map("trk_test") is None
+    finally:
+        ST.save_map("trk_test", None)
+
+
+def test_recipes_defaults_overrides_and_reset():
+    import recipes as RC
+    import section_types as ST
+    assert set(RC.load_all()) == set(ST.TYPE_IDS)
+    assert RC.load("drop")["movement"]["hi"] == 1.0 and "penetration" in RC.load("drop")["tags"]
+    try:
+        r = RC.load("slow")
+        r["beat_lock"] = 0.4
+        r["tags"]["Blowjob"] = 0.9
+        r["movement"] = {"lo": 0.6, "hi": 0.2, "trend": "rise"}        # swapped band is tidied
+        RC.save("slow", r)
+        got = RC.load("slow")
+        assert RC.is_custom("slow") and got["beat_lock"] == 0.4 and got["tags"]["Blowjob"] == 0.9
+        assert got["movement"] == {"lo": 0.2, "hi": 0.6, "trend": "rise"}
+        assert not RC.is_custom("drop")
+        RC.save("slow", RC.default("slow"))                             # saving the default drops the override
+        assert not RC.is_custom("slow")
+        RC.save("slow", r)
+        RC.reset("slow")
+        assert not RC.is_custom("slow") and RC.load("slow") == RC.default("slow")
+    finally:
+        RC.reset("slow")
+    assert RC.unknown_tags({"tags": {"Blowjob": 1, "Typo": 1}, "avoid": ["x"]}, ["blowjob"]) == ["Typo", "x"]
+    assert "wants" in RC.summary(RC.default("drop"))
+    assert RC.default("intro")["roles"] == ["intro"] and RC.default("ending")["roles"] == ["outro"]
+    assert RC.normalise({"roles": ["intro", "x"]}, "drop")["roles"] == ["intro", "x"]
+
+
+def test_media_library_sub_menus():
+    from tests.apptest_util import errors, page_app
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎵 Audio"
+    at.session_state["aud_kind"] = "🍳 Recipes"
+    at.run()
+    assert not errors(at), errors(at)
+    assert [r.key for r in at.radio if r.key in ("lib_kind", "aud_kind")] == ["lib_kind", "aud_kind"]
+    assert len(at.expander) >= 10
+    at.session_state["aud_kind"] = "🧩 Sections"
+    at.run()
+    assert not errors(at), errors(at)
+    assert at.selectbox(key="sec_track").value
+    assert [sb for sb in at.selectbox if str(sb.key).startswith("sec_role_")], "no section parts rendered"
+    lines = [sl for sl in list(at.slider) + list(at.select_slider) if str(sl.key).startswith("sec_line_")]
+    assert lines, "no draggable lines rendered"
+    at.session_state["lib_kind"] = "🎬 Videos"
+    at.session_state["vid_kind"] = "🎬 Videos"
+    at.run()
+    assert not errors(at), errors(at)
+    assert [r.key for r in at.radio if r.key in ("lib_kind", "vid_kind")] == ["lib_kind", "vid_kind"]
