@@ -7,7 +7,8 @@ import random
 import streamlit as st
 import catalogue_store as CStore
 import scene_roles as SR
-from library_common import (safe_image, video_details, all_actors, all_video_tags, matches_details, render_range_picker, library_ranges, memory_check)
+from library_common import (safe_image, video_details, all_actors, all_video_tags, matches_details, render_range_picker, library_ranges, memory_check,
+                            HAIR_COLOURS, HAIR_EMOJI, video_hair, matches_hair)
 from core.matching import format_mmss
 
 from planner.state import (
@@ -89,17 +90,27 @@ def render_video_selection_section(track: dict, all_video_ids: list, all_tag_opt
 
     _details = video_details()
     _role_secs_now = video_role_seconds(effective_time_ranges())
-    _dc = st.columns([5, 5, 2])
+    _dc = st.columns([4, 4, 3, 2], vertical_alignment="bottom")
     _f_actors = _dc[0].multiselect("👤 Actors", all_actors(), key="vid_actor_filter", placeholder="anyone",
                                    help="Only videos with these actors (set in the Reviewer's 🎬 Video details).")
     _f_vtags = _dc[1].multiselect("🏷️ Video tags", all_video_tags(), key="vid_vtag_filter", placeholder="any",
                                   help="Only videos with these video tags (set in the Reviewer's 🎬 Video details).")
-    _f_all = _dc[2].toggle("Must have all", key="vid_details_all", disabled=not (_f_actors or _f_vtags),
-                           help="Off: any of them. On: every one.")
-    _allowed = (frozenset(v for v in all_video_ids if matches_details(v, _details, _f_actors, _f_vtags, _f_all))
-                if (_f_actors or _f_vtags) else None)
+    _f_hair = _dc[2].multiselect("💇 Hair", list(HAIR_COLOURS), key="vid_hair_filter", placeholder="any",
+                                 format_func=lambda c: f"{HAIR_EMOJI[c]} {c}",
+                                 help="Only videos with this hair colour — yours where confirmed in the Reviewer, "
+                                      "otherwise the model's vote.")
+    with _dc[3]:
+        _f_all = st.toggle("Must have all", key="vid_details_all", disabled=not (_f_actors or _f_vtags),
+                           help="Actors / video tags — off: any of them. On: every one.")
+        _f_hair_only = st.toggle("Only this hair", key="vid_hair_only", disabled=not _f_hair,
+                                 help="Off: the video has any of these hair colours. On: everyone's hair in it is "
+                                      "one of these (only Blonde leaves out a Blonde + Brunette video).")
+    _hair = video_hair() if _f_hair else {}
+    _allowed = (frozenset(v for v in all_video_ids if matches_details(v, _details, _f_actors, _f_vtags, _f_all)
+                          and matches_hair(v, _hair, _f_hair, _f_hair_only))
+                if (_f_actors or _f_vtags or _f_hair) else None)
     if _allowed is not None:
-        st.caption(f"👤🏷️ {len(_allowed)} of {len(all_video_ids)} videos match — the recommendations and the "
+        st.caption(f"👤🏷️💇 {len(_allowed)} of {len(all_video_ids)} videos match — the recommendations and the "
                    f"'add another video' list only include those. Videos you've already ticked stay ticked.")
     if not simple:
         render_ranking_weights(tag_filter)

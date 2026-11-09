@@ -151,6 +151,7 @@ def tag_card(card: dict) -> None:
                            help="  \n".join(notes) or None)
             picked += list(val or [])
 
+    picked = TL.keep_hidden(picked, card.get("suggested"))   # hair colour is per video now — kept, not asked
     for p in TL.rule_problems(picked, vocab):
         st.warning(f"{p} — save anyway if this frame really is like that (then the rule may need changing).")
     with st.container(key="tl_wrap_act"):

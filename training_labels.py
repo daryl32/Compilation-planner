@@ -332,10 +332,30 @@ def set_thresholds(rows: list, thresholds: dict) -> list:
             for r in rows]
 
 
-def chip_groups(rows: list, extra: list = ()) -> list:
+# Tags no longer labelled frame by frame (claude/hair-colour-plan.md): hair colour is one answer per video
+# (Reviewer → 🎬 Video details). Cards and ▦ Grid don't show them; a card or 🧹 keeps whatever the frame
+# already had (your old answer, else the model's), so a new label never teaches "no hair colour here".
+HIDDEN_TAGS = ("Blonde", "Brunette", "Redhead")
+
+
+def is_hidden(tag) -> bool:
+    return "".join(str(tag).split()).lower() in {t.lower() for t in HIDDEN_TAGS}
+
+
+def keep_hidden(picked: list, start) -> list:
+    """The tags picked on a card, plus the hidden tags the frame started with."""
+    have = {str(t).lower() for t in picked}
+    return list(picked) + [t for t in dict.fromkeys(start or []) if is_hidden(t) and str(t).lower() not in have]
+
+
+def chip_groups(rows: list, extra: list = (), hide: bool = True) -> list:
     """How a card shows the tags: [(title, single_choice, [tags])]. Tags sharing a one_of are
     one single-choice row each; the rest are grouped by "group" (multi-choice). extra: tags
-    the scene has that aren't in the vocabulary — shown last so they can still be confirmed."""
+    the scene has that aren't in the vocabulary — shown last so they can still be confirmed.
+    hide: leave out HIDDEN_TAGS (hair colour — per video now)."""
+    if hide:
+        rows = [r for r in rows if not is_hidden(r["tag"])]
+        extra = [t for t in extra if not is_hidden(t)]
     exclusive, groups = {}, {}
     for r in rows:
         if r["one_of"]:
@@ -518,6 +538,8 @@ def finish_partials(moments: list, rows: list = None) -> dict:
             continue
         yes = list(part.get("yes") or [])
         have = {group_of.get(t.lower(), "other") for t in yes}
+        no = {str(t).lower() for t in part.get("no") or []}
+        hidden = [t for t in (m.get("suggested") or []) if is_hidden(t) and str(t).lower() not in no]
         missing = [g for g in required if g not in have]
         if missing:
             out["skipped"].append((m["video_id"], float(m["t"]), missing))
@@ -525,7 +547,8 @@ def finish_partials(moments: list, rows: list = None) -> dict:
         lid = m.get("label_id") or card_id("tags", m["video_id"], float(m["t"]))
         out["undo"] += [(pid, part), (lid, by_id.get(lid))]
         new[lid] = {"id": lid, "type": "tags", "video_id": m["video_id"], "scene_id": m.get("scene_id"),
-                    "t": float(m["t"]), "suggested": list(m.get("suggested") or yes), "tags": yes,
+                    "t": float(m["t"]), "suggested": list(m.get("suggested") or yes),
+                    "tags": keep_hidden(yes, hidden),
                     "from_batch": True, "labelled_at": now, "vocab_version": ver}
         new[pid] = None
         out["done"] += 1

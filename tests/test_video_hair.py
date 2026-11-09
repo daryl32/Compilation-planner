@@ -263,3 +263,69 @@ def test_hair_test_check():
     assert (c["videos"], c["confirmed"], c["checked"], c["right"], c["main_right"], c["unsure"], c["no_vote"]) \
         == (6, 4, 3, 1, 2, 1, 1)
     assert [w["video_id"] for w in c["wrong"]] == ["b", "c"] and c["models"] == ["v13"]
+
+
+# ---------------------------------------------------------------------------
+# Hair hidden from frame labelling; hair filters in the planner and Media Library
+# ---------------------------------------------------------------------------
+
+def test_hair_hidden_from_chips_but_kept_on_save():
+    import training_labels as TLB
+    rows = [{"tag": t, "group": g, "one_of": ""} for t, g in
+            (("Blonde", "appearance"), ("Brunette", "appearance"), ("lingerie", "appearance"), ("POV", "camera"))]
+    shown = [t for _, _, tags in TLB.chip_groups(rows, extra=["Redhead"]) for t in tags]
+    assert "Blonde" not in shown and "Redhead" not in shown and "lingerie" in shown
+    assert "Blonde" in [t for _, _, tags in TLB.chip_groups(rows, hide=False) for t in tags]
+    assert TLB.keep_hidden(["POV"], ["Blonde", "lingerie", "POV"]) == ["POV", "Blonde"]
+
+
+def test_finish_partials_keeps_model_hair():
+    import training_labels as TLB
+    before = TLB.load_labels()
+    try:
+        TLB.batch_tag([{"video_id": "vid_a", "scene_id": 1, "t": 12.0, "label_id": "tags:vid_a:12.00"}], add=["POV"])
+        res = TLB.finish_partials([{"video_id": "vid_a", "scene_id": 1, "t": 12.0,
+                                    "suggested": ["Blonde", "Blowjob", "POV"]}], [])
+        assert res["done"] == 1
+        lab = [i for i in TLB.load_labels() if i.get("type") == "tags" and i["video_id"] == "vid_a"
+               and float(i["t"]) == 12.0][0]
+        assert lab["tags"] == ["POV", "Blonde"]               # only your yes tags + the model's hair kept
+    finally:
+        TLB._write_labels(before)
+
+
+def test_planner_and_library_hair_filters():
+    import library_common as LC
+    from tests.apptest_util import errors, page_app
+    before = LC.load_library_meta()
+    try:
+        LC.set_video_hair("vid_a", ["Redhead"])
+        at = page_app("pages/3_Media_Library.py", timeout=300)
+        at.session_state["lib_kind"] = "🎬 Videos"
+        at.run()
+        assert not errors(at), errors(at)
+        at.multiselect(key="lib_hair").set_value(["Redhead"]).run()
+        assert not errors(at), errors(at)
+        text = " ".join(m.value for m in at.markdown) + " ".join(c.value for c in at.caption)
+        assert "vid_a" in text and "vid_b" not in text
+    finally:
+        LC.save_library_meta(before)
+
+
+def test_planner_videos_hair_filter():
+    import library_common as LC
+    from tests.apptest_util import errors, page_app
+    from tests.test_ui_simple import PLANNER
+    before = LC.load_library_meta()
+    try:
+        LC.set_video_hair("vid_a", ["Redhead"])
+        at = page_app(PLANNER, advanced=False)
+        at.session_state["track_id"] = "song_full"
+        at.run()
+        steps = at.radio(key="ui_section").options
+        at.radio(key="ui_section").set_value([s for s in steps if "Videos" in s][0]).run()
+        at.multiselect(key="vid_hair_filter").set_value(["Redhead"]).run()
+        assert not errors(at), errors(at)
+        assert any(c.value.startswith("👤🏷️💇 1 of") for c in at.caption)
+    finally:
+        LC.save_library_meta(before)

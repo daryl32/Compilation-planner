@@ -252,6 +252,7 @@ def _editor(vid: str, m: dict, teachers: list, ekey: str) -> None:
                                     wrap=True, width="stretch", key=wkey) or [])
     for p in TLB.rule_problems(picked, vocab):
         st.warning(f"{p} — save anyway if this frame really is like that (then the rule may need changing).")
+    picked = TLB.keep_hidden(picked, start)      # hair colour isn't shown (per video) — keep what the frame had
     card = TR.correction_card(vid, m, start)
     c1, c2 = st.columns(2)
     c1.button("💾 Save my tags", type="primary", key=f"{ekey}_save", width="stretch",

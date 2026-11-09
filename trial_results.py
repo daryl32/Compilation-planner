@@ -256,12 +256,13 @@ def model_has(moment: dict, tag: str) -> bool:
 
 def still_to_review(moment: dict) -> list:
     """On a batch-tagged frame: the model's tags you haven't said yes or no to yet."""
+    import training_labels as TLB
     p = moment.get("partial") or {}
     done = {norm(t) for t in (p.get("yes") or []) + (p.get("no") or [])}
     out = {}
     for r in (moment.get("teachers") or {}).values():
         for t in r.get("tags") or []:
-            if norm(t) not in done:
+            if norm(t) not in done and not TLB.is_hidden(t):     # hair: per video now, never "to review"
                 out.setdefault(norm(t), t)
     return sorted(out.values(), key=str.lower)
 
