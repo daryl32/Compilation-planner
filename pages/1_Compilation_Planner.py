@@ -474,6 +474,20 @@ def render_mode_picker() -> str:
 def render_matching_mode_settings() -> None:
     """🎛️ Mode tab of the 🎬 Matching step's settings."""
     mode = st.session_state.get("matching_mode", "Auto")
+    if mode == "Auto":
+        ec = st.columns([1.4, 1.3, 1.3])
+        ec[0].radio("Matcher", ["Classic", "🤖 Auto story"], key="matcher_engine", horizontal=True,
+                    help="Classic: today's matcher — the music's shape against each scene's motion curve.  "
+                         "🤖 Auto story: the new matcher — any half second of any processed video, scored on the "
+                         "🧭 footage timeline against the track's 🧩 section types and their 🍳 recipes (📁 Media "
+                         "Library). Videos without a timeline are only used by Classic's fallback picks.")
+        story_on = st.session_state.get("matcher_engine") == "🤖 Auto story"
+        ec[1].slider("Music ↔ Story", 0.0, 1.0, step=0.05, key="story_music_story", disabled=not story_on,
+                     help="Left: the music fit decides (movement band, shape, beat lock). Right: the recipe's "
+                          "tags decide. Middle: both equally.")
+        ec[2].slider("Smooth ↔ Contrast", 0.0, 1.0, step=0.05, key="story_smooth_contrast", disabled=not story_on,
+                     help="Left: shot size and POV kept steady from clip to clip. Right: a change at drops and "
+                          "section changes is welcome.")
     c = st.columns([1, 2])
     with c[0]:
         if mode == "Manual step-through":
@@ -1143,6 +1157,18 @@ if matching_mode == "Auto":
     # The shape search is real work, so the plan is remembered and only worked out
     # again when something that changes it changes (settings, videos, footage
     # edits in the Reviewer, Swap / Reject / Remove…).
+    _story_engine = st.session_state.get("matcher_engine") == "🤖 Auto story"
+
+    def _story_sig():
+        """What the 🤖 Auto story plan depends on beyond Classic's inputs: its sliders, the track's section map,
+        the recipes and the footage timeline build."""
+        import footage_timeline as FT
+        import recipes as RC
+        import section_types as ST
+        return [round(float(st.session_state.get("story_music_story", 0.5)), 3),
+                round(float(st.session_state.get("story_smooth_contrast", 0.5)), 3),
+                ST.saved_map(track_id), RC.load_all(), FT.signature()]
+
     def _cat_mtime(v):
         try:
             return CStore.catalogue_path(v).stat().st_mtime
@@ -1160,6 +1186,7 @@ if matching_mode == "Auto":
         plan_block_roles, sorted(st.session_state.get("clip_count_skip") or []),
         bool(st.session_state.get("autofill_v2", True)), bool(st.session_state.get("intro_outro_exclusive")),
         bool(st.session_state.get("story_reserve", True)), [(v, _cat_mtime(v)) for v in sorted(selected_videos)],
+        _story_engine, _story_sig() if _story_engine else None,
     ], default=str).encode()).hexdigest()
     # What the plan is built FROM (videos, cuts, ranges, story map…) — not the ⚙️ settings (they only
     # change through ▶️) nor Swap / Reject / Remove (they apply at once to a confirmed plan).
@@ -1197,24 +1224,53 @@ if matching_mode == "Auto":
         timeline, clip_count_shortfall, duration_shortfall_sec = _auto_cache["result"]
         _auto_repeat_fallbacks = set(_auto_cache["fallbacks"])
     else:
-        with st.spinner("Matching clips to the music's shape…"), \
-                _timed("Auto matching", f"{len(segments)} blocks, {len(selected_videos)} videos"):
-            timeline, clip_count_shortfall, duration_shortfall_sec = match_scenes_to_track(
-                segments, queues,
-                min_clips, max_clips, ramp_start, ramp_end, allow_same_video, sequential_mode,
-                st.session_state["segment_exclusions"], st.session_state["segment_clip_reduction"],
-                st.session_state["global_excluded_scenes"],
-                vary_count, int(count_seed), min_clip_len_sec,
-                intro_blocks_0based, outro_blocks_0based,
-                weight_shape, weight_random, avoid_repeat, weight_spread, weight_motion, autofill_seed,
-                weight_position=weight_position, repeat_fallbacks=(_auto_repeat_fallbacks := set()),
-                block_roles=plan_block_roles, track=track,
-            )
+        _story_notes = []
+        if _story_engine:
+            import core.story_matcher as SMX
+            with st.spinner("🤖 Matching footage to the song's sections…"), \
+                    _timed("Auto story matching", f"{len(segments)} blocks, {len(selected_videos)} videos"):
+                _story_opts = SMX.StoryOptions(music_story=float(st.session_state.get("story_music_story", 0.5)),
+                                               smooth_contrast=float(st.session_state.get("story_smooth_contrast", 0.5)))
+                timeline, clip_count_shortfall, duration_shortfall_sec = SMX.match_story(
+                    segments, queues, track,
+                    min_clips=min_clips, max_clips=max_clips, ramp_start=ramp_start, ramp_end=ramp_end,
+                    allow_same_video=allow_same_video, sequential=sequential_mode,
+                    segment_exclusions=st.session_state["segment_exclusions"],
+                    segment_clip_reduction=st.session_state["segment_clip_reduction"],
+                    global_excluded=st.session_state["global_excluded_scenes"],
+                    vary_count=vary_count, seed=int(count_seed), min_clip_len_sec=min_clip_len_sec,
+                    block_roles=plan_block_roles, options=_story_opts, ctx=plan_context())
+                _story_notes = list(_story_opts.notes)
+                _auto_repeat_fallbacks = set()
+        else:
+            with st.spinner("Matching clips to the music's shape…"), \
+                    _timed("Auto matching", f"{len(segments)} blocks, {len(selected_videos)} videos"):
+                timeline, clip_count_shortfall, duration_shortfall_sec = match_scenes_to_track(
+                    segments, queues,
+                    min_clips, max_clips, ramp_start, ramp_end, allow_same_video, sequential_mode,
+                    st.session_state["segment_exclusions"], st.session_state["segment_clip_reduction"],
+                    st.session_state["global_excluded_scenes"],
+                    vary_count, int(count_seed), min_clip_len_sec,
+                    intro_blocks_0based, outro_blocks_0based,
+                    weight_shape, weight_random, avoid_repeat, weight_spread, weight_motion, autofill_seed,
+                    weight_position=weight_position, repeat_fallbacks=(_auto_repeat_fallbacks := set()),
+                    block_roles=plan_block_roles, track=track,
+                )
         st.session_state["_auto_plan_cache"] = {
             "sig": _auto_sig, "result": (timeline, clip_count_shortfall, duration_shortfall_sec),
-            "fallbacks": sorted(_auto_repeat_fallbacks), "bounds": _bounds}
+            "fallbacks": sorted(_auto_repeat_fallbacks), "bounds": _bounds, "story_notes": _story_notes}
     if _auto_repeat_fallbacks:
         _note(repeat_fallback_message([i + 1 for i in sorted(_auto_repeat_fallbacks)]))
+    if _story_engine:
+        import core.story_matcher as SMX
+        import section_types as ST
+        for _n in (st.session_state.get("_auto_plan_cache") or {}).get("story_notes") or []:
+            _note("🤖 " + _n)
+        _ps = SMX.plan_summary(timeline)
+        if _ps["slots"]:
+            _types_line = " · ".join(f"{ST.label(t)} {n}" for t, n in sorted(_ps["types"].items(), key=lambda kv: -kv[1]))
+            _note(f"🤖 Auto story: {_types_line}" + (f" · mean fit {_ps['mean_fit']:.2f}" if _ps["mean_fit"] is not None else "")
+                  + (f" · {_ps['fallback']} slot(s) from Classic's fallback" if _ps["fallback"] else ""))
 
     split_count = sum(1 for e in timeline if e["split_screen"])
     total_picks = sum(len(e["scenes"]) for e in timeline)
@@ -1607,6 +1663,16 @@ if matching_mode == "Auto":
                                                  for c in chain)
                         st.caption(f"Chain of {len(chain)}: {chain_desc}  (total {s['clip_duration_sec']:.1f}s)")
                     st.caption(", ".join(s.get("tags", [])))
+                    _story = s.get("story")
+                    if _story:
+                        import section_types as _ST
+                        if _story.get("fit") is None:
+                            st.caption(f"🤖 {_ST.label(_story.get('type'))} · Classic's pick (no timeline window fitted)")
+                        else:
+                            _sh = _story.get("shot")
+                            _shot_txt = "" if _sh is None else f" · shot {_sh:.1f}"
+                            st.caption(f"🤖 {_ST.label(_story.get('type'))} · fit {_story['fit']:.2f} "
+                                       f"(music {_story.get('base', 0):.2f} · story {_story.get('story', 0):.2f}){_shot_txt}")
 
                     scene_key = f"{seg_idx}_{slot_idx}_{s['video_id']}_{s['scene_id']}"
                     btn_cols = st.columns(3)
