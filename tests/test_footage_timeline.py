@@ -168,7 +168,7 @@ def test_media_library_timeline_tab(tmp_path, monkeypatch):
     shutil.rmtree(scf, ignore_errors=True)
     try:
         at = page_app("pages/3_Media_Library.py", timeout=300)
-        at.session_state["lib_kind"] = "🧭 Timeline"
+        at.session_state["lib_kind"] = "🎬 Videos"; at.session_state["vid_kind"] = "🧭 Timeline"
         at.run()
         assert not errors(at), errors(at)
         assert any("No footage timeline yet" in m.value for m in at.markdown)
@@ -178,7 +178,7 @@ def test_media_library_timeline_tab(tmp_path, monkeypatch):
         monkeypatch.setenv("STUDENT_WORK_DIR", str(root))
         FT.build(folder=out, progress=lambda *a: None)
         at = page_app("pages/3_Media_Library.py", timeout=300)
-        at.session_state["lib_kind"] = "🧭 Timeline"
+        at.session_state["lib_kind"] = "🎬 Videos"; at.session_state["vid_kind"] = "🧭 Timeline"
         at.run()
         assert not errors(at), errors(at)
         assert at.selectbox(key="ft_video").value == "vid_a"
