@@ -195,6 +195,7 @@ def fetch() -> int:
           f"newest saved {newest.replace('T', ' ') or '—'}.")
     print("   (Not seeing today's corrections? Press ☁️ Save edits to Drive in the app, wait for Drive "
           "to sync to this laptop, then run fetch again.)")
+    pull_models()
     return 0
 
 
@@ -230,6 +231,76 @@ def upload_local(only: list = None) -> int:
                 batch.put_file(str(p), remote)
     print("Done — on the server: deploy/student.sh fetch")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Models shared through the Modal Volume (student_models/<run>/…): train anywhere, rescore everywhere
+# ---------------------------------------------------------------------------
+
+MODELS_REMOTE = "student_models"
+MODEL_FILES = ("meta.json", "student_report.md")      # plus every *.pt
+
+
+def _model_files(d: Path) -> list:
+    return sorted(p for p in d.iterdir() if p.is_file() and (p.suffix == ".pt" or p.name in MODEL_FILES))
+
+
+def push_models(names: list = None) -> int:
+    """Upload saved models (all, or just `names`) to the Modal Volume so the other machines' fetch picks
+    them up. Free (a file upload); files already there at the same size are skipped. Never fails a run."""
+    try:
+        import modal
+    except ImportError:
+        print("(modal isn't installed here — the model stays on this machine only)")
+        return 0
+    root = WORK / "models"
+    dirs = [root / n for n in names] if names else (sorted(d for d in root.iterdir() if d.is_dir())
+                                                     if root.exists() else [])
+    dirs = [d for d in dirs if (d / "meta.json").exists() and any(d.glob("head*.pt"))]
+    if not dirs:
+        return 0
+    try:
+        vol = modal.Volume.from_name(VOLUME)
+        try:
+            there = {e.path.lstrip("/"): e.size for e in vol.listdir(MODELS_REMOTE, recursive=True)}
+        except Exception:               # noqa: BLE001 — no student_models/ yet
+            there = {}
+        todo = [(p, f"{MODELS_REMOTE}/{d.name}/{p.name}") for d in dirs for p in _model_files(d)
+                if there.get(f"{MODELS_REMOTE}/{d.name}/{p.name}") != p.stat().st_size]
+        if todo:
+            with vol.batch_upload(force=True) as batch:
+                for p, remote in todo:
+                    batch.put_file(str(p), remote)
+        print(f"Models shared on Modal: {len(dirs)} checked, {len(todo)} file(s) uploaded.")
+        return len(todo)
+    except Exception as e:              # noqa: BLE001
+        print(f"(Couldn't share the model(s) on Modal: {e})")
+        return 0
+
+
+def pull_models() -> int:
+    """Download the models other machines shared that this machine doesn't have yet. Returns how many."""
+    try:
+        import modal
+    except ImportError:
+        return 0
+    try:
+        vol = modal.Volume.from_name(VOLUME)
+        entries = [e for e in vol.listdir(MODELS_REMOTE, recursive=True)]
+    except Exception:                   # noqa: BLE001 — no shared models yet
+        return 0
+    by_model = {}
+    for e in entries:
+        parts = e.path.lstrip("/").split("/")
+        if len(parts) == 3:
+            by_model.setdefault(parts[1], []).append(e)
+    new = [n for n in by_model if not (WORK / "models" / n / "meta.json").exists()]
+    for n in new:
+        for e in by_model[n]:
+            _download(vol, e.path.lstrip("/"), WORK / "models" / n / e.path.split("/")[-1])
+    if new:
+        print(f"Models from the other machines: {', '.join(sorted(new))}")
+    return len(new)
 
 
 def write_reviewer_scenes():
@@ -1277,7 +1348,8 @@ def publish_runs() -> None:
         cat = Path(CATALOGUE_DIR)
         in_use = (_read_json(cat / "student_scores" / "index.json", {}) or {}).get("model")
         n = SR.export_runs(WORK / "models", cat / "student_runs", in_use)
-        print(f"Run records for the app: {n} runs → {cat / 'student_runs'} (☁️ Sync in the app to see them)")
+        print(f"Run records for the app: {n} runs from {SR.machine_name()} → {cat / 'student_runs'} "
+              "(laptop: ☁️ Sync from Google Drive in the app to see them)")
     except Exception as e:      # noqa: BLE001 — never fail a training run over this
         print(f"(Couldn't write the run records for the app: {e})")
 
@@ -1828,7 +1900,7 @@ def rescore_all(vs: str, label_weight: float) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Train / score the student tag model on the laptop.")
     ap.add_argument("command", choices=["fetch", "train", "score", "export", "picks", "all", "rescore-all", "runs",
-                                        "upload-local"])
+                                        "upload-local", "push-models"])
     ap.add_argument("--only", nargs="*", default=None, help="upload-local: just these video ids")
     ap.add_argument("--n", type=int, default=300, help="picks: how many where the student is unsure (default 300)")
     ap.add_argument("--n-test", type=int, default=80, help="picks: how many random test-set moments (default 80)")
@@ -1864,18 +1936,25 @@ def main(argv=None) -> int:
     WORK.mkdir(exist_ok=True)
     if a.command == "upload-local":
         return upload_local(a.only)
+    if a.command == "push-models":         # share every saved model (once, for models from before 9 Nov)
+        push_models()
+        return 0
     if a.command in ("fetch", "all"):
         rc = fetch()
         if rc or a.command == "fetch":
             return rc
     if a.command in ("train", "all"):
-        return train(a.name, a.epochs, a.label_weight, a.vs, max(2, a.folds), not a.no_teacher_trust,
-                     a.pose, a.context)
+        rc = train(a.name, a.epochs, a.label_weight, a.vs, max(2, a.folds), not a.no_teacher_trust,
+                   a.pose, a.context)
+        if rc == 0:
+            push_models([a.name])          # so every machine can rescore it
+        return rc
     if a.command == "export":
         rc = export(a.name)
         publish_runs()                     # ⭐ in use moves to this run
         return rc
     if a.command == "rescore-all":
+        pull_models()                      # every machine's runs, rescored here on the same labels
         return rescore_all(a.vs, a.label_weight)
     if a.command == "runs":                # just rewrite catalogue/student_runs from the saved runs
         publish_runs()

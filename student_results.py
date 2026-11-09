@@ -24,25 +24,67 @@ def _read_json(path, default=None):
         return default
 
 
+def _in_use_here() -> str | None:
+    """The model whose half-second scores this copy of the app reads (student_scores/index.json)."""
+    return (_read_json(CATALOGUE_DIR / "student_scores" / "index.json", {}) or {}).get("model")
+
+
+def merge_runs(files: list, in_use: str | None = None) -> dict | None:
+    """Every machine's runs@<machine>.json merged: one line per run — where a run was scored on several
+    machines, the newest score wins (its detail file goes with it). Oldest run first."""
+    best, created, file_in_use = {}, "", None
+    for data in sorted((d for d in files if isinstance(d, dict)), key=lambda d: d.get("created") or ""):
+        created = data.get("created") or created
+        file_in_use = data.get("in_use") or file_in_use       # the newest file's ⭐ wins
+        for ln in data.get("runs") or []:
+            if not isinstance(ln, dict) or not ln.get("name"):
+                continue
+            key = (ln.get("scored_at") or "", ln.get("created") or "")
+            cur = best.get(ln["name"])
+            if cur is None or key > (cur.get("scored_at") or "", cur.get("created") or ""):
+                best[ln["name"]] = dict(ln, _detail=f"{ln['name']}@{ln.get('machine') or data.get('machine')}.json")
+    if not best:
+        return None
+    use = in_use or file_in_use
+    runs = sorted(best.values(), key=lambda ln: (ln.get("created") or "", ln.get("name") or ""))
+    for ln in runs:
+        ln["in_use"] = ln["name"] == use
+    return {"created": created, "in_use": use, "runs": runs}
+
+
 def load_index() -> dict | None:
-    """{"created", "in_use", "runs": [...]} — oldest run first — or None if no run was exported yet."""
-    path = RUNS_DIR / "index.json"
-    try:
-        stamp = path.stat().st_mtime_ns
-    except OSError:
+    """{"created", "in_use", "runs": [...]} — oldest run first — or None if no run was exported yet. Merges every
+    machine's runs@<machine>.json (falls back to an old single index.json)."""
+    files = sorted(RUNS_DIR.glob("runs@*.json")) if RUNS_DIR.exists() else []
+    paths = files or [RUNS_DIR / "index.json"]
+    stamp = []
+    for p in paths + [CATALOGUE_DIR / "student_scores" / "index.json"]:
+        try:
+            stamp.append((p.name, p.stat().st_mtime_ns))
+        except OSError:
+            pass
+    if not files and not (RUNS_DIR / "index.json").exists():
         return None
     if _CACHE.get("stamp") != stamp:
-        data = _read_json(path)
         _CACHE.clear()
-        _CACHE.update(stamp=stamp, data=data if isinstance(data, dict) and data.get("runs") else None)
+        if files:
+            data = merge_runs([_read_json(p) for p in files], _in_use_here())
+        else:
+            data = _read_json(RUNS_DIR / "index.json")
+            data = data if isinstance(data, dict) and data.get("runs") else None
+        _CACHE.update(stamp=stamp, data=data)
     return _CACHE.get("data")
 
 
 def load_detail(name: str) -> dict | None:
-    """One run's per-tag detail (<run>.json), or None."""
+    """One run's per-tag detail — from the machine whose score the merged list shows — or None."""
+    idx = load_index() or {}               # first: a changed run list clears the cached details
     key = f"detail:{name}"
     if key not in _CACHE:
-        d = _read_json(RUNS_DIR / f"{name}.json")
+        ln = next((r for r in idx.get("runs") or [] if r.get("name") == name), {})
+        d = _read_json(RUNS_DIR / ln["_detail"]) if ln.get("_detail") else None
+        if not isinstance(d, dict):
+            d = _read_json(RUNS_DIR / f"{name}.json")
         _CACHE[key] = d if isinstance(d, dict) else None
     return _CACHE[key]
 
@@ -209,7 +251,7 @@ def run_rows(runs: list, groups: dict, detail_of=None) -> list:
             "first_f1": t.get("first_f1"), "train_f1": tr.get("f1"), "labels": r.get("labels"),
             "partial": r.get("partial"), "minutes": r.get("minutes"),
             "shot": t.get("shot"), "teacher_shot": t.get("teacher_shot"), "reference": t.get("reference"),
-            "teacher_f1": te.get("f1"),
+            "teacher_f1": te.get("f1"), "machine": r.get("machine") or "", "scored_at": t.get("scored_at"),
         })
     return out
 
@@ -301,15 +343,16 @@ def report_markdown(rows: list, baseline: dict | None, head: dict | None, label_
                   + ".")
         md.append("")
     md += ["## Runs (oldest first)", "",
-           "| Run | When | High F1 | Medium F1 | F1 | vs teacher | Right | Found | Training F1 | Your labels | Batch answers | What changed |",
-           "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+           "| Run | When | Scored on | High F1 | Medium F1 | F1 | vs teacher | Right | Found | Training F1 | Your labels | Batch answers | What changed |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
-        md.append(f"| {'⭐ ' if r['in_use'] else ''}{r['name']} | {r['created'] or ''} | {_f(r['high'])} | "
+        md.append(f"| {'⭐ ' if r['in_use'] else ''}{r['name']} | {r['created'] or ''} | "
+                  f"{r['machine'] or '–'} {r['scored_at'] or ''} | {_f(r['high'])} | "
                   f"{_f(r['medium'])} | {_f(r['f1'])} | {_sign(r['vs_teacher'])} | "
                   f"{_f(r['precision'], True)} | {_f(r['recall'], True)} | {_f(r['train_f1'])} | {r['labels'] or '–'} | "
                   f"{r['partial'] or '–'} | {(r['changed'] or '').replace('|', '/')} |")
     if baseline:
-        md.append(f"| {baseline['name']} | | {_f(baseline['high'])} | {_f(baseline['medium'])} | {_f(baseline['f1'])} "
+        md.append(f"| {baseline['name']} | | | {_f(baseline['high'])} | {_f(baseline['medium'])} | {_f(baseline['f1'])} "
                   f"| | | | | | | baseline on the same frames |")
     if rows:
         groups = sorted({g for r in rows[-3:] for g in r["groups"]}, key=lambda g: (

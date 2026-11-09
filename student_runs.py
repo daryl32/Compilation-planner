@@ -10,9 +10,13 @@ student_tags.py fills each run's meta.json with:
                 frames), overall and per tag, and when it was scored; "test_first" keeps the score from
                 the first time (when the run was trained) once `rescore-all` scores it again;
     "settings": what the run was trained with.
-This file turns those into catalogue/student_runs/ on Drive:
-    index.json      one line per run: when, the headline numbers, what changed, ⭐ in use
-    <run>.json      the per-tag detail for one run
+This file turns those into catalogue/student_runs/ (on Drive from the laptop, straight into the catalogue on
+the server), one set of files per machine so no machine ever overwrites another's (9 Nov):
+    runs@<machine>.json     one line per run this machine has: when, the headline numbers, what changed
+    <run>@<machine>.json    the per-tag detail for one run, as this machine last scored it
+The app (student_results.load_index) merges every machine's lines — where a run was scored on several
+machines, the newest score wins. The models themselves are shared through the Modal Volume
+(student_tags.py push_models / pull_models), so any machine can rescore every run.
 "What changed" is worked out here, by comparing each run with the one trained before it. Runs from
 before 6 Nov have no settings record, so their line comes from HISTORY (the session summaries' table).
 """
@@ -20,6 +24,9 @@ before 6 Nov have no settings record, so their line comes from HISTORY (the sess
 from __future__ import annotations
 
 import json
+import os
+import re
+import socket
 import time
 from pathlib import Path
 
@@ -154,9 +161,16 @@ def run_detail(meta: dict) -> dict:
             "test_best": te.get("best"), "reference": meta.get("reference_run")}
 
 
-def export_runs(models_dir: Path, dest: Path, in_use: str | None = None) -> int:
-    """catalogue/student_runs/ from every run in models_dir, keeping the lines of runs made elsewhere (another
-    machine's models) that are already there. Returns how many runs are listed."""
+def machine_name() -> str:
+    """This machine, for the run records: STUDENT_MACHINE if set, else the host name (letters, digits, - and _)."""
+    name = os.environ.get("STUDENT_MACHINE") or socket.gethostname() or "machine"
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-")[:40] or "machine"
+
+
+def export_runs(models_dir: Path, dest: Path, in_use: str | None = None, machine: str | None = None) -> int:
+    """This machine's run records in dest (catalogue/student_runs/): runs@<machine>.json + <run>@<machine>.json
+    for every run in models_dir. Other machines' files are never touched. Returns how many runs are listed."""
+    machine = machine or machine_name()
     metas = []
     for d in sorted(Path(models_dir).iterdir()) if Path(models_dir).exists() else []:
         m = _read(d / "meta.json")
@@ -167,22 +181,16 @@ def export_runs(models_dir: Path, dest: Path, in_use: str | None = None) -> int:
     dest.mkdir(parents=True, exist_ok=True)
     lines, prev = [], None
     for m in metas:
-        lines.append(run_line(m, what_changed(prev, m), m.get("name") == in_use))
-        tmp = dest / f"{m['name']}.json.tmp"
+        ln = run_line(m, what_changed(prev, m), m.get("name") == in_use)
+        ln["machine"] = machine
+        ln["scored_at"] = (m.get("test") or {}).get("scored_at") or m.get("created")
+        lines.append(ln)
+        tmp = dest / f"{m['name']}@{machine}.json.tmp"
         tmp.write_text(json.dumps(run_detail(m)), encoding="utf-8")
-        tmp.replace(dest / f"{m['name']}.json")
+        tmp.replace(dest / f"{m['name']}@{machine}.json")
         prev = m
-    # Runs this machine doesn't have (e.g. the laptop's, when the server runs the student) keep their
-    # lines, so the app's list never loses history because of where a command ran.
-    have = {ln.get("name") for ln in lines}
-    old = _read(dest / "index.json", {}) or {}
-    kept = [dict(ln, in_use=ln.get("name") == in_use) if in_use else ln
-            for ln in (old.get("runs") or []) if isinstance(ln, dict) and ln.get("name") not in have
-            and (dest / f"{ln['name']}.json").exists()]
-    if kept:
-        lines = sorted(kept + lines, key=lambda ln: (ln.get("created") or "", ln.get("name") or ""))
-    idx = {"created": time.strftime("%Y-%m-%d %H:%M"), "in_use": in_use or old.get("in_use"), "runs": lines}
-    tmp = dest / "index.json.tmp"
+    idx = {"machine": machine, "created": time.strftime("%Y-%m-%d %H:%M"), "in_use": in_use, "runs": lines}
+    tmp = dest / f"runs@{machine}.json.tmp"
     tmp.write_text(json.dumps(idx, indent=1), encoding="utf-8")
-    tmp.replace(dest / "index.json")
+    tmp.replace(dest / f"runs@{machine}.json")
     return len(lines)

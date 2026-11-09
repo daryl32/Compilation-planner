@@ -446,22 +446,34 @@ def test_work_dir_from_the_environment(monkeypatch, tmp_path):
     assert S.work_root() != tmp_path
 
 
-def test_export_runs_keeps_runs_made_on_another_machine(tmp_path):
-    """The server lists its own runs and keeps the laptop's (already in catalogue/student_runs)."""
+def test_run_records_per_machine_merged_newest_score_wins(tmp_path):
+    """Each machine writes runs@<machine>.json (never another's); the app merges them, the newest score wins."""
+    from tests.support import DATA  # noqa: F401  (the app's config, for student_results)
+    import student_results as SRS
     import student_runs as SR
     dest = tmp_path / "student_runs"
-    dest.mkdir()
-    (dest / "v12.json").write_text("{}")
-    (dest / "index.json").write_text(json.dumps({"in_use": "v12", "runs": [
-        {"name": "v12", "created": "2026-11-06 16:45", "in_use": True},
-        {"name": "gone", "created": "2026-11-01 10:00", "in_use": False}]}))   # no detail file → dropped
-    models = tmp_path / "models" / "v13"
-    models.mkdir(parents=True)
-    (models / "meta.json").write_text(json.dumps({"name": "v13", "created": "2026-11-08 10:00"}))
-    assert SR.export_runs(tmp_path / "models", dest, in_use="v13") == 2
-    idx = json.loads((dest / "index.json").read_text())
-    assert [r["name"] for r in idx["runs"]] == ["v12", "v13"]
-    assert idx["in_use"] == "v13" and [r["in_use"] for r in idx["runs"]] == [False, True]
+
+    def machine(name, runs):
+        models = tmp_path / name / "models"
+        for run, created, scored, f1 in runs:
+            (models / run).mkdir(parents=True)
+            (models / run / "meta.json").write_text(json.dumps({
+                "name": run, "created": created, "tags": ["a"],
+                "test": {"frames": 9, "best": "rules", "scored_at": scored,
+                         "scores": {"rules": {"f1": f1, "n": 9}}, "per_tag": {"a": {"f1": f1}}}}))
+        return SR.export_runs(models, dest, in_use=None, machine=name)
+
+    assert machine("server", [("v13", "2026-11-07 22:00", "2026-11-09 10:00", .70),
+                              ("v12", "2026-11-06 16:45", "2026-11-09 10:00", .66)]) == 2
+    assert machine("laptop", [("v12", "2026-11-06 16:45", "2026-11-06 17:00", .77),     # older score of v12
+                              ("v14", "2026-11-09 15:01", "2026-11-09 15:30", .71)]) == 2
+    assert {p.name for p in dest.iterdir()} >= {"runs@server.json", "runs@laptop.json", "v12@server.json",
+                                                "v12@laptop.json", "v13@server.json", "v14@laptop.json"}
+    idx = SRS.merge_runs([json.loads(p.read_text()) for p in dest.glob("runs@*.json")], in_use="v13")
+    assert [r["name"] for r in idx["runs"]] == ["v12", "v13", "v14"]
+    by = {r["name"]: r for r in idx["runs"]}
+    assert by["v12"]["machine"] == "server" and by["v12"]["_detail"] == "v12@server.json"   # newest score
+    assert by["v14"]["machine"] == "laptop" and [r["in_use"] for r in idx["runs"]] == [False, True, False]
 
 
 def test_scene_weight_setting(tmp_path, monkeypatch):
@@ -532,3 +544,51 @@ def test_upload_local_sends_laptop_only_videos(tmp_path, monkeypatch):
             (d / S.TEACHER_FILE).write_text("{}")
     assert S.main(["upload-local"]) == 0
     assert sent == ["local/lv1/embeddings.npz"]            # vision.json already there; modal1 is Modal's own
+
+
+def test_models_shared_through_the_volume(tmp_path, monkeypatch):
+    """push_models uploads a run once; pull_models on another machine downloads runs it doesn't have."""
+    import sys
+    import types
+    store = {}
+
+    class Entry:
+        def __init__(self, path):
+            self.path, self.size = path, len(store[path])
+
+    class Batch:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def put_file(self, local, remote):
+            store[remote] = open(local, "rb").read()
+
+    class Vol:
+        def listdir(self, prefix, recursive=False):
+            hits = [Entry(p) for p in store if p.startswith(prefix + "/")]
+            if not hits:
+                raise FileNotFoundError(prefix)
+            return hits
+
+        def batch_upload(self, force=False):
+            return Batch()
+
+        def read_file_into_fileobj(self, remote, fh):
+            fh.write(store[remote])
+
+    fake = types.SimpleNamespace(Volume=types.SimpleNamespace(from_name=lambda name: Vol()))
+    monkeypatch.setitem(sys.modules, "modal", fake)
+    a, b = tmp_path / "laptop", tmp_path / "server"
+    (a / "models" / "v14").mkdir(parents=True)
+    (a / "models" / "v14" / "meta.json").write_text('{"name": "v14"}')
+    (a / "models" / "v14" / "head0.pt").write_bytes(b"weights")
+    (a / "models" / "v14" / "notes.txt").write_text("not shared")
+    monkeypatch.setattr(S, "WORK", a)
+    assert S.push_models(["v14"]) == 2 and S.push_models(["v14"]) == 0          # second time: nothing new
+    assert set(store) == {"student_models/v14/meta.json", "student_models/v14/head0.pt"}
+    monkeypatch.setattr(S, "WORK", b)
+    assert S.pull_models() == 1 and (b / "models" / "v14" / "head0.pt").read_bytes() == b"weights"
+    assert S.pull_models() == 0

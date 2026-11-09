@@ -4,7 +4,8 @@
 #   deploy/student.sh setup                 one-off: CPU PyTorch + numpy into /root/modal-venv
 #   deploy/student.sh fetch                 new / changed video data from Modal (free) + your labels
 #   deploy/student.sh all --name v13        fetch, train, score
-#   deploy/student.sh rescore-all           every saved model on today's test labels
+#   deploy/student.sh rescore-all           every model (yours + shared from the laptop) on today's test labels
+#   deploy/student.sh push-models           share every saved model on Modal (once — new runs share themselves)
 #   deploy/student.sh picks --name v13      🎓 Student's picks for 🎯 Training Labels
 #   deploy/student.sh export --name v13     scores for every half second → catalogue/student_scores
 #
@@ -22,6 +23,7 @@ export STUDENT_WORK_DIR=${STUDENT_WORK_DIR:-/root/data/student}
 THREADS=${STUDENT_THREADS:-3}            # leave a core for the app (the server has 4)
 MEM=${STUDENT_MEM:-4G}                   # the run is stopped past this, never the app
 LOG=${STUDENT_LOG:-/root/data/logs/student.log}
+export STUDENT_MACHINE=${STUDENT_MACHINE:-server}   # its run records are runs@server.json in 📊 Results
 
 if [ "${1:-}" = "setup" ]; then
   echo "Installing CPU PyTorch + numpy into $(dirname "$(dirname "$PY")") (about 700 MB on disk)…"

@@ -21,9 +21,12 @@ rem      student_tags.bat export --name v4          scores for every half
 rem                                                 second -> Drive catalogue
 rem      student_tags.bat rescore-all               every saved model on today's
 rem                                                 test labels (for the app)
+rem      student_tags.bat push-models               share every model on Modal
+rem                                                 (once; new runs share themselves)
 rem ============================================================
 
 cd /d "%~dp0scripts"
+if not defined STUDENT_MACHINE set STUDENT_MACHINE=laptop
 set VENV=..\.venv
 
 if not exist "%VENV%\Scripts\activate.bat" (
