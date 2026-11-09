@@ -13,7 +13,7 @@ models are trained and judged against (claude/ml-redesign-plan.md, Phase 4).
                  ⏭️ Skip (bad frame) is remembered, so that frame never comes back.
                  • 🧪 New test videos — videos you add to the test set: 60 moments each, spread evenly,
                    nothing prefilled (so the test can't lean towards a model's guesses).
-  📊 Progress    how many of each, which tags still need examples, recent answers (with ↩️ undo).
+  📊 Progress    what you've labelled — training vs 🧪 test, ▦ batch answers, per tag by group, recent answers (↩️ undo).
   📒 Vocabulary  tag_vocabulary.csv — edit it here, upload your Excel copy, or download it.
   🧪 Trial results  the latest Modal trial (trial_view.py): every tagged frame with your tags, the
                  old tags and each model's tags side by side; motion curves and cuts; the report.
@@ -48,7 +48,6 @@ SOURCE_QUESTION = {
     "peak": "The sharpest picture change inside a long scene. **Should a new scene start here?**",
     "random": "A random point. **Should a new scene start here?**",
 }
-TARGET_PER_TAG = 20   # examples per tag the Progress view aims for
 
 # ---------------------------------------------------------------------------
 # Sidebar
@@ -276,40 +275,54 @@ def label_view() -> None:
 # ---------------------------------------------------------------------------
 
 def progress_view() -> None:
+    """What you've labelled (9 Nov): training vs 🧪 test, ▦ batch answers included, per tag by group. Which tags
+    to work on next is 📊 Results → What to label next."""
+    import trial_results as TR
     items = TL.load_labels()
-    sm = TL.summary(items)
-    c = st.columns(5)
-    c[0].metric("Frames tagged", sm["tags"])
-    c[1].metric("Tags changed", sm["changed"], help="Frames where your tags differ from the scene's "
-                "current tags — how often the old tagger was wrong.")
-    c[2].metric("Scene changes", sm["boundaries"], help=f"{sm['cuts']} said yes, new scene.")
-    c[3].metric("Videos", sm["videos"])
-    c[4].metric("Skipped", sm["skipped"])
+    try:
+        test = TR.test_set_videos()
+    except Exception:                     # noqa: BLE001
+        test = set()
+    p = TL.progress(items, test, vocab)
+    try:
+        nt = TL.new_test_progress(CS.video_index(), items, library_ranges())
+    except Exception:                     # noqa: BLE001
+        nt = []
+    c = st.columns(4)
+    c[0].metric("Training frames", f"{p['train_full'] + p['train_batch_frames']:,}",
+                help=f"{p['train_full']:,} full labels (every tag decided) + {p['train_batch_frames']:,} frames with "
+                     "▦ batch answers (only the tags you answered).")
+    c[1].metric("Batch answers", f"{p['batch_yes'] + p['batch_no']:,}",
+                help=f"✅ {p['batch_yes']:,} yes · ❌ {p['batch_no']:,} no — each teaches the student that one tag.")
+    c[2].metric("🧪 Test frames", f"{p['test_full']:,}",
+                delta=f"{p['test_part']} part-reviewed" if p["test_part"] else None, delta_color="off",
+                help="Full labels in the 🧪 test videos — only these count in the test. Part-reviewed frames need "
+                     "🧩 / 🧹 in Compare tags to count.")
+    c[3].metric("Today", f"{p['today']:,}", help="Answers saved today (full labels and batch frames).")
+    if nt:
+        done, planned = sum(d for _, d, _ in nt), sum(n for _, _, n in nt)
+        st.caption(f"🧪 New test videos: **{done} of {planned}** moments labelled across {len(nt)} videos.")
 
-    st.subheader("Examples per tag")
-    st.caption(f"Each tag wants about {TARGET_PER_TAG} frames where it's there. Fewest first.")
-    rows = [{"Tag": r["tag"], "Kind": r["kind"], "Examples": sm["per_tag"].get(r["tag"], 0),
-             "Big model may try": "yes" if r["teacher"] else "no"} for r in vocab]
-    rows.sort(key=lambda r: (r["Examples"], r["Tag"].lower()))
-    if rows:
-        st.dataframe(rows, hide_index=True, width="stretch", column_config={
-            "Examples": st.column_config.ProgressColumn("Examples", min_value=0, max_value=TARGET_PER_TAG,
-                                                        format="%d")})
+    st.subheader("Per tag")
+    st.caption("High groups first. **Training ✅ / ❌** = your yes / no answers in training videos (full labels "
+               "and ▦ batch answers); **Test ✅** = test frames that have the tag. Hair, shot sizes and text on "
+               "screen aren't listed. Which tags to work on next: 🧪 Trial results → 📊 Results.")
+    if p["tags"]:
+        st.dataframe([{"Group": f"{r['group']} · {r['importance']}" if r["importance"] != "—" else r["group"],
+                       "Tag": r["tag"], "Training ✅": r["train_yes"], "Training ❌": r["train_no"],
+                       "Test ✅": r["test_yes"], "Last labelled": (r["last"] or "").replace("T", " ")[:16] or None}
+                      for r in p["tags"]], hide_index=True, width="stretch", key="tl_prog_tags")
 
     st.subheader("Recent answers")
-    recent = list(reversed(items))[:15]
+    recent = [i for i in reversed(items) if TL.describe_answer(i) or i.get("type") == "boundary"][:15]
     if not recent:
         st.caption("Nothing yet.")
     for n, it in enumerate(recent):
-        if it.get("skipped"):
-            what = f"⏭️ skipped ({it.get('reason')})"
-        elif it["type"] == "tags":
-            what = "🏷️ " + (", ".join(it.get("tags") or []) or "no tags")
-        else:
-            what = VERDICTS.get(it.get("verdict"), "?") + f" ({it.get('source')})"
+        what = TL.describe_answer(it) or (VERDICTS.get(it.get("verdict"), "?") + f" ({it.get('source')})")
+        where = "🧪 " if it.get("video_id") in test else ""
         with st.container(key=f"tl_wrap_recent_{n}"):
             a, b = st.columns([5, 1])
-            a.write(f"**{it['video_id']}** · {format_mmss(it.get('t') or 0)} · {what}")
+            a.write(f"{where}**{it['video_id']}** · {format_mmss(it.get('t') or 0)} · {what}")
             b.button("↩️ Undo", key=f"tl_undo_{it['id']}", on_click=TL.remove_label, args=(it["id"],),
                      width="stretch")
 
