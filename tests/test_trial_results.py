@@ -97,7 +97,7 @@ def test_view_without_results():
     assert any("No trial results here yet" in i.value for i in at.info)
 
 
-@pytest.mark.parametrize("sub", ["🖼️ Compare tags", "🕺 Motion", "🏋️ Training results"])
+@pytest.mark.parametrize("sub", ["🖼️ Compare tags", "🕺 Motion", "🗄️ Teacher"])
 def test_view(bundle, sub):
     from tests.apptest_util import errors, page_app
     at = page_app("pages/6_Training_Labels.py")
@@ -125,7 +125,7 @@ def test_view(bundle, sub):
         assert not errors(at), errors(at)
         assert not at.info                                        # you and the 32B both picked "dance"
         assert at.session_state["tr_by"] == "both"
-    elif sub == "🏋️ Training results":
+    elif sub == "🗄️ Teacher":
         assert "Hello." in md                                     # the written report, in its fold-out
 
 
@@ -312,17 +312,15 @@ def test_teacher_label_and_batch_scorecard_fields():
     assert rows["All"]["teacher"] == "32B + 32B FP8" and rows["All"]["examples"] == "mixed"
 
 
-def test_summary_opens_first_with_scorecard(bundle, no_labels):
-    """📋 Summary opens first, as a landing page; the teacher's batch scorecard rows and the batch
-    fold-outs are on 🏋️ Training results."""
+def test_results_opens_first_teacher_has_the_batches(bundle, no_labels):
+    """📊 Results opens first; the teacher's batch fold-outs are in the 🗄️ Teacher archive."""
     from tests.apptest_util import errors, page_app
     at = page_app("pages/6_Training_Labels.py")
     at.session_state["tl_view"] = "🧪 Trial results"
     at.run()
     assert not errors(at), errors(at)
-    md = [m.value for m in at.markdown]
-    assert "#### 🏋️ Training results" in md and "#### 🧪 Test results" in md
-    at.button(key="tr_go_train").click().run()
+    assert at.session_state["tr_sub"] == "📊 Results"
+    at.radio(key="tr_sub").set_value("🗄️ Teacher").run()
     assert not errors(at), errors(at)
     labels = [e.label for e in at.expander]
     for want in ("💷 Cost and time per batch", "🔎 Tagging detail per batch", "✂️ Scene changes per batch",
@@ -475,11 +473,11 @@ def test_summary_shows_test_runs(bundle, no_labels):
                    tags=["close-up shot", "dance"])
     at = page_app("pages/6_Training_Labels.py")
     at.session_state["tl_view"] = "🧪 Trial results"
-    at.session_state["tr_sub"] = "🧪 Test results"
+    at.session_state["tr_sub"] = "🗄️ Teacher"
     at.run()
     assert not errors(at), errors(at)
-    assert "#### 🧪 Test results" in [m.value for m in at.markdown]
-    runs = [d for d in at.dataframe if "Vs teacher" in d.value.columns]               # the runs table
+    assert "##### 🧪 Teacher test runs" in [m.value for m in at.markdown]
+    runs = [d for d in at.dataframe if "Settings" in d.value.columns]                 # the teacher runs table
     assert runs and any("needs-a-tag fills" in str(s) or "2nd looks" in str(s) for s in runs[0].value["Settings"])
     assert any("Errors" in d.value.columns for d in at.dataframe)                     # per-tag changes
     assert any("dance · threshold" in c.value for c in at.caption)
@@ -942,9 +940,9 @@ def test_new_test_videos_in_compare_tags(bundle, clean_labels):
         assert not errors(at), errors(at)
         part = [i for i in TLB.load_labels() if i["type"] == "partial"]
         assert len(part) == 1 and part[0]["video_id"] == "vid_a" and part[0]["t"] == ms[0]["t"]
-        at.session_state["tr_sub"] = "📊 Scores"
+        at.session_state["tr_sub"] = "🗄️ Teacher"
         at.run()
-        assert any("only in 🖼️ Compare tags" in i.value for i in at.info)
+        assert any("no teacher run" in i.value for i in at.info)
     finally:
         if had_extra is None:
             TLB.EXTRA_TEST_FILE.unlink(missing_ok=True)

@@ -1,5 +1,5 @@
-"""Student runs in the web app (student_results.py + student_results_view.py): 📋 Summary landing,
-🏋️ Training results and 🧪 Test results, notes per run — from records like the laptop writes."""
+"""Student runs in the web app (student_results.py + student_results_view.py): 📊 Results (headline, runs,
+what to label next, 📥 markdown) and 🗄️ Teacher, notes per run — from records like the laptop writes."""
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ def test_index_notes_and_helpers(runs):
     assert "0.40–0.70" in SRS.settings_text({"cutoffs": "plain", "cutoff_range": [.4, .7], "pose": True})
 
 
-@pytest.mark.parametrize("sub", ["📋 Summary", "🏋️ Training results", "🧪 Test results"])
+@pytest.mark.parametrize("sub", ["📊 Results", "🗄️ Teacher", "📋 Summary"])
 def test_pages(runs, sub):
     from tests.test_trial_results import _bundle  # noqa: F401  (needs the trial bundle on disk)
     import trial_results as TR
@@ -90,18 +90,36 @@ def test_pages(runs, sub):
     at.run()
     assert not errors(at), errors(at)
     text = " ".join([m.value for m in at.markdown] + [c.value for c in at.caption])
-    if sub == "📋 Summary":
-        assert [m.value for m in at.metric][:1] and "v12" in " ".join(m.label for m in at.metric)
-        at.button(key="tr_go_test").click().run()
-        assert not errors(at), errors(at)
-        assert at.session_state["tr_sub"] == "🧪 Test results"
-    elif sub == "🏋️ Training results":
+    if sub == "🗄️ Teacher":
         assert "Hello." in text                              # the teacher batches' written report
-        assert at.selectbox(key="srv_train_tag_run").value == "v12"
-    else:
-        assert at.selectbox(key="srv_test_tag_run").value == "v12"   # 🏆 best opens first
-        assert "chance" in text
+        assert at.selectbox(key="tr_batch")                  # the Batch box only here (and Compare / Motion)
+    else:                                                    # old tab names open 📊 Results
+        assert at.session_state["tr_sub"] == "📊 Results"
+        assert not [s for s in at.selectbox if s.key == "tr_batch"]
+        labels = " ".join(m.label for m in at.metric)
+        assert "v12" in labels and "chance" in text            # newest run vs the one before
+        assert at.selectbox(key="srv_label_run").value == "v12"
+        at.toggle(key="srv_details").set_value(True).run()
+        assert not errors(at), errors(at)
     shutil.rmtree(TR.RESULTS_DIR, ignore_errors=True)
+
+
+def test_results_logic_and_markdown(runs):
+    rows = SRS.run_rows(SRS.load_index()["runs"], {"kissing": "action", "pov": "camera", "close-up": "shot"})
+    assert [r["name"] for r in rows] == ["v5b", "v10", "v12"]
+    assert rows[-1]["high"] is not None and rows[-1]["medium"] is None
+    head = SRS.headline(rows)
+    assert head["key"] == "high" and head["prev"]["name"] == "v10" and head["verdict"]
+    base = SRS.teacher_baseline(rows, {"kissing": "action"})
+    assert base and base["f1"] is not None
+    lr = SRS.label_next(SRS.load_detail("v12"), {"kissing": "action", "pov": "camera", "close-up": "shot"})
+    assert [x["importance"] for x in lr] == ["High", "High"]      # High groups first; close-up (shot) not listed
+    assert lr[0]["errors"] >= lr[1]["errors"]                               # then most errors first
+    print(SRS.report_markdown(rows, base, head, lr, "v12"))
+    md = SRS.report_markdown(rows, base, head, lr, "v12", {"checked": 2, "right": 1, "main_right": 2, "unsure": 0,
+                                                          "models": ["v13"]}, "2026-11-09")
+    assert md.startswith("# Student tag model — results (2026-11-09)")
+    assert "| v12 |" in md and "Per tag — v12" in md and "Vote right 1 / 2" in md and "baseline" in md
 
 
 def test_test_page_hair_check(runs):
@@ -122,7 +140,7 @@ def test_test_page_hair_check(runs):
         (TR.RESULTS_DIR / "results.json").write_text(json.dumps(_bundle()))
         at = page_app("pages/6_Training_Labels.py")
         at.session_state["tl_view"] = "🧪 Trial results"
-        at.session_state["tr_sub"] = "🧪 Test results"
+        at.session_state["tr_sub"] = "📊 Results"
         at.run()
         assert not errors(at), errors(at)
         got = {m.label: m.value for m in at.metric}
@@ -147,9 +165,9 @@ def test_test_page_group_card(runs, monkeypatch):
     try:
         at = page_app("pages/6_Training_Labels.py")
         at.session_state["tl_view"] = "🧪 Trial results"
-        at.session_state["tr_sub"] = "🧪 Test results"
+        at.session_state["tr_sub"] = "📊 Results"
         at.run()
         assert not errors(at), errors(at)
-        assert any("By tag group" in m.value for m in at.markdown)
+        assert any("High F1" in m.label for m in at.metric)
     finally:
         shutil.rmtree(TR.RESULTS_DIR, ignore_errors=True)

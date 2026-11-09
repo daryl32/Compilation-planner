@@ -1623,7 +1623,7 @@ def _run_test(keys: list, label: str, keep_vocab: bool, dedup: float, lora: str 
     text = finish_test_run.remote(run_id, meta)
     Path("test_report.md").write_text(text, encoding="utf-8")
     print("\n" + text + f"\n\nSaved {Path('test_report.md').resolve()}")
-    print(f"   Test runs → {_download_test_runs()}\n   In the app: 🧪 Trial results → 📋 Summary → 🧪 Test set.")
+    print(f"   Test runs → {_download_test_runs()}\n   In the app: 🧪 Trial results → 🗄️ Teacher.")
 
 
 @app.function(image=report_image, volumes={DATA: pack_vol})
@@ -2468,12 +2468,12 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         return
     if stage == "test-refresh":
         text = finish_test_run.remote("", {})
-        print(text + f"\n\n   Test runs → {_download_test_runs()}\n   In the app: 🧪 Trial results → 📋 Summary → 🧪 Test set.")
+        print(text + f"\n\n   Test runs → {_download_test_runs()}\n   In the app: 🧪 Trial results → 🗄️ Teacher.")
         return
     if stage in ("neighbours", "look-check", "look-fix"):
         if not run.strip():
             print("--run <test run id> is needed, e.g. --run 2026-11-01_2239_positions-v2 "
-                  "(the names are in 📋 Summary → 🧪 Test set).")
+                  "(the names are in 🧪 Trial results → 🗄️ Teacher).")
             return
         meta = derived_test_run.remote(run.strip(), stage)
         if meta.get("error"):
@@ -2487,7 +2487,7 @@ def main(stage: str = "all", smoke: bool = False, videos: str = "", redo: bool =
         text = finish_test_run.remote(meta["id"], meta)
         Path("test_report.md").write_text(text, encoding="utf-8")
         print("\n" + text + f"\n\nSaved {Path('test_report.md').resolve()}")
-        print(f"   Test runs → {_download_test_runs()}\n   In the app: 🧪 Trial results → 📋 Summary → 🧪 Test set.")
+        print(f"   Test runs → {_download_test_runs()}\n   In the app: 🧪 Trial results → 🗄️ Teacher.")
         return
     if stage == "lora-train":
         name = label.strip().replace(" ", "-") or time.strftime("lora-%Y%m%d-%H%M")

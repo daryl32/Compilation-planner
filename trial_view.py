@@ -1011,7 +1011,7 @@ def _batch_details(data: dict) -> None:
                 "`modal run modal_trial.py --stage results` (no GPU, about a minute).")
     pct = lambda x: None if x is None else round(x * 100)
     names = lambda r: "All batches" if r["batch"] == "All" else (f"Batch {r['batch']}" if r["batch"] != "?" else "Not recorded")
-    st.caption("Teacher batches in detail — per-tag detail for a batch: pick it in the Batch box, then 📊 Scores.")
+    st.caption("Teacher batches in detail — per-tag detail for a batch: pick it in the Batch box, then 📊 Scores at the top.")
     with st.expander("💷 Cost and time per batch"):
         st.dataframe([{"": names(r), "Run (UTC)": r["run"], "Videos": r["videos"], "Footage (h)": r["footage_h"],
                        "Vision GPU": r["vision_gpu"], "Vision (min)": r["vision_min"], "Vision $": r["vision_cost"],
@@ -1246,28 +1246,36 @@ def render() -> None:
     opts = [None] + blist + ([TR.NEW_TEST_BATCH] if TLB.load_extra_test() else [])
     if st.session_state.get("tr_batch") not in opts:
         st.session_state.pop("tr_batch", None)
+    pages = [SRV.RESULTS, "🖼️ Compare tags", "🕺 Motion", "🏷️ Scene tags", SRV.TEACHER]
+    if st.session_state.get("tr_sub") not in pages:          # old tab names (Summary / Training / Test / Scores)
+        st.session_state["tr_sub"] = SRV.TEACHER if st.session_state.get("tr_sub") == "📊 Scores" else SRV.RESULTS
+    with st.container(key="subnav_tr"):
+        sub = st.radio("Trial", pages, horizontal=True, key="tr_sub", label_visibility="collapsed")
+    if sub == "🏷️ Scene tags":
+        _scene_tags(data)                      # always every batch: the new tags come from all of them
+        return
+    if sub == SRV.RESULTS:
+        SRV.results(data)
+        return
+    # The Batch box only matters for the pages that show the teacher's batches.
     with st.container(key="tl_wrap_tr_top"):
-        a, b = st.columns([1, 3])
+        a, _ = st.columns([1, 3])
         batch = a.selectbox("Batch", opts, format_func=names.get, key="tr_batch",
                             help="Look at one batch run on its own, or all of them together. 🧪 New test videos = "
                                  "the videos you added to the test set (🎯 Cards → 🧪 New test videos): 60 moments "
                                  "each, label them here in ▦ Grid.")
-        with b:
-            with st.container(key="subnav_tr"):
-                sub = st.radio("Trial", ["📋 Summary", SRV.TRAINING, SRV.TEST, "🖼️ Compare tags", "📊 Scores", "🕺 Motion",
-                                        "🏷️ Scene tags"], horizontal=True,
-                               key="tr_sub", label_visibility="collapsed")
-    if sub == "🏷️ Scene tags":
-        _scene_tags(data)                      # always every batch: the new tags come from all of them
-        return
-    if sub == "📋 Summary":
-        SRV.landing(data)
-        return
-    if sub == SRV.TRAINING:
-        SRV.training(data)
-        return
-    if sub == SRV.TEST:
-        SRV.test()
+    if sub == SRV.TEACHER:
+        if batch == TR.NEW_TEST_BATCH:
+            st.info("🧪 New test videos have no teacher run — pick a batch, or All batches.")
+            return
+        view = {**data, "videos": TR.in_batch(data["videos"], batch)}
+        st.caption("The teacher's tools — its tuning finished on 3 Nov. Useful again if more Modal batches are run.")
+        with st.expander(f"📊 Scores for {names.get(batch)} — per tag, and 🎚️ thresholds", expanded=True):
+            if view["videos"]:
+                _scores(view)
+            else:
+                st.info("No videos in this batch.")
+        SRV.teacher_runs(data)
         return
     if batch == TR.NEW_TEST_BATCH:
         if sub != "🖼️ Compare tags":
@@ -1290,7 +1298,5 @@ def render() -> None:
         return
     if sub == "🖼️ Compare tags":
         _compare(view)
-    elif sub == "📊 Scores":
-        _scores(view)
     else:
         _motion(view)
