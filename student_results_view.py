@@ -284,6 +284,46 @@ def _hair_check() -> None:
                              hide_index=True, width="stretch", key="srv_hair_wrong")
 
 
+def _group_check(runs: list, scored: list, best: str | None) -> None:
+    """F1 per tag group, High groups first — what the matcher leans on most (claude/tag-levels.md)."""
+    vocab, _ = TLB.load_vocabulary()
+    groups = SRS.group_of_tags(vocab)
+    used = [g for g, imp in SRS.GROUP_IMPORTANCE.items()
+            if g in set(groups.values())]
+    rows = []
+
+    def row(label, who, per_tag):
+        sc = SRS.group_scores(per_tag, groups)
+        if not sc["groups"]:
+            return
+        r = {"Run": label, "Who": who}
+        for imp in SRS.IMPORTANCE_ORDER:
+            r[f"{imp} F1"] = _f1((sc["importance"].get(imp) or {}).get("f1"))
+        for g in used:
+            r[g.capitalize()] = _f1((sc["groups"].get(g) or {}).get("f1"))
+        rows.append(r)
+
+    for r in reversed(runs):
+        if (r.get("test") or {}).get("student"):
+            d = SRS.load_detail(r["name"]) or {}
+            row(_marks(r, best) + r["name"], "Student",
+                {t: (x or {}).get("test") for t, x in (d.get("per_tag") or {}).items()})
+    for x in reversed(scored):
+        run = x["run"]
+        row(run.get("label") or run["id"], "Teacher", x["score"].get("per_tag") or {})
+    if not rows:
+        return
+    with st.container(border=True):
+        st.markdown("**🎯 By tag group** — High: " + ", ".join(g for g, i in SRS.GROUP_IMPORTANCE.items()
+                                                               if i == "High")
+                    + " · Medium: " + ", ".join(g for g, i in SRS.GROUP_IMPORTANCE.items() if i == "Medium"))
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", key="srv_group_table",
+                     column_config={c: _f1_col(c) for c in rows[0] if c not in ("Run", "Who")})
+        st.caption("**High F1** is the number to watch — the groups the matcher leans on most. Groups come from "
+                   "📒 Vocabulary. Hair (per video), shot size (🎥 below) and text on screen aren't counted. Student "
+                   "rows need `rescore-all` to pick up label changes.")
+
+
 def _shot_check(runs: list, scored: list, best: str | None) -> None:
     """🎥 Shot size on its scale (extreme close-up → close-up → medium → wide): the matcher only cares how
     far apart two shots are, so within one step is the number that counts."""
@@ -325,7 +365,8 @@ def test() -> None:
                "the reference teacher run also tagged, so every row is the same frames. **Vs teacher** = the "
                "student minus that teacher run on them. **F1 at the time** = its score when it was trained."
                + (f" At {frames} frames a difference under ±{SRS.noise_f1(frames):.2f} F1 is chance." if frames else "")
-               + " 💇 Hair colour and 🎥 shot size are left out of every F1 — each has its own check below.")
+               + " 💇 Hair colour and 🎥 shot size are left out of every F1 (each has its own check below), and so "
+                 "is text on screen (not used — junk footage is found from nobody on screen).")
     _hair_check()
     _shot_check(runs, scored, best)
     pts = []
@@ -363,6 +404,7 @@ def test() -> None:
                                          "Your note": st.column_config.TextColumn(width="medium")})
     st.caption("⭐ in use · 🏆 best on the test set · teacher rows: each teacher test run on all your labelled "
                "frames it tagged (its own frame count). Newest first.")
+    _group_check(runs, scored, best)
 
     studs = [r for r in runs if r.get("test")]
     if studs:

@@ -31,10 +31,12 @@ from config import CATALOGUE_DIR
 from library_common import (safe_image, image_ok, video_details, set_video_details, all_actors,
                             all_video_tags, suggest_video_tags, matches_details, mark_pending, master_thumbnail_scenes, set_master_thumbnail,
                             proxy_path, library_ranges, tc_to_seconds, format_mmss, overlap_with_range,
-                            scene_tags, HAIR_COLOURS, HAIR_EMOJI, video_hair, hair_of, hair_label,
-                            hair_needs_confirming, hair_unsure, set_video_hair, set_hair_votes, matches_hair)
+                            scene_tags, scene_thumbnail_path, HAIR_COLOURS, HAIR_EMOJI, video_hair, hair_of, hair_label,
+                            hair_needs_confirming, hair_unsure, set_video_hair, set_hair_votes, matches_hair,
+                            CAST_MAX, CAST_ANY, video_cast, set_video_cast, matches_cast, cast_label)
 import catalogue_store as CS
 import scene_edits as SE
+import footage_people as FP
 import scene_roles as SR
 
 # Sign-in, whitelist, Drive connect, title and the shared sidebar — see page_setup.py
@@ -271,6 +273,8 @@ FIND_NO_VTAGS = "🏷️ No video tags yet"
 FIND_HAIR_TODO = "💇 Hair not confirmed"
 FIND_HAIR_UNSURE = "❓ Hair to confirm (vote unsure)"
 FIND_TEST = "🧪 In the test set"
+FIND_NOBODY = "🚫 Has clips with nobody on screen"
+FIND_NO_CAST = "👥 No cast yet"
 FIND_NO_THUMB = "⭐ No custom thumbnail"
 FIND_SPLIT = "✂️ Has split suggestions"
 FIND_MERGE = "🔗 Has combine suggestions"
@@ -348,7 +352,7 @@ with st.container(border=True, key="rev_wrap_find"):
     find_flags = fc[1].multiselect(
         "Only videos that…",
         [FIND_TODAY, FIND_3DAYS, FIND_NEW, FIND_UNTAGGED, FIND_UNROLED, FIND_NO_THUMB, FIND_SPLIT, FIND_MERGE,
-         FIND_NO_OUTRO, FIND_NO_INTRO, FIND_NO_ACTORS, FIND_NO_VTAGS, FIND_HAIR_TODO, FIND_HAIR_UNSURE, FIND_TEST],
+         FIND_NO_OUTRO, FIND_NO_INTRO, FIND_NO_ACTORS, FIND_NO_VTAGS, FIND_HAIR_TODO, FIND_HAIR_UNSURE, FIND_TEST, FIND_NOBODY, FIND_NO_CAST],
         key="rev_find_flags", placeholder="any video",
         help="Pick several to narrow it down further (a video must match all of them). "
              "Split/combine suggestions use the sidebar settings and the library range.",
@@ -356,6 +360,7 @@ with st.container(border=True, key="rev_wrap_find"):
 
     _details = video_details()
     _hair = video_hair()
+    _cast = video_cast()
     _test_vids = set()
     if FIND_TEST in find_flags:
         try:
@@ -366,7 +371,9 @@ with st.container(border=True, key="rev_wrap_find"):
     _roles = SR.roles_by_id()
     # Actors / video tags / roles: less used, so in a popover (its label counts the ones in use).
     _n_more = sum(bool(st.session_state.get(k)) for k in
-                  ("rev_find_actors", "rev_find_vtags", "rev_find_roles", "rev_find_no_roles", "rev_find_hair"))
+                  ("rev_find_actors", "rev_find_vtags", "rev_find_roles", "rev_find_no_roles", "rev_find_hair",
+                   "rev_find_gg"))
+    _n_more += sum(st.session_state.get(k) not in (None, CAST_ANY) for k in ("rev_find_women", "rev_find_men"))
     with fc[2].popover(f"More filters ({_n_more})" if _n_more else "More filters", width="stretch"):
         find_actors = st.multiselect("With actors", all_actors(), key="rev_find_actors", placeholder="anyone")
         find_vtags = st.multiselect("With video tags", all_video_tags(), key="rev_find_vtags", placeholder="any")
@@ -385,6 +392,12 @@ with st.container(border=True, key="rev_wrap_find"):
         find_hair_only = hc[1].toggle("Only these", key="rev_find_hair_only", disabled=not find_hair,
                                       help="Off: the video has any of these. On: every hair colour in the video is "
                                            "one of these (only Blonde leaves out a Blonde + Brunette video).")
+        cc = st.columns(3, vertical_alignment="bottom")
+        find_women = cc[0].selectbox("👩 Women", [CAST_ANY, 1, 2, 3, CAST_MAX], key="rev_find_women",
+                                     format_func=lambda x: f"{x}+" if x == CAST_MAX else str(x))
+        find_men = cc[1].selectbox("👨 Men", [CAST_ANY, 0, 1, 2, 3, CAST_MAX], key="rev_find_men",
+                                   format_func=lambda x: f"{x}+" if x == CAST_MAX else str(x))
+        find_gg = cc[2].toggle("👭 Girl / girl", key="rev_find_gg", help="2 or more women and no men (👥 cast).")
         st.button("🤖 Re-vote hair colours", key="rev_hair_revote", on_click=_run_hair_votes,
                   help="Work the model's hair votes out again from the current student scores "
                        "(your confirmed answers stay).")
@@ -403,6 +416,8 @@ with st.container(border=True, key="rev_wrap_find"):
         if not matches_details(vid, _details, find_actors, find_vtags, find_all):
             return False
         if not matches_hair(vid, _hair, find_hair, find_hair_only):
+            return False
+        if not matches_cast(vid, _cast, find_women, find_men, find_gg):
             return False
         if find_roles and not (all if find_all else any)(r in f["roles"] for r in find_roles):
             return False
@@ -424,6 +439,10 @@ with st.container(border=True, key="rev_wrap_find"):
             FIND_HAIR_TODO: hair_needs_confirming(vid, _hair),
             FIND_HAIR_UNSURE: hair_unsure(vid, _hair),
             FIND_TEST: vid in _test_vids,
+            FIND_NO_CAST: vid not in _cast,
+            FIND_NOBODY: (FIND_NOBODY in find_flags
+                          and bool(FP.nobody_scenes(index[stem]["scenes"], *FP.load_people(vid),
+                                                    index[stem]["dismissed_edit_suggestions"]))),
         }
         return all(checks[flag] for flag in find_flags)
 
@@ -573,10 +592,12 @@ _ka, _kt, _kn = f"vd_actors_{selected}", f"vd_tags_{selected}", f"vd_new_actor_{
 # The pick's key follows the saved answer / vote, so a new vote (or a save) prefills it afresh.
 _kh = f"vd_hair_{selected}_{_vh['source']}_{'-'.join(_vh['colours'])}"
 _sugg = suggest_video_tags(data["scenes"], ranges.get(video_id))
+_cast_bit = "👥 " + cast_label(video_cast().get(video_id)) if video_cast().get(video_id) else "👥 no cast"
 _hair_bit = ("💇 " + hair_label(_vh["colours"]) + ("" if _vh["source"] == "you" else " (vote — to confirm)")
              if _vh["colours"] else ("❓ hair to confirm" if _vh["unsure"] else "💇 hair not set"))
-with st.expander(f"🎬 Video details — {len(_vd['actors'])} actor(s), {len(_vd['tags'])} video tag(s) · {_hair_bit}",
-                 expanded=not (_vd["actors"] or _vd["tags"]) or _vh["source"] != "you"):
+with st.expander(f"🎬 Video details — {len(_vd['actors'])} actor(s), {len(_vd['tags'])} video tag(s) · {_hair_bit} · {_cast_bit}",
+                 expanded=not (_vd["actors"] or _vd["tags"]) or _vh["source"] != "you"
+                 or not video_cast().get(video_id)):
     # 💇 Hair colour: one answer for the whole video (claude/hair-colour-plan.md) — the
     # same actress can look blonde / brunette / red from shot to shot, so it isn't tagged per clip.
     hrow = st.columns([3, 1], vertical_alignment="bottom")
@@ -614,6 +635,29 @@ with st.expander(f"🎬 Video details — {len(_vd['actors'])} actor(s), {len(_v
                         + (" — it couldn't decide, so check this one." if _vh["unsure"] else " — tap ✅ if it's right."))
     else:
         hrow[0].caption("No vote yet — pick the colours and tap ✅.")
+
+    # 👥 Cast: how many women and men are in the video (claude/tag-levels.md).
+    _vc = video_cast().get(video_id)
+    _ksig = f"{_vc['women']}-{_vc['men']}" if _vc else "none"
+    _kw, _km = f"vd_women_{selected}_{_ksig}", f"vd_men_{selected}_{_ksig}"
+    _fmt = lambda x: f"{x}+" if x == CAST_MAX else str(x)
+    crow = st.columns([2, 2, 1], vertical_alignment="bottom")
+    _w = crow[0].pills("👩 Women", [1, 2, 3, CAST_MAX], selection_mode="single", key=_kw,
+                       default=_vc["women"] if _vc and _vc["women"] >= 1 else None, format_func=_fmt)
+    _m = crow[1].pills("👨 Men", [0, 1, 2, 3, CAST_MAX], selection_mode="single", key=_km,
+                       default=_vc["men"] if _vc else None, format_func=_fmt,
+                       help="Count the cameraman in POV videos — he's in the video.")
+    _cast_same = bool(_vc) and (_w, _m) == (_vc["women"], _vc["men"])
+    if crow[2].button("✅ Saved" if _cast_same else "💾 Save cast", key=f"vd_cast_save_{selected}",
+                      type="secondary" if _cast_same else "primary",
+                      disabled=_cast_same or _w is None or _m is None, width="stretch"):
+        set_video_cast(video_id, _w, _m)
+        st.session_state["rev_saved_msg"] = f"Cast saved: {cast_label({'women': _w, 'men': _m})}."
+        st.rerun()
+    _ppl = FP.people_hint(data["scenes"], *FP.load_people(video_id))
+    st.caption(("👥 " + cast_label(_vc) + ". " if _vc else "")
+               + (f"🤖 The model sees up to **{_ppl}** people on screen together (it can't tell women from men, "
+                  "and misses the cameraman in POV)." if _ppl is not None else ""))
     vc = st.columns(2)
     with vc[0]:
         _actor_opts = sorted(set(all_actors()) | set(_vd["actors"]) | set(st.session_state.get(_ka) or [])
@@ -1002,6 +1046,33 @@ def bulk_auto_split_dialog(candidate_ids: list):
         write_catalogue(msg, new_thumbs)
 
 
+@st.dialog("🚫 Clips with nobody on screen", width="large")
+def nobody_dialog(scene_ids: list):
+    st.markdown(f"**{len(scene_ids)} clip(s)** where the pose model sees nobody for most of the clip — title "
+                "cards, logos, black frames. Untick any that aren't junk.")
+    keep = []
+    for sid in scene_ids:
+        sc = scene_by_id[sid]
+        c = st.columns([1, 3], vertical_alignment="center")
+        p = scene_thumbnail_path(video_id, sc)
+        if p is not None and image_ok(p):
+            with c[0]:
+                safe_image(str(p), width="stretch")
+        a, b = tc_to_seconds(sc["start_tc"]), tc_to_seconds(sc["end_tc"])
+        if c[1].checkbox(f"Scene {sid} · {format_mmss(a)}–{format_mmss(b)} ({fmt_dur(b - a)}) — exclude",
+                         value=True, key=f"nobody_tick_{selected}_{sid}"):
+            keep.append(sid)
+    st.caption("Ticked clips are excluded (undo by unticking Exclude on their card). Unticked ones won't be "
+               "suggested again.")
+    if st.button(f"🚫 Exclude {len(keep)} · keep {len(scene_ids) - len(keep)}", type="primary", width="stretch"):
+        unsaved = apply_pending()
+        FP.apply_choice(data, scene_ids, keep)
+        msg = f"🚫 Excluded {len(keep)} clip(s) with nobody on screen."
+        if unsaved:
+            msg += f" Your unsaved changes to {unsaved} scene(s) were saved too."
+        write_catalogue(msg)
+
+
 @st.dialog("🔗 Auto combine short clips", width="large")
 def bulk_auto_combine_dialog(groups: list):
     if not groups:
@@ -1053,6 +1124,9 @@ auto_ids = [s["scene_id"] for s in SE.auto_split_candidates(in_range, split_part
                                                             factor=suggest_long_sec / split_part_sec, cap=True)]
 bulk_split_ids = [i for i in sugg["split"] if i in set(auto_ids)]
 combine_groups = SE.auto_combine_groups(in_range, sugg["merge"], max_sec=split_part_sec)
+# 🚫 Nobody on screen (claude/tag-levels.md): from the people counts in the student export.
+nobody_ids = (FP.nobody_scenes(in_range, *FP.load_people(video_id), data.get("dismissed_edit_suggestions", []))
+              if show_suggestions else [])
 
 # Scenes whose thumbnail is missing or unreadable — remake them all in one go.
 def _thumb_dest(scene: dict) -> Path:
@@ -1094,9 +1168,11 @@ if sugg["split"]:
     _todo.append(f"✂️ {len(sugg['split'])} clip(s) over {suggest_long_sec:g}s to split")
 if sugg["merge"]:
     _todo.append(f"🔗 {len(sugg['merge'])} run(s) of clips under {suggest_short_sec:g}s to combine")
+if nobody_ids:
+    _todo.append(f"🚫 {len(nobody_ids)} clip(s) with nobody on screen")
 if _todo:
     with st.container(border=True, key="rev_wrap_todo"):
-        tc_ = st.columns([4, 1.3, 1.3, 1.3], vertical_alignment="center")
+        tc_ = st.columns([4, 1.3, 1.3, 1.3, 1.3], vertical_alignment="center")
         tc_[0].markdown("**To do:** " + " · ".join(_todo),
                         help=f"Split: clips over {suggest_long_sec:g}s, cut into parts of up to {split_part_sec:g}s; combine: runs of clips "
                              f"each under {suggest_short_sec:g}s — set both in the sidebar (✂️ Split & combine).")
@@ -1115,6 +1191,10 @@ if _todo:
                                             help=f"Joins every suggested run of clips under {suggest_short_sec:g}s "
                                                  "into one clip (you see the list first)."):
             bulk_auto_combine_dialog(combine_groups)
+        if nobody_ids and tc_[4].button(f"🚫 Junk {len(nobody_ids)}…", width="stretch", key=f"nobody_{selected}",
+                                        help="Clips where nobody is on screen for most of the clip (title cards, "
+                                             "logos, black frames) — you see the list and choose."):
+            nobody_dialog(nobody_ids)
 
 # Which scenes: tag search, role and "only …" chips; hide excluded sits with the role tools below.
 _filters_box = st.container(key="rev_wrap_filters")

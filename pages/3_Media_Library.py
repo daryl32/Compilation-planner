@@ -31,7 +31,7 @@ from track_files import track_file
 from config import CATALOGUE_DIR, AUDIO_DIR, PREVIEW_DIR
 from library_common import (
     safe_image, image_ok, video_details, all_actors, all_video_tags, matches_details,
-    HAIR_COLOURS, HAIR_EMOJI, video_hair, matches_hair,
+    HAIR_COLOURS, HAIR_EMOJI, video_hair, matches_hair, CAST_MAX, CAST_ANY, video_cast, matches_cast,
     scene_tags, tc_to_seconds, format_mmss, overlap_with_range,
     library_ranges, set_library_range, set_library_ranges, master_thumbnail_scenes,
     render_range_picker, show_render_player, file_download_button,
@@ -192,8 +192,9 @@ def render_videos():
             format_func=lambda k: ADDED_CHOICES[k][0] + (f" · {len(new_ids)}" if k == "new" else ""),
             help="When the video was added — the date its catalogue first appeared in Google Drive.",
         )
-        _more_keys = ("lib_vtags", "lib_hair", "lib_tags", "lib_range_filter", "lib_review_filter")
+        _more_keys = ("lib_vtags", "lib_hair", "lib_gg", "lib_tags", "lib_range_filter", "lib_review_filter")
         _n_more = sum(bool(st.session_state.get(k)) and st.session_state.get(k) != "Any" for k in _more_keys)
+        _n_more += sum(st.session_state.get(k) not in (None, CAST_ANY) for k in ("lib_women", "lib_men"))
         _dur = st.session_state.get("lib_duration")
         if _dur and tuple(_dur) != (0, max_minutes):
             _n_more += 1
@@ -206,6 +207,11 @@ def render_videos():
             hair_only = st.toggle("Only this hair", key="lib_hair_only", disabled=not hair_filter,
                                   help="Off: the video has any of these. On: everyone's hair in it is one of these "
                                        "(only Blonde leaves out a Blonde + Brunette video).")
+            _cc = st.columns(3, vertical_alignment="bottom")
+            _cfmt = lambda x: f"{x}+" if x == CAST_MAX else str(x)
+            women_filter = _cc[0].selectbox("👩 Women", [CAST_ANY, 1, 2, 3, CAST_MAX], key="lib_women", format_func=_cfmt)
+            men_filter = _cc[1].selectbox("👨 Men", [CAST_ANY, 0, 1, 2, 3, CAST_MAX], key="lib_men", format_func=_cfmt)
+            gg_filter = _cc[2].toggle("👭 Girl / girl", key="lib_gg", help="2 or more women and no men (👥 cast).")
             details_all = st.toggle("Must have all of these", key="lib_details_all",
                                     disabled=not (actor_filter or vtag_filter),
                                     help="Off: any of the picked 👤 actors (top row) / video tags. "
@@ -264,12 +270,15 @@ def render_videos():
     wanted = {t.lower() for t in tag_filter}
     rows = []
     hair = video_hair() if hair_filter else {}
+    cast = video_cast()
     for vid, video in library.items():
         if name_query and name_query.lower() not in vid.lower():
             continue
         if not matches_details(vid, details, actor_filter, vtag_filter, details_all):
             continue
         if hair_filter and not matches_hair(vid, hair, hair_filter, hair_only):
+            continue
+        if not matches_cast(vid, cast, women_filter, men_filter, gg_filter):
             continue
         if added_since is not None and added.get(vid, 0) < added_since:
             continue
