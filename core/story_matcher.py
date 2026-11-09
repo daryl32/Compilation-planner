@@ -349,7 +349,7 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
             if not len(starts):
                 continue
             prefer = PREFER_BONUS if any(str(t).lower() in span_tags for t in recipe.get("scene_prefer") or []) else 0.0
-            role_b = ROLE_BONUS if role and has_role(span, role) else 0.0
+            role_b = ROLE_BONUS if (role and has_role(span, role)) or any(has_role(span, rr) for rr in recipe.get("roles") or []) else 0.0
             penalty = USE_PENALTY * uses.get(span["video_id"], 0) + (REPEAT_PENALTY if span["video_id"] in prev_videos else 0.0)
             for s in _top_spread(starts, fit, TOP_PER_SPAN, max(MIN_GAP_POINTS, n // 2)):
                 total = float(fit[s]) + prefer + role_b - penalty

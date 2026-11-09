@@ -91,6 +91,8 @@ def test_recipes_defaults_overrides_and_reset():
         RC.reset("slow")
     assert RC.unknown_tags({"tags": {"Blowjob": 1, "Typo": 1}, "avoid": ["x"]}, ["blowjob"]) == ["Typo", "x"]
     assert "wants" in RC.summary(RC.default("drop"))
+    assert RC.default("intro")["roles"] == ["intro"] and RC.default("ending")["roles"] == ["outro"]
+    assert RC.normalise({"roles": ["intro", "x"]}, "drop")["roles"] == ["intro", "x"]
 
 
 def test_media_library_sub_menus():
@@ -106,7 +108,9 @@ def test_media_library_sub_menus():
     at.run()
     assert not errors(at), errors(at)
     assert at.selectbox(key="sec_track").value
-    assert [sb for sb in at.selectbox if str(sb.key).startswith("sec_type_")], "no section rows rendered"
+    assert [sb for sb in at.selectbox if str(sb.key).startswith("sec_role_")], "no section parts rendered"
+    lines = [sl for sl in list(at.slider) + list(at.select_slider) if str(sl.key).startswith("sec_line_")]
+    assert lines, "no draggable lines rendered"
     at.session_state["lib_kind"] = "🎬 Videos"
     at.session_state["vid_kind"] = "🎬 Videos"
     at.run()

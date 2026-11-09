@@ -1062,7 +1062,7 @@ def _sm_play(track: dict, r: dict, lead: bool, key: str) -> None:
     import preview_snippets
     path = Path(colab_to_local(track.get("source_path", "")))
     if not path.exists():
-        _render_audio_player(st.session_state[SM_EDIT]["track_id"], track.get("source_path", ""))
+        _render_audio_player(track.get("track_id") or (st.session_state.get(SM_EDIT) or {}).get("track_id"), track.get("source_path", ""))
         return
     with st.spinner("Cutting the music…"):
         clip, err = preview_snippets.make_audio_snippet(PREVIEW_DIR / "snippets", path, r["start"],
@@ -2274,7 +2274,7 @@ if library_kind == "🎵 Audio":
                                   label_visibility="collapsed")
         if audio_kind == "🧩 Sections":
             import sections_view
-            sections_view.render_sections(load_audio_library(_audio_signature()), _sec_track_bits)
+            sections_view.render_sections(load_audio_library(_audio_signature()), _sec_track_bits, play=_sm_play)
         elif audio_kind == "🍳 Recipes":
             import sections_view
             sections_view.render_recipes()

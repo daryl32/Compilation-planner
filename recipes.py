@@ -14,6 +14,8 @@ A recipe:
     description  ""                         an optional short line, compared with the pictures (SigLIP2 text side)
     shot_change  "hold" | "allow" | "change"   shot-size / POV consistency across the section's cuts
                  (hold = keep it steady, allow = a change is fine, change = contrast welcome — e.g. at a drop)
+    roles        [scene role ids]          clips marked with one of these (🎭 Reviewer roles: intro, outro, your own)
+                 get a bonus in this section — mainly for Intro / Ending
     pace         {"lo": s, "hi": s}   how long the clips should be in this section (seconds). The 🤖 new matcher
                  cuts each section on the beat at this pace — a "rise" trend shortens the clips through the
                  section, a "fall" lengthens them (section_cuts.py). Classic ignores it.
@@ -40,7 +42,7 @@ DEFAULTS = {
         "avoid": ["penetration", "creampie", "deepthroat", "orgasm"],
         "scene_require": [], "scene_prefer": [],
         "description": "teasing, slow, still dressed", "shot_change": "allow",
-        "pace": {"lo": 4.0, "hi": 8.0},
+        "pace": {"lo": 4.0, "hi": 8.0}, "roles": ["intro"],
     },
     "buildup": {
         "movement": {"lo": 0.3, "hi": 0.7, "trend": "rise"}, "beat_lock": 0.5,
@@ -112,14 +114,16 @@ DEFAULTS = {
         "avoid": [],
         "scene_require": [], "scene_prefer": [],
         "description": "the finish", "shot_change": "allow",
-        "pace": {"lo": 4.0, "hi": 8.0},
+        "pace": {"lo": 4.0, "hi": 8.0}, "roles": ["outro"],
     },
 }
 assert set(DEFAULTS) == set(TYPE_IDS)
 
 
 def default(type_id: str) -> dict:
-    return copy.deepcopy(DEFAULTS[type_id])
+    d = copy.deepcopy(DEFAULTS[type_id])
+    d.setdefault("roles", [])
+    return d
 
 
 def normalise(r: dict, type_id: str) -> dict:
@@ -141,7 +145,8 @@ def normalise(r: dict, type_id: str) -> dict:
     if isinstance(r.get("tags"), dict):
         out["tags"] = {str(t): float(min(max(w, 0.0), 1.0)) for t, w in r["tags"].items()
                        if isinstance(w, (int, float)) and str(t).strip()}
-    for k in ("avoid", "scene_require", "scene_prefer"):
+    out.setdefault("roles", [])
+    for k in ("avoid", "scene_require", "scene_prefer", "roles"):
         if isinstance(r.get(k), list):
             out[k] = [str(t) for t in dict.fromkeys(r[k]) if str(t).strip()]
     if isinstance(r.get("description"), str):

@@ -14,77 +14,67 @@ SEC_STATE = "sec_edit"
 
 
 # ---------------------------------------------------------------------------
-# 🧩 Sections
+# 🧩 Sections — the 🎭 story-map editor reused (draggable lines, snap to cuts, play), with section types
 # ---------------------------------------------------------------------------
 
 def _state() -> dict:
     return st.session_state.setdefault(SEC_STATE, {})
 
 
-def _load_regions(tid: str, track_bits) -> list:
+def _to_editor(regions: list) -> list:
+    return [{"start": r["start"], "end": r["end"], "role": r.get("type"), "why": r.get("why", "")} for r in regions]
+
+
+def _from_editor(regions: list) -> list:
+    return [{"start": r["start"], "end": r["end"], "type": r.get("role") or "rhythmic", "why": r.get("why", "")}
+            for r in regions]
+
+
+def _fresh(tid: str, track_bits) -> tuple:
+    """(regions in editor shape, source) — the saved map, else a suggestion."""
+    saved = ST.saved_map(tid)
+    if saved:
+        return _to_editor(saved), "saved"
+    track, segs, analysis = track_bits(tid)
+    if analysis is None:
+        return [], "none"
+    import story_map as STM
+    cuts = [sg["start"] for sg in segs] + [float(track["duration_sec"])]
+    return _to_editor(ST.snap(ST.suggest(analysis, STM.saved_map(tid)), cuts)), "suggested"
+
+
+def _load(tid: str, track_bits) -> list:
     s = _state()
     if s.get("track_id") != tid or s.get("regions") is None:
-        saved = ST.saved_map(tid)
-        regions = saved
-        source = "saved"
-        if not regions:
-            track, segs, analysis = track_bits(tid)
-            if analysis is not None:
-                import story_map as STM
-                cuts = [sg["start"] for sg in segs] + [float(track["duration_sec"])]
-                regions = ST.snap(ST.suggest(analysis, STM.saved_map(tid)), cuts)
-                source = "suggested"
-            else:
-                regions = []
-                source = "none"
+        regions, source = _fresh(tid, track_bits)
         s.update(track_id=tid, regions=regions, source=source, dirty=False, v=s.get("v", 0) + 1)
     return s["regions"]
 
 
-def _set_regions(regions: list, source: str = None) -> None:
+def _set(regions: list) -> None:
     s = _state()
     s["regions"] = regions
     s["dirty"] = True
-    if source:
-        s["source"] = source
     s["v"] = s.get("v", 0) + 1
-
-
-def _suggest_again(tid: str, track_bits) -> None:
-    track, segs, analysis = track_bits(tid)
-    if analysis is None:
-        st.session_state["sec_msg"] = "This track can't be analysed for a suggestion."
-        return
-    import story_map as STM
-    cuts = [sg["start"] for sg in segs] + [float(track["duration_sec"])]
-    _set_regions(ST.snap(ST.suggest(analysis, STM.saved_map(tid)), cuts), "suggested")
 
 
 def _save(tid: str) -> None:
     s = _state()
-    ST.save_map(tid, s.get("regions") or [], source=s.get("source") or "you")
+    ST.save_map(tid, _from_editor(s.get("regions") or []), source="you" if s.get("dirty") else (s.get("source") or "you"))
     s["dirty"] = False
     s["source"] = "saved"
     st.session_state["sec_msg"] = f"Saved the sections for {tid}."
 
 
-def _set_type(i: int, key: str) -> None:
-    s = _state()
-    pick = st.session_state.get(key)
-    tid = next((t for t in ST.TYPE_IDS if ST.label(t) == pick), None)
-    if tid and i < len(s.get("regions") or []):
-        _set_regions(ST.set_type(s["regions"], i, tid))
+def _discard(tid: str, track_bits) -> None:
+    _state().clear()
+    st.session_state["sec_msg"] = "Changes dropped."
 
 
-def _merge(i: int) -> None:
-    s = _state()
-    _set_regions(ST.merge_next(s["regions"], i))
-
-
-def _split(i: int) -> None:
-    s = _state()
-    r = s["regions"][i]
-    _set_regions(ST.split(s["regions"], i, round((r["start"] + r["end"]) / 2, 3)))
+def _remove(tid: str) -> None:
+    ST.save_map(tid, None)
+    _state().clear()
+    st.session_state["sec_msg"] = f"Removed the saved sections for {tid} — the suggestion shows again."
 
 
 def _suggest_all(tracks: dict, track_bits) -> None:
@@ -93,77 +83,65 @@ def _suggest_all(tracks: dict, track_bits) -> None:
         if ST.saved_map(tid):
             continue
         try:
-            track, segs, analysis = track_bits(tid)
+            regions, source = _fresh(tid, track_bits)
         except Exception:          # noqa: BLE001
             continue
-        if analysis is None:
-            continue
-        import story_map as STM
-        cuts = [sg["start"] for sg in segs] + [float(track["duration_sec"])]
-        regions = ST.snap(ST.suggest(analysis, STM.saved_map(tid)), cuts)
         if regions:
-            ST.save_map(tid, regions, source="suggested")
+            ST.save_map(tid, _from_editor(regions), source="suggested")
             made += 1
     st.session_state["sec_msg"] = f"Suggested and saved sections for {made} track{'s' if made != 1 else ''}."
     _state().clear()
 
 
-def render_sections(tracks: dict, track_bits) -> None:
-    """tracks: the Media Library's slim track dict; track_bits(tid) → (track, smart segs, analysis)."""
-    st.caption("🧩 The song in section types — what each stretch of the track *is* (Intro, Build-up, Drop…). The 🍳 "
-               "recipe for each type says what footage it wants. Suggested from the song's structure with your 🎭 "
-               "story-map roles as hints; change any part's type and save. Roles stay as they are.")
+def render_sections(tracks: dict, track_bits, play=None) -> None:
+    """tracks: the Media Library's slim track dict; track_bits(tid) → (track, smart segs, analysis);
+    play(track, region, lead, key) plays a stretch of the song (the Media Library's ▶)."""
+    st.caption("🧩 The song in section types — what each stretch *is* (Intro, Build-up, Drop…); the 🍳 recipe for "
+               "each type says what footage it wants and how fast to cut. Suggested from the song with your 🎭 "
+               "story-map roles as hints. Drag the lines between parts, change a part's type, ✂️ split, 🔗 join, then 💾 Save.")
     if not tracks:
         st.info("No analysed tracks yet — 🔬 Audio analysis in 🎵 Tracks first.")
         return
     saved = ST.saved_maps()
     names = sorted(tracks, key=str.lower)
-    c = st.columns([3, 1.4, 1.4])
-    tid = c[0].selectbox("Track", names, key="sec_track",
-                         format_func=lambda t: f"{'✅ ' if t in saved else ''}{t}")
-    c[1].button("✨ Suggest again", key="sec_suggest", width="stretch", on_click=_suggest_again, args=(tid, track_bits))
+    c = st.columns([3, 1.4, 1.4, 1.4])
+    tid = c[0].selectbox("Track", names, key="sec_track", format_func=lambda t: f"{'✅ ' if t in saved else ''}{t}")
     missing = [t for t in names if t not in saved]
-    c[2].button(f"✨ All {len(missing)} without", key="sec_suggest_all", width="stretch", disabled=not missing,
-                help="Suggest and save a section map for every track that hasn't one.",
-                on_click=_suggest_all, args=(tracks, track_bits))
+    c[1].button(f"✨ All {len(missing)} without", key="sec_suggest_all", width="stretch", disabled=not missing,
+                help="Suggest and save a section map for every track that hasn't one.", on_click=_suggest_all,
+                args=(tracks, track_bits))
     if msg := st.session_state.pop("sec_msg", None):
         st.success(msg)
-    regions = _load_regions(tid, track_bits)
+    regions = _load(tid, track_bits)
     s = _state()
     if not regions:
         st.warning("This track can't be analysed for a suggestion yet — it may need the extra 🔬 analysis.")
         return
     try:
-        track, segs, _ = track_bits(tid)
+        track, segs, analysis = track_bits(tid)
     except Exception as e:          # noqa: BLE001
         st.error(f"Couldn't read {tid}: {e}")
         return
+    c[2].button("💾 Save", key="sec_save", width="stretch", type="primary",
+                disabled=not (s.get("dirty") or s.get("source") == "suggested"), on_click=_save, args=(tid,))
+    with c[3].popover("⋯", width="stretch"):
+        st.button("↩️ Drop my changes", key="sec_discard", width="stretch", disabled=not s.get("dirty"),
+                  on_click=_discard, args=(tid, track_bits))
+        st.button("🗑️ Remove the saved map", key="sec_remove", width="stretch", disabled=tid not in saved,
+                  on_click=_remove, args=(tid,))
+    state_line = ("**unsaved changes** — 💾 Save to keep them" if s.get("dirty") else
+                  "suggested, not saved yet — 💾 Save to keep it" if s.get("source") == "suggested" else "saved ✅")
+    st.caption(f"{tid} · {state_line}")
+    import story_map as STM
     import story_map_editor as SME
-    chart_regions = [{"start": r["start"], "end": r["end"], "role": r["type"]} for r in regions]
-    st.plotly_chart(SME.story_chart(track, chart_regions, segs, ST.types_as_roles(), height=190),
-                    width="stretch", config={"displayModeBar": False}, key=f"sec_chart_{tid}_{s.get('v', 0)}")
-    tot = ST.totals(regions)
-    st.caption(" · ".join(f"{ST.label(t)} {format_mmss(sec)}" for t, sec in sorted(tot.items(), key=lambda kv: -kv[1]))
-               + (" · **unsaved changes**" if s.get("dirty") else
-                  (" · suggested, not saved yet" if s.get("source") == "suggested" else "")))
-    labels = [ST.label(t) for t in ST.TYPE_IDS]
-    v = s.get("v", 0)
-    for i, r in enumerate(regions):
-        cols = st.columns([0.5, 1.6, 2.6, 2.6, 0.7, 0.7], vertical_alignment="center")
-        cols[0].markdown(f"**{i + 1}**")
-        cols[1].markdown(f"{format_mmss(r['start'])}–{format_mmss(r['end'])}")
-        key = f"sec_type_{tid}_{i}_{v}"
-        cols[2].selectbox("Type", labels, index=ST.TYPE_IDS.index(r["type"]) if r["type"] in ST.TYPE_IDS else 0,
-                          key=key, label_visibility="collapsed", on_change=_set_type, args=(i, key))
-        cols[3].caption(r.get("why") or "")
-        cols[4].button("✂️", key=f"sec_split_{tid}_{i}_{v}", help="Split this part in two", on_click=_split, args=(i,))
-        cols[5].button("🔗", key=f"sec_merge_{tid}_{i}_{v}", help="Join with the next part", disabled=i + 1 >= len(regions),
-                       on_click=_merge, args=(i,))
-    b = st.columns([1.5, 1.5, 4])
-    b[0].button("💾 Save", key="sec_save", width="stretch", type="primary", disabled=not (s.get("dirty") or s.get("source") == "suggested"),
-                on_click=_save, args=(tid,))
-    if tid in saved:
-        b[1].button("🗑️ Remove saved", key="sec_remove", width="stretch", on_click=lambda: (ST.save_map(tid, None), _state().clear()))
+    cuts = [sg["start"] for sg in segs] + [float(track["duration_sec"])]
+
+    def suggest():
+        return _to_editor(ST.snap(ST.suggest(analysis, STM.saved_map(tid)), cuts)) if analysis else regions
+
+    SME.render_editor(track, segs, ns="sec", get_regions=lambda: _state().get("regions") or [], set_regions=_set,
+                      version=s.get("v", 0), analysis=analysis, play=play, roles=ST.types_as_roles(), suggest=suggest,
+                      allow_none=False, thing="type", clear=False)
 
 
 # ---------------------------------------------------------------------------
@@ -183,23 +161,11 @@ def _vocab_tags() -> tuple:
         return [], []
 
 
-def _edited_rows(ns: str) -> list:
-    """The tag table as edited: the base rows with st.data_editor's edits applied."""
-    base = list(st.session_state.get(ns + "tags_base") or [])
-    ed = st.session_state.get(ns + "tags_df") or {}
-    if not isinstance(ed, dict):
-        return base
-    for i, changes in (ed.get("edited_rows") or {}).items():
-        try:
-            base[int(i)] = {**base[int(i)], **changes}
-        except (IndexError, ValueError):
-            continue
-    for row in ed.get("added_rows") or []:
-        base.append({"Tag": row.get("Tag", ""), "Weight": row.get("Weight", 0.5)})
-    for i in sorted((int(i) for i in ed.get("deleted_rows") or []), reverse=True):
-        if 0 <= i < len(base):
-            del base[i]
-    return base
+LEVELS = {"a bit": 0.3, "want": 0.6, "important": 0.8, "must": 1.0}
+
+
+def _level_of(w: float) -> str:
+    return min(LEVELS, key=lambda k: abs(LEVELS[k] - float(w)))
 
 
 def _save_recipe(type_id: str, ns: str) -> None:
@@ -209,18 +175,14 @@ def _save_recipe(type_id: str, ns: str) -> None:
     shot_label = st.session_state.get(ns + "shot")
     shot = next((k for k, v in RC.SHOT_CHANGES.items() if v == shot_label), "allow")
     tags = {}
-    for row in _edited_rows(ns):
-        t = str(row.get("Tag") or "").strip()
-        try:
-            w = float(row.get("Weight"))
-        except (TypeError, ValueError):
-            continue
-        if t:
-            tags[t] = w
+    for t in st.session_state.get(ns + "wants", []):
+        lvl = st.session_state.get(ns + "lvl_" + t, "want")
+        tags[t] = LEVELS.get(lvl, 0.6)
     p_lo, p_hi = st.session_state.get(ns + "pace", (2.0, 4.0))
     recipe = {"movement": {"lo": lo, "hi": hi, "trend": trend}, "beat_lock": st.session_state.get(ns + "beat", 0.5),
               "pace": {"lo": p_lo, "hi": p_hi},
               "tags": tags, "avoid": st.session_state.get(ns + "avoid", []),
+              "roles": st.session_state.get(ns + "roles", []),
               "scene_require": st.session_state.get(ns + "req", []), "scene_prefer": st.session_state.get(ns + "pref", []),
               "description": st.session_state.get(ns + "desc", ""), "shot_change": shot}
     RC.save(type_id, recipe)
@@ -235,12 +197,11 @@ def _reset_recipe(type_id: str) -> None:
 
 
 def render_recipes() -> None:
-    import pandas as pd
     st.caption("🍳 What footage each section type wants: a movement band (library scale, as the 🧭 timeline shows it) "
                "and whether it builds or falls, how tightly movement should lock to the beat, the moment tags to "
                "look for (with weights) and to avoid, scene tags to require or prefer, an optional description "
-               "matched against the pictures, and whether the shot size may change. One shared set for now — "
-               "variations per cutting style can come later.")
+               "matched against the pictures, whether the shot size may change, and the clip length the 🤖 new "
+               "matcher cuts at. One shared set for now — variations per cutting style can come later.")
     if msg := st.session_state.pop("rc_msg", None):
         st.success(msg)
     moment_tags, all_tags = _vocab_tags()
@@ -270,14 +231,20 @@ def render_recipes() -> None:
             if unknown:
                 st.caption("⚠️ Not in your vocabulary (spelling?): " + ", ".join(unknown))
             tag_opts = sorted(set(moment_tags) | set(r["tags"]) | set(r["avoid"]), key=str.lower)
-            rows = [{"Tag": k, "Weight": float(w)} for k, w in sorted(r["tags"].items(), key=lambda kv: -kv[1])]
-            st.session_state[ns + "tags_base"] = rows
-            st.data_editor(pd.DataFrame(rows, columns=["Tag", "Weight"]), key=ns + "tags_df", num_rows="dynamic", hide_index=True, width="stretch",
-                           column_config={"Tag": st.column_config.SelectboxColumn("Wants (moment tag)", options=tag_opts,
-                                                                                  required=False),
-                                          "Weight": st.column_config.NumberColumn("Weight", min_value=0.0, max_value=1.0,
-                                                                                  step=0.1, format="%.1f")})
+            wants = st.multiselect("Wants (moment tags)", tag_opts, default=[t for t in r["tags"] if t in tag_opts],
+                                   key=ns + "wants", help="What should be on screen in this section.")
+            if wants:
+                st.caption("How much each matters")
+                wc = st.columns(min(3, len(wants)))
+                for k, t in enumerate(wants):
+                    wc[k % len(wc)].select_slider(t, list(LEVELS), value=_level_of(r["tags"].get(t, 0.6)), key=ns + "lvl_" + t)
             st.multiselect("Avoid", tag_opts, default=[x for x in r["avoid"] if x in tag_opts], key=ns + "avoid")
+            import scene_roles as SR
+            role_opts = [x["id"] for x in SR.all_roles()]
+            st.multiselect("🎭 Prefer clips marked with", role_opts, default=[x for x in r.get("roles") or [] if x in role_opts],
+                           key=ns + "roles", format_func=lambda x: SR.label(x),
+                           help="Scene roles you've marked in the Reviewer (🎬 Intro, 🏁 Outro, your own) — clips with one of "
+                                "these get a bonus in this section.")
             sc = st.columns(2)
             scene_opts = sorted(set(all_tags) | set(r["scene_require"]) | set(r["scene_prefer"]), key=str.lower)
             sc[0].multiselect("Scene tags — require", scene_opts, default=r["scene_require"], key=ns + "req",

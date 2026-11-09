@@ -132,12 +132,18 @@ def render_empty(duration: float, analysis: dict, cut_times: list, *, set_region
 
 
 def render_editor(track: dict, segs: list, *, ns: str, get_regions, set_regions, version: int,
-                  analysis: dict, play=None) -> None:
+                  analysis: dict, play=None, roles: dict = None, suggest=None, allow_none: bool = True,
+                  thing: str = "role", clear: bool = True) -> None:
+    """The region editor. By default it edits a 🎭 story map (scene roles). 🧩 Sections reuse it with
+    roles = the section types (section_types.types_as_roles()), suggest = a function giving fresh regions,
+    allow_none = False (every part has a type) and thing = "type" — regions still carry the value under "role"."""
     duration = float(track["duration_sec"])
     cut_times = [sg["start"] for sg in segs] + [duration]
-    roles = SR.roles_by_id()
+    roles = roles if roles is not None else SR.roles_by_id()
     regions = get_regions()
     v = version
+    if suggest is None:
+        suggest = lambda: STM.snap(STM.suggest(analysis, SR.all_roles()), cut_times)   # noqa: E731
 
     def edit(fn, *args):
         set_regions(fn(get_regions(), *args))
@@ -161,12 +167,12 @@ def render_editor(track: dict, segs: list, *, ns: str, get_regions, set_regions,
 
     tc = st.columns([2, 2, 2, 3])
     tc[0].button("✨ Suggest again", width="stretch", key=f"{ns}_suggest", disabled=analysis is None,
-                 on_click=_wrap(ns, None, lambda: set_regions(STM.snap(STM.suggest(analysis, SR.all_roles()),
-                                                                       cut_times))),
+                 on_click=_wrap(ns, None, lambda: set_regions(suggest())),
                  help="Replaces the map with a fresh suggestion from the song (your edits are lost).")
-    tc[1].button("🧹 Clear the map", width="stretch", key=f"{ns}_clear",
-                 on_click=_wrap(ns, None, lambda: set_regions(STM.blank(duration))),
-                 help="One region, no role — then split and set roles yourself.")
+    if clear:
+        tc[1].button("🧹 Clear the map", width="stretch", key=f"{ns}_clear",
+                     on_click=_wrap(ns, None, lambda: set_regions(STM.blank(duration))),
+                     help="One region, no role — then split and set roles yourself.")
     tc[2].button("📐 Line up with the cuts", width="stretch", key=f"{ns}_snapall",
                  on_click=_wrap(ns, None, edit, STM.snap, cut_times),
                  help="Moves every boundary onto the nearest cut, so no block straddles two parts. "
@@ -193,11 +199,11 @@ def render_editor(track: dict, segs: list, *, ns: str, get_regions, set_regions,
                                  f"{'s' if x['blocks'] != 1 else ''})" for r, x in tot.items()))
     unknown = sorted({r["role"] for r in regions if r["role"] and r["role"] not in roles})
     if unknown:
-        st.warning("Some parts use a role that's been deleted: " + ", ".join(unknown))
+        st.warning(f"Some parts use a {thing} that's been deleted: " + ", ".join(unknown))
 
-    role_opts = [None, *roles, *unknown]
+    role_opts = ([None] if allow_none else []) + [*roles, *unknown]
     block_role = STM.block_roles(regions, segs)
-    _lab = lambda x: SR.label(x, roles) if x else "no role"
+    _lab = lambda x: SR.label(x, roles) if x else f"no {thing}"
     for i, r in enumerate(regions):
         role = roles.get(r["role"]) if r["role"] else None
         n_blocks = sum(1 for sg in segs if r["start"] <= (sg["start"] + sg["end"]) / 2 < r["end"])
@@ -209,8 +215,8 @@ def render_editor(track: dict, segs: list, *, ns: str, get_regions, set_regions,
             rc[1].markdown(f"**{i + 1}** · **{format_mmss(r['start'])} – {format_mmss(r['end'])}**  \n"
                            f":gray[{r['end'] - r['start']:.0f}s · {n_blocks} block{'s' if n_blocks != 1 else ''}]")
             rk = f"{ns}_role_{v}_{i}"
-            rc[2].selectbox("Role", role_opts, index=role_opts.index(r["role"]) if r["role"] in role_opts else 0,
-                            key=rk, format_func=lambda x: "— no role" if x is None else SR.label(x, roles),
+            rc[2].selectbox(thing.title(), role_opts, index=role_opts.index(r["role"]) if r["role"] in role_opts else 0,
+                            key=rk, format_func=lambda x: f"— no {thing}" if x is None else SR.label(x, roles),
                             label_visibility="collapsed", on_change=_wrap(ns, part, role_changed, i, rk))
             with rc[3]:
                 if r.get("why"):
@@ -265,8 +271,9 @@ def render_editor(track: dict, segs: list, *, ns: str, get_regions, set_regions,
 
     st.divider()
     n_role = sum(1 for x in block_role if x)
-    st.caption(f"{n_role} of {len(segs)} blocks have a role. Times are kept in seconds, so changing the "
-               "audio settings later keeps the map where it is (📐 lines it up with the new cuts).")
+    if allow_none:
+        st.caption(f"{n_role} of {len(segs)} blocks have a role. Times are kept in seconds, so changing the "
+                   "audio settings later keeps the map where it is (📐 lines it up with the new cuts).")
 
 
 __all__ = ["render_editor", "render_empty", "story_chart"]
