@@ -287,7 +287,7 @@ __all__ = ["render_editor", "render_empty", "story_chart"]
 def synced_player(clip_path, track: dict, r: dict, lead: float, cut_times: list, key: str,
                   colour: str = "#ff4b4b", height: int = 150) -> None:
     """Plays the clip (st.audio can't report where it is) with its own small graph: the loudness over this
-    part (plus the lead-in, greyed), the cuts as thin lines, and a cursor synced to the audio. Times along the
+    part (plus the lead-in, greyed), the cuts as thin numbered lines with their times, and a cursor synced to the audio. Times along the
     bottom are track times, so what you hear lines up with the handles above."""
     import base64
     import json as _json
@@ -334,6 +334,13 @@ def synced_player(clip_path, track: dict, r: dict, lead: float, cut_times: list,
   if (cfg.start > cfg.a) {{ ctx.fillStyle = "rgba(128,128,128,0.18)"; ctx.fillRect(0, 0, x(cfg.start), H); }}
   ctx.strokeStyle = "rgba(128,128,128,0.45)"; ctx.lineWidth = 1;
   for (const c of cfg.cuts) {{ ctx.beginPath(); ctx.moveTo(x(c), 0); ctx.lineTo(x(c), H); ctx.stroke(); }}
+  // each line numbered (within this part) with its time, so a change can be named: "line 9, 0:39.4"
+  ctx.textAlign = "left"; let lastX = -100;
+  cfg.cuts.forEach((c, i) => {{
+   const px = x(c);
+   ctx.font = "bold 12px sans-serif"; ctx.fillStyle = "#e6e6e6"; ctx.fillText(String(i + 1), px + 3, 12);
+   if (px - lastX >= 46) {{ ctx.font = "10px sans-serif"; ctx.fillStyle = "#a8a8a8"; ctx.fillText(mmss(c), px + 3, 24); lastX = px; }}
+  }});
   if (cfg.ys.length) {{
    ctx.strokeStyle = "rgba(80,120,220,0.9)"; ctx.lineWidth = 1.5; ctx.beginPath();
    cfg.xs.forEach((t, i) => {{ const px = x(t), py = H - 4 - cfg.ys[i] * (H - 10); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }});

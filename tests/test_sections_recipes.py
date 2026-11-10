@@ -201,7 +201,7 @@ def test_intro_ends_where_the_music_comes_in():
     R = lambda rows: [{"start": a, "end": b, "type": t} for a, b, t in rows]   # noqa: E731
     for key in ("body", "disconnect"):
         d = fx[key]
-        out = ST.refine_with(R(d["coarse"]), d["beats"], d["intensity"], d["drops"], d["duration"])
+        out = ST.refine_with(R(d["coarse"]), d["beats"], d["intensity"], d["drops"], d["duration"], d["marks"])
         assert out[0]["type"] == "intro" and abs(out[0]["end"] - d["intro_end"]) < 0.6, (key, out[0])
         assert out[1]["type"] == "warmup" and out[2]["type"] == "buildup"
         assert ST.agreement(out, R(d["daryl"]), d["duration"]) > 0.88, key
@@ -209,3 +209,24 @@ def test_intro_ends_where_the_music_comes_in():
     a = fx["aura"]
     out = ST.refine_with(R(a["coarse"]), a["beats"], a["intensity"], a["drops"], a["duration"])
     assert out[0]["type"] == "intro" and out[0]["end"] > 13 and out[1]["type"] == "buildup"
+
+
+def test_build_up_starts_at_the_songs_own_change_point():
+    """Body (10 Nov): the Warm-up should end "one block earlier, where there is a big change" — 39.4 s, a boundary the
+    analysis itself found; the four-bar rule had put it at 43.3 s. A change point never shortens a build-up."""
+    import json
+    import section_types as ST
+    from tests.support import REPO
+    fx = json.loads((REPO / "tests" / "golden" / "sections_bar_pass.json").read_text())
+    R = lambda rows: [{"start": a, "end": b, "type": t} for a, b, t in rows]   # noqa: E731
+    d = fx["body"]
+    out = ST.refine_with(R(d["coarse"]), d["beats"], d["intensity"], d["drops"], d["duration"], d["marks"])
+    first = next(r for r in out if r["type"] == "buildup")
+    assert abs(first["start"] - 39.38) < 0.1 and out[out.index(first) - 1]["type"] == "warmup"
+    assert ST.agreement(out, R(d["daryl"]), d["duration"]) > 0.94
+    for key in ("aura", "disconnect"):                    # the other tracks keep their build-ups
+        t_ = fx[key]
+        a = ST.refine_with(R(t_["coarse"]), t_["beats"], t_["intensity"], t_["drops"], t_["duration"])
+        b = ST.refine_with(R(t_["coarse"]), t_["beats"], t_["intensity"], t_["drops"], t_["duration"], t_["marks"])
+        starts = lambda rs: [round(r["start"], 1) for r in rs if r["type"] == "buildup"]     # noqa: E731
+        assert starts(a) == starts(b)

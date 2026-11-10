@@ -355,6 +355,7 @@ ENTRY_QUIET = 0.08
 ENTRY_LEVEL = 0.1          # …and the music "comes in" on the first beat from which ENTRY_HOLD_BEATS stay at this level
 ENTRY_HOLD_BEATS = 4
 WARMUP_LEVEL = 0.2         # after the entry: Warm-up at this mean level or above, else Slow
+BUILD_REACH_SEC = 14.0     # a change point the analysis found may start the build-up up to this long before the loud run
 BUILD_MAX_BARS = 4
 BUILD_RISE = 0.1           # "the energy rises through them": last bar − first bar of the candidate build-up
 MEDIUM_LEVEL = 0.4         # leftover bars: at or above → Rhythmic, below → Slow
@@ -460,8 +461,9 @@ def _fit_warmdown(b, it, k_edge: int, k_run_start: int, k_next: int, dip: bool, 
     return ws, we
 
 
-def refine_with(coarse: list, beats, inten, drops, duration: float) -> list:
-    """The bar-level pass on explicit data (see above). coarse: regions with "type". Returns regions."""
+def refine_with(coarse: list, beats, inten, drops, duration: float, marks=()) -> list:
+    """The bar-level pass on explicit data (see above). coarse: regions with "type"; marks: the times where the
+    analysis itself found the song changing (its stretch boundaries and build-up starts). Returns regions."""
     import math
     import numpy as np
     b = np.asarray(beats, float)
@@ -587,6 +589,15 @@ def refine_with(coarse: list, beats, inten, drops, duration: float) -> list:
                     build_from = bs
                 else:
                     build_from = max(float(starts[b0]), start)
+                # the song's own change point wins when the build-up starts earlier there: a place where the analysis
+                # found the music changing, up to BUILD_REACH_SEC before the loud run (Body: 39.4 s, not 43.3 s)
+                earlier = [float(m_) for m_ in marks if t1 - BUILD_REACH_SEC <= float(m_) < build_from - 0.25 * bar
+                           and float(m_) > start + 0.5 * bar]
+                if earlier:
+                    build_from = max(earlier)
+                    e = k
+                    while e < j and float(ends[e]) <= build_from + 1e-6:
+                        e += 1
         for m in range(k, e):
             c = coarse_at((starts[m] + ends[m]) / 2)
             if last:
@@ -661,7 +672,9 @@ def refine(coarse: list, track: dict, analysis: dict = None) -> list:
         beats = np.asarray(beats, float)
         inten, _ = SM.intensity_per_beat(track, beats, CS.bar_sec(track, 4) or 2.0)
         drops = list((analysis or {}).get("drops") or [])
-        return refine_with(coarse, beats, inten, drops, float(track["duration_sec"]))
+        marks = sorted({float(u["start"]) for u in (analysis or {}).get("units") or [] if float(u["start"]) > 0.5}
+                       | {float(b_[0]) for b_ in (analysis or {}).get("builds") or [] if float(b_[0]) > 0.5})
+        return refine_with(coarse, beats, inten, drops, float(track["duration_sec"]), marks)
     except Exception:          # noqa: BLE001
         return coarse
 
