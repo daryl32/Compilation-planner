@@ -700,6 +700,8 @@ def render_result(res: dict) -> None:
     st.caption(f"{len(plan['timeline'])} blocks · {summary.get('videos', 0)} different videos used "
                f"(of {len(plan['selected_videos'])} in play) · {types}"
                + (f" · mean fit {summary['mean_fit']:.2f}" if summary.get("mean_fit") is not None else "")
+               + (f" · {summary['joined']} across clip edges" if summary.get("joined") else "")
+               + (f" · {summary['split']} split on the beat" if summary.get("split") else "")
                + (f" · {summary['fallback']} Classic pick(s)" if summary.get("fallback") else "")
                + (f" · ⚠️ {res['shortfall']} slot(s) unfilled" if res.get("shortfall") else ""))
     for n in res.get("notes") or []:
@@ -725,7 +727,9 @@ def render_result(res: dict) -> None:
                 r[1].markdown(f"**{format_mmss(a)}–{format_mmss(b)}**  \n{ST.label(info.get('type'))}")
                 r[2].markdown(f"`{s['video_id']}` #{s['scene_id']} at {format_mmss(s['clip_start_sec'])} · {s['clip_duration_sec']:.1f} s"
                               + (f"  \n{', '.join(s.get('tags') or [])}" if s.get("tags") else ""))
-                r[3].caption(f"fit {info['fit']:.2f} (music {info.get('base', 0):.2f} · story {info.get('story', 0):.2f})"
+                how = (f" · split in {info['parts']}" if info.get("parts") else
+                       f" · {info['joined']} clips back to back" if info.get("joined") else "")
+                r[3].caption(f"fit {info['fit']:.2f} (music {info.get('base', 0):.2f} · story {info.get('story', 0):.2f}){how}"
                              if info.get("fit") is not None else "Classic's pick")
                 r[4].button("✅" if key in excluded else "🚫", key=f"compose_rej_{e['segment_index']}_{s['video_id']}_{s['scene_id']}",
                             help="Put back" if key in excluded else "Leave this clip out", on_click=_toggle_reject, args=(key,))

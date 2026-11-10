@@ -193,3 +193,82 @@ def test_max_videos_limit_and_progress(monkeypatch):
         assert SMX.plan_summary(timeline)["videos"] >= 1
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def _set_cuts(out, video_ids, cuts_of):
+    """Rewrite the test timelines' hard cuts: cuts_of(video row) → list of seconds."""
+    import numpy as np
+    import catalogue_store as CS
+    import footage_timeline as FT
+    rows = {v["video_id"]: v for v in CS.video_index().values()}
+    for vid in video_ids:
+        with np.load(out / f"{vid}.npz") as z:
+            arrays = {k: z[k] for k in z.files}
+        arrays["cuts"] = np.asarray(cuts_of(rows[vid]), np.float32)
+        FT._write_video(out, vid, arrays)
+
+
+def _contiguous(chain):
+    return all(abs(a["clip_start_sec"] + a["clip_duration_sec"] - b["clip_start_sec"]) < 0.06 for a, b in zip(chain, chain[1:]))
+
+
+def test_windows_run_across_clip_edges_but_not_hard_cuts(monkeypatch):
+    """12 s blocks over fixture clips of 1.5–14 s: with continuous footage the window crosses clip edges (a chain of
+    back-to-back pieces); a hard cut on every clip edge makes them walls again."""
+    out = _setup(monkeypatch)
+    try:
+        import copy
+        import core.story_matcher as SMX
+        track, queues, segments, regions = _plan_inputs(["rhythmic"] * 8)
+        tl, short, unfilled = SMX.match_story(segments, copy.deepcopy(queues), track,
+                                              options=SMX.StoryOptions(section_map=regions))
+        ps = SMX.plan_summary(tl)
+        assert short == 0 and unfilled < 0.1 and ps["fallback"] == 0
+        joined = [s for e in tl for s in e["scenes"] if (s["story"] or {}).get("joined")]
+        assert joined and ps["joined"] == len(joined)
+        for e in tl:
+            for s in e["scenes"]:
+                assert abs(s["clip_duration_sec"] - (e["track_time"][1] - e["track_time"][0])) < 0.1
+                if s["story"].get("joined"):
+                    assert len(s["chain"]) == s["story"]["joined"] > 1 and _contiguous(s["chain"])
+                    assert len({c["video_id"] for c in s["chain"]}) == 1
+                    assert min(c["clip_duration_sec"] for c in s["chain"]) >= SMX.MIN_PIECE_SEC - 0.02
+        # no footage used twice, pieces included
+        used = sorted((c["video_id"], c["clip_start_sec"], c["clip_start_sec"] + c["clip_duration_sec"])
+                      for e in tl for s in e["scenes"] for c in s["chain"])
+        for a, b in zip(used, used[1:]):
+            assert a[0] != b[0] or a[2] <= b[1] + 0.02
+        # an excluded clip is a wall: vid_b's scene 2 is excluded in the fixture — nothing of it is used
+        assert not [c for e in tl for s in e["scenes"] for c in s["chain"] if c["video_id"] == "vid_b" and c["scene_id"] == 2]
+        # hard cuts on every clip edge → no window crosses an edge any more
+        _set_cuts(out, ("vid_a", "vid_b", "vid_c", "vid_f"), lambda v: [s["end"] for s in v["scenes"]])
+        tl2, _, _ = SMX.match_story(segments, copy.deepcopy(queues), track, options=SMX.StoryOptions(section_map=regions))
+        assert SMX.plan_summary(tl2)["joined"] == 0
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_blocks_too_long_for_any_window_are_split_on_the_beat(monkeypatch):
+    out = _setup(monkeypatch)
+    try:
+        import copy
+        import core.story_matcher as SMX
+        _set_cuts(out, ("vid_a", "vid_b", "vid_c", "vid_f"), lambda v: [s["end"] for s in v["scenes"]])
+        track, queues, segments, regions = _plan_inputs(["rhythmic"] * 6)          # 16 s blocks; no clip is that long
+        tl, short, _ = SMX.match_story(segments, copy.deepcopy(queues), track, options=SMX.StoryOptions(section_map=regions))
+        ps = SMX.plan_summary(tl)
+        split = [(e, s) for e in tl for s in e["scenes"] if (s["story"] or {}).get("parts")]
+        assert split and ps["split"] == len(split)
+        for e, s in split:
+            assert s["story"]["parts"] >= 2 and s["story"]["fit"] is not None
+            assert abs(s["clip_duration_sec"] - (e["track_time"][1] - e["track_time"][0])) < 0.15
+            assert all(c["clip_duration_sec"] >= SMX.MIN_PART_SEC - 0.05 for c in s["chain"])
+        assert ps["fallback"] < ps["slots"]
+        # a failed split leaves the queues as they were (nothing half-carved)
+        q = copy.deepcopy(queues)
+        before = copy.deepcopy(q)
+        only_d = {k: v for k, v in q.items() if k == "vid_d"}                       # no timeline → nothing to split with
+        SMX.match_story(segments[:1], only_d, track, max_clips=1, options=SMX.StoryOptions(section_map=regions))
+        assert {k: v for k, v in q.items() if k != "vid_d"} == {k: v for k, v in before.items() if k != "vid_d"}
+    finally:
+        shutil.rmtree(out, ignore_errors=True)

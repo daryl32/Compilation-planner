@@ -17,14 +17,19 @@ For every block of the track:
   3. the best windows fill the block's slots (distinct videos unless allowed), carved out of the queues like
      Classic's picks, so no footage is used twice and in-order mode holds. Split-screen panes are pulled towards
      the first (anchor) pane's shot size.
-Blocks no timeline window can fill (no processed videos left, footage exhausted) fall back to Classic's chain
-fill, so the plan never has gaps. Each slot carries a "story" dict (type, fit, base, story) for the cards.
+A window may run across Reviewer clip edges where the footage is continuous — neighbouring usable clips that
+touch with no hard cut (TransNetV2) on the join form one run; the pick is then a chain of back-to-back pieces.
+Excluded clips, the library range and hard cuts stay walls. A block no window is long enough for is split at
+the beat nearest its middle (up to twice) and each part gets its own recipe-scored window. Only what's still
+unfilled after that (no processed videos left, footage exhausted) falls back to Classic's chain fill, so the
+plan never has gaps. Each slot carries a "story" dict (type, fit, base, story) for the cards.
 
 No Streamlit in here.
 """
 
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass, field
 
@@ -38,7 +43,13 @@ from core.matching import PlanContext, excluded_for_block, fill_slot
 from core.shape import get_block_audio_curve, resample_curve
 
 STEP = FT.STEP
-TOP_PER_SPAN = 3            # candidate windows kept per span (spread ≥ half a block apart)
+TOP_PER_SPAN = 3            # candidate windows kept per clip in a run (spread ≥ half a block apart), up to TOP_PER_RUN
+TOP_PER_RUN = 12
+JOIN_TOL_SEC = 0.06         # two clips touch when one ends within this of the next one's start
+CUT_NEAR_SEC = 0.3          # …and no hard cut lies within this of the join
+MIN_PIECE_SEC = 0.3         # a window crossing a clip edge never leaves a piece shorter than this
+MIN_PART_SEC = 0.75         # a block is only split into parts at least this long
+MAX_SPLIT_DEPTH = 2         # block → 2 parts → 4 parts
 MIN_GAP_POINTS = 2          # …at least this many half seconds apart
 JUNK_SHARE = 0.5            # nobody on screen for over half the window → heavy penalty
 W_BAND, W_TREND, W_SHAPE, W_BEAT = 0.45, 0.15, 0.25, 0.15      # inside base
@@ -82,6 +93,10 @@ class _Video:
         self.shot = np.asarray(tl.shot, np.float32)
         self.bpm = np.asarray(tl.bpm, np.float32)
         self.per = np.asarray(tl.periodicity, np.float32)
+        try:
+            self.cuts = np.asarray(tl.cuts, np.float64)
+        except AttributeError:
+            self.cuts = np.zeros(0)
         pov = tl.visible("POV")
         self.pov = pov.astype(np.float64) if pov is not None else np.zeros(self.n)
         self._col = {str(t).lower(): k for k, t in enumerate(tl.tags)}
@@ -201,11 +216,24 @@ def _score_video(v: _Video, n: int, recipe: dict, audio_curve: np.ndarray, track
     return fit, base, story
 
 
-def _window_starts(v: _Video, span: dict, n: int) -> np.ndarray:
-    """Start indices whose n-point window lies inside the span's still-available footage."""
-    a = span["scene_start_sec"] + span["offset_sec"]
-    b = a + span["remaining_sec"]
-    d = n * STEP
+def _abs_start(span: dict) -> float:
+    return span["scene_start_sec"] + span["offset_sec"]
+
+
+def _abs_end(span: dict) -> float:
+    return span["scene_start_sec"] + span["offset_sec"] + span["remaining_sec"]
+
+
+def _joined(a: dict, b: dict, cuts: np.ndarray) -> bool:
+    """Do two spans of one video form continuous footage: b starts where a ends, and no hard cut on the join."""
+    end = _abs_end(a)
+    if abs(_abs_start(b) - end) > JOIN_TOL_SEC:
+        return False
+    return not (len(cuts) and bool(np.any(np.abs(cuts - end) <= CUT_NEAR_SEC)))
+
+
+def _window_starts(v: _Video, a: float, b: float, d: float, n: int) -> np.ndarray:
+    """Start indices whose d-second window lies inside the footage [a, b)."""
     lo = int(np.searchsorted(v.times, a - 1e-3, side="left"))
     hi = int(np.searchsorted(v.times, b - d + 1e-3, side="right"))
     hi = min(hi, v.n - n + 1)
@@ -268,6 +296,15 @@ def _slot(pick: dict, info: dict) -> dict:
             "clip_start_sec": pick["clip_start_sec"], "story": info}
 
 
+def _slot_chain(picks: list, info: dict) -> dict:
+    """A slot from one or more picks played back to back (a window across clip edges, or a split block)."""
+    first = picks[0]
+    return {"chain": picks, "video_id": first["video_id"], "scene_id": first["scene_id"],
+            "tags": sorted({t for p in picks for t in p["tags"]}), "motion_norm": first["motion_norm"],
+            "thumbnail": first["thumbnail"], "clip_duration_sec": round(sum(p["clip_duration_sec"] for p in picks), 3),
+            "offset_into_scene_sec": first["offset_into_scene_sec"], "clip_start_sec": first["clip_start_sec"], "story": info}
+
+
 def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1, max_clips: int = 1,
                 ramp_start: float = 0.2, ramp_end: float = 0.85, allow_same_video: bool = False,
                 sequential: bool = False, segment_exclusions: dict = None, segment_clip_reduction: dict = None,
@@ -295,6 +332,11 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
         options.notes.append(f"{len(missing)} selected video{'s have' if len(missing) != 1 else ' has'} no 🧭 timeline "
                              f"yet — only Classic's picks can use {'them' if len(missing) != 1 else 'it'}.")
     track_bpm = float(track.get("bpm") or 0.0)
+    try:
+        import section_cuts as _SCUT
+        beats = np.asarray(_SCUT._beats(track), float)
+    except Exception:          # noqa: BLE001 — no beat grid: blocks are split at their middle
+        beats = np.zeros(0)
     ms = float(min(max(options.music_story, 0.0), 1.0))
     smooth = 1.0 - float(min(max(options.smooth_contrast, 0.0), 1.0))
 
@@ -325,54 +367,134 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
         change_ok = shot_rule == "change" or (t_id != prev_type and shot_rule == "allow")
         shot_w = SHOT_PENALTY * smooth * {"hold": 1.0, "allow": 0.5, "change": 0.0}[shot_rule] * (0.5 if t_id != prev_type else 1.0)
 
-        # 1. candidate windows across every available span of every video with a timeline
-        cands = []
-        for span in get_candidate_spans(queues, sequential, excluded_all):
-            key = (span["video_id"], span["scene_id"])
-            if key in excluded_here or span["remaining_sec"] < d - 1e-6:
-                continue
-            v = videos.get(span["video_id"])
-            if v is None:
-                continue
-            req = recipe.get("scene_require") or []
-            span_tags = {str(t).lower() for t in span.get("tags") or []}
-            if req and not all(str(t).lower() in span_tags for t in req):
-                continue
-            starts = _window_starts(v, span, n)
-            if not len(starts):
-                continue
-            cache = v._cum.get(("fit", i))
-            if cache is None:
-                cache = v._cum[("fit", i)] = _score_video(v, n, recipe, audio, track_bpm, ms)
-            fit, base, story = cache
-            starts = starts[starts < len(fit)]
-            if not len(starts):
-                continue
-            prefer = PREFER_BONUS if any(str(t).lower() in span_tags for t in recipe.get("scene_prefer") or []) else 0.0
-            role_b = ROLE_BONUS if (role and has_role(span, role)) or any(has_role(span, rr) for rr in recipe.get("roles") or []) else 0.0
-            penalty = USE_PENALTY * uses.get(span["video_id"], 0) + (REPEAT_PENALTY if span["video_id"] in prev_videos else 0.0)
-            for s in _top_spread(starts, fit, TOP_PER_SPAN, max(MIN_GAP_POINTS, n // 2)):
-                total = float(fit[s]) + prefer + role_b - penalty
-                start_shot = _shot_at(v, s)
-                if not math.isnan(prev_shot) and not math.isnan(start_shot):
-                    jump = abs(start_shot - prev_shot)
-                    total -= shot_w * jump
-                    if change_ok and jump >= 1.0:
-                        total += CONTRAST_BONUS * max(0.0, 1.0 - smooth - 0.5) * 2
-                if prev_pov is not None and smooth > 0:
-                    pov_here = bool(v.pov[s])
-                    if pov_here != prev_pov:
-                        total -= POV_PENALTY * smooth * (0.5 if change_ok else 1.0)
-                cands.append({"total": total, "fit": float(fit[s]), "base": float(base[s]), "story": float(story[s]),
-                              "video_id": span["video_id"], "scene_id": span["scene_id"], "start_idx": s,
-                              "offset": float(v.times[s] - span["scene_start_sec"]), "shot": start_shot,
-                              "end_shot": _shot_at(v, min(s + n - 1, v.n - 1)), "pov": bool(v.pov[s])})
-        cands.sort(key=lambda c: -c["total"])
+        req = [str(t).lower() for t in recipe.get("scene_require") or []]
+        pref = [str(t).lower() for t in recipe.get("scene_prefer") or []]
+        rec_roles = recipe.get("roles") or []
         budget_spent = bool(max_videos) and len(uses) >= max_videos
-        if budget_spent:
-            # the video budget is spent: only the videos already in the plan (Classic's fallback fills the rest,
-            # preferring them too — a new video only if nothing else can fill the block)
-            cands = [c for c in cands if c["video_id"] in uses]
+
+        def search(t0: float, t1: float, key) -> list:
+            """Candidate windows for the music from t0 to t1, best first. Clips of one video that touch with no hard
+            cut on the join form one run, and a window may sit anywhere in a run."""
+            dd = t1 - t0
+            nn = max(2, int(round(dd / STEP)))
+            aud = get_block_audio_curve(track, t0, t1)
+            by_vid = {}
+            for span in get_candidate_spans(queues, sequential, excluded_all):
+                vid_ = span["video_id"]
+                if (vid_, span["scene_id"]) in excluded_here or vid_ not in videos:
+                    continue
+                if budget_spent and vid_ not in uses:
+                    continue                     # the video budget is spent: only videos already in the plan
+                if req:
+                    have = {str(x).lower() for x in span.get("tags") or []}
+                    if not all(t in have for t in req):
+                        continue
+                by_vid.setdefault(vid_, []).append(span)
+            out = []
+            for vid_, spans in by_vid.items():
+                v = videos[vid_]
+                spans.sort(key=_abs_start)
+                runs = [[spans[0]]]
+                for sp in spans[1:]:
+                    if not sequential and _joined(runs[-1][-1], sp, v.cuts):
+                        runs[-1].append(sp)
+                    else:
+                        runs.append([sp])
+                penalty = USE_PENALTY * uses.get(vid_, 0) + (REPEAT_PENALTY if vid_ in prev_videos else 0.0)
+                cache = None
+                for run in runs:
+                    ra, rb = _abs_start(run[0]), _abs_end(run[-1])
+                    if rb - ra < dd - 1e-6:
+                        continue
+                    starts = _window_starts(v, ra, rb, dd, nn)
+                    if not len(starts):
+                        continue
+                    if cache is None:
+                        cache = v._cum.get(("fit", key))
+                        if cache is None:
+                            cache = v._cum[("fit", key)] = _score_video(v, nn, recipe, aud, track_bpm, ms)
+                    fit, base, story = cache
+                    starts = starts[starts < len(fit)]
+                    if not len(starts):
+                        continue
+                    keep = min(TOP_PER_RUN, TOP_PER_SPAN * len(run))
+                    for s_ in _top_spread(starts, fit, keep, max(MIN_GAP_POINTS, nn // 2)):
+                        ws = min(max(float(v.times[s_]), ra), rb - dd)
+                        we = ws + dd
+                        pieces, over = [], []
+                        for sp in run:
+                            lo, hi = max(ws, _abs_start(sp)), min(we, _abs_end(sp))
+                            if hi - lo > 1e-6:
+                                pieces.append((sp["scene_id"], lo - sp["scene_start_sec"], hi - lo))
+                                over.append(sp)
+                        if not pieces or (len(pieces) > 1 and min(p_[2] for p_ in pieces) < MIN_PIECE_SEC):
+                            continue
+                        over_tags = {str(x).lower() for sp in over for x in sp.get("tags") or []}
+                        prefer = PREFER_BONUS if any(t in over_tags for t in pref) else 0.0
+                        role_b = ROLE_BONUS if any((role and has_role(sp, role)) or any(has_role(sp, rr) for rr in rec_roles)
+                                                   for sp in over) else 0.0
+                        total = float(fit[s_]) + prefer + role_b - penalty
+                        start_shot = _shot_at(v, s_)
+                        if not math.isnan(prev_shot) and not math.isnan(start_shot):
+                            jump = abs(start_shot - prev_shot)
+                            total -= shot_w * jump
+                            if change_ok and jump >= 1.0:
+                                total += CONTRAST_BONUS * max(0.0, 1.0 - smooth - 0.5) * 2
+                        if prev_pov is not None and smooth > 0 and bool(v.pov[s_]) != prev_pov:
+                            total -= POV_PENALTY * smooth * (0.5 if change_ok else 1.0)
+                        out.append({"total": total, "fit": float(fit[s_]), "base": float(base[s_]), "story": float(story[s_]),
+                                    "video_id": vid_, "pieces": pieces, "shot": start_shot,
+                                    "end_shot": _shot_at(v, min(s_ + nn - 1, v.n - 1)), "pov": bool(v.pov[s_])})
+            out.sort(key=lambda c: -c["total"])
+            return out
+
+        def take(c: dict, journal: list = None):
+            """Carve a candidate's pieces out of the queues; all or nothing. Returns the picks or None."""
+            vid_ = c["video_id"]
+            backup = copy.deepcopy(queues[vid_])
+            picks = []
+            try:
+                for scene_id, off, dur in c["pieces"]:
+                    picks.append(carve_span(queues, vid_, scene_id, off, dur, sequential))
+            except ValueError:
+                queues[vid_][:] = backup
+                return None
+            if journal is not None:
+                journal.append((vid_, backup))
+            return picks
+
+        def split_fill(t0: float, t1: float, depth: int, avoid: set, journal: list):
+            """No window is long enough for t0–t1: cut it at the beat nearest the middle and give each part its own
+            window (splitting a part again if it must). Returns [(picks, candidate)] in order, or None."""
+            if depth >= MAX_SPLIT_DEPTH or t1 - t0 < 2 * MIN_PART_SEC:
+                return None
+            mid = (t0 + t1) / 2
+            inner = beats[(beats >= t0 + MIN_PART_SEC) & (beats <= t1 - MIN_PART_SEC)]
+            if inner.size:
+                mid = float(inner[int(np.argmin(np.abs(inner - mid)))])
+            parts = []
+            for k, (a_, b_) in enumerate(((t0, mid), (mid, t1))):
+                got = None
+                for c in search(a_, b_, (i, depth, k, round(a_, 3))):
+                    if c["video_id"] in avoid:
+                        continue
+                    picks = take(c, journal)
+                    if picks:
+                        got = [(picks, c)]
+                        break
+                if got is None:
+                    got = split_fill(a_, b_, depth + 1, avoid, journal)
+                if got is None:
+                    return None
+                parts += got
+            return parts
+
+        def _info(c: dict, **extra) -> dict:
+            return {"type": t_id, "fit": round(c["fit"], 3), "base": round(c["base"], 3), "story": round(c["story"], 3),
+                    "shot": None if math.isnan(c["shot"]) else round(c["shot"], 2), **extra}
+
+        # 1. whole-block windows, best first
+        cands = search(seg["start"], seg["end"], (i,))
 
         # 2. fill the slots
         slots, used = [], set()
@@ -383,20 +505,39 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
             if not allow_same_video and c["video_id"] in used:
                 continue
             if slots and not math.isnan(anchor_shot) and not math.isnan(c["shot"]):
-                # split-screen: pull the other panes towards the anchor's shot size — re-rank the rest lazily
+                # split-screen: the other panes are pulled towards the anchor's shot size
                 if abs(c["shot"] - anchor_shot) * PANE_PENALTY > 0.08:
                     continue
-            try:
-                pick = carve_span(queues, c["video_id"], c["scene_id"], c["offset"], d, sequential)
-            except ValueError:
+            picks = take(c)
+            if not picks:
                 continue
-            slots.append(_slot(pick, {"type": t_id, "fit": round(c["fit"], 3), "base": round(c["base"], 3),
-                                      "story": round(c["story"], 3), "shot": None if math.isnan(c["shot"]) else round(c["shot"], 2)}))
+            slots.append(_slot_chain(picks, _info(c, **({"joined": len(picks)} if len(picks) > 1 else {}))))
             used.add(c["video_id"])
             uses[c["video_id"]] = uses.get(c["video_id"], 0) + 1
             if len(slots) == 1:
                 anchor_shot = c["shot"]
                 prev_shot, prev_pov = c["end_shot"], c["pov"]
+        # 2b. slots no whole window fits: split the block on the beat, each part scored on its own
+        for _ in range(n_picks - len(slots)):
+            journal = []
+            parts = split_fill(seg["start"], seg["end"], 0, set(used) if not allow_same_video else set(), journal)
+            if not parts:
+                for vid_, backup in reversed(journal):
+                    queues[vid_][:] = backup
+                break
+            picks = [p_ for ps, _ in parts for p_ in ps]
+            w = [sum(p_["clip_duration_sec"] for p_ in ps) for ps, _ in parts]
+            mean = lambda k_: float(np.average([c[k_] for _, c in parts], weights=w))    # noqa: E731
+            first, last = parts[0][1], parts[-1][1]
+            slots.append(_slot_chain(picks, {"type": t_id, "fit": round(mean("fit"), 3), "base": round(mean("base"), 3),
+                                             "story": round(mean("story"), 3), "parts": len(parts),
+                                             "shot": None if math.isnan(first["shot"]) else round(first["shot"], 2)}))
+            for _, c in parts:
+                used.add(c["video_id"])
+                uses[c["video_id"]] = uses.get(c["video_id"], 0) + 1
+            if len(slots) == 1:
+                anchor_shot = first["shot"]
+                prev_shot, prev_pov = last["end_shot"], last["pov"]
         # 3. Classic's chain fill for anything left
         for _ in range(n_picks - len(slots)):
             avoid = set(used) if not allow_same_video else set()
@@ -428,7 +569,7 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
         prev_type = t_id
         # the fit cache is per block (window length and recipe change) — drop it
         for v in videos.values():
-            v._cum.pop(("fit", i), None)
+            v._cum.clear()
         timeline.append({"segment_index": i, "track_time": [round(seg["start"], 2), round(seg["end"], 2)],
                          "segment_energy": seg["energy"], "segment_intensity": seg.get("intensity", seg["energy"]),
                          "clip_count": len(slots), "split_screen": len(slots) > 1,
@@ -444,7 +585,7 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
 
 def plan_summary(timeline: list) -> dict:
     """For the status line: blocks per section type, share of slots from the timeline, mean fit."""
-    types, fits, fallback, total = {}, [], 0, 0
+    types, fits, fallback, total, split, joined = {}, [], 0, 0, 0, 0
     for e in timeline:
         t = e.get("section_type")
         if t:
@@ -456,6 +597,8 @@ def plan_summary(timeline: list) -> dict:
                 fallback += 1
             else:
                 fits.append(info["fit"])
+            split += 1 if info.get("parts") else 0
+            joined += 1 if info.get("joined") else 0
     videos = {c["video_id"] for e in timeline for s in e.get("scenes") or [] for c in s.get("chain") or []}
-    return {"types": types, "slots": total, "fallback": fallback, "videos": len(videos),
+    return {"types": types, "slots": total, "fallback": fallback, "videos": len(videos), "split": split, "joined": joined,
             "mean_fit": round(float(np.mean(fits)), 3) if fits else None}

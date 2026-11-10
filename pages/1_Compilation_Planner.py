@@ -1682,8 +1682,10 @@ if matching_mode == "Auto":
                         else:
                             _sh = _story.get("shot")
                             _shot_txt = "" if _sh is None else f" · shot {_sh:.1f}"
+                            _how = (f" · split in {_story['parts']}" if _story.get("parts") else
+                                    f" · {_story['joined']} clips back to back" if _story.get("joined") else "")
                             st.caption(f"🤖 {_ST.label(_story.get('type'))} · fit {_story['fit']:.2f} "
-                                       f"(music {_story.get('base', 0):.2f} · story {_story.get('story', 0):.2f}){_shot_txt}")
+                                       f"(music {_story.get('base', 0):.2f} · story {_story.get('story', 0):.2f}){_shot_txt}{_how}")
 
                     scene_key = f"{seg_idx}_{slot_idx}_{s['video_id']}_{s['scene_id']}"
                     btn_cols = st.columns(3)
