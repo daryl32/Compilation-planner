@@ -157,7 +157,9 @@ def test_bar_level_pass_on_a_real_track():
     assert all(abs(a["end"] - b["start"]) < 1e-6 for a, b in zip(out, out[1:]))
     drops = [r for r in out if r["type"] == "drop"]
     assert [round(r["start"]) for r in drops] == [24, 45] and all(2.0 < r["end"] - r["start"] < 3.2 for r in drops)
-    assert [round(r["start"]) for r in out if r["type"] == "warmdown"] == [40, 64, 99]
+    wd = [r for r in out if r["type"] == "warmdown"]
+    assert [round(r["start"]) for r in wd] == [41, 64, 99]              # starts on the beat the energy leaves the loud level
+    assert [round(r["end"], 1) for r in wd] == [45.3, 69.3, 104.0]      # ends on the bar line where the next part begins
     seq = [r["type"] for r in out]
     assert seq[0] == "intro" and seq[1] == "buildup" and seq[-1] == "ending" and round(out[-1]["start"]) == 104
     assert ST.type_at(out, 30.0) == "action" and ST.type_at(out, 38.0) == "action"      # the first loud stretch: no Fast
@@ -167,3 +169,21 @@ def test_bar_level_pass_on_a_real_track():
     assert before < 0.4 and after > 0.85
     # too little to go on → the coarse map comes back untouched
     assert ST.refine_with(coarse, fx["beats"][:6], fx["intensity"][:5], [], fx["duration"]) == coarse
+    import numpy as np
+    b, level = np.array(fx["beats"]), np.array(fx["intensity"])
+    # no drop to anchor the bars on: the bar count is chosen from the energy changes — same result
+    free = ST.refine_with(coarse, b, level, [], fx["duration"])
+    assert ST.agreement(free, daryl, fx["duration"]) > 0.85 and sum(r["type"] == "drop" for r in free) == 2
+    # a song with steady energy is left as the first pass had it
+    assert ST.refine_with(coarse, b, 0.6 + 0.05 * np.sin(np.arange(len(level))), [], fx["duration"]) == coarse
+    # at double the tempo a one-bar Drop would be 1.3 s — it takes two bars
+    fast = ST.refine_with(coarse, b / 2, level, [d / 2 for d in fx["drops"]], fx["duration"] / 2)
+    assert all(r["end"] - r["start"] >= ST.DROP_MIN_SEC for r in fast if r["type"] == "drop")
+    # a hard stop (loud straight to quiet) gets no Warm-down
+    hard = level.copy()
+    k = int(np.argmin(abs(b - 64.0)))
+    hard[k:k + 40], hard[k - 8:k] = 0.2, 0.8
+    stops = ST.refine_with(coarse, b, hard, fx["drops"], fx["duration"])
+    assert not [r for r in stops if r["type"] == "warmdown" and 60 < r["start"] < 70]
+    for res in (free, fast, stops):
+        assert res[0]["start"] == 0.0 and all(abs(p["end"] - q["start"]) < 1e-6 for p, q in zip(res, res[1:]))
