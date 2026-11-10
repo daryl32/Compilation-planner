@@ -1,9 +1,10 @@
 """
 ✂️ Section cuts — the 🤖 new matcher's blocks, without the Audio Settings step. The track's 🧩 section map gives the
-boundaries and each part's type; the type's 🍳 recipe gives the pace (clip length lo–hi seconds). Inside each
-section the cuts land on beats, at the pace: a "rise" trend shortens the clips from hi to lo through the section
-(tension building), a "fall" lengthens them lo → hi, "flat" keeps them around the middle. Section boundaries are
-always cuts. Each block carries the same fields Classic's segments do (start, end, energy, intensity) plus its
+boundaries and each part's type; the type's 🍳 recipe gives the clip length range (lo–hi seconds). Each section is
+divided as a whole: every clip inside the range, cuts on the beats the music accents (drum hits, changes, bar and
+phrase lines — or vocal phrase starts where a voice drives the bar; audio_drive.py), clips a musical number of
+beats long. A "rise" trend shortens the clips from hi to lo through the section, a "fall" lengthens them, a steady
+section aims a little above the middle. Section boundaries are always cuts. Each block carries the same fields Classic's segments do (start, end, energy, intensity) plus its
 section type.
 
 No Streamlit in here.
@@ -55,7 +56,8 @@ def _mean_energy(curve: np.ndarray, rate: float, a: float, b: float) -> float:
 
 
 def pace_at(recipe: dict, share: float) -> float:
-    """The wanted clip length at `share` (0–1) of the way through the section."""
+    """The wanted clip length at `share` (0–1) of the way through the section. A steady section aims a little
+    above the middle of the range (Daryl, 10 Nov: rather slightly longer clips, when the footage holds)."""
     pc = recipe.get("pace") or {"lo": 2.0, "hi": 4.0}
     lo, hi = float(pc["lo"]), float(pc["hi"])
     trend = (recipe.get("movement") or {}).get("trend", "flat")
@@ -63,46 +65,90 @@ def pace_at(recipe: dict, share: float) -> float:
         return hi + (lo - hi) * share
     if trend == "fall":
         return lo + (hi - lo) * share
-    return (lo + hi) / 2
+    return lo + FLAT_AIM * (hi - lo)
 
 
-def cut_section(beats: np.ndarray, start: float, end: float, recipe: dict) -> list:
-    """Cut times inside [start, end): on beats, at the recipe's pace. Returns the block starts (incl. start)."""
-    starts = [start]
-    t = start
-    inner = beats[(beats > start + 1e-6) & (beats < end - 1e-6)]
+FLAT_AIM = 0.65            # where in the range a steady section aims
+RANGE_SLACK = 0.15         # a clip may be this far outside the recipe's range (cuts sit on beats)
+MUSICAL_BEATS = (1, 2, 4, 8, 16, 32)             # a beat, half a bar, 1, 2, 4, 8 bars
+W_ODD_BARS = 0.15          # cost of a whole number of bars that isn't one of those (3, 5, 6 bars)
+W_LENGTH = 0.5             # cost of a clip's distance from the wanted length (per its own length)
+W_UNMUSICAL = 0.4          # cost of a clip that isn't whole bars or half a bar long (3, 5, 7 beats…)
+
+
+def cut_section(beats: np.ndarray, start: float, end: float, recipe: dict, accent: np.ndarray = None) -> list:
+    """Block starts inside [start, end) (incl. start). The section is divided as a whole: every clip within the
+    recipe's range (so no short leftover at the end), cuts on the beats the music accents (`accent`, one value per
+    beat — audio_drive.accents), clips a musical number of beats long, each as near the wanted length as that
+    allows. Without accents: the most even musical division."""
+    beats = np.asarray(beats, float)
+    sel = (beats > start + 1e-6) & (beats < end - 1e-6)
+    inner = beats[sel]
     if inner.size == 0:
-        return starts
-    while True:
-        want = pace_at(recipe, (t - start) / max(end - start, 1e-9))
-        target = t + want
-        if target >= end - MIN_BLOCK_SEC:
-            break
-        later = inner[inner > t + 1e-6]
-        if later.size == 0:
-            break
-        nxt = float(later[int(np.argmin(np.abs(later - target)))])
-        if nxt <= t + 1e-6:
-            break
-        if end - nxt < MIN_BLOCK_SEC:
-            break
-        starts.append(nxt)
-        t = nxt
-    return starts
+        return [start]
+    acc = np.asarray(accent, float)[sel] if accent is not None and len(accent) == len(beats) else np.zeros(inner.size)
+    acc = acc - float(np.median(acc)) if acc.size else acc          # only beats that stand out attract a cut
+    beat = float(np.median(np.diff(beats))) if beats.size > 1 else 0.5
+    pc = recipe.get("pace") or {"lo": 2.0, "hi": 4.0}
+    lo, hi = float(pc["lo"]), float(pc["hi"])
+    T = np.concatenate([[start], inner, [end]])
+    A = np.concatenate([[0.0], acc, [0.0]])
+    K = len(T)
+    a_edge = float(max(acc.max(), 0.0)) if acc.size else 0.0      # a section edge is as good a cut as the best beat
+
+    def solve(lo_, hi_):
+        best = np.full(K, -np.inf)
+        prev = np.full(K, -1, int)
+        best[0] = 0.0
+        for j in range(1, K):
+            for i in range(j - 1, -1, -1):
+                d = T[j] - T[i]
+                if d > hi_ + 1e-6:
+                    break
+                if d < lo_ - 1e-6 or best[i] == -np.inf:
+                    continue
+                want = pace_at(recipe, (T[i] - start) / max(end - start, 1e-9))
+                n_beats = int(round(d / beat))
+                cost = W_LENGTH * abs(d - want) / max(want, 1e-6)
+                if abs(d - n_beats * beat) <= 0.3 * beat:        # (a clip ending on a section edge off the beat isn't judged)
+                    cost += 0.0 if n_beats in MUSICAL_BEATS else (W_ODD_BARS if n_beats % 4 == 0 else W_UNMUSICAL)
+                # each clip is judged by how well it ends and how well its length suits — weighted by its length, so
+                # many short clips can't out-score a few long ones just by collecting more accents
+                v = best[i] + d * ((A[j] if j < K - 1 else a_edge) - cost)
+                if v > best[j]:
+                    best[j], prev[j] = v, i
+        if best[K - 1] == -np.inf:
+            return None
+        cuts, j = [], K - 1
+        while j > 0:
+            j = int(prev[j])
+            cuts.append(float(T[j]))
+        return cuts[::-1]
+    got = solve(max(lo * (1 - RANGE_SLACK), MIN_BLOCK_SEC), hi * (1 + RANGE_SLACK))
+    if got is None:                                     # a section shorter than a clip, or one the range can't tile
+        got = solve(MIN_BLOCK_SEC, max(hi * 2, end - start))
+    return got or [start]
 
 
 def story_segments(track: dict, regions: list, recipes: dict) -> list:
-    """Blocks for the whole track from its section map + the recipes' paces."""
+    """Blocks for the whole track from its section map + the recipes' clip lengths, cut where the music accents
+    (audio_drive). Each block: start, end, energy, intensity, section_type, driver (what drives the music there)."""
+    import audio_drive as AD
     duration = float(track["duration_sec"])
     beats = _beats(track)
     curve, rate = _energy_curve(track)
+    try:
+        drv = AD.drivers(track, beats)
+        accent = AD.accents(track, beats, drv)
+    except Exception:          # noqa: BLE001 — a track the extra curves can't be read from: even musical cuts
+        drv, accent = None, None
     bounds = []
     for r in regions or []:
         a, b = float(r["start"]), float(min(r["end"], duration))
         if b <= a:
             continue
         recipe = recipes.get(r.get("type")) or {}
-        for s in cut_section(beats, a, b, recipe):
+        for s in cut_section(beats, a, b, recipe, accent):
             bounds.append((s, r.get("type")))
     if not bounds:
         bounds = [(0.0, None)]
@@ -115,7 +161,8 @@ def story_segments(track: dict, regions: list, recipes: dict) -> list:
             continue
         energy = _mean_energy(curve, rate, s, e)
         out.append({"start": round(s, 3), "end": round(e, 3), "energy": round(energy, 4),
-                    "intensity": round(energy, 4), "section_type": t})
+                    "intensity": round(energy, 4), "section_type": t,
+                    "driver": AD.driver_at(drv, (s + e) / 2) if drv else "loudness"})
     if out:
         out[-1]["end"] = round(duration, 3)
     return out

@@ -58,6 +58,8 @@ AVOID_WEIGHT = 0.5
 STORY_TOP = 2               # a window is judged on its best two wanted tags (e.g. a position + penetration)
 PREFER_BONUS = 0.1
 ROLE_BONUS = 0.1
+MERGE_MAX = 1.5             # a merged clip may be up to this × the recipe's longest clip length
+MERGE_TOL = 0.02            # …and is kept when its best window fits within this of the two short clips' best windows
 REPEAT_PENALTY = 0.3        # the same video as a neighbouring block
 USE_PENALTY = 0.04          # per earlier use of the video in this plan (variety)
 SHOT_PENALTY = 0.05         # per shot-size step jumped against the previous clip (× hold / allow / smooth)
@@ -73,6 +75,9 @@ class StoryOptions:
     track_recipes: dict | None = None   # ✍️ Custom: {type_id: recipe} overriding the shared recipes
     section_map: list | None = None     # the track's section map; None → suggested from the song
     max_videos: int = 0                 # at most this many different videos in the plan (0 = no limit)
+    merge_blocks: bool = False          # two neighbouring blocks of one section become one longer clip when the
+                                        # footage fits the longer stretch as well (the new matcher's own flow only —
+                                        # Classic's cards are tied to its own cut list)
     progress: object = None             # progress(done_blocks, total_blocks) — for a progress bar
     notes: list = field(default_factory=list)
 
@@ -347,6 +352,11 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
         beats = np.asarray(_SCUT._beats(track), float)
     except Exception:          # noqa: BLE001 — no beat grid: blocks are split at their middle
         beats = np.zeros(0)
+    try:                               # what drives the music bar by bar (drums / bass / vocals / loudness)
+        import audio_drive as _AD
+        drv = _AD.drivers(track, beats if len(beats) else None)
+    except Exception:          # noqa: BLE001 — no extra analysis: the loudness curve, as before
+        _AD, drv = None, None
     ms = float(min(max(options.music_story, 0.0), 1.0))
     smooth = 1.0 - float(min(max(options.smooth_contrast, 0.0), 1.0))
 
@@ -354,10 +364,13 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
     shortfall, unfilled_total = 0, 0.0
     uses = {}                      # video_id → times used so far
     prev_shot, prev_pov, prev_type = float("nan"), None, None
-    confirmed = {}
+    last_block = []                # the picks of the block before (for the neighbour-repeat rule)
+    merged_away = set()            # blocks taken into the one before them
 
     max_videos = int(options.max_videos or 0)
     for i, seg in enumerate(segments):
+        if i in merged_away:
+            continue
         if options.progress:
             try:
                 options.progress(i, len(segments))
@@ -371,8 +384,7 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
         recipe = shared.get(t_id) or RC.default("rhythmic")
         excluded_here = segment_exclusions.get(i, set())
         excluded_all = excluded_for_block(queues, global_excluded, role, ctx=pctx)
-        prev_videos = {p["video_id"] for j in (i - 1,) if j in confirmed for p in confirmed[j]}
-        audio = get_block_audio_curve(track, seg["start"], seg["end"])
+        prev_videos = {p["video_id"] for p in last_block}
         shot_rule = recipe.get("shot_change", "allow")
         change_ok = shot_rule == "change" or (t_id != prev_type and shot_rule == "allow")
         shot_w = SHOT_PENALTY * smooth * {"hold": 1.0, "allow": 0.5, "change": 0.0}[shot_rule] * (0.5 if t_id != prev_type else 1.0)
@@ -387,7 +399,8 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
             cut on the join form one run, and a window may sit anywhere in a run."""
             dd = t1 - t0
             nn = max(2, int(round(dd / STEP)))
-            aud = get_block_audio_curve(track, t0, t1)
+            key = (round(t0, 3), round(t1, 3), t_id)
+            aud = _AD.drive_slice(drv, t0, t1) if drv is not None else get_block_audio_curve(track, t0, t1)
             by_vid = {}
             for span in get_candidate_spans(queues, sequential, excluded_all):
                 vid_ = span["video_id"]
@@ -506,6 +519,25 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
         # 1. whole-block windows, best first
         cands = search(seg["start"], seg["end"], (i,))
 
+        # 1b. one longer clip instead of two short ones, when the footage holds for the longer stretch
+        nxt = segments[i + 1] if i + 1 < len(segments) else None
+        if (options.merge_blocks and nxt is not None and cands and types[i + 1] == t_id and counts[i + 1] == counts[i]
+                and not segment_exclusions.get(i + 1) and not segment_clip_reduction.get(i + 1)
+                and (nxt["end"] - seg["start"]) <= MERGE_MAX * float((recipe.get("pace") or {}).get("hi", 4.0)) + 1e-6):
+            d2 = nxt["end"] - nxt["start"]
+            c_next = search(nxt["start"], nxt["end"], None)
+            c_long = search(seg["start"], nxt["end"], None)
+            if c_next and c_long:
+                apart = (d * cands[0]["fit"] + d2 * c_next[0]["fit"]) / (d + d2)
+                if c_long[0]["fit"] >= apart - MERGE_TOL:
+                    seg = {**seg, "end": nxt["end"],
+                           "energy": round((d * seg["energy"] + d2 * nxt["energy"]) / (d + d2), 4),
+                           "intensity": round((d * seg.get("intensity", seg["energy"])
+                                               + d2 * nxt.get("intensity", nxt["energy"])) / (d + d2), 4)}
+                    d = seg["end"] - seg["start"]
+                    cands = c_long
+                    merged_away.add(i + 1)
+
         # 2. fill the slots
         slots, used = [], set()
         anchor_shot = float("nan")
@@ -575,12 +607,17 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
                 unfilled_total += unfilled
         if len(slots) < n_picks:
             shortfall += n_picks - len(slots)
-        confirmed[i] = [c for s in slots for c in s["chain"]]
+        last_block = [c for s in slots for c in s["chain"]]
         prev_type = t_id
-        # the fit cache is per block (window length and recipe change) — drop it
+        # window scores are kept per stretch of music; drop the ones this block has passed
         for v in videos.values():
-            v._cum.clear()
-        timeline.append({"segment_index": i, "track_time": [round(seg["start"], 2), round(seg["end"], 2)],
+            for key_ in [k_ for k_ in v._cum if isinstance(k_, tuple) and len(k_) == 2 and k_[0] == "fit"
+                         and k_[1][1] <= seg["end"] + 1e-6]:
+                del v._cum[key_]
+        timeline.append({"segment_index": len(timeline) if options.merge_blocks else i,
+                         "driver": _AD.driver_at(drv, (seg["start"] + seg["end"]) / 2) if drv is not None else None,
+                         "merged": (i + 1) in merged_away,
+                         "track_time": [round(seg["start"], 2), round(seg["end"], 2)],
                          "segment_energy": seg["energy"], "segment_intensity": seg.get("intensity", seg["energy"]),
                          "clip_count": len(slots), "split_screen": len(slots) > 1,
                          "manually_edited": i in segment_exclusions or i in segment_clip_reduction,
@@ -610,5 +647,12 @@ def plan_summary(timeline: list) -> dict:
             split += 1 if info.get("parts") else 0
             joined += 1 if info.get("joined") else 0
     videos = {c["video_id"] for e in timeline for s in e.get("scenes") or [] for c in s.get("chain") or []}
+    drivers = {}
+    for e in timeline:
+        if e.get("driver"):
+            drivers[e["driver"]] = drivers.get(e["driver"], 0) + 1
+    lens = [e["track_time"][1] - e["track_time"][0] for e in timeline]
     return {"types": types, "slots": total, "fallback": fallback, "videos": len(videos), "split": split, "joined": joined,
+            "merged": sum(1 for e in timeline if e.get("merged")), "drivers": drivers,
+            "clip_sec": [round(min(lens), 2), round(float(np.median(lens)), 2), round(max(lens), 2)] if lens else None,
             "mean_fit": round(float(np.mean(fits)), 3) if fits else None}

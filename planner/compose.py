@@ -288,7 +288,7 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     segments = SCUT.story_segments(track, regions, all_recipes)
     queues = build_footage_queues(tuple(video_ids), (), LC.library_ranges())
     opts = SMX.StoryOptions(music_story=music_story, smooth_contrast=smooth_contrast, section_map=regions or None,
-                            max_videos=int(max_videos or 0), progress=progress)
+                            max_videos=int(max_videos or 0), progress=progress, merge_blocks=True)
     max_clips = 3 if split_screen else 1
     timeline, shortfall, unfilled = SMX.match_story(
         segments, queues, track, min_clips=1, max_clips=max_clips, ramp_start=0.5, ramp_end=0.9,
@@ -700,10 +700,18 @@ def render_result(res: dict) -> None:
     st.caption(f"{len(plan['timeline'])} blocks · {summary.get('videos', 0)} different videos used "
                f"(of {len(plan['selected_videos'])} in play) · {types}"
                + (f" · mean fit {summary['mean_fit']:.2f}" if summary.get("mean_fit") is not None else "")
+               + (f" · clips {summary['clip_sec'][0]:g}–{summary['clip_sec'][2]:g} s (typically {summary['clip_sec'][1]:g})"
+                  if summary.get("clip_sec") else "")
+               + (f" · {summary['merged']} made longer" if summary.get("merged") else "")
                + (f" · {summary['joined']} across clip edges" if summary.get("joined") else "")
                + (f" · {summary['split']} split on the beat" if summary.get("split") else "")
                + (f" · {summary['fallback']} Classic pick(s)" if summary.get("fallback") else "")
                + (f" · ⚠️ {res['shortfall']} slot(s) unfilled" if res.get("shortfall") else ""))
+    if summary.get("drivers"):
+        import audio_drive as AD
+        tot = sum(summary["drivers"].values())
+        st.caption("What drives the music, by block: " + " · ".join(
+            f"{AD.EMOJI.get(k, '')} {k} {round(100 * v / tot)}%" for k, v in sorted(summary["drivers"].items(), key=lambda kv: -kv[1])))
     for n in res.get("notes") or []:
         st.caption("🤖 " + n)
     _strip_chart(res)
@@ -724,7 +732,9 @@ def render_result(res: dict) -> None:
                         LC.safe_image(thumb, width=90)          # a PIL image cropped from the sprite sheet
                     elif s.get("thumbnail") and Path(s["thumbnail"]).exists():
                         LC.safe_image(s["thumbnail"], width=90)
-                r[1].markdown(f"**{format_mmss(a)}–{format_mmss(b)}**  \n{ST.label(info.get('type'))}")
+                import audio_drive as AD
+                r[1].markdown(f"**{format_mmss(a)}–{format_mmss(b)}**  \n{ST.label(info.get('type'))} "
+                              f"{AD.EMOJI.get(e.get('driver'), '')}")
                 r[2].markdown(f"`{s['video_id']}` #{s['scene_id']} at {format_mmss(s['clip_start_sec'])} · {s['clip_duration_sec']:.1f} s"
                               + (f"  \n{', '.join(s.get('tags') or [])}" if s.get("tags") else ""))
                 how = (f" · split in {info['parts']}" if info.get("parts") else
