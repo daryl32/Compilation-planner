@@ -103,3 +103,22 @@ def test_two_short_blocks_become_one_when_the_footage_holds(monkeypatch):
         assert ps["clip_sec"][2] > 3.5 and ps["drivers"]
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def test_bar_lines_are_filled_in_and_a_one_bar_driver_flicker_is_smoothed():
+    import audio_drive as AD
+    tr = _voice_track()
+    beats = np.array(tr["beat_times"])
+    full = np.array(tr["analysis"]["downbeats"])
+    tr["analysis"]["downbeats"] = [float(d) for d in full if not (4.0 <= d < 14.0)]        # the analysis left a hole
+    bars = AD.bar_lines(tr, beats)
+    assert np.allclose(bars, full)                                                        # filled from the beats, same count
+    # one vocal-looking bar inside the drum part (a gap in the kick) doesn't change the driver
+    kick = np.array(tr["analysis"]["kick"])
+    voc = np.array(tr["analysis"]["vocals"])
+    kick[int(8.0 * 30):int(10.0 * 30)] = 0.0
+    voc[int(8.0 * 30):int(10.0 * 30)] = 0.8
+    tr["analysis"]["kick"], tr["analysis"]["vocals"] = kick.tolist(), voc.tolist()
+    drv = AD.drivers(tr, beats)
+    assert AD.driver_at(drv, 9.0) == "drums" and AD.driver_at(drv, 25.0) == "vocals"
+    assert len(drv["levels"]) == len(drv["driver"]) and set(drv["levels"][0]) == {"drums", "bass", "vocals", "loudness"}

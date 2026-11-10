@@ -300,6 +300,9 @@ def tuning_export(track: dict, regions: list, analysis: dict = None, source: str
         drv = AD.drivers(track, beats)
         out["bars"] = r2(drv["bars"])
         out["bar_driver"] = list(drv["driver"])
+        out["bar_levels"] = {k: [lv[k] for lv in drv["levels"]] for k in ("vocals", "drums", "bass", "loudness")}
+        out["marks"] = sorted({round(float(u["start"]), 3) for u in (analysis or {}).get("units") or [] if u["start"] > 0.5}
+                              | {round(float(b_[0]), 3) for b_ in (analysis or {}).get("builds") or [] if b_[0] > 0.5})
         rate = drv["rate"]
         for name in ("vocals", "drums", "bass"):
             c = drv["curves"].get(name)
@@ -682,6 +685,16 @@ def refine(coarse: list, track: dict, analysis: dict = None) -> list:
 def suggest_fine(track: dict, analysis: dict, story: list = None) -> list:
     """The suggestion with the bar-level pass — what the app proposes for a track."""
     return refine(suggest(analysis, story), track, analysis)
+
+
+def boundary_match(suggested: list, wanted: list, tol: float = 1.0) -> float:
+    """Share of the wanted map's boundaries that the suggested map has within `tol` seconds — how many lines the
+    user would NOT have to move."""
+    want = [float(r["start"]) for r in wanted[1:]]
+    got = [float(r["start"]) for r in suggested[1:]]
+    if not want:
+        return 1.0
+    return sum(1 for w in want if any(abs(w - g) <= tol for g in got)) / len(want)
 
 
 def agreement(a: list, b: list, duration: float, step: float = 0.25) -> float:

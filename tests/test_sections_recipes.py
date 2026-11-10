@@ -230,3 +230,12 @@ def test_build_up_starts_at_the_songs_own_change_point():
         b = ST.refine_with(R(t_["coarse"]), t_["beats"], t_["intensity"], t_["drops"], t_["duration"], t_["marks"])
         starts = lambda rs: [round(r["start"], 1) for r in rs if r["type"] == "buildup"]     # noqa: E731
         assert starts(a) == starts(b)
+
+
+def test_the_score_table_never_falls():
+    """The floor for every real track (10 Nov 2026) — a rule change that lowers one of these is a regression."""
+    from tests.score_sections import rows
+    floor = {"aura": (0.88, 0.70), "body": (0.95, 0.70), "disconnect": (0.90, 0.65)}
+    for r in rows():
+        same, lines = floor[r["track"]]
+        assert r["now"] >= same and r["boundaries"] >= lines, r

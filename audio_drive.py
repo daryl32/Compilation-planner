@@ -84,12 +84,26 @@ def _curves(track: dict) -> tuple:
 
 
 def bar_lines(track: dict, beats=None) -> np.ndarray:
-    """The track's bar lines: the analysis' downbeats, else every fourth beat."""
+    """The track's bar lines: the analysis' downbeats, with the stretches it left without any (quiet openings,
+    breakdowns — Body had none for 0–12 s and 85–98 s) filled in from the beats, counted the way the downbeats that
+    are there count them. Without downbeats: every fourth beat."""
     a = track.get("analysis") or {}
-    if a.get("downbeats"):
-        return np.asarray(a["downbeats"], float)
     b = np.asarray(beats if beats is not None else track.get("beat_times") or [], float)
-    return b[::4]
+    down = np.asarray(a.get("downbeats") or [], float)
+    if not down.size:
+        return b[::4]
+    if b.size < 8:
+        return down
+    idx = np.clip(np.searchsorted(b, down), 0, len(b) - 1)
+    prev = np.clip(idx - 1, 0, len(b) - 1)
+    idx = np.where(np.abs(b[prev] - down) < np.abs(b[idx] - down), prev, idx)
+    phase = int(np.bincount(idx % 4, minlength=4).argmax())           # how the downbeats count the beats
+    bar = float(np.median(np.diff(b))) * 4
+    grid = b[phase::4]
+    pos = np.clip(np.searchsorted(down, grid), 0, len(down) - 1)
+    before = np.clip(pos - 1, 0, len(down) - 1)
+    gap = np.minimum(np.abs(down[pos] - grid), np.abs(down[before] - grid))
+    return np.sort(np.concatenate([down, grid[gap > 0.6 * bar]]))
 
 
 def drivers(track: dict, beats=None) -> dict:
@@ -101,7 +115,7 @@ def drivers(track: dict, beats=None) -> dict:
     bars = bars[(bars > 0.05) & (bars < duration - 0.05)]
     bars = np.concatenate([[0.0], bars])
     ends = np.append(bars[1:], duration)
-    names, drive = [], np.zeros(n)
+    names, levels, drive = [], [], np.zeros(n)
     for a_, b_ in zip(bars, ends):
         lo, hi = int(a_ * rate), max(int(a_ * rate) + 1, min(int(b_ * rate), n))
         mean = lambda k: float(curves[k][lo:hi].mean()) if k in curves and hi > lo else 0.0     # noqa: E731
@@ -116,8 +130,18 @@ def drivers(track: dict, beats=None) -> dict:
         else:
             d = "loudness"
         names.append(d)
+        levels.append({"drums": round(hits, 3), "bass": round(mean("bass"), 3), "vocals": round(mean("vocals"), 3),
+                       "loudness": round(mean("loudness"), 3)})
+    # one bar that differs from both its neighbours is noise, not a change of driver (Body's verse flickered
+    # drums / vocals bar by bar): it takes its neighbours' driver
+    for k in range(1, len(names) - 1):
+        if names[k - 1] == names[k + 1] != names[k]:
+            names[k] = names[k - 1]
+    for (a_, b_), d in zip(zip(bars, ends), names):
+        lo, hi = int(a_ * rate), max(int(a_ * rate) + 1, min(int(b_ * rate), n))
         drive[lo:hi] = curves[d][lo:hi]
-    return {"bars": bars, "driver": names, "curve": drive, "rate": rate, "curves": curves, "duration": duration}
+    return {"bars": bars, "driver": names, "levels": levels, "curve": drive, "rate": rate, "curves": curves,
+            "duration": duration}
 
 
 def drive_slice(drv: dict, t0: float, t1: float) -> np.ndarray:
