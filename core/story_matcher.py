@@ -9,7 +9,8 @@ For every block of the track:
   2. every window of block length inside every available span of every video with a timeline is scored
      (vectorised over the video's half seconds):
        base  = movement band + trend (recipe) · shape of the person-movement vs the music · beat lock
-       story = recipe tag weights × the window's tag scores − avoid tags; scene tags filter / prefer;
+       story = the window's best two wanted tags (recipe weights × tag scores) − avoid tags; scene tags
+               filter / prefer;
        fit   = (1 − music_story) × base + music_story × story, then
                + the block's 🎭 role as a bonus · − junk (nobody on screen) · − variety / neighbour penalties ·
                ± the last pass: shot size / POV continuity with the previous clip, relaxed where the recipe
@@ -54,6 +55,7 @@ MIN_GAP_POINTS = 2          # …at least this many half seconds apart
 JUNK_SHARE = 0.5            # nobody on screen for over half the window → heavy penalty
 W_BAND, W_TREND, W_SHAPE, W_BEAT = 0.45, 0.15, 0.25, 0.15      # inside base
 AVOID_WEIGHT = 0.5
+STORY_TOP = 2               # a window is judged on its best two wanted tags (e.g. a position + penetration)
 PREFER_BONUS = 0.1
 ROLE_BONUS = 0.1
 REPEAT_PENALTY = 0.3        # the same video as a neighbouring block
@@ -193,16 +195,24 @@ def _score_video(v: _Video, n: int, recipe: dict, audio_curve: np.ndarray, track
     beat = 1.0 - lock * (1.0 - beat_fit)
     base = W_BAND * band + W_TREND * trend + W_SHAPE * shape + W_BEAT * beat
 
+    # A recipe's wanted tags are alternatives, not a checklist: a window can show a position and an action, not
+    # twelve things at once. So the story score is the window's best STORY_TOP weighted tags against the recipe's
+    # STORY_TOP heaviest weights — a long tag list doesn't water every window down.
     tags = recipe.get("tags") or {}
-    num = np.zeros(len(base))
-    den = 0.0
+    rows, weights = [], []
     for tag, w in tags.items():
         tw = v.tag_window(tag, n)
         if tw is None or w <= 0:
             continue
-        num += float(w) * tw
-        den += float(w)
-    story = num / den if den > 0 else np.full(len(base), 0.5)
+        rows.append(float(w) * tw)
+        weights.append(float(w))
+    if rows:
+        k = min(STORY_TOP, len(rows))
+        m = np.vstack(rows)
+        top = np.sort(m, axis=0)[-k:].sum(axis=0) if len(rows) > k else m.sum(axis=0)
+        story = np.clip(top / max(sum(sorted(weights)[-k:]), 1e-6), 0.0, 1.0)
+    else:
+        story = np.full(len(base), 0.5)
     avoid = np.zeros(len(base))
     for tag in recipe.get("avoid") or []:
         tw = v.tag_window(tag, n)

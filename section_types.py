@@ -254,3 +254,43 @@ def ensure_default(track_id: str, track: dict) -> bool:
         return False
     save_map(track_id, regions, source="suggested")
     return True
+
+
+# ---------------------------------------------------------------------------
+# 📥 A track's sections with what the app measured — for tuning the suggester in a Claude chat
+# ---------------------------------------------------------------------------
+
+def tuning_export(track: dict, regions: list, analysis: dict = None, source: str = "") -> dict:
+    """Everything needed to compare a hand-edited section map with the suggestion: the map, the suggester's own
+    answer, the song's stretches (energy percentile, build-up, drop, breakdown, vocals) and the energy beat by beat."""
+    import numpy as np
+    import cut_scoring as CS
+    import smart_cuts as SM
+    r2 = lambda v: [round(float(x), 2) for x in np.asarray(v, float).ravel()]   # noqa: E731
+    out = {"track_id": track.get("track_id"), "duration": round(float(track["duration_sec"]), 3),
+           "bpm": track.get("bpm"), "source": source,
+           "sections": [[round(float(r["start"]), 3), round(float(r["end"]), 3), r.get("type"), r.get("why", "")]
+                        for r in regions or []]}
+    try:
+        analysis = analysis or STM.analyse(track)
+        out["bar_sec"] = analysis.get("bar_sec")
+        out["drops"] = r2(analysis.get("drops") or [])
+        out["builds"] = [r2(b) for b in analysis.get("builds") or []]
+        out["stretches"] = [{"start": u["start"], "end": u["end"], "energy_pct": u["pct"], "build": u["build"],
+                             "drop": bool(u["drop"]), "breakdown": u["breakdown"], "vocal": u["vocal"]}
+                            for u in analysis["units"]]
+        out["suggested"] = [[r["start"], r["end"], r["type"]]
+                            for r in suggest(analysis, STM.saved_map(track.get("track_id", "")))]
+    except Exception as e:          # noqa: BLE001
+        out["analysis_error"] = str(e)
+    try:
+        beats, bpm, _ = CS.beat_grid(track)
+        beats = np.asarray(beats, float)
+        inten, feats = SM.intensity_per_beat(track, beats, CS.bar_sec(track, 4) or 2.0)
+        out["beat_bpm"] = round(float(bpm), 1)
+        out["beats"] = r2(beats)
+        out["beat_intensity"] = r2(inten)
+        out["beat_features"] = {k: r2(v) for k, v in (feats or {}).items()}
+    except Exception as e:          # noqa: BLE001
+        out["beats_error"] = str(e)
+    return out

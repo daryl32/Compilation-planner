@@ -116,3 +116,28 @@ def test_media_library_sub_menus():
     at.run()
     assert not errors(at), errors(at)
     assert [r.key for r in at.radio if r.key in ("lib_kind", "vid_kind")] == ["lib_kind", "vid_kind"]
+
+
+def test_tuning_export_and_recipe_upload():
+    import json
+    import recipes as RC
+    import section_types as ST
+    import sections_view as SV
+    from tests.fixtures import load_track
+    track = load_track(DATA, "song_full")
+    regions = ST.suggested_map(track)
+    out = ST.tuning_export(track, regions, source="you")
+    assert out["track_id"] == "song_full" and out["sections"] and out["suggested"] and out["stretches"]
+    assert len(out["beats"]) == len(out["beat_intensity"]) + 1 and "analysis_error" not in out and "beats_error" not in out
+    json.dumps(out)                                                   # plain JSON all the way down
+    try:
+        r = RC.default("slow")
+        r["beat_lock"] = 0.1
+        SV.st.session_state.clear()
+        SV._upload_recipes(json.dumps({"slow": r, "nonsense": 1}).encode())
+        assert RC.load("slow")["beat_lock"] == 0.1 and not RC.is_custom("drop")
+        assert "Slow" in SV.st.session_state["rc_msg"]
+        SV._upload_recipes(b"not json")
+        assert "nothing was changed" in SV.st.session_state["rc_msg"] and RC.load("slow")["beat_lock"] == 0.1
+    finally:
+        RC.reset("slow")

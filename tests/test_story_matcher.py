@@ -10,7 +10,7 @@ import numpy as np
 
 from tests.support import DATA  # noqa: F401  (installs the test config first)
 
-TAGS = ["Blowjob", "Cowgirl", "penetration", "Face", "lingerie", "close-up", "wide", "POV", "Blonde"]
+TAGS = ["Blowjob", "Cowgirl position", "penetration", "Face", "lingerie", "close-up", "wide", "POV", "Blonde"]
 CUTS = [50] * len(TAGS)
 
 
@@ -30,7 +30,7 @@ def _timeline_for(FT, out, video: dict, busy: bool):
     scores[lo, TAGS.index("lingerie")] = 90
     scores[lo, TAGS.index("Face")] = 80
     scores[hi, TAGS.index("penetration")] = 90
-    scores[hi, TAGS.index("Cowgirl")] = 85
+    scores[hi, TAGS.index("Cowgirl position")] = 85
     scores[:, TAGS.index("close-up")] = 70
     shot = np.full(T, 1.0, np.float32)
     bpm = np.full(T, 124.0, np.float32)
@@ -270,5 +270,24 @@ def test_blocks_too_long_for_any_window_are_split_on_the_beat(monkeypatch):
         only_d = {k: v for k, v in q.items() if k == "vid_d"}                       # no timeline → nothing to split with
         SMX.match_story(segments[:1], only_d, track, max_clips=1, options=SMX.StoryOptions(section_map=regions))
         assert {k: v for k, v in q.items() if k != "vid_d"} == {k: v for k, v in before.items() if k != "vid_d"}
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_story_score_uses_the_best_two_wanted_tags(monkeypatch):
+    """A long wanted list doesn't water a window down: two strong tags out of twelve score like two out of two."""
+    out = _setup(monkeypatch)
+    try:
+        import numpy as np
+        import core.story_matcher as SMX
+        import footage_timeline as FT
+        index = FT.load_index()
+        v = SMX._Video(FT.load("vid_f", index=index), index)          # busy, penetration + Cowgirl position throughout
+        short = {"movement": {"lo": 0.7, "hi": 1.0, "trend": "flat"}, "beat_lock": 0.5, "avoid": [],
+                 "tags": {"penetration": 0.8, "Cowgirl position": 0.6}}
+        long = {**short, "tags": {**short["tags"], **{f"other{k}": 0.6 for k in range(10)}, "Face": 0.6, "lingerie": 0.6}}
+        _, _, s_short = SMX._score_video(v, 8, short, None, 0.0, 0.5)
+        _, _, s_long = SMX._score_video(v, 8, long, None, 0.0, 0.5)
+        assert float(s_short.mean()) > 0.8 and abs(float(s_short.mean()) - float(s_long.mean())) < 0.02
     finally:
         shutil.rmtree(out, ignore_errors=True)

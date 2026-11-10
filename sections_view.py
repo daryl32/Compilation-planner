@@ -104,7 +104,7 @@ def render_sections(tracks: dict, track_bits, play=None) -> None:
         return
     saved = ST.saved_maps()
     names = sorted(tracks, key=str.lower)
-    c = st.columns([3, 1.4, 1.4, 1.4])
+    c = st.columns([3, 1.4, 1.2, 0.7, 0.7])
     tid = c[0].selectbox("Track", names, key="sec_track", format_func=lambda t: f"{'✅ ' if t in saved else ''}{t}")
     missing = [t for t in names if t not in saved]
     c[1].button(f"✨ All {len(missing)} without", key="sec_suggest_all", width="stretch", disabled=not missing,
@@ -129,6 +129,17 @@ def render_sections(tracks: dict, track_bits, play=None) -> None:
                   on_click=_discard, args=(tid, track_bits))
         st.button("🗑️ Remove the saved map", key="sec_remove", width="stretch", disabled=tid not in saved,
                   on_click=_remove, args=(tid,))
+    with c[4].popover("📥", width="stretch", help="Download this track's sections"):
+        import json as _json
+        st.caption("The sections as shown, the suggester's own answer and what the app measured in the song (energy "
+                   "per stretch and beat by beat) — attach it to a Claude chat to tune the suggestions.")
+        try:
+            data = _json.dumps(ST.tuning_export(track, _from_editor(regions), analysis,
+                                                "you" if (s.get("dirty") or s.get("source") == "saved") else "suggested"))
+            st.download_button("📥 Sections + measurements (.json)", data=data, file_name=f"sections_{tid}.json",
+                               mime="application/json", key="sec_dl", width="stretch")
+        except Exception as e:          # noqa: BLE001
+            st.caption(f"Couldn't build the file: {e}")
     state_line = ("**unsaved changes** — 💾 Save to keep them" if s.get("dirty") else
                   "suggested, not saved yet — 💾 Save to keep it" if s.get("source") == "suggested" else "saved ✅")
     st.caption(f"{tid} · {state_line}")
@@ -197,6 +208,23 @@ def _reset_recipe(type_id: str) -> None:
     st.session_state["rc_v"] = st.session_state.get("rc_v", 0) + 1
 
 
+def _upload_recipes(raw: bytes) -> None:
+    import json as _json
+    try:
+        data = _json.loads(raw.decode("utf-8-sig"))
+        if not isinstance(data, dict):
+            raise ValueError("not a recipes file")
+    except (ValueError, UnicodeDecodeError) as e:
+        st.session_state["rc_msg"] = f"That file couldn't be read ({e}) — nothing was changed."
+        return
+    done = [t for t in ST.TYPE_IDS if isinstance(data.get(t), dict)]
+    for t in done:
+        RC.save(t, data[t])
+    st.session_state["rc_msg"] = (f"Recipes replaced from the file: {', '.join(ST.label(t) for t in done)}." if done
+                                  else "No section type found in that file — nothing was changed.")
+    st.session_state["rc_v"] = st.session_state.get("rc_v", 0) + 1
+
+
 def render_recipes() -> None:
     st.caption("🍳 What footage each section type wants: a movement band (library scale, as the 🧭 timeline shows it) "
                "and whether it builds or falls, how tightly movement should lock to the beat, the moment tags to "
@@ -205,6 +233,19 @@ def render_recipes() -> None:
                "matcher cuts at. One shared set for now — variations per cutting style can come later.")
     if msg := st.session_state.pop("rc_msg", None):
         st.success(msg)
+    import json as _json
+    io = st.columns([1.6, 1.6, 4])
+    io[0].download_button("📥 Download recipes", data=_json.dumps(RC.load_all(), indent=1, ensure_ascii=False),
+                          file_name="section_recipes.json", mime="application/json", key="rc_dl", width="stretch",
+                          help="Every type's recipe as it stands — to keep a copy, or to attach to a Claude chat.")
+    with io[1].popover("📤 Upload recipes", width="stretch"):
+        st.caption("A file from 📥 Download recipes (edited or not). Each type in it replaces that type's recipe here; "
+                   "types it doesn't mention are left alone.")
+        up = st.file_uploader("Recipes file", type=["json"], key=f"rc_up_{st.session_state.get('rc_v', 0)}",
+                              label_visibility="collapsed")
+        if up is not None:
+            st.button("Use this file", key="rc_up_go", type="primary", width="stretch", on_click=_upload_recipes,
+                      args=(up.getvalue(),))
     moment_tags, all_tags = _vocab_tags()
     all_recipes = RC.load_all()
     v = st.session_state.get("rc_v", 0)
