@@ -294,6 +294,22 @@ def tuning_export(track: dict, regions: list, analysis: dict = None, source: str
         out["beats"] = r2(beats)
         out["beat_intensity"] = r2(inten)
         out["beat_features"] = {k: r2(v) for k, v in (feats or {}).items()}
+        # what drives each bar, and the voice / drums / bass at each beat (audio_drive) — the opening of a song is
+        # usually decided by when the voice and the beat come in, which the energy alone doesn't show
+        import audio_drive as AD
+        drv = AD.drivers(track, beats)
+        out["bars"] = r2(drv["bars"])
+        out["bar_driver"] = list(drv["driver"])
+        rate = drv["rate"]
+        for name in ("vocals", "drums", "bass"):
+            c = drv["curves"].get(name)
+            if c is not None and len(c):
+                idx = np.clip((beats[:-1] * rate).astype(int), 0, len(c) - 1)
+                nxt = np.clip((beats[1:] * rate).astype(int), 1, len(c))
+                out.setdefault("beat_levels", {})[name] = [round(float(c[a:max(b, a + 1)].mean()), 2) for a, b in zip(idx, nxt)]
+        an = track.get("analysis") or {}
+        out["vocal_starts"] = r2(an.get("vocal_starts") or [])
+        out["vocal_ends"] = r2(an.get("vocal_ends") or [])
     except Exception as e:          # noqa: BLE001
         out["beats_error"] = str(e)
     return out
@@ -333,6 +349,12 @@ WARMDOWN_MIN_FALL = 0.1    # no way down when the two levels are this close
 WARMDOWN_BACK_BARS = 2     # it may start up to this many bars before the loud run's last bar line
 WARMDOWN_MAX_BARS = 4      # and lasts at most this long (a dip: as long as the dip)
 WARMDOWN_MIN_BEATS = 2     # shorter than this is a hard stop — no Warm-down
+ENTRY_LOOK_BEATS = 16      # the opening is "near-silent" when at least ENTRY_MIN_QUIET_BEATS of its first beats are
+ENTRY_MIN_QUIET_BEATS = 4  # under ENTRY_QUIET…
+ENTRY_QUIET = 0.08
+ENTRY_LEVEL = 0.1          # …and the music "comes in" on the first beat from which ENTRY_HOLD_BEATS stay at this level
+ENTRY_HOLD_BEATS = 4
+WARMUP_LEVEL = 0.2         # after the entry: Warm-up at this mean level or above, else Slow
 BUILD_MAX_BARS = 4
 BUILD_RISE = 0.1           # "the energy rises through them": last bar − first bar of the candidate build-up
 MEDIUM_LEVEL = 0.4         # leftover bars: at or above → Rhythmic, below → Slow
@@ -590,9 +612,37 @@ def refine_with(coarse: list, beats, inten, drops, duration: float) -> list:
         if c is not None and abs(c - r["start"]) <= 0.25 * bar:
             r_prev["end"] = r["start"] = c
     out[0]["start"], out[-1]["end"] = 0.0, float(duration)
+    out = _end_intro_at_entry(out, b, it, bar)
     for r in out:
         r["start"], r["end"] = round(float(r["start"]), 3), round(float(r["end"]), 3)
     return merge_same([r for r in out if r["end"] - r["start"] > 1e-3])
+
+
+def _end_intro_at_entry(out: list, b, it, bar: float) -> list:
+    """A song that opens near-silent: the Intro ends on the beat where the music comes in (the voice, the first
+    instrument) — not at the first build-up. What follows, up to the next part, is a Warm-up (or Slow if it stays
+    very quiet). Daryl, 10 Nov, on two tracks whose suggested Intro ran 37 s and 43 s. A song that opens with sound
+    already playing is left alone."""
+    import numpy as np
+    if not out or out[0]["type"] != "intro":
+        return out
+    n = min(len(it), len(b) - 1)
+    head = np.asarray(it[:min(n, ENTRY_LOOK_BEATS)], float)
+    if int((head < ENTRY_QUIET).sum()) < ENTRY_MIN_QUIET_BEATS:
+        return out
+    k = next((k for k in range(n - ENTRY_HOLD_BEATS + 1) if (np.asarray(it[k:k + ENTRY_HOLD_BEATS]) >= ENTRY_LEVEL).all()), None)
+    if k is None:
+        return out
+    te = float(b[k])
+    intro = out[0]
+    if te < 0.75 * bar or te > intro["end"] - bar:
+        return out
+    k_end = int(np.searchsorted(np.asarray(b[:n], float), intro["end"]))
+    level = float(np.mean(it[k:max(k_end, k + 1)]))
+    typ = "warmup" if level >= WARMUP_LEVEL else "slow"
+    rest = {"start": te, "end": intro["end"], "type": typ,
+            "why": "the music has come in — before the first big part" if typ == "warmup" else WHY["slow"]}
+    return [{**intro, "end": te, "why": "the opening, before the music comes in"}, rest] + out[1:]
 
 
 WHY = {"drop": "the hit — the first bar of a loud stretch", "action": "a loud stretch", "fast": "the peak — the later half of a long loud stretch",

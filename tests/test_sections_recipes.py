@@ -129,6 +129,8 @@ def test_tuning_export_and_recipe_upload():
     out = ST.tuning_export(track, regions, source="you")
     assert out["track_id"] == "song_full" and out["sections"] and out["suggested"] and out["stretches"]
     assert len(out["beats"]) == len(out["beat_intensity"]) + 1 and "analysis_error" not in out and "beats_error" not in out
+    assert len(out["bar_driver"]) == len(out["bars"]) and set(out["bar_driver"]) <= {"drums", "bass", "vocals", "loudness"}
+    assert len(out["beat_levels"]["vocals"]) == len(out["beat_intensity"]) and out["vocal_starts"]
     json.dumps(out)                                                   # plain JSON all the way down
     try:
         r = RC.default("slow")
@@ -149,7 +151,7 @@ def test_bar_level_pass_on_a_real_track():
     import json
     import section_types as ST
     from tests.support import REPO
-    fx = json.loads((REPO / "tests" / "golden" / "sections_bar_pass.json").read_text())
+    fx = json.loads((REPO / "tests" / "golden" / "sections_bar_pass.json").read_text())["aura"]
     R = lambda rows: [{"start": a, "end": b, "type": t} for a, b, t in rows]   # noqa: E731
     coarse, daryl = R(fx["coarse"]), R(fx["daryl"])
     out = ST.refine_with(coarse, fx["beats"], fx["intensity"], fx["drops"], fx["duration"])
@@ -187,3 +189,23 @@ def test_bar_level_pass_on_a_real_track():
     assert not [r for r in stops if r["type"] == "warmdown" and 60 < r["start"] < 70]
     for res in (free, fast, stops):
         assert res[0]["start"] == 0.0 and all(abs(p["end"] - q["start"]) < 1e-6 for p, q in zip(res, res[1:]))
+
+
+def test_intro_ends_where_the_music_comes_in():
+    """Body and Disconnect (10 Nov 2026) open near-silent: the suggested Intro ran to the first build-up (43 s, 37 s);
+    Daryl: it should end where the voice / the music comes in. AURA opens with sound playing — its Intro is unchanged."""
+    import json
+    import section_types as ST
+    from tests.support import REPO
+    fx = json.loads((REPO / "tests" / "golden" / "sections_bar_pass.json").read_text())
+    R = lambda rows: [{"start": a, "end": b, "type": t} for a, b, t in rows]   # noqa: E731
+    for key in ("body", "disconnect"):
+        d = fx[key]
+        out = ST.refine_with(R(d["coarse"]), d["beats"], d["intensity"], d["drops"], d["duration"])
+        assert out[0]["type"] == "intro" and abs(out[0]["end"] - d["intro_end"]) < 0.6, (key, out[0])
+        assert out[1]["type"] == "warmup" and out[2]["type"] == "buildup"
+        assert ST.agreement(out, R(d["daryl"]), d["duration"]) > 0.88, key
+        assert all(abs(p["end"] - q["start"]) < 1e-6 for p, q in zip(out, out[1:]))
+    a = fx["aura"]
+    out = ST.refine_with(R(a["coarse"]), a["beats"], a["intensity"], a["drops"], a["duration"])
+    assert out[0]["type"] == "intro" and out[0]["end"] > 13 and out[1]["type"] == "buildup"
