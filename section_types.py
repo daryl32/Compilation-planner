@@ -340,6 +340,13 @@ def tuning_export(track: dict, regions: list, analysis: dict = None, source: str
 #   • whatever is left keeps the coarse suggestion's type where that was a quiet type (Intro, Warm-up, Slow, Rhythmic,
 #     Ending — so story-map hints still count), else Rhythmic / Slow by level.
 # The coarse boundaries are trusted (all of them matched Daryl's): a run edge one bar away from one moves onto it.
+#
+# With the layers (what is playing in each bar — see the constants below), from Daryl's maps of 10 Nov evening:
+#   • the Intro lasts until the beat comes in; • a bar is only loud if it is as loud as the loud bars (so a build-up
+#     runs right up to the hit, and a bass-less passage is its own quieter part); • a Drop needs the voice to step
+#     back; • a build-up starts no earlier than the drums; • Action → Fast changes at a one-bar break when one is
+#     near; • the band stopping dead has no Warm-down after it — and a track that ends that way gets its way out
+#     (Warm-down, then an Ending of at least three bars) from the last loud bars.
 LOUD_SHARE = 0.85          # a bar is loud at ≥ this share of the track's upper-quartile bar intensity
 DROP_JUMP = 0.25           # a loud run's first bar is a Drop when the energy jumps by at least this from the bar before
 FAST_MIN_BARS = 6          # a loud run this long after its drop ends in Fast (its later half)
@@ -358,11 +365,29 @@ ENTRY_QUIET = 0.08
 ENTRY_LEVEL = 0.1          # …and the music "comes in" on the first beat from which ENTRY_HOLD_BEATS stay at this level
 ENTRY_HOLD_BEATS = 4
 WARMUP_LEVEL = 0.2         # after the entry: Warm-up at this mean level or above, else Slow
-BUILD_REACH_SEC = 14.0     # a change point the analysis found may start the build-up up to this long before the loud run
+BUILD_REACH_SEC = 16.0     # a change point the analysis found may start the build-up up to this long before the loud run
 BUILD_MAX_BARS = 4
 BUILD_RISE = 0.1           # "the energy rises through them": last bar − first bar of the candidate build-up
 MEDIUM_LEVEL = 0.4         # leftover bars: at or above → Rhythmic, below → Slow
+MEDIUM_SHARE = 0.7         # …and never Rhythmic under this share of the loud threshold
 QUIET_TYPES = ("intro", "warmup", "slow", "rhythmic", "ending")
+# --- what is playing (the voice, the drums, the loudness of each bar — audio_drive). Daryl's maps of Body, Bad Times
+# and Disconnect (10 Nov, evening) follow the instruments more than the energy curve; these rules only run when the
+# layers are known.
+LAYER_LOUD_SHARE = 0.8     # a loud bar must also reach this share of the loud bars' own loudness (the energy curve
+#                            stays high through a bass-less passage — Bad Times 124–138 s, which Daryl hears as Slow)
+LAYER_NEAR_LOUD = 0.9      # …and a bar a little under the energy threshold is loud when it is as loud as they are
+RHYTHM_IN = 0.2            # the beat "has come in" from the first bar whose drum hits reach this, and the next bar's too
+INTRO_MAX_SHARE = 0.35     # …an Intro never runs past this share of the track
+VOICE_PRESENT = 0.3        # a Drop is where the band hits and the voice steps back: with a voice at this level before
+VOICE_FALL = 0.25          # the loud run, it must fall by this much — a chorus sung straight through is Action, no Drop
+BUILD_DRUM_JUMP = 0.3      # inside a build-up, the bar where the drums come in (a jump this big) is where it starts
+HARD_STOP = 0.4            # the track "stops dead" when the bar after its last loud run is under this share of loud
+END_MIN_BARS = 3           # after a hard stop, the Ending is at least this long: it reaches back into the loud run
+END_TAIL_BARS = 2.5        # …unless what follows the stop is already this long
+WAYOUT_BARS = 2            # the Warm-down before that Ending: this many bars — or from the run's last eight-bar line,
+WAYOUT_PHRASE = (3, 6)     # when that leaves between this many bars
+BREAK_REACH_BARS = 2       # Action → Fast changes at a one-bar break when there is one this close to the half-way bar
 
 
 def _bars(beats, inten, duration: float, anchor_time: float = None) -> tuple:
@@ -464,9 +489,31 @@ def _fit_warmdown(b, it, k_edge: int, k_run_start: int, k_next: int, dip: bool, 
     return ws, we
 
 
-def refine_with(coarse: list, beats, inten, drops, duration: float, marks=()) -> list:
+def _layers_on(layers, starts, ends) -> dict:
+    """The layers (audio_drive's per-bar drums / vocals / loudness) read on this pass's own bars: {name: array}, or
+    None when there are none."""
+    import numpy as np
+    if not layers or not len(layers.get("bars") or ()):
+        return None
+    lb = np.asarray(layers["bars"], float)
+    le = np.append(lb[1:], max(float(ends[-1]), float(lb[-1]) + 1e-3))
+    out = {}
+    for name in ("drums", "vocals", "loudness"):
+        v = np.asarray(layers.get(name) or (), float)
+        if len(v) != len(lb):
+            return None
+        vals = []
+        for a_, b_ in zip(starts, ends):
+            w = np.clip(np.minimum(le, b_) - np.maximum(lb, a_), 0.0, None)
+            vals.append(float((w * v).sum() / w.sum()) if w.sum() > 1e-6 else 0.0)
+        out[name] = np.asarray(vals)
+    return out
+
+
+def refine_with(coarse: list, beats, inten, drops, duration: float, marks=(), layers: dict = None) -> list:
     """The bar-level pass on explicit data (see above). coarse: regions with "type"; marks: the times where the
-    analysis itself found the song changing (its stretch boundaries and build-up starts). Returns regions."""
+    analysis itself found the song changing (its stretch boundaries and build-up starts); layers: {"bars", "drums",
+    "vocals", "loudness"} per bar from audio_drive — with them the pass also follows what is playing. Returns regions."""
     import math
     import numpy as np
     b = np.asarray(beats, float)
@@ -484,6 +531,20 @@ def refine_with(coarse: list, beats, inten, drops, duration: float, marks=()) ->
     for k in range(1, nb - 1):                           # a single loud bar among quieter ones isn't a loud run
         if loud[k] and not loud[k - 1] and not loud[k + 1]:
             loud[k] = False
+    L = _layers_on(layers, starts, ends)
+    breaks = set()
+    if L is not None and loud.any():
+        ref = float(np.median(L["loudness"][loud]))
+        loud = loud | ((level >= LAYER_NEAR_LOUD * thr) & (L["loudness"] >= ref))   # as loud as the loud bars, a hair under
+        thin = loud & (L["loudness"] < LAYER_LOUD_SHARE * ref)
+        loud = loud & ~thin
+        for k in range(1, nb - 1):                       # one thin bar inside a loud run is a break in it, not its end
+            if thin[k] and loud[k - 1] and loud[k + 1]:
+                loud[k] = True
+                breaks.add(k)
+        for k in range(1, nb - 1):
+            if loud[k] and not loud[k - 1] and not loud[k + 1]:
+                loud[k] = False
     cb = [float(r["start"]) for r in coarse[1:]]         # the coarse boundaries
 
     def near(t):
@@ -523,6 +584,12 @@ def refine_with(coarse: list, beats, inten, drops, duration: float, marks=()) ->
             continue
         last = j == nb
         dip = (not last) and (j - i) <= DIP_MAX_BARS
+        if not last and not dip and all(coarse_at((starts[m] + ends[m]) / 2) == "buildup" for m in range(i, j)):
+            continue                                     # the song is building here, not coming down
+        if L is not None and not last:                   # the band stops dead: a break, there is no way down
+            pi, pj = runs[ri - 1][0], runs[ri - 1][1]
+            if float(L["loudness"][i]) < HARD_STOP * float(np.median(L["loudness"][pi:pj])):
+                continue
         fit = _fit_warmdown(b, it[:n_int], kb(i), kb(runs[ri - 1][0]), kb(j), dip, last, starts, bar, cb, float(duration))
         if fit:
             ws, we = fit
@@ -549,6 +616,10 @@ def refine_with(coarse: list, beats, inten, drops, duration: float, marks=()) ->
             k = i
             jump = i > 0 and level[i] - level[i - 1] >= DROP_JUMP
             known = any(starts[i] - 0.5 * bar <= float(d) < ends[i] for d in drops)
+            if L is not None and i >= 2:                 # a drop is the band hitting as the voice steps back
+                v0, v1 = float(L["vocals"][i - 2:i].mean()), float(L["vocals"][i:min(i + 2, j)].mean())
+                if v0 >= VOICE_PRESENT and v0 - v1 < VOICE_FALL:
+                    jump = known = False
             if i > 0 and (jump or known):
                 k = min(i + n_drop, j)
                 put(t0, min(float(ends[k - 1]), end), "drop")
@@ -557,7 +628,11 @@ def refine_with(coarse: list, beats, inten, drops, duration: float, marks=()) ->
                 rest = sum(1 for m in range(k, j)
                            if (min(float(ends[m]), end) - float(starts[m])) >= 0.6 * (float(ends[m]) - float(starts[m])))
                 if rest >= FAST_MIN_BARS:
-                    split = float(starts[min(k + (rest - rest // 2), j - 1)])
+                    half = min(k + (rest - rest // 2), j - 1)
+                    near_break = [m for m in breaks if k + 2 <= m <= j - 2 and abs(m - half) <= BREAK_REACH_BARS]
+                    if near_break:
+                        half = min(near_break, key=lambda m: abs(m - half))
+                    split = float(starts[half])
                     put(float(starts[k]), split, "action")
                     put(split, end, "fast")
                 else:
@@ -598,6 +673,12 @@ def refine_with(coarse: list, beats, inten, drops, duration: float, marks=()) ->
                            and float(m_) > start + 0.5 * bar]
                 if earlier:
                     build_from = max(earlier)
+                if L is not None:                        # …but not before the drums come in, when they do on the way
+                    came_in = [m for m in range(max(k, 1), j) if float(starts[m]) > build_from + 1e-6
+                               and L["drums"][m] - L["drums"][m - 1] >= BUILD_DRUM_JUMP]
+                    if came_in:
+                        build_from = float(starts[came_in[0]])
+                if earlier or L is not None:
                     e = k
                     while e < j and float(ends[e]) <= build_from + 1e-6:
                         e += 1
@@ -610,7 +691,7 @@ def refine_with(coarse: list, beats, inten, drops, duration: float, marks=()) ->
             elif c in QUIET_TYPES and not (c == "ending" and not last) and not (c == "intro" and i > 0):
                 typ = c
             else:
-                typ = "rhythmic" if float(np.mean(level[k:e])) >= MEDIUM_LEVEL else "slow"
+                typ = "rhythmic" if float(np.mean(level[k:e])) >= max(MEDIUM_LEVEL, MEDIUM_SHARE * thr) else "slow"
             m0 = max(float(starts[m]), start)
             m1 = float(ends[m]) if m + 1 < e or e == j else (build_from if e < j else float(ends[m]))
             put(m0, m1, typ)
@@ -626,10 +707,88 @@ def refine_with(coarse: list, beats, inten, drops, duration: float, marks=()) ->
         if c is not None and abs(c - r["start"]) <= 0.25 * bar:
             r_prev["end"] = r["start"] = c
     out[0]["start"], out[-1]["end"] = 0.0, float(duration)
-    out = _end_intro_at_entry(out, b, it, bar)
+    if L is not None:
+        out = _way_out(out, runs, starts, ends, L, bar, float(duration), wd.get(len(runs) - 1))
+        out = _intro_until_the_beat(out, starts, L, bar, float(duration), b, it)
+    else:
+        out = _end_intro_at_entry(out, b, it, bar)
     for r in out:
         r["start"], r["end"] = round(float(r["start"]), 3), round(float(r["end"]), 3)
     return merge_same([r for r in out if r["end"] - r["start"] > 1e-3])
+
+
+def _cut_from(out: list, t: float) -> list:
+    """The regions up to t (the one across t is shortened; a sliver left at the cut goes)."""
+    kept = [{**r, "end": min(r["end"], t)} for r in out if r["start"] < t - 0.3]
+    if kept:
+        kept[-1]["end"] = t
+    return kept
+
+
+def _way_out(out: list, runs: list, starts, ends, L: dict, bar: float, duration: float, tail_fit=None) -> list:
+    """A track that stops dead at full volume still needs its way out. The Ending is at least END_MIN_BARS long —
+    reaching back into the last loud run when little or nothing follows the stop — and the bars before it are the
+    Warm-down: from the run's last eight-bar line when that leaves a sensible length, else WAYOUT_BARS.
+    (Body: Action to 145.6, Warm-down to 155.4, Ending — though the band plays on to 161 s. Disconnect: Warm-down for
+    the last two loud bars, the Ending is the silence after.) A track that fades is left to the fitted Warm-down."""
+    import numpy as np
+    loud_runs = [r for r in runs if r[2]]
+    if not loud_runs:
+        return out
+    i, j, _ = loud_runs[-1]
+    nb = len(starts)
+    if j < nb and nb - j > 4:                            # a real quiet part follows: not the end of the track
+        return out
+    ref = float(np.median(L["loudness"][i:j]))
+    if j < nb and float(L["loudness"][j]) >= HARD_STOP * ref:
+        return out                                       # it fades
+    stop = float(ends[j - 1])
+    if tail_fit and stop - bar <= tail_fit[0] <= stop:   # the beat the sound stops on, inside the run's last bar
+        stop = float(tail_fit[0])
+    tail = duration - stop
+    short = j - i <= 2 * END_MIN_BARS                    # a last burst after a dip: all of it is the way out
+    if tail >= END_TAIL_BARS * bar:
+        je, end_from = j, stop
+    else:
+        je = max(i + 1, j - END_MIN_BARS)
+        end_from = float(starts[je])
+    lines = [m for m in range(i + 8, je, 8) if WAYOUT_PHRASE[0] <= je - m <= WAYOUT_PHRASE[1]]
+    jw = i if short else (lines[-1] if lines else max(i + 1, je - WAYOUT_BARS))
+    wd_from = float(starts[jw])
+    if short:                                            # …joined to the way down that led into it
+        before = [r for r in out if abs(r["end"] - wd_from) < 0.3 and r["type"] == "warmdown"]
+        if before:
+            wd_from = float(before[0]["start"])
+    if end_from - wd_from < 0.5 or duration - end_from < 0.5:
+        return out
+    return _cut_from(out, wd_from) + [
+        {"start": wd_from, "end": end_from, "type": "warmdown", "why": "the way out — the last bars before the end"},
+        {"start": end_from, "end": duration, "type": "ending", "why": WHY["ending"]}]
+
+
+def _intro_until_the_beat(out: list, starts, L: dict, bar: float, duration: float, b, it) -> list:
+    """The Intro lasts until the beat comes in — the first bar with real drum hits that carry on — however the voice
+    and the energy move before that (Bad Times: 24.7 s of voice alone; Disconnect: the voice enters at 10 s, the
+    Intro runs on to the first percussion). A song with drums from its first bar, or none before a third of the way
+    in, falls back to where the sound comes in."""
+    nb = len(starts)
+    m = next((k for k in range(nb - 1) if L["drums"][k] >= RHYTHM_IN and L["drums"][k + 1] >= RHYTHM_IN), None)
+    if m is None or m < 1 or float(starts[m]) < 0.75 * bar or float(starts[m]) > INTRO_MAX_SHARE * duration:
+        return _end_intro_at_entry(out, b, it, bar)
+    te = float(starts[m])
+    rest = [r for r in out if r["end"] > te + 1e-6]
+    if not rest:
+        return out
+    rest = [dict(r) for r in rest]
+    rest[0]["start"] = te
+    if rest[0]["type"] == "intro":                       # the music has come in: no longer the Intro
+        import numpy as np
+        n = min(len(it), len(b) - 1)
+        k0, k1 = int(np.searchsorted(b[:n], te)), int(np.searchsorted(b[:n], rest[0]["end"]))
+        level = float(np.mean(it[k0:max(k1, k0 + 1)]))
+        typ = "warmup" if level >= WARMUP_LEVEL else "slow"
+        rest[0].update(type=typ, why="the beat has come in — before the first big part" if typ == "warmup" else WHY["slow"])
+    return [{"start": 0.0, "end": te, "type": "intro", "why": "the opening, before the beat comes in"}] + rest
 
 
 def _end_intro_at_entry(out: list, b, it, bar: float) -> list:
@@ -677,9 +836,23 @@ def refine(coarse: list, track: dict, analysis: dict = None) -> list:
         drops = list((analysis or {}).get("drops") or [])
         marks = sorted({float(u["start"]) for u in (analysis or {}).get("units") or [] if float(u["start"]) > 0.5}
                        | {float(b_[0]) for b_ in (analysis or {}).get("builds") or [] if float(b_[0]) > 0.5})
-        return refine_with(coarse, beats, inten, drops, float(track["duration_sec"]), marks)
+        return refine_with(coarse, beats, inten, drops, float(track["duration_sec"]), marks, _track_layers(track, beats))
     except Exception:          # noqa: BLE001
         return coarse
+
+
+def _track_layers(track: dict, beats):
+    """What is playing in each bar (audio_drive): {"bars", "drums", "vocals", "loudness"} — None if it can't be read,
+    and the pass then goes by the energy alone."""
+    try:
+        import audio_drive as AD
+        drv = AD.drivers(track, beats)
+        if len(drv["bars"]) < 6:
+            return None
+        return {"bars": [float(x) for x in drv["bars"]],
+                **{k: [float(lv[k]) for lv in drv["levels"]] for k in ("drums", "vocals", "loudness")}}
+    except Exception:          # noqa: BLE001
+        return None
 
 
 def suggest_fine(track: dict, analysis: dict, story: list = None) -> list:
