@@ -6,9 +6,10 @@ new matcher's recipes (recipes.py) are written for:
 
 A section map is a list of regions covering the whole track in order, like a story map:
     {"start": s, "end": s, "type": type_id, "why": "..."}
-It is suggested from the song's structure (story_map.analyse: energy percentile, build-ups, drops, breakdowns,
-vocals, place) with the track's saved 🎭 story-map roles as hints (Intro → Intro, Outro → Ending, Action → Drop /
-Action, Slow → Build-up / Slow), snapped to the 🧠 Smart method's cuts, then edited and saved per track in
+It is suggested in two passes: the song's structure (story_map.analyse: energy percentile, build-ups, drops,
+breakdowns, vocals, place) with the track's saved 🎭 story-map roles as hints (Intro → Intro, Outro → Ending,
+Action → Drop / Action, Slow → Build-up / Slow), then a bar-level pass (refine: one-bar Drops, Action → Fast,
+Warm-downs, short Build-ups — see below), snapped to the 🧠 Smart method's cuts, then edited and saved per track in
 catalogue/section_maps.json. Roles stay as they are — they're for the scenes and remain a bonus in matching.
 
 Section types are about the MUSIC, not any video: one shared list, one map per track. The recipes say what
@@ -149,7 +150,8 @@ def suggested_map(track: dict, beats_per_bar: int = 4) -> list:
     import smart_cuts as SM
     segs = SM.build_smart_segments(track, {"beats_per_bar": beats_per_bar})
     cuts = [sg["start"] for sg in segs] + [float(track["duration_sec"])]
-    return snap(suggest(STM.analyse(track, beats_per_bar), STM.saved_map(track["track_id"])), cuts)
+    analysis = STM.analyse(track, beats_per_bar)
+    return snap(suggest_fine(track, analysis, STM.saved_map(track["track_id"])), cuts)
 
 
 # ---------------------------------------------------------------------------
@@ -279,8 +281,9 @@ def tuning_export(track: dict, regions: list, analysis: dict = None, source: str
         out["stretches"] = [{"start": u["start"], "end": u["end"], "energy_pct": u["pct"], "build": u["build"],
                              "drop": bool(u["drop"]), "breakdown": u["breakdown"], "vocal": u["vocal"]}
                             for u in analysis["units"]]
-        out["suggested"] = [[r["start"], r["end"], r["type"]]
-                            for r in suggest(analysis, STM.saved_map(track.get("track_id", "")))]
+        story = STM.saved_map(track.get("track_id", ""))
+        out["suggested_coarse"] = [[r["start"], r["end"], r["type"]] for r in suggest(analysis, story)]
+        out["suggested"] = [[r["start"], r["end"], r["type"]] for r in suggest_fine(track, analysis, story)]
     except Exception as e:          # noqa: BLE001
         out["analysis_error"] = str(e)
     try:
@@ -294,3 +297,186 @@ def tuning_export(track: dict, regions: list, analysis: dict = None, source: str
     except Exception as e:          # noqa: BLE001
         out["beats_error"] = str(e)
     return out
+
+
+# ---------------------------------------------------------------------------
+# The bar-level pass (10 Nov 2026, from Daryl's hand-edited map of one track and his rules)
+# ---------------------------------------------------------------------------
+# The song's stretches (story_map.analyse) are ~20 s long; Daryl marks parts of 1–5 bars. So after the coarse
+# suggestion, each bar is read as loud or not from the beat-by-beat intensity, and the parts are laid out by rule:
+#   • Drop = the first bar of a loud run that starts on a jump in energy (or on a drop the analysis found) — the hit only.
+#   • then Action; in a long loud run (≥ FAST_MIN_BARS after the drop) the later half is Fast — the peak comes last.
+#   • Warm-down = the way down from Action / Fast: the first WARMDOWN_BARS bars after a loud run (a one-bar dip takes
+#     the bar before it too).
+#   • Build-up = at most BUILD_MAX_BARS bars before a loud run, only where the song builds (the coarse suggestion says
+#     so, or the energy rises through them).
+#   • whatever is left keeps the coarse suggestion's type where that was a quiet type (Intro, Warm-up, Slow, Rhythmic,
+#     Ending — so story-map hints still count), else Rhythmic / Slow by level.
+# The coarse boundaries are trusted (all of them matched Daryl's): a run edge one bar away from one moves onto it.
+LOUD_SHARE = 0.85          # a bar is loud at ≥ this share of the track's upper-quartile bar intensity
+DROP_JUMP = 0.25           # a loud run's first bar is a Drop when the energy jumps by at least this from the bar before
+FAST_MIN_BARS = 6          # a loud run this long after its drop ends in Fast (its later half)
+WARMDOWN_BARS = 2
+BUILD_MAX_BARS = 4
+BUILD_RISE = 0.1           # "the energy rises through them": last bar − first bar of the candidate build-up
+MEDIUM_LEVEL = 0.4         # leftover bars: at or above → Rhythmic, below → Slow
+QUIET_TYPES = ("intro", "warmup", "slow", "rhythmic", "ending")
+
+
+def _bars(beats, inten, duration: float, anchor_time: float = None) -> tuple:
+    """(bar start times, bar mean intensity): four beats to the bar, counted from the beat nearest anchor_time
+    (a drop sits on a downbeat) — else from the first beat. The first bar starts at 0."""
+    import numpy as np
+    b = np.asarray(beats, float)
+    it = np.asarray(inten, float)
+    n = min(len(it), len(b) - 1)
+    if n < 8:
+        return np.zeros(0), np.zeros(0)
+    off = (int(np.argmin(np.abs(b - anchor_time))) % 4) if anchor_time is not None else 0
+    idx = list(range(off, n, 4))
+    starts = [float(b[s]) for s in idx]
+    means = [float(it[s:min(s + 4, n)].mean()) for s in idx]
+    if off >= 2:
+        starts.insert(0, 0.0)
+        means.insert(0, float(it[:off].mean()))
+    else:
+        starts[0] = 0.0
+    keep = [k for k, s in enumerate(starts) if s < duration - 0.25]
+    return np.asarray([starts[k] for k in keep]), np.asarray([means[k] for k in keep])
+
+
+def refine_with(coarse: list, beats, inten, drops, duration: float) -> list:
+    """The bar-level pass on explicit data (see above). coarse: regions with "type". Returns regions."""
+    import numpy as np
+    starts, level = _bars(beats, inten, duration, float(drops[0]) if len(drops) else None)
+    nb = len(starts)
+    if nb < 6 or not coarse:
+        return coarse
+    ends = np.append(starts[1:], duration)
+    bar = float(np.median(np.diff(starts))) if nb > 1 else 2.0
+    thr = max(LOUD_SHARE * float(np.percentile(level, 75)), 0.6 * float(np.percentile(level, 95)))
+    loud = level >= thr
+    for k in range(1, nb - 1):                       # a single loud bar among quieter ones isn't a loud run
+        if loud[k] and not loud[k - 1] and not loud[k + 1]:
+            loud[k] = False
+    cb = [float(r["start"]) for r in coarse[1:]]     # the coarse boundaries
+
+    def near(t):
+        return any(abs(t - c) <= 0.4 * bar for c in cb)
+
+    def run_len(k):
+        a = k
+        while a > 0 and loud[a - 1] == loud[k]:
+            a -= 1
+        z = k
+        while z + 1 < nb and loud[z + 1] == loud[k]:
+            z += 1
+        return z - a + 1
+    for k in range(1, nb):                           # move a run edge that is one bar off a coarse boundary onto it
+        if loud[k] == loud[k - 1] or near(starts[k]):
+            continue
+        if near(starts[k - 1]) and run_len(k - 1) > 1:
+            loud[k - 1] = loud[k]
+        elif k + 1 < nb and near(starts[k + 1]) and run_len(k) > 1:
+            loud[k] = loud[k - 1]
+
+    coarse_at = lambda t: type_at(coarse, t)         # noqa: E731
+    types = [None] * nb
+    runs, a = [], 0
+    for k in range(1, nb + 1):
+        if k == nb or loud[k] != loud[a]:
+            runs.append((a, k, bool(loud[a])))
+            a = k
+    for ri, (i, j, is_loud) in enumerate(runs):
+        if is_loud:
+            k = i
+            jump = i > 0 and level[i] - level[i - 1] >= DROP_JUMP
+            known = any(starts[i] - 0.5 * bar <= float(d) < ends[i] for d in drops)
+            if i > 0 and (jump or known):
+                types[i] = "drop"
+                k = i + 1
+            j_ = j
+            nxt = runs[ri + 1] if ri + 1 < len(runs) else None
+            if nxt and nxt[1] - nxt[0] == 1 and nxt[1] != nb and j - 1 > k:
+                types[j - 1] = "warmdown"            # a one-bar dip follows: the way down starts a bar early
+                j_ = j - 1
+            rest = j_ - k
+            n_fast = rest // 2 if rest >= FAST_MIN_BARS else 0
+            for m in range(k, j_):
+                types[m] = "fast" if m >= j_ - n_fast else "action"
+            continue
+        k = i
+        after_loud = ri > 0
+        last = j == nb
+        if after_loud:                               # the way down
+            n_wd = min(WARMDOWN_BARS, j - i if not last else max(j - i - 1, 0))
+            for m in range(i, i + n_wd):
+                types[m] = "warmdown"
+            k = i + n_wd
+        e = j
+        if not last and j - k >= 1:                  # a build-up into the loud run that follows
+            n_b = min(BUILD_MAX_BARS, j - k)
+            b0 = j - n_b
+            said = any(coarse_at((starts[m] + ends[m]) / 2) == "buildup" for m in range(k, j))
+            rises = level[j - 1] - level[b0] >= BUILD_RISE
+            if said or rises:
+                for m in range(b0, j):
+                    types[m] = "buildup"
+                e = b0
+        for m in range(k, e):
+            c = coarse_at((starts[m] + ends[m]) / 2)
+            if last:
+                types[m] = "ending"
+            elif i == 0 and c in (None, "buildup", "drop", "action", "fast"):
+                types[m] = "intro"
+            elif c in QUIET_TYPES and not (c == "ending" and not last) and not (c == "intro" and i > 0):
+                types[m] = c
+            else:
+                types[m] = "rhythmic" if float(np.mean(level[k:e])) >= MEDIUM_LEVEL else "slow"
+    out = []
+    for m in range(nb):
+        t = types[m] or coarse_at((starts[m] + ends[m]) / 2) or "rhythmic"
+        if out and out[-1]["type"] == t:
+            out[-1]["end"] = round(float(ends[m]), 3)
+        else:
+            out.append({"start": round(float(starts[m]), 3), "end": round(float(ends[m]), 3), "type": t,
+                        "why": WHY.get(t, "")})
+    for r_prev, r in zip(out, out[1:]):              # tiny differences from a coarse boundary: use the coarse time
+        c = min(cb, key=lambda x: abs(x - r["start"])) if cb else None
+        if c is not None and abs(c - r["start"]) <= 0.4 * bar:
+            r_prev["end"] = r["start"] = round(c, 3)
+    out[0]["start"], out[-1]["end"] = 0.0, round(float(duration), 3)
+    return [r for r in out if r["end"] - r["start"] > 1e-3]
+
+
+WHY = {"drop": "the hit — the first bar of a loud stretch", "action": "a loud stretch", "fast": "the peak — the later half of a long loud stretch",
+       "warmdown": "the way down from a loud stretch", "buildup": "the bars building into a loud stretch", "intro": "the start of the track",
+       "ending": "the end of the track", "rhythmic": "steady, medium energy", "slow": "one of the quietest parts",
+       "warmup": "middling energy before the first big part"}
+
+
+def refine(coarse: list, track: dict, analysis: dict = None) -> list:
+    """The bar-level pass for a track; the coarse regions come back unchanged if its beats can't be read."""
+    try:
+        import numpy as np
+        import cut_scoring as CS
+        import smart_cuts as SM
+        beats, _, _ = CS.beat_grid(track)
+        beats = np.asarray(beats, float)
+        inten, _ = SM.intensity_per_beat(track, beats, CS.bar_sec(track, 4) or 2.0)
+        drops = list((analysis or {}).get("drops") or [])
+        return refine_with(coarse, beats, inten, drops, float(track["duration_sec"]))
+    except Exception:          # noqa: BLE001
+        return coarse
+
+
+def suggest_fine(track: dict, analysis: dict, story: list = None) -> list:
+    """The suggestion with the bar-level pass — what the app proposes for a track."""
+    return refine(suggest(analysis, story), track, analysis)
+
+
+def agreement(a: list, b: list, duration: float, step: float = 0.25) -> float:
+    """Share of the track where two section maps give the same type."""
+    import numpy as np
+    ts = np.arange(step / 2, duration, step)
+    return float(np.mean([type_at(a, t) == type_at(b, t) for t in ts])) if len(ts) else 0.0

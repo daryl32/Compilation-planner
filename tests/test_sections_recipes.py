@@ -141,3 +141,29 @@ def test_tuning_export_and_recipe_upload():
         assert "nothing was changed" in SV.st.session_state["rc_msg"] and RC.load("slow")["beat_lock"] == 0.1
     finally:
         RC.reset("slow")
+
+
+def test_bar_level_pass_on_a_real_track():
+    """AURA (10 Nov 2026): the app's own beat data + coarse suggestion, against Daryl's hand-edited map and his rules —
+    Drop = the first bar only; Fast = the later half of a long loud stretch; Warm-down = the way down."""
+    import json
+    import section_types as ST
+    from tests.support import REPO
+    fx = json.loads((REPO / "tests" / "golden" / "sections_bar_pass.json").read_text())
+    R = lambda rows: [{"start": a, "end": b, "type": t} for a, b, t in rows]   # noqa: E731
+    coarse, daryl = R(fx["coarse"]), R(fx["daryl"])
+    out = ST.refine_with(coarse, fx["beats"], fx["intensity"], fx["drops"], fx["duration"])
+    assert out[0]["start"] == 0.0 and out[-1]["end"] == fx["duration"]
+    assert all(abs(a["end"] - b["start"]) < 1e-6 for a, b in zip(out, out[1:]))
+    drops = [r for r in out if r["type"] == "drop"]
+    assert [round(r["start"]) for r in drops] == [24, 45] and all(2.0 < r["end"] - r["start"] < 3.2 for r in drops)
+    assert [round(r["start"]) for r in out if r["type"] == "warmdown"] == [40, 64, 99]
+    seq = [r["type"] for r in out]
+    assert seq[0] == "intro" and seq[1] == "buildup" and seq[-1] == "ending" and round(out[-1]["start"]) == 104
+    assert ST.type_at(out, 30.0) == "action" and ST.type_at(out, 38.0) == "action"      # the first loud stretch: no Fast
+    assert ST.type_at(out, 50.0) == "action" and ST.type_at(out, 60.0) == "fast"         # the peak comes last
+    assert ST.type_at(out, 72.0) == "rhythmic"
+    before, after = ST.agreement(coarse, daryl, fx["duration"]), ST.agreement(out, daryl, fx["duration"])
+    assert before < 0.4 and after > 0.85
+    # too little to go on → the coarse map comes back untouched
+    assert ST.refine_with(coarse, fx["beats"][:6], fx["intensity"][:5], [], fx["duration"]) == coarse

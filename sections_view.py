@@ -40,7 +40,7 @@ def _fresh(tid: str, track_bits) -> tuple:
         return [], "none"
     import story_map as STM
     cuts = [sg["start"] for sg in segs] + [float(track["duration_sec"])]
-    return _to_editor(ST.snap(ST.suggest(analysis, STM.saved_map(tid)), cuts)), "suggested"
+    return _to_editor(ST.snap(ST.suggest_fine(track, analysis, STM.saved_map(tid)), cuts)), "suggested"
 
 
 def _load(tid: str, track_bits) -> list:
@@ -148,7 +148,7 @@ def render_sections(tracks: dict, track_bits, play=None) -> None:
     cuts = [sg["start"] for sg in segs] + [float(track["duration_sec"])]
 
     def suggest():
-        return _to_editor(ST.snap(ST.suggest(analysis, STM.saved_map(tid)), cuts)) if analysis else regions
+        return _to_editor(ST.snap(ST.suggest_fine(track, analysis, STM.saved_map(tid)), cuts)) if analysis else regions
 
     play_part = (lambda r, lead, key: play(track, r, lead, key)) if play else None     # the editor calls play(r, lead, key)
     SME.render_editor(track, segs, ns="sec", get_regions=lambda: _state().get("regions") or [], set_regions=_set,
