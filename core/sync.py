@@ -315,3 +315,20 @@ def half_second_level(curve, rate: float, times, step: float) -> np.ndarray:
     cnt = k[hi] - k[lo]
     with np.errstate(divide="ignore", invalid="ignore"):
         return np.where(cnt > 0, (c[hi] - c[lo]) / np.maximum(cnt, 1), np.nan)
+
+
+def hit_rate(drums, rate: float, level: float) -> float | None:
+    """Drum hits a second in a stretch of the drum curve: its peaks at or above `level`, at least a tenth of a
+    second apart. How busy the rhythm is — which changes between the parts of a song far more than how hard the
+    drums hit (seven tracks, 11 Nov: hit strength 0.51–0.62 across Bad Times' beat sections, hit rate 1.8–3.3)."""
+    d = np.asarray(drums, np.float64) if drums is not None else np.zeros(0)
+    if len(d) < 3 or not rate:
+        return None
+    peak = np.flatnonzero((d[1:-1] >= level) & (d[1:-1] >= d[:-2]) & (d[1:-1] > d[2:])) + 1
+    gap = max(1, int(round(0.1 * rate)))
+    n, last = 0, -gap
+    for p in peak:
+        if p - last >= gap:
+            n += 1
+            last = p
+    return n / (len(d) / float(rate))

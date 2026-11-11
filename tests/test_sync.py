@@ -357,3 +357,59 @@ def test_the_tracks_own_range_is_stretched_as_far_as_the_setting_says(monkeypatc
         assert not any(rec.values())                                          # with recipes on, levels aren't used
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def test_hit_rate_counts_the_drum_hits_a_second():
+    from core import sync as S
+    d = np.zeros(300)                                         # 10 s at 30 a second
+    d[::15] = 0.9                                             # two hits a second
+    d[7::30] = 0.2                                            # ghost notes under the level don't count
+    assert abs(S.hit_rate(d, 30.0, 0.4) - 2.0) < 0.11
+    d[1::15] = 0.8                                            # a hit's own tail a frame later is the same hit
+    assert abs(S.hit_rate(d, 30.0, 0.4) - 2.0) < 0.11
+    assert S.hit_rate(np.zeros(300), 30.0, 0.4) == 0.0 and S.hit_rate(None, 30.0, 0.4) is None
+
+
+def test_bounce_speed_follows_the_rhythm_when_asked(monkeypatch):
+    """One video bouncing at 60 a minute in its first half and 120 in its second, on a 120 BPM track: both are
+    "on tempo" (half and full). Asked for slow bounces the first half counts for more, asked for fast ones the
+    second — and unasked they count the same. In a plan, the setting tells each beat block which speed it wants."""
+    from tests.test_story_matcher import _plan_inputs, _setup
+    out = _setup(monkeypatch)
+    try:
+        import catalogue_store as CS
+        import core.story_matcher as SMX
+        import footage_timeline as FT
+        vids = {v["video_id"]: v for v in CS.video_index().values()}
+        t = np.arange(int(float(vids["vid_a"]["duration"]) * 15) + 15) / 15.0
+        rng = np.random.default_rng(9)
+        half = len(t) // 2
+        curve = 0.3 + 0.3 * np.maximum(0, np.sin(2 * np.pi * 1.0 * t)) + 0.01 * rng.standard_normal(len(t))
+        curve[half:] = 0.3 + 0.3 * np.maximum(0, np.sin(2 * np.pi * 2.0 * t[half:])) + 0.01 * rng.standard_normal(len(t) - half)
+        _add_full_rate(out, "vid_a", curve)
+        index = FT.load_index()
+        v = SMX._Video(FT.load("vid_a", index=index), index)
+        plain = v.bounce_window(8, 120.0)
+        mid = len(plain) // 2
+        a, b = slice(4, mid - 12), slice(mid + 12, len(plain) - 4)
+        assert abs(plain[a].mean() - plain[b].mean()) < 0.1 and plain[a].mean() > 0.8
+        slow, fast = v.bounce_window(8, 120.0, (60.0, 1.0)), v.bounce_window(8, 120.0, (120.0, 1.0))
+        assert slow[a].mean() > slow[b].mean() + 0.3 and fast[b].mean() > fast[a].mean() + 0.3
+        gentle = v.bounce_window(8, 120.0, (60.0, 0.5))
+        assert slow[b].mean() < gentle[b].mean() < plain[b].mean()            # half the setting, half the effect
+        assert np.allclose(v.bounce_window(8, 120.0, (60.0, 0.0)), plain)
+
+        def wants(**kw):
+            track, queues, segments, regions = _plan_inputs(["rhythmic"] * 16)
+            tl, _, _ = SMX.match_story(segments, queues, track, options=SMX.StoryOptions(section_map=regions, **kw))
+            return [s_["story"].get("bounce_want") for e in tl for s_ in e["scenes"] if s_["story"].get("fit") is not None], track
+        off, track = wants(movement_only=True)
+        on, _ = wants(movement_only=True, bounce_speed=1.0)
+        rec, _ = wants(movement_only=False, bounce_speed=1.0)
+        assert not any(off) and not any(rec)
+        got = [w for w in on if w]
+        bpm = float(track["bpm"])
+        if got:                                               # the fixture song has drums and enough beat blocks
+            assert all(bpm / 2 - 0.2 <= w <= bpm * 2 + 0.2 for w in got) and max(got) > min(got)
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
