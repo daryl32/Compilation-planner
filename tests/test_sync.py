@@ -121,6 +121,7 @@ def test_movement_only_picks_the_footage_that_moves_with_the_music_and_slides_it
         row = next(r for r in rep["clips"] if r["video"] == "vid_b" and abs(r["music"][0] - seg["start"]) < 0.01)
         assert rep["rate"] == 15.0 and len(row["move"]) == len(row["music_curves"]["drive"]) and row["sync_played"] > 0.9
         assert len(row["move_before"]) == 15 and "loudness" in row["music_curves"]
+        assert {"beat", "bounce", "move_level", "level"} <= set(row) and isinstance(rep["movement_by_shot_size"], dict)
         # with recipes on, the frame-rate sync is the "shape" part of the music fit: every pick carries it and is slid
         track, queues, segments, regions = _plan_inputs(types)
         t2, _, _ = SMX.match_story(segments, queues, track, options=SMX.StoryOptions(section_map=regions, music_story=0.0))
@@ -158,7 +159,8 @@ def test_beat_presence_is_judged_on_the_hits():
     hits[1::15] = 0.6
     assert S.beat_presence(hits, 0.4) == 1.0                  # a low average, strong hits: a beat
     assert S.beat_presence(np.full(120, 0.1), 0.4) == 0.0     # a steady murmur: none
-    assert 0.0 < S.beat_presence(np.full(120, 0.3), 0.4) < 1.0
+    assert S.beat_presence(np.full(120, 0.3), 0.4) == 0.0     # 01 AURA's beatless passages: weak hits are no beat
+    assert 0.0 < S.beat_presence(np.full(120, 0.43), 0.4) < 1.0
     assert S.beat_presence(None, 0.4) is None and S.beat_presence([], 0.4) is None
 
 
@@ -200,5 +202,41 @@ def test_movement_only_wants_bouncy_footage_on_a_beat_and_smooth_footage_off_it(
         # recipes on: the feel plays no part
         r_on = SMX._score_video_x(*args[:8], False, beat=1.0)[0]
         assert np.allclose(r_on, SMX._score_video_x(*args[:8], False)[0])
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_a_frozen_picture_is_found_and_kept_out_of_the_plan(monkeypatch):
+    from core import sync as S
+    rate = 15.0
+    rng = np.random.default_rng(2)
+    x = 0.03 + 0.02 * rng.random(900)                         # a quiet scene still jitters
+    x[300:360] = 0.0                                          # 4 s frozen from 20 s
+    x[600:606] = 0.0                                          # a few identical frames: not a freeze
+    x[700:760] = np.nan                                       # nobody tracked: not a freeze either
+    times = np.arange(0, 60, 0.5)
+    fz = S.frozen(x, rate, times, 0.5)
+    assert fz[40:48].min() == 1.0 and fz[:40].max() == 0.0 and fz[48:].max() == 0.0
+    assert not S.frozen(np.full(900, np.nan), rate, times, 0.5).any()
+    # in the matcher: every window touching the freeze is pushed to the bottom, with or without recipes
+    from tests.test_story_matcher import _setup
+    out = _setup(monkeypatch)
+    try:
+        import catalogue_store as CS
+        import core.story_matcher as SMX
+        import footage_timeline as FT
+        import recipes as RC
+        vids = {v["video_id"]: v for v in CS.video_index().values()}
+        n_f = int(float(vids["vid_a"]["duration"]) * 15) + 15
+        curve = 0.2 + 0.1 * rng.random(n_f)
+        curve[300:360] = 0.0
+        _add_full_rate(out, "vid_a", curve)
+        index = FT.load_index()
+        v = SMX._Video(FT.load("vid_a", index=index), index)
+        clean = SMX._Video(FT.load("vid_b", index=index), index)
+        assert not clean.frozen.any()                         # a timeline without the full-rate curve: no opinion
+        for only in (True, False):
+            fit = SMX._score_video_x(v, 8, RC.default("rhythmic"), np.full(120, 0.5), 120.0, 0.0, 4.0, 0.5, only)[0]
+            assert fit[34:47].max() < 0.5 * np.median(fit[60:])
     finally:
         shutil.rmtree(out, ignore_errors=True)

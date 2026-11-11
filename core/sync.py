@@ -156,7 +156,11 @@ BOUNCE_WIN_SEC = 4.0      # the movement is judged over this long around each po
 BOUNCE_LAG_SEC = (0.25, 1.5)      # one bounce lasts between these (240 … 40 a minute)
 BOUNCE_QUIET = 0.5        # windows moving less than this share of the video's usual swing count for less
 BOUNCE_NOISE = 0.35       # the autocorrelation peak that random movement reaches by chance over the window
-BEAT_OFF, BEAT_ON = 0.5, 1.25     # × the drum level a bar needs to count as drum-driven: no beat … a full beat
+BEAT_OFF, BEAT_ON = 0.9, 1.25     # × the drum level a bar needs to count as drum-driven: no beat … a full beat
+#                                   (0.5 at first: 01 AURA's beatless passages at 1:04 and 1:44, hits ≈ 0.3, then read
+#                                   as a third of a beat and were given half-bouncy footage — Daryl hears no beat there)
+FROZEN_BELOW = 1e-4       # a tracked person whose pose doesn't change at all: the picture is frozen (a live body always
+FROZEN_SEC = 1.0          # jitters) — for at least this long
 
 
 def bounce(move_hi, rate: float, times) -> tuple:
@@ -210,3 +214,24 @@ def beat_presence(drums, drum_level: float) -> float | None:
         return None
     hits = float(np.percentile(d, 90))
     return float(np.clip((hits - BEAT_OFF * drum_level) / max((BEAT_ON - BEAT_OFF) * drum_level, 1e-9), 0.0, 1.0))
+
+
+def frozen(move_hi, rate: float, times, step: float) -> np.ndarray:
+    """Share (0–1) of each point's `step` seconds in which the picture is frozen: somebody is tracked and doesn't
+    move AT ALL for FROZEN_SEC or more — a still frame held in the source file, or the curve running past the
+    video's end (01 AURA's first clip froze 3.5 s in: the movement there is exactly 0 from that frame on)."""
+    raw = np.asarray(move_hi, np.float64)
+    times = np.asarray(times, np.float64)
+    rate = float(rate or 15.0)
+    still = np.isfinite(raw) & (np.abs(np.where(np.isfinite(raw), raw, 1.0)) < FROZEN_BELOW)
+    if not still.any():
+        return np.zeros(len(times))
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], still.astype(np.int8), [0]])))
+    held = np.zeros(len(raw))
+    for a, b in zip(edges[::2], edges[1::2]):
+        if (b - a) / rate >= FROZEN_SEC:
+            held[a:b] = 1.0
+    c = np.concatenate([[0.0], np.cumsum(held)])
+    lo = np.clip(np.round(times * rate).astype(int), 0, len(raw))
+    hi = np.clip(np.round((times + step) * rate).astype(int), 0, len(raw))
+    return (c[hi] - c[lo]) / np.maximum(hi - lo, 1)
