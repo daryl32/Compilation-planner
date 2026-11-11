@@ -285,7 +285,7 @@ def _motion_curves(video_id: str) -> dict:
 
 def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, music_story: float = 0.5,
                  smooth_contrast: float = 0.5, excluded: set = None, max_videos: int = 0, progress=None,
-                 movement_only: bool = False, min_clip: float = None) -> dict:
+                 movement_only: bool = False, min_clip: float = None, level_range: float = 0.0) -> dict:
     import core.story_matcher as SMX
     from planner.data import build_footage_queues, load_all_catalogues
     from render_preview import colab_to_local
@@ -296,7 +296,8 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     queues = build_footage_queues(tuple(video_ids), (), LC.library_ranges())
     opts = SMX.StoryOptions(music_story=music_story, smooth_contrast=smooth_contrast, section_map=regions or None,
                             max_videos=int(max_videos or 0), progress=progress, merge_blocks=True,
-                            movement_only=bool(movement_only), curves_of=_motion_curves)
+                            movement_only=bool(movement_only), curves_of=_motion_curves,
+                            level_range=float(level_range or 0.0))
     max_clips = 3 if split_screen else 1
     timeline, shortfall, unfilled = SMX.match_story(
         segments, queues, track, min_clips=1, max_clips=max_clips, ramp_start=0.5, ramp_end=0.9,
@@ -316,7 +317,7 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
         "min_clips": 1, "max_clips": max_clips, "ramp_start": 0.5, "ramp_end": 0.9, "density_contrast": 1.0,
         "vary_clip_count": False, "clip_count_seed": 0, "min_clip_len_sec": 1.0, "allow_same_video": False,
         "story": {"music_story": music_story, "smooth_contrast": smooth_contrast, "max_videos": int(max_videos or 0),
-                  "movement_only": bool(movement_only)},
+                  "movement_only": bool(movement_only), "level_range": float(level_range or 0.0)},
         "timeline": timeline,
     }
     return {"plan": plan, "segments": segments, "notes": list(opts.notes), "shortfall": shortfall,
@@ -346,6 +347,7 @@ def _do_pending_compile() -> None:
                            max_videos=int(st.session_state.get("compose_max_videos", 0) or 0),
                            movement_only=bool(st.session_state.get("compose_movement_only")),
                            min_clip=_min_clip(),
+                           level_range=float(st.session_state.get("compose_level_range", 0.5)),
                            progress=lambda d, t: bar.progress(min(d / max(t, 1), 1.0), text=f"🤖 Compiling… block {d} of {t}"))
     except Exception as e:          # noqa: BLE001
         bar.empty()
@@ -380,6 +382,13 @@ def _options_row(ns: str) -> None:
                          "128 BPM (1.9 s). Or type your own; cuts stay on the beat, so it rounds up to whole beats. "
                          "0.5 = no minimum (the recipes' clip lengths alone). A section too short for two clips "
                          "stays one clip.")
+    st.slider("🎚️ Use the track's full range", 0.0, 1.0, 0.5, 0.25, key="compose_level_range",
+              disabled=not bool(st.session_state.get("compose_movement_only")),
+              help="🎯 Movement only. How far each track's loudness is stretched over the whole calm-to-lively range. "
+                   "0: as measured — the loud parts of most songs all ask for nearly the same footage, and the "
+                   "liveliest footage is never asked for. 1: the track's calmest part asks for calm footage and its "
+                   "loudest for the liveliest, so a soft song's chorus is as lively as a heavy song's. In between, "
+                   "soft songs stay gentler. The order of the parts never changes.")
     st.toggle("🎯 Movement only", key="compose_movement_only",
               help="No recipes: every clip is picked on how its movement follows the music (frame by frame, against "
                    "the drums, bass or voice — whichever carries the bar) and how lively it is against how loud the "

@@ -327,3 +327,33 @@ def test_movement_only_goes_by_what_is_seen_where_the_person_curve_misses_it(mon
         assert np.allclose(r1, SMX._score_video_x(v2, *args[1:8], False)[0])
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def test_the_tracks_own_range_is_stretched_as_far_as_the_setting_says(monkeypatch):
+    """🎚️ Use the track's full range: block levels keep their order; at 0 nothing changes, at 1 the calmest blocks
+    ask for about 0.1 and the loudest for about 0.9, half way is half way; recipes mode ignores it."""
+    from tests.test_story_matcher import _plan_inputs, _setup
+    out = _setup(monkeypatch)
+    try:
+        import core.story_matcher as SMX
+
+        def levels(**kw):
+            track, queues, segments, regions = _plan_inputs(["rhythmic"] * 16)
+            tl, _, _ = SMX.match_story(segments, queues, track, options=SMX.StoryOptions(section_map=regions, **kw))
+            rows = [(e["track_time"][0], s_["story"]) for e in tl for s_ in e["scenes"] if s_["story"].get("fit") is not None]
+            return {t: st_.get("level") for t, st_ in rows}, {t: st_.get("level_raw") for t, st_ in rows}
+        plain, _ = levels(movement_only=True)
+        same, raw0 = levels(movement_only=True, level_range=0.0)
+        full, raw = levels(movement_only=True, level_range=1.0)
+        half, _ = levels(movement_only=True, level_range=0.5)
+        ts = sorted(set(plain) & set(full) & set(half))
+        assert len(ts) >= 8 and plain == same and not any(raw0.values())
+        a, f, h = (np.array([d[t] for t in ts]) for d in (plain, full, half))
+        assert np.allclose([raw[t] for t in ts], a, atol=1e-3)               # the file keeps the measured level too
+        assert (np.diff(f[np.argsort(a, kind="stable")]) >= -1e-9).all()      # the order of the blocks is kept
+        assert abs(f.min() - 0.1) < 0.02 and abs(f.max() - 0.9) < 0.02     # whatever range the track measured (here 0–0.93)
+        assert np.allclose(h, (a + f) / 2, atol=2e-3)
+        rec, _ = levels(movement_only=False, level_range=1.0)
+        assert not any(rec.values())                                          # with recipes on, levels aren't used
+    finally:
+        shutil.rmtree(out, ignore_errors=True)

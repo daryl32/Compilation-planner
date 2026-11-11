@@ -70,6 +70,9 @@ BOUNCE_OFF_TEMPO = 0.6      # a bounce a quarter octave off the track's tempo (o
 SEEN_SHARE = 0.65           # 👁️ how lively and how bouncy a window is: this share from the on-screen motion
 #                             (core/sync.pixel_curve), the rest from the person curve — where the video has both
 SEEN_SYNC = 0.5             # …and this share of the sync
+RANGE_LO, RANGE_HI = 0.1, 0.9          # 🎚️ full range: a track's calmest blocks ask for this level, its loudest for that
+RANGE_MIN_SPREAD = 0.1      # a track whose blocks differ by less than this is nearly flat: it is stretched less,
+#                             so noise isn't blown up into a "structure" it doesn't have
 LEVEL_NO_BEAT = 0.25        # with no beat the footage may be this much calmer than the loudness alone asks for
 ONLY_BAND = 0.15            # …the footage should be this close to the music's level (both 0–1 within their library / track)
 ONLY_TREND = 0.15           # …and rise or fall with it when the music moves by more than this across the block
@@ -101,6 +104,9 @@ class StoryOptions:
                                         # Classic's cards are tied to its own cut list)
     movement_only: bool = False         # 🎯 no recipes: pick on how the movement follows the music and matches its
                                         # level; tags, scene tags, roles and the recipes' movement bands are ignored
+    level_range: float = 0.0            # 🎚️ 🎯 Movement only: how far each track's levels are stretched to the whole
+                                        # calm-to-lively range (0 = as measured, 1 = its calmest block asks for calm
+                                        # footage and its loudest for the liveliest); the order is kept
     curves_of: object = None            # curves_of(video_id) → {scene_id: {"fps", "values"}}: the catalogue's on-screen
                                         # motion. 🎯 Movement only then judges the footage on it too (None: person curve only)
     video_stats: dict = field(default_factory=dict)      # filled in: how every video in play fared (see _video_stats)
@@ -564,13 +570,41 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
     else:
         loud = None
 
-    def music_level(t0: float, t1: float):
+    def raw_level(t0: float, t1: float):
         """How loud the music is from t0 to t1, 0–1 within the track (None: unknown)."""
         if loud is None:
             return None
         r_ = drv["rate"]
         part = loud[int(t0 * r_):max(int(t0 * r_) + 1, int(t1 * r_))]
         return float(np.clip((float(part.mean()) - lv_lo) / max(lv_hi - lv_lo, 1e-6), 0.0, 1.0)) if len(part) else None
+
+    # 🎚️ The track's own range. A block's level is the mean of a spiky curve, so even the loudest block sits well
+    # under 1 and the loud sections bunch together: over seven tracks (11 Nov) none asked for more than 0.82, and
+    # AURA spent 46 % of its length within 0.57–0.68 — verse, chorus and drop asking for the same footage. The
+    # blocks' levels are stretched so the track's calmest (5th percentile, by time) ask for RANGE_LO and its
+    # loudest (95th) for RANGE_HI.
+    stretch, blk_lo, blk_hi = 0.0, 0.0, 1.0
+    want = float(min(max(options.level_range or 0.0, 0.0), 1.0))
+    if only and want > 0 and loud is not None and segments:
+        vals = [(raw_level(sg["start"], sg["end"]), sg["end"] - sg["start"]) for sg in segments]
+        vals = [(v_, w_) for v_, w_ in vals if v_ is not None and w_ > 0]
+        if len(vals) >= 4:
+            v_ = np.array([a_ for a_, _ in vals])
+            w_ = np.array([b_ for _, b_ in vals])
+            order = np.argsort(v_)
+            cum = np.cumsum(w_[order]) / w_.sum()
+            blk_lo, blk_hi = (float(x) for x in np.interp([0.05, 0.95], cum, v_[order]))
+            if blk_hi - blk_lo > 1e-3:
+                stretch = want * min(1.0, (blk_hi - blk_lo) / RANGE_MIN_SPREAD)
+
+    def music_level(t0: float, t1: float):
+        """The level asked of the footage from t0 to t1: how loud the music is, 0–1 within the track, with the
+        track's own range stretched as far as options.level_range says (None: unknown)."""
+        r = raw_level(t0, t1)
+        if r is None or stretch <= 0:
+            return r
+        full = RANGE_LO + (RANGE_HI - RANGE_LO) * float(np.clip((r - blk_lo) / (blk_hi - blk_lo), 0.0, 1.0))
+        return (1.0 - stretch) * r + stretch * full
     drums = drv["curves"].get("drums") if drv is not None else None
 
     def music_beat(t0: float, t1: float):
@@ -744,6 +778,7 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
                     "sync": round(c["sync"], 3), "slide": c["slide"],
                     **({"seen": True} if only and videos[c["video_id"]].seen_mover is not None else {}),
                     **({"level": round(lv_, 3)} if (lv_ := music_level(seg["start"], seg["end"])) is not None and only else {}),
+                    **({"level_raw": round(raw_level(seg["start"], seg["end"]), 3)} if only and stretch > 0 else {}),
                     "shot": None if math.isnan(c["shot"]) else round(c["shot"], 2), **extra}
 
         # 1. whole-block windows, best first
@@ -1029,7 +1064,7 @@ def sync_report(timeline: list, track: dict, context_sec: float = 1.0, video_sta
                 row = {"music": [round(tt, 3), round(tt + dur, 3)], "type": e.get("section_type"), "driver": e.get("driver"),
                        "video": vid, "scene": link.get("scene_id"), "clip_start": round(float(link["clip_start_sec"]), 3),
                        "seconds": round(dur, 3), **{k: (slot.get("story") or {}).get(k) for k in ("fit", "base", "sync", "slide")},
-                       **{k: (slot.get("story") or {})[k] for k in ("level", "parts", "joined") if (slot.get("story") or {}).get(k) is not None}}
+                       **{k: (slot.get("story") or {})[k] for k in ("level", "level_raw", "parts", "joined") if (slot.get("story") or {}).get(k) is not None}}
                 try:
                     hi, rate = np.asarray(tl.move_hi, np.float32), float(tl.move_rate)
                 except (AttributeError, TypeError):
@@ -1127,7 +1162,7 @@ def sync_report(timeline: list, track: dict, context_sec: float = 1.0, video_sta
                            "have one point per 1/rate s from the clip's first frame. beat: 1 = a full drum beat in this "
                            "stretch, 0 = none. bounce: 1 = a strong regular up-and-down, 0 = smooth or irregular "
                            "(bounce_bpm = its tempo). The two should agree. level: how lively the music asks the footage "
-                           "to be, move_level: how lively the clip is (both 0–1). shot: 0 extreme close-up … 3 wide. "
+                           "to be (level_raw: before 🎚️ the track's range was stretched), move_level: how lively the clip is (all 0–1). shot: 0 extreme close-up … 3 wide. "
                            "frozen: share of the clip with the picture frozen. pixel_move: how much of the "
                            "picture changes frame to frame (1 = the video's busy level) — camera and whole bodies "
                            "included, unlike move. seen_level / seen_bounce / seen_bounce_bpm: the same "
