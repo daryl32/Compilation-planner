@@ -321,6 +321,7 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     }
     return {"plan": plan, "segments": segments, "notes": list(opts.notes), "shortfall": shortfall,
             "unfilled": unfilled, "summary": SMX.plan_summary(timeline), "track": track,
+            "video_stats": dict(opts.video_stats),
             "made": time.strftime("%H:%M:%S")}
 
 
@@ -806,7 +807,7 @@ def render_result(res: dict) -> None:
                       "the movement matching on real numbers."):
         try:
             import core.story_matcher as SMX
-            rep = SMX.sync_report(plan["timeline"], res["track"])
+            rep = SMX.sync_report(plan["timeline"], res["track"], video_stats=res.get("video_stats"))
             st.download_button(f"⬇️ {plan['track_id']}_sync.json"
                                + (f" — as played {rep['sync_played_mean']:.0%}" if rep.get("sync_played_mean") is not None else ""),
                                data=json.dumps(rep, separators=(",", ":")), file_name=f"{plan['track_id']}_sync.json",

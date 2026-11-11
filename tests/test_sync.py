@@ -137,7 +137,15 @@ def test_movement_only_picks_the_footage_that_moves_with_the_music_and_slides_it
         opts3 = SMX.StoryOptions(section_map=regions, movement_only=True, curves_of=CS.motion_curves)
         t3, _, _ = SMX.match_story(segments, queues, track, options=opts3)
         assert any(s_["story"].get("seen") for e in t3 for s_ in e["scenes"])
-        rep3 = SMX.sync_report(t3, track)
+        rep3 = SMX.sync_report(t3, track, video_stats=opts3.video_stats)
+        # every video in play is in the table, picked or not — with why it could or couldn't win
+        vs = rep3["videos"]
+        assert set(vs) == set(queues) and "timeline" in rep3["videos_how_to_read"]
+        with_tl = [r for r in vs.values() if r["timeline"]]
+        assert with_tl and all(r["scored"] > 0 and r["best_rank"] >= 1 and r["mean_gap"] >= 0 for r in with_tl)
+        assert sum(r["picked"] for r in vs.values()) >= len(t3) and any(r["first"] for r in with_tl)
+        assert all(r["picked"] == 0 and r["scored"] == 0 for r in vs.values() if not r["timeline"])
+        assert any(r["seen"] and r.get("seen_busy") for r in with_tl)
         both = [r for r in rep3["clips"] if "sync_played_seen" in r and "sync_played_person" in r]
         assert both and all(abs(r["sync_played"] - (r["sync_played_person"] + r["sync_played_seen"]) / 2) < 0.002 for r in both)
         # with recipes on, the frame-rate sync is the "shape" part of the music fit: every pick carries it and is slid

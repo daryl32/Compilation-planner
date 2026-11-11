@@ -103,6 +103,7 @@ class StoryOptions:
                                         # level; tags, scene tags, roles and the recipes' movement bands are ignored
     curves_of: object = None            # curves_of(video_id) → {scene_id: {"fps", "values"}}: the catalogue's on-screen
                                         # motion. 🎯 Movement only then judges the footage on it too (None: person curve only)
+    video_stats: dict = field(default_factory=dict)      # filled in: how every video in play fared (see _video_stats)
     progress: object = None             # progress(done_blocks, total_blocks) — for a progress bar
     notes: list = field(default_factory=list)
 
@@ -140,6 +141,7 @@ class _Video:
         self.seen_mover = None
         self.seen_level = None         # …per half second, 0–1 (NaN where it has none)
         self.seen_bounce = None
+        self.seen_top = None
 
     @property
     def mover(self):
@@ -179,6 +181,11 @@ class _Video:
         if px is None or not np.isfinite(px).any():
             return
         self.seen = px
+        try:                           # the video's own "busy" level, in the catalogue's raw units — what 1.0 stands for
+            self.seen_top = float(np.percentile(np.concatenate([np.asarray(v_, np.float64) for _, _, v_ in scenes
+                                                                if len(v_)]), 95))
+        except ValueError:
+            self.seen_top = None
         self.seen_mover = SY.Mover(px, rate)
         self.seen_level = np.clip(SY.half_second_level(px, rate, self.times, STEP), 0.0, 1.0)
         self.seen_bounce = SY.bounce(px, rate, self.times)
@@ -507,6 +514,8 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
     if options.track_recipes:
         shared = {**shared, **{k: RC.normalise(v, k) for k, v in options.track_recipes.items() if k in shared}}
     videos, missing = _load_videos(queues)
+    usable_at_start = {vid: (len(spans), sum(float(sp.get("remaining_sec") or 0.0) for sp in spans))
+                       for vid, spans in queues.items()}
     if missing:
         options.notes.append(f"{len(missing)} selected video{'s have' if len(missing) != 1 else ' has'} no 🧭 timeline "
                              f"yet — only Classic's picks can use {'them' if len(missing) != 1 else 'it'}.")
@@ -569,6 +578,7 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
                              "was matched on the half seconds. Press 🧭 Build (Media Library → Videos → Timeline) once.")
 
     timeline = []
+    stats, stats_blocks = {}, [0]  # video_id → its ranks block by block (for options.video_stats)
     shortfall, unfilled_total = 0, 0.0
     uses = {}                      # video_id → times used so far
     prev_shot, prev_pov, prev_type = float("nan"), None, None
@@ -752,6 +762,20 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
                     cands = c_long
                     merged_away.add(i + 1)
 
+        # how every video fared in this block: its best window's place among all videos' best windows
+        ranked, gaps = {}, {}
+        for c in cands:
+            if c["video_id"] not in ranked:
+                ranked[c["video_id"]] = len(ranked) + 1
+                gaps[c["video_id"]] = (cands[0]["total"] - c["total"], cands[0]["fit"] - c["fit"])
+        for vid_, rank_ in ranked.items():
+            st_ = stats.setdefault(vid_, {"blocks": 0, "ranks": [], "gap": [], "fit_gap": []})
+            st_["blocks"] += 1
+            st_["ranks"].append(rank_)
+            st_["gap"].append(gaps[vid_][0])
+            st_["fit_gap"].append(gaps[vid_][1])
+        stats_blocks[0] += 1
+
         # 2. fill the slots
         slots, used = [], set()
         anchor_shot = float("nan")
@@ -842,7 +866,49 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
             options.progress(len(segments), len(segments))
         except Exception:          # noqa: BLE001
             pass
+    try:
+        options.video_stats.update(_video_stats(queues, videos, missing, stats, stats_blocks[0], uses, usable_at_start))
+    except Exception:              # noqa: BLE001 — a diagnostic must never break the plan
+        pass
     return timeline, shortfall, unfilled_total
+
+
+def _video_stats(queues: dict, videos: dict, missing: list, stats: dict, blocks: int, uses: dict, usable: dict) -> dict:
+    """{video_id: …} for EVERY video in play — the answer to "why was this video never picked?". Per video:
+    timeline (has a 🧭 timeline: without one it can't be picked at all), seen (has on-screen motion curves),
+    clips / usable_min (usable footage when the plan started), picked (times used), and over the plan's blocks:
+    scored (blocks where it had a window long enough), first / top3 / top10 (blocks where its best window ranked
+    there among all videos' best windows, penalties for reuse included), best_rank, median_rank, mean_gap (how far
+    its best window was behind the winner, on the 0–1 score) and mean_fit_gap (the same without the reuse
+    penalties). seen_busy: the raw frame-difference level its on-screen motion calls 1.0; seen_level / bounce_share:
+    how lively and how often bouncy it reads overall."""
+    out = {}
+    for vid in queues:
+        n_clips, secs = usable.get(vid, (0, 0.0))
+        row = {"timeline": vid in videos, "seen": False, "clips": int(n_clips), "usable_min": round(secs / 60.0, 1),
+               "picked": int(uses.get(vid, 0)), "scored": 0, "of_blocks": int(blocks)}
+        v = videos.get(vid)
+        if v is not None:
+            row["seen"] = v.seen is not None
+            if v.seen is not None:
+                row["seen_busy"] = None if v.seen_top is None else round(v.seen_top, 3)
+                if np.isfinite(v.seen_level).any():
+                    row["seen_level"] = round(float(np.nanmean(v.seen_level)), 3)
+                row["bounce_share"] = round(float((v.seen_bounce[0] / BOUNCE_FULL >= 0.5).mean()), 3)
+            elif v.bounce is not None:
+                row["bounce_share"] = round(float((v.bounce[0] / BOUNCE_FULL >= 0.5).mean()), 3)
+            lv = v.move_f[v.has_move > 0]
+            if len(lv):
+                row["person_level"] = round(float(lv.mean()), 3)
+        st_ = stats.get(vid)
+        if st_:
+            r = np.asarray(st_["ranks"])
+            row.update({"scored": int(st_["blocks"]), "first": int((r == 1).sum()), "top3": int((r <= 3).sum()),
+                        "top10": int((r <= 10).sum()), "best_rank": int(r.min()), "median_rank": float(np.median(r)),
+                        "mean_gap": round(float(np.mean(st_["gap"])), 3),
+                        "mean_fit_gap": round(float(np.mean(st_["fit_gap"])), 3)})
+        out[vid] = row
+    return out
 
 
 def plan_summary(timeline: list) -> dict:
@@ -926,7 +992,7 @@ def _pixel_move(cache: dict, vid: str, link: dict, dur: float, m: int):
         return None
 
 
-def sync_report(timeline: list, track: dict, context_sec: float = 1.0) -> dict:
+def sync_report(timeline: list, track: dict, context_sec: float = 1.0, video_stats: dict = None) -> dict:
     """The plan's movement against its music, clip by clip, at the movement curve's rate — for the 📥 sync data file
     (the numbers a "does this clip move with the music?" question is answered from). Per piece of footage: the
     stretch of music, the movement as played plus a second either side, the music's curves over the same stretch
@@ -1059,4 +1125,7 @@ def sync_report(timeline: list, track: dict, context_sec: float = 1.0) -> dict:
                            "included, unlike move. seen_level / seen_bounce / seen_bounce_bpm: the same "
                            "three readings as move_level / bounce / bounce_bpm, taken from that on-screen motion.",
             "movement_by_shot_size": shot_table,
+            # every video in play and how it fared (see _video_stats) — never-picked videos included
+            **({"videos": video_stats, "videos_how_to_read": _video_stats.__doc__.split("Per video:", 1)[1].strip()}
+               if video_stats else {}),
             "clips": rows}
