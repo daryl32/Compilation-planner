@@ -129,3 +129,76 @@ def test_movement_only_picks_the_footage_that_moves_with_the_music_and_slides_it
         assert any(i_["story"] != 0.5 for i_ in infos)            # …and the recipes' tags count again
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def test_bounce_tells_a_regular_up_and_down_from_smooth_or_random_movement():
+    from core import sync as S
+    rate = 15.0
+    t = np.arange(0, 60, 1 / rate)
+    times = np.arange(0, 60, 0.5)
+    rng = np.random.default_rng(0)
+    jitter = 0.005 * rng.standard_normal(len(t))
+    bouncy, bpm = S.bounce(0.1 + 0.05 * np.maximum(0, np.sin(2 * np.pi * 1.5 * t)) + jitter, rate, times)
+    assert bouncy.mean() > 0.9 and abs(np.nanmedian(bpm) - 90) < 2             # 1.5 a second, not half of it
+    assert S.bounce(0.1 + 0.05 * np.sin(2 * np.pi * 0.08 * t) + jitter, rate, times)[0].max() < 0.1    # a slow swell
+    assert S.bounce(0.1 + 0.03 * rng.standard_normal(len(t)), rate, times)[0].mean() < 0.15            # random
+    half = 0.1 + 0.05 * np.maximum(0, np.sin(2 * np.pi * 1.5 * t)) + jitter
+    half[450:] = 0.01 + 0.0005 * rng.standard_normal(len(t) - 450)             # …then hardly moving at all
+    s, _ = S.bounce(half, rate, times)
+    assert s[:55].mean() > 0.9 and s[66:].mean() < 0.1
+    gone = np.full(len(t), np.nan)
+    s, b = S.bounce(gone, rate, times)
+    assert not s.any() and np.isnan(b).all() and not S.bounce(np.ones(20), rate, times)[0].any()
+
+
+def test_beat_presence_is_judged_on_the_hits():
+    from core import sync as S
+    hits = np.zeros(120)
+    hits[::15] = 0.9
+    hits[1::15] = 0.6
+    assert S.beat_presence(hits, 0.4) == 1.0                  # a low average, strong hits: a beat
+    assert S.beat_presence(np.full(120, 0.1), 0.4) == 0.0     # a steady murmur: none
+    assert 0.0 < S.beat_presence(np.full(120, 0.3), 0.4) < 1.0
+    assert S.beat_presence(None, 0.4) is None and S.beat_presence([], 0.4) is None
+
+
+def test_movement_only_wants_bouncy_footage_on_a_beat_and_smooth_footage_off_it(monkeypatch):
+    """One video: its first half bounces on the track's tempo, its second half moves just as much but smoothly.
+    The same stretch of music scored as "a beat" prefers the first half, as "no beat" the second — and with the
+    beat unknown (no drum curve) the score is what it was before."""
+    from tests.test_story_matcher import _setup
+    out = _setup(monkeypatch)
+    try:
+        import catalogue_store as CS
+        import core.story_matcher as SMX
+        import footage_timeline as FT
+        import recipes as RC
+        vids = {v["video_id"]: v for v in CS.video_index().values()}
+        dur = float(vids["vid_a"]["duration"])
+        t = np.arange(int(dur * 15) + 15) / 15.0
+        rng = np.random.default_rng(5)
+        curve = 0.3 + 0.3 * np.maximum(0, np.sin(2 * np.pi * 2.0 * t)) + 0.01 * rng.standard_normal(len(t))      # 120 a minute
+        half = len(t) // 2
+        curve[half:] = 0.4 + 0.1 * np.sin(2 * np.pi * 0.05 * t[half:]) + 0.01 * rng.standard_normal(len(t) - half)
+        _add_full_rate(out, "vid_a", curve)
+        index = FT.load_index()
+        v = SMX._Video(FT.load("vid_a", index=index), index)
+        n = 8
+        music = np.full(120, 0.5)                             # nothing to follow: only the feel can tell windows apart
+        args = (v, n, RC.default("rhythmic"), music, 120.0, 0.0, 4.0, 0.5, True)
+        on = SMX._score_video_x(*args, beat=1.0)[0]
+        off = SMX._score_video_x(*args, beat=0.0)[0]
+        plain = SMX._score_video_x(*args)[0]
+        mid = len(on) // 2
+        a, b = slice(4, mid - 12), slice(mid + 12, len(on) - 4)
+        # the half-second fixture data differs between the halves too, so it is the SWING between the two that counts
+        assert (on[a].mean() - on[b].mean()) - (off[a].mean() - off[b].mean()) > 0.15
+        assert on[a].mean() > on[b].mean()
+        bw = v.bounce_window(n, 120.0)
+        assert bw[a].mean() > 0.8 and bw[b].mean() < 0.1 and v.bounce_window(n, 100.0)[a].mean() < bw[a].mean()
+        assert np.allclose(plain, SMX._score_video_x(*args, beat=None)[0])
+        # recipes on: the feel plays no part
+        r_on = SMX._score_video_x(*args[:8], False, beat=1.0)[0]
+        assert np.allclose(r_on, SMX._score_video_x(*args[:8], False)[0])
+    finally:
+        shutil.rmtree(out, ignore_errors=True)

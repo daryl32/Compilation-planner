@@ -364,7 +364,9 @@ def _options_row(ns: str) -> None:
     st.toggle("🎯 Movement only", key="compose_movement_only",
               help="No recipes: every clip is picked on how its movement follows the music (frame by frame, against "
                    "the drums, bass or voice — whichever carries the bar) and how lively it is against how loud the "
-                   "music is. Tags, scene tags and roles are ignored. The cuts still come from the sections.")
+                   "music is. Bouncy up-and-down footage goes where the music has a beat, smooth footage where a "
+                   "voice or pad carries it. Tags, scene tags and roles are ignored. The cuts still come from the "
+                   "sections.")
 
 
 # ---------------------------------------------------------------------------

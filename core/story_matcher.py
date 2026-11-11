@@ -25,7 +25,8 @@ The "shape" part of base is worked out on the footage's full-rate movement curve
 wherever the timeline has it: every start frame is compared with the music, and the clip's start slides by up to a
 quarter second so its pushes land on the hits. 🎯 Movement only (StoryOptions.movement_only) drops the recipes'
 tags and movement bands altogether: the footage is picked on how its movement follows the music and how lively it
-is against how loud the music is — nothing else but the safeguards. A block no window is long enough for is split at
+is against how loud the music is, plus 🪀 bounce ↔ beat (bouncy footage where the drums play, smooth footage
+where they don't — core/sync.bounce / beat_presence) — nothing else but the safeguards. A block no window is long enough for is split at
 the beat nearest its middle (up to twice) and each part gets its own recipe-scored window. Only what's still
 unfilled after that (no processed videos left, footage exhausted) falls back to Classic's chain fill, so the
 plan never has gaps. Each slot carries a "story" dict (type, fit, base, story) for the cards.
@@ -61,6 +62,11 @@ MIN_GAP_POINTS = 2          # …at least this many half seconds apart
 JUNK_SHARE = 0.5            # nobody on screen for over half the window → heavy penalty
 W_BAND, W_TREND, W_SHAPE, W_BEAT = 0.45, 0.15, 0.25, 0.15      # inside base
 ONLY_W = (0.25, 0.10, 0.50, 0.15)   # 🎯 Movement only: level, trend, sync, beat — the sync leads
+ONLY_FEEL = 0.2             # …and this share of the whole goes to 🪀 bounce ↔ beat (the four above share the rest):
+#                             bouncy footage where the music has a beat, smooth footage where a voice or pad carries it
+BOUNCE_FULL = 0.5           # a bounce this strong (core/sync.bounce) is as bouncy as real footage gets (01 AURA, 11 Nov)
+BOUNCE_OFF_TEMPO = 0.6      # a bounce a quarter octave off the track's tempo (or its half / double) counts this much
+LEVEL_NO_BEAT = 0.25        # with no beat the footage may be this much calmer than the loudness alone asks for
 ONLY_BAND = 0.15            # …the footage should be this close to the music's level (both 0–1 within their library / track)
 ONLY_TREND = 0.15           # …and rise or fall with it when the music moves by more than this across the block
 ONLY_BEAT_LOCK = 0.6
@@ -122,6 +128,7 @@ class _Video:
         self._col = {str(t).lower(): k for k, t in enumerate(tl.tags)}
         self._cum = {}
         self._mover = False            # the full-rate movement, prepared on first use (None: the file has none)
+        self._bounce = False
 
     @property
     def mover(self):
@@ -134,6 +141,31 @@ class _Video:
             except (AttributeError, ValueError, TypeError):
                 pass
         return self._mover
+
+    @property
+    def bounce(self):
+        """(strength 0–1, bounces a minute) per half second from the full-rate movement; None without it."""
+        if self._bounce is False:
+            self._bounce = None
+            try:
+                hi = np.asarray(self.tl.move_hi, np.float32)
+                if len(hi) >= SY.MIN_FRAMES and np.isfinite(hi).any():
+                    self._bounce = SY.bounce(hi, float(self.tl.move_rate), self.times)
+            except (AttributeError, ValueError, TypeError):
+                pass
+        return self._bounce
+
+    def bounce_window(self, n: int, track_bpm: float) -> np.ndarray | None:
+        """How bouncy each n-point window is, 0–1 (1 = a strong, regular bounce on the track's tempo)."""
+        if self.bounce is None:
+            return None
+        key = ("bounce", n, round(float(track_bpm), 2))
+        if key not in self._cum:
+            strength, bpm = self.bounce
+            on_tempo = _fold_ratio_fit(bpm, track_bpm) if track_bpm > 0 else np.ones(len(bpm))
+            eff = np.clip(strength / BOUNCE_FULL, 0.0, 1.0) * (BOUNCE_OFF_TEMPO + (1.0 - BOUNCE_OFF_TEMPO) * on_tempo)
+            self._cum[key] = self.window_mean(eff, n)
+        return self._cum[key]
 
     def col(self, tag: str):
         return self._col.get(str(tag).lower())
@@ -224,10 +256,13 @@ def _score_video(v: _Video, n: int, recipe: dict, audio_curve: np.ndarray, track
 
 
 def _score_video_x(v: _Video, n: int, recipe: dict, audio_curve: np.ndarray, track_bpm: float, music_story: float,
-                   seconds: float = None, level: float = None, movement_only: bool = False) -> tuple:
+                   seconds: float = None, level: float = None, movement_only: bool = False,
+                   beat: float = None) -> tuple:
     """(fit, base, story, sync, slide) over every window start of this video. sync is the 0–1 movement-follows-music
     score, slide the seconds to move the window's start by for its best alignment (zeros without a full-rate
-    curve). seconds: the stretch's true length; level: how loud the music is here, 0–1 within the track."""
+    curve). seconds: the stretch's true length; level: how loud the music is here, 0–1 within the track; beat: is
+    there a beat here, 0–1 (None: unknown) — 🎯 Movement only then also asks for bouncy footage on a beat and smooth
+    footage off it."""
     if v.n < n:
         e = np.zeros(0)
         return e, e, e, e, e
@@ -235,6 +270,8 @@ def _score_video_x(v: _Video, n: int, recipe: dict, audio_curve: np.ndarray, tra
     mv = recipe["movement"]
     if movement_only:
         lv = 0.5 if level is None else float(level)
+        if beat is not None:           # loud but beatless (a pad, a held voice) wants calmer footage than a loud beat
+            lv *= 1.0 - LEVEL_NO_BEAT * (1.0 - float(beat))
         band = _band_fit(mean_move, lv - ONLY_BAND, lv + ONLY_BAND)
         trend = _trend_fit(v.move_f, n, _music_trend(audio_curve))
     else:
@@ -250,10 +287,13 @@ def _score_video_x(v: _Video, n: int, recipe: dict, audio_curve: np.ndarray, tra
     mbpm = np.where(bpm_has > 0, bpm_mean / np.maximum(bpm_has, 1e-6), np.nan)
     beat_fit = _fold_ratio_fit(mbpm, track_bpm) * v.window_mean(np.nan_to_num(v.per.astype(np.float64)), n)
     lock = ONLY_BEAT_LOCK if movement_only else float(recipe.get("beat_lock", 0.5))
-    beat = 1.0 - lock * (1.0 - beat_fit)
+    tempo = 1.0 - lock * (1.0 - beat_fit)
     wb, wt, ws, wk = ONLY_W if movement_only else (W_BAND, W_TREND, W_SHAPE, W_BEAT)
-    base = wb * band + wt * trend + ws * shape + wk * beat
+    base = wb * band + wt * trend + ws * shape + wk * tempo
     if movement_only:                  # no recipe: the music fit is the whole score
+        bw = v.bounce_window(n, track_bpm) if beat is not None else None
+        if bw is not None:
+            base = (1.0 - ONLY_FEEL) * base + ONLY_FEEL * (1.0 - np.abs(float(beat) - bw[:len(base)]))
         junk = v.window_mean(v.nobody, n) > JUNK_SHARE
         fit = np.where(junk, base * 0.2, base)
         return fit, base, np.full(len(base), 0.5), shape, slide
@@ -431,6 +471,14 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
         r_ = drv["rate"]
         part = loud[int(t0 * r_):max(int(t0 * r_) + 1, int(t1 * r_))]
         return float(np.clip((float(part.mean()) - lv_lo) / max(lv_hi - lv_lo, 1e-6), 0.0, 1.0)) if len(part) else None
+    drums = drv["curves"].get("drums") if drv is not None else None
+
+    def music_beat(t0: float, t1: float):
+        """Is there a beat from t0 to t1, 0–1 (None: the analysis has no drum curve)."""
+        if drums is None:
+            return None
+        r_ = drv["rate"]
+        return SY.beat_presence(drums[int(t0 * r_):max(int(t0 * r_) + 1, int(t1 * r_))], _AD.DRUM_LEVEL)
     if videos and not any(v.mover is not None for v in videos.values()):
         options.notes.append("The 🧭 footage timeline was built before the frame-by-frame movement was kept — movement "
                              "was matched on the half seconds. Press 🧭 Build (Media Library → Videos → Timeline) once.")
@@ -511,7 +559,8 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
                         cache = v._cum.get(("fit", key))
                         if cache is None:
                             cache = v._cum[("fit", key)] = _score_video_x(v, nn, recipe, aud, track_bpm, ms, dd,
-                                                                          music_level(t0, t1), only)
+                                                                          music_level(t0, t1), only,
+                                                                          music_beat(t0, t1) if only else None)
                     fit, base, story, sync, slide = cache
                     starts = starts[starts < len(fit)]
                     if not len(starts):
@@ -758,7 +807,7 @@ def sync_report(timeline: list, track: dict, context_sec: float = 1.0) -> dict:
     drv = AD.drivers(track, beats if len(beats) else None)
     a_rate = float(drv["rate"])
     r2 = lambda v: [None if not np.isfinite(x) else round(float(x), 3) for x in np.asarray(v, float).ravel()]    # noqa: E731
-    tls, rows, rate = {}, [], None
+    tls, rows, rate, bounces = {}, [], None, {}
     for e in timeline:
         t = float(e["track_time"][0])
         for slot in e.get("scenes") or []:
@@ -785,6 +834,17 @@ def sync_report(timeline: list, track: dict, context_sec: float = 1.0) -> dict:
                     row["move_before"], row["move_after"] = r2(hi[max(p0 - c, 0):max(p0, 0)]), r2(hi[p0 + m:p0 + m + c])
                     row["music_curves"] = {"drive": r2(SY.pool(drv["curve"][lo:hi_], len(move))),
                                            **{k: r2(SY.pool(v[lo:hi_], len(move))) for k, v in drv["curves"].items()}}
+                    if "drums" in drv["curves"]:
+                        bp = SY.beat_presence(drv["curves"]["drums"][lo:hi_], AD.DRUM_LEVEL)
+                        row["beat"] = None if bp is None else round(bp, 3)
+                    if vid not in bounces:
+                        bounces[vid] = SY.bounce(hi, rate, np.asarray(tl.times, float))
+                    k0 = int(np.searchsorted(np.asarray(tl.times, float), float(link["clip_start_sec"])))
+                    k1 = max(k0 + 1, int(np.searchsorted(np.asarray(tl.times, float), float(link["clip_start_sec"]) + dur)))
+                    st_, bpm_ = bounces[vid][0][k0:k1], bounces[vid][1][k0:k1]
+                    if len(st_):
+                        row["bounce"] = round(float(np.clip(st_.mean() / BOUNCE_FULL, 0.0, 1.0)), 3)
+                        row["bounce_bpm"] = round(float(np.nanmedian(bpm_)), 1) if np.isfinite(bpm_).any() else None
                     played = SY.sync_of(move, drv["curve"][lo:hi_], rate)
                     row["sync_played"] = None if played is None else round(played, 3)
                 rows.append(row)
@@ -793,5 +853,7 @@ def sync_report(timeline: list, track: dict, context_sec: float = 1.0) -> dict:
     return {"track_id": track.get("track_id"), "bpm": track.get("bpm"), "rate": rate, "music_rate": a_rate,
             "sync_played_mean": round(float(np.mean(played)), 3) if played else None,
             "how_to_read": "sync: 1 = the movement follows the music, 0.5 = unrelated, 0 = opposite. move / music_curves "
-                           "have one point per 1/rate s from the clip's first frame.",
+                           "have one point per 1/rate s from the clip's first frame. beat: 1 = a full drum beat in this "
+                           "stretch, 0 = none. bounce: 1 = a strong regular up-and-down, 0 = smooth or irregular "
+                           "(bounce_bpm = its tempo). The two should agree.",
             "clips": rows}

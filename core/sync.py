@@ -141,3 +141,72 @@ def sync_of(move_slice, audio_slice, rate: float) -> float | None:
     if sx < 1e-6 or sa < 1e-9:
         return None
     return float((np.clip(float((x * a).mean()) / (sx * sa), -1.0, 1.0) * min(1.0, len(x) / SHORT_FRAMES) + 1.0) / 2.0)
+
+
+# ---------------------------------------------------------------------------
+# 🪀 Bounce: is the movement a regular up-and-down, or smooth / irregular? (11 Nov 2026)
+# ---------------------------------------------------------------------------
+# The sync above is blind to WHAT KIND of movement it is: against a smooth curve (a voice, a pad) almost any
+# movement correlates. Daryl, on the first real render (01 AURA): where the beat stopped, the footage went on
+# bouncing as if it hadn't. Bouncy movement belongs on a beat; smooth or irregular movement on voice and
+# instruments. So the footage gets a 0–1 "bounce" per half second, the music a 0–1 "beat presence" per stretch,
+# and the matcher asks for the two to agree.
+
+BOUNCE_WIN_SEC = 4.0      # the movement is judged over this long around each point (2.7 s clips hold 4 beats: too few)
+BOUNCE_LAG_SEC = (0.25, 1.5)      # one bounce lasts between these (240 … 40 a minute)
+BOUNCE_QUIET = 0.5        # windows moving less than this share of the video's usual swing count for less
+BOUNCE_NOISE = 0.35       # the autocorrelation peak that random movement reaches by chance over the window
+BEAT_OFF, BEAT_ON = 0.5, 1.25     # × the drum level a bar needs to count as drum-driven: no beat … a full beat
+
+
+def bounce(move_hi, rate: float, times) -> tuple:
+    """(strength 0–1, bounces a minute) at every time in `times`. Strength is the height of the first real peak of
+    the movement's autocorrelation over BOUNCE_WIN_SEC around the point — a peak that RISES from a trough, so
+    movement that merely changes slowly (whose autocorrelation only falls) scores 0. 0 where nobody is tracked or
+    hardly anything moves; the tempo is NaN where there is no bounce."""
+    raw = np.asarray(move_hi, np.float64)
+    times = np.asarray(times, np.float64)
+    T = len(times)
+    rate = float(rate or 15.0)
+    W = int(round(BOUNCE_WIN_SEC * rate))
+    lo, hi = max(2, int(round(BOUNCE_LAG_SEC[0] * rate))), int(round(BOUNCE_LAG_SEC[1] * rate))
+    if T == 0 or len(raw) < W or hi >= W // 2 + hi // 2 or hi <= lo:
+        return np.zeros(T), np.full(T, np.nan)
+    tracked = np.isfinite(raw)
+    x = smooth(np.where(tracked, raw, 0.0), rate)
+    centre = np.clip(np.round(times * rate).astype(int), 0, len(x) - 1)
+    start = np.clip(centre - W // 2, 0, len(x) - W)
+    idx = start[:, None] + np.arange(W)[None, :]
+    win = x[idx]
+    seen = tracked[idx].mean(axis=1)
+    win = win - win.mean(axis=1, keepdims=True)
+    std = np.sqrt((win * win).mean(axis=1))
+    taper = np.hanning(W + 2)[1:-1]
+    L = 1 << int(np.ceil(np.log2(2 * W)))
+    spec = np.fft.rfft(win * taper, L, axis=1)
+    ac = np.fft.irfft(spec.real ** 2 + spec.imag ** 2, L, axis=1)[:, :hi + 1]
+    tw = np.fft.rfft(taper, L)
+    ac_t = np.fft.irfft(tw.real ** 2 + tw.imag ** 2, L)[:hi + 1]              # what the taper alone does to each lag
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ac = np.where(ac[:, :1] > 1e-12, ac / ac[:, :1], 0.0) / (ac_t / ac_t[0])[None, :]
+    trough = np.minimum.accumulate(ac, axis=1)
+    peak = np.clip(np.minimum(ac, ac - trough), 0.0, 1.0)[:, lo:hi + 1]       # high AND risen from a trough
+    top = peak.max(axis=1)
+    best = (peak >= 0.9 * top[:, None]).argmax(axis=1)          # the first peak that high: one bounce, not two
+    # a short stretch of random movement still shows a peak of about BOUNCE_NOISE by chance: only what is above counts
+    strength = np.clip((top - BOUNCE_NOISE) / (1.0 - BOUNCE_NOISE), 0.0, 1.0)
+    usual = float(np.percentile(std[seen >= MIN_TRACKED], 75)) if (seen >= MIN_TRACKED).any() else 0.0
+    loud_enough = np.clip(std / max(BOUNCE_QUIET * usual, 1e-9), 0.0, 1.0) if usual > 1e-9 else np.zeros(T)
+    strength = np.where(seen >= MIN_TRACKED, strength * loud_enough, 0.0)
+    bpm = np.where(strength > 0.05, 60.0 * rate / (best + lo), np.nan)
+    return strength, bpm
+
+
+def beat_presence(drums, drum_level: float) -> float | None:
+    """0–1: is there a beat in this stretch of the drum curve (kick + snare, 0–1 within the track)? Judged on the
+    hits (the 90th percentile — drums are spikes, a strong beat still has a low average). None without drums."""
+    d = np.asarray(drums, np.float64) if drums is not None else np.zeros(0)
+    if not len(d):
+        return None
+    hits = float(np.percentile(d, 90))
+    return float(np.clip((hits - BEAT_OFF * drum_level) / max((BEAT_ON - BEAT_OFF) * drum_level, 1e-9), 0.0, 1.0))
