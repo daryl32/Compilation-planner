@@ -425,6 +425,14 @@ def scores_model(want: str = "") -> str | None:
 
 def run(ids: list, PK, cats: dict, redo: bool, model: str, scores: bool) -> int:
     rows = process(ids, PK, cats, redo=redo)
+    if rows:                      # a tuned SigLIP2 encoder in use (siglip_tune.py): its embeddings for the new videos
+        try:
+            import siglip_tune as FT
+            for enc in FT.encoders_in_use():
+                print(f"\nThe tuned encoder '{enc}' is in use — its embeddings for the new videos…", flush=True)
+                FT.embed(enc, send=False)        # only the videos without them; upload-local sends them
+        except ImportError:
+            pass                  # no siglip_tune.py here: nothing tuned to keep up with
     if not rows or not scores:
         return 0
     name = scores_model(model)
