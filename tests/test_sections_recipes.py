@@ -235,7 +235,70 @@ def test_build_up_starts_at_the_songs_own_change_point():
 def test_the_score_table_never_falls():
     """The floor for every real track (10 Nov 2026) — a rule change that lowers one of these is a regression."""
     from tests.score_sections import rows
-    floor = {"aura": (0.88, 0.70), "body": (0.95, 0.70), "disconnect": (0.90, 0.65)}
+    floor = {"aura": (0.88, 0.70), "body": (0.95, 0.70), "disconnect": (0.90, 0.65),
+             "body ②": (0.93, 0.85), "badtimes ②": (0.58, 0.70), "disconnect ②": (0.48, 0.50)}
     for r in rows():
         same, lines = floor[r["track"]]
         assert r["now"] >= same and r["boundaries"] >= lines, r
+
+
+def _layer_case(key):
+    import json
+    import section_types as ST
+    from tests.support import REPO
+    d = json.loads((REPO / "tests" / "golden" / "sections_layers.json").read_text())[key]
+    R = lambda rows: [{"start": a, "end": b, "type": t} for a, b, t in rows]   # noqa: E731
+    out = ST.refine_with(R(d["coarse"]), d["beats"], d["intensity"], d["drops"], d["duration"], d["marks"], d["layers"])
+    assert out[0]["start"] == 0.0 and out[-1]["end"] == d["duration"]
+    assert all(abs(p["end"] - q["start"]) < 1e-6 and p["end"] - p["start"] > 0.4 for p, q in zip(out, out[1:]))
+    return out, d
+
+
+def _starts(out, typ):
+    return [round(r["start"], 1) for r in out if r["type"] == typ]
+
+
+def test_layers_body_build_up_runs_to_the_hit_and_the_track_gets_its_way_out():
+    """Body, Daryl's map of 10 Nov evening: the Build-up runs to 55.1 s (the bars before it have the energy but not
+    the loudness); the chorus is sung straight through — Action, no Drop; and though the band plays to 161 s the last
+    part is Warm-down from 145.6 and Ending from 155.4."""
+    out, _ = _layer_case("body")
+    assert "drop" not in [r["type"] for r in out]
+    assert _starts(out, "buildup")[0] == 39.4 and _starts(out, "action") == [55.1, 129.9]
+    assert [(r["type"], round(r["start"], 1)) for r in out[-2:]] == [("warmdown", 145.6), ("ending", 155.4)]
+
+
+def test_layers_bad_times_intro_until_the_beat_and_lines_on_the_breaks():
+    """Bad Times: 24.7 s of voice alone is all Intro; the Build-up is the four quieter bars from 33.6; the two long
+    loud runs change at their one-bar breaks (57.9, 113.4); the bass-less passage from 124.5 is not loud; Drops are
+    where the voice steps back (42.4, 97.9)."""
+    import section_types as ST
+    out, _ = _layer_case("badtimes")
+    assert out[0]["type"] == "intro" and abs(out[0]["end"] - 24.66) < 0.1
+    assert 33.6 in _starts(out, "buildup") and {42.4, 97.9} <= set(_starts(out, "drop"))
+    assert _starts(out, "fast") == [57.9, 113.4]
+    assert ST.type_at(out, 131.0) == "slow" and ST.type_at(out, 153.0) == "warmdown" and out[-1]["type"] == "ending"
+
+
+def test_layers_disconnect_intro_past_the_voice_and_a_break_is_not_a_warm_down():
+    """Disconnect: the voice enters at 10 s but the Intro runs on until the percussion (he put the line at 33 s); the
+    Build-up starts where the drums come in; the band stopping dead at 77.8 is a break — Slow, no Warm-down; the
+    track stops dead at 158.9: Warm-down for the last loud bars, the Ending is what follows."""
+    import section_types as ST
+    out, _ = _layer_case("disconnect")
+    assert out[0]["type"] == "intro" and 29 < out[0]["end"] < 34 and out[1]["type"] == "warmup"
+    assert abs(_starts(out, "buildup")[0] - 42.9) < 0.2 and 55.1 in _starts(out, "drop")
+    assert ST.type_at(out, 79.0) == "slow"
+    assert [(r["type"], round(r["start"], 1)) for r in out[-2:]] == [("warmdown", 155.3), ("ending", 158.9)]
+
+
+def test_without_layers_the_pass_is_as_it_was():
+    """No layer data (audio_drive can't read the track): the energy-only pass — the same answer as passing none."""
+    import json
+    import section_types as ST
+    from tests.support import REPO
+    d = json.loads((REPO / "tests" / "golden" / "sections_layers.json").read_text())["body"]
+    R = lambda rows: [{"start": a, "end": b, "type": t} for a, b, t in rows]   # noqa: E731
+    a = ST.refine_with(R(d["coarse"]), d["beats"], d["intensity"], d["drops"], d["duration"], d["marks"])
+    b = ST.refine_with(R(d["coarse"]), d["beats"], d["intensity"], d["drops"], d["duration"], d["marks"], {"bars": []})
+    assert a == b and a[0]["type"] == "intro"

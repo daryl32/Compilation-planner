@@ -78,6 +78,14 @@ def test_build_writes_every_array_and_the_index(tmp_path, monkeypatch):
     assert abs(m[5] - 0.1) < 0.01 and abs(m[25] - 0.9) < 0.01 and np.isnan(m[50])
     sm = tl.scaled_move()
     assert sm[5] < 0.1 and sm[25] > 0.9
+    # …and the curve itself is kept frame by frame (15 a second), gaps and all, for the frame-rate sync
+    hi = tl.move_hi.astype(np.float32)
+    assert float(tl.move_rate) == 15.0 and len(hi) == 30 * 15 and idx["version"] == FT.VERSION == 2
+    assert abs(hi[5 * 15 // 2] - 0.1) < 0.01 and np.isnan(hi[25 * 15 + 3])
+    # a timeline from before that (version 1) is rebuilt by a plain build
+    (out / "index.json").write_text(__import__("json").dumps({**idx, "version": 1}))
+    again = FT.build(root=root / "_student" / "videos", folder=out, sc_folder=scf, progress=lambda *a: None)
+    assert again["built"] == ["vid_a"]
     # change peaks at the step between the two scenes
     ch = tl.change.astype(np.float32)
     assert ch[20] > ch[5] and ch[20] > ch[30]

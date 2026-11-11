@@ -93,6 +93,28 @@ SCENE_WIDE_AGREE = 0.85                   # on the scene → present everywhere
 SCENE_TEACHER_AGREE = 0.50                # on the scene → present where the teacher saw it too
 VAL_SHARE = 0.12                          # training videos kept aside to pick thresholds / stop early
 SEED = 7
+EMB_NAME = ""                             # --emb: a tuned encoder's embeddings (siglip_tune.py); "" = the original SigLIP2
+
+
+def emb_file(name: str = None) -> str:
+    """The embeddings file a video folder is read from: embeddings.npz, or embeddings_<encoder>.npz."""
+    name = EMB_NAME if name is None else name
+    return f"embeddings_{name}.npz" if name else "embeddings.npz"
+
+
+def use_emb(name: str) -> None:
+    global EMB_NAME
+    EMB_NAME = name or ""
+
+
+def emb_missing(name: str = None, root: Path = None) -> list:
+    """Videos that have the original embeddings but not the tuned encoder's (they'd silently drop out)."""
+    name = EMB_NAME if name is None else name
+    root = root or WORK / "videos"
+    if not name or not root.exists():
+        return []
+    return sorted(d.name for d in root.iterdir() if d.is_dir() and (d / "embeddings.npz").exists()
+                  and not (d / emb_file(name)).exists())
 
 
 # ---------------------------------------------------------------------------
@@ -559,7 +581,7 @@ def video_features(vdir: Path, use_pose: bool) -> tuple:
     """(frame times, features) for one video, or (None, None): the unit-length SigLIP2 embeddings,
     plus the body-pose features at the same times when use_pose (cached in pose_feats.npz)."""
     try:
-        z = np.load(vdir / "embeddings.npz")
+        z = np.load(vdir / emb_file())
         et = np.asarray(z["frame_times"], float)
         emb = np.asarray(z["frame_embs"], np.float32)
     except (OSError, KeyError, ValueError):
@@ -1279,6 +1301,12 @@ def partial_markdown(ds: dict, prob, rows, thresholds, svocab=None, ref: dict | 
 def _prepare(label_weight: float, use_trust: bool = True, use_pose: bool = False):
     vocab, labels, test = _vocab(), _labels(), set(test_videos())
     partials = _partials(labels)
+    lacking = emb_missing()
+    if lacking:
+        raise SystemExit(f"{len(lacking)} video(s) have no {emb_file()} yet (e.g. {', '.join(lacking[:3])}) — "
+                         f"run `siglip_tune embed --name {EMB_NAME}` first, so every video is read the same way.")
+    if EMB_NAME:
+        print(f"Picture embeddings: the tuned encoder '{EMB_NAME}' ({emb_file()})")
     if not vocab:
         raise SystemExit("No tag_vocabulary.csv in _student/library — run `python student_tags.py fetch`.")
     if not test:
@@ -1454,12 +1482,14 @@ def train(name: str, epochs: int, label_weight: float, vs: str, folds: int = 5, 
             "labels_newest": max((i.get("labelled_at") or "" for i in labels), default=""),
             "context": ctx_meta, "step1_thresholds": [float(x) for x in step1_thresholds],
             "cutoffs": CUTOFF_MODE, "cutoff_range": list(CUTOFF_RANGE), "training": training,
-            "settings": {"label_weight": label_weight, "folds": folds, "epochs": epochs, "teacher_trust": use_trust,
+            "emb": EMB_NAME,
+            "settings": {"emb": EMB_NAME or "original",
+                         "label_weight": label_weight, "folds": folds, "epochs": epochs, "teacher_trust": use_trust,
                          "pose": use_pose, "context": use_context, "cutoffs": CUTOFF_MODE,
                          "cutoff_range": list(CUTOFF_RANGE), "scene_weight": SCENE_WEIGHT_RUN}}
     o = training["scores"]
     print(f"Trained in {minutes:.1f} min. On your labels in the training videos (each checked by the fold model "
-          f"that didn't train on it): F1 {o['f1']:.2f} over {training['frames']} frames.", flush=True)
+          f"that didn't train on it): F1 {o['f1'] or 0:.2f} over {training['frames']} frames.", flush=True)
     step1 = None
     if ctx_meta and step1_test_prob is not None:
         step1 = (step1_test_prob, step1_thresholds)
@@ -1623,6 +1653,12 @@ def export(name: str, dest: Path = None, root: Path = None) -> int:
     if not models:
         print(f"No model '{name}' in {WORK / 'models'} — train it first.")
         return 1
+    use_emb(meta.get("emb") or "")          # a model trained on a tuned encoder reads that encoder's embeddings
+    lacking = emb_missing()
+    if lacking:
+        print(f"{len(lacking)} video(s) have no {emb_file()} (e.g. {', '.join(lacking[:3])}) — run "
+              f"`siglip_tune embed --name {EMB_NAME}` on the machine that has the encoder first.")
+        return 1
     if dest is None:
         try:
             from config import CATALOGUE_DIR
@@ -1754,6 +1790,7 @@ def make_picks(name: str, n: int = 300, n_test: int = 80, dest: Path = None, see
     if not models:
         print(f"No model '{name}' in {WORK / 'models'} — train it first.")
         return 1
+    use_emb(meta.get("emb") or "")
     ctx_models = load_ctx_models(name, meta)
     tags = meta["tags"]
     cutoffs = np.asarray(meta["thresholds"], np.float32)
@@ -1860,6 +1897,7 @@ def score(name: str, vs: str, label_weight: float) -> int:
     if not models:
         print(f"No model '{name}' in {WORK / 'models'}.")
         return 1
+    use_emb(meta.get("emb") or "")
     rc = _score_saved(name, models, meta, _prepare(label_weight, use_pose=bool(meta.get("pose_dim"))), vs)
     publish_runs()
     return rc
@@ -1873,15 +1911,22 @@ def rescore_all(vs: str, label_weight: float) -> int:
     if not names:
         print(f"No saved models in {WORK / 'models'}.")
         return 1
-    prepared, done, skipped = {}, [], []
+    prepared, done, skipped, no_emb = {}, [], [], []
     for k, name in enumerate(names, 1):
         models, meta = load_models(name)
         pose = bool(meta.get("pose_dim"))
-        if pose not in prepared:
-            print(f"Building the dataset{' with body pose' if pose else ''}…", flush=True)
-            prepared[pose] = _prepare(label_weight, use_pose=pose)
+        emb = meta.get("emb") or ""
+        use_emb(emb)
+        if emb_missing():                   # a tuned encoder's embeddings live on the machine that made them
+            print(f"[{k}/{len(names)}] {name}: needs {emb_file()} for every video — not on this machine, left as it is")
+            no_emb.append(name)
+            continue
+        if (pose, emb) not in prepared:
+            print(f"Building the dataset{' with body pose' if pose else ''}"
+                  f"{f' on the {emb} embeddings' if emb else ''}…", flush=True)
+            prepared[(pose, emb)] = _prepare(label_weight, use_pose=pose)
         print(f"[{k}/{len(names)}] {name}", flush=True)
-        if _score_saved(name, models, meta, prepared[pose], vs, main_report=False) == 0:
+        if _score_saved(name, models, meta, prepared[(pose, emb)], vs, main_report=False) == 0:
             sc = (meta.get("test") or {})
             o = (sc.get("scores") or {}).get(sc.get("best") or "plain") or {}
             done.append(f"{name} {o.get('f1') or 0:.2f}")
@@ -1890,6 +1935,9 @@ def rescore_all(vs: str, label_weight: float) -> int:
     print("\nOn today's test labels (F1, best of plain / rules): " + " · ".join(done))
     if skipped:
         print("Not rescored (vocabulary changed since they were trained): " + ", ".join(skipped))
+    if no_emb:
+        print("Not rescored (their tuned embeddings aren't on this machine): " + ", ".join(no_emb))
+    use_emb("")
     publish_runs()
     return 0
 
@@ -1922,7 +1970,10 @@ def main(argv=None) -> int:
     ap.add_argument("--per-tag", type=int, default=PICK_PER_TAG,
                     help=f"picks: at most this many picks for one tag (default {PICK_PER_TAG})")
     ap.add_argument("--vs", default="", help="teacher test run id or label to compare with (default: newest try2)")
+    ap.add_argument("--emb", default="", help="train: read the embeddings a tuned encoder made "
+                    "(siglip_tune.py embed --name ft1 → --emb ft1); default: the original SigLIP2")
     a = ap.parse_args(argv)
+    use_emb(a.emb)
     global CUTOFF_MODE
     CUTOFF_MODE = "plain" if a.old_cutoffs else "weighted"
     global CUTOFF_RANGE

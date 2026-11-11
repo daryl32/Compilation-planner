@@ -48,7 +48,8 @@ HISTORY = {
 
 SETTING_NAMES = {"label_weight": "label weight", "folds": "fold models", "epochs": "max epochs",
                  "teacher_trust": "teacher trust", "pose": "body pose", "context": "time context",
-                 "cutoffs": "cut-off rule", "cutoff_range": "cut-off range"}
+                 "cutoffs": "cut-off rule", "cutoff_range": "cut-off range",
+                 "emb": "picture embeddings"}
 
 
 def _read(path: Path, default=None):
@@ -62,6 +63,7 @@ def settings_of(meta: dict) -> dict:
     """The settings a run was trained with — from its "settings" record, else what older metas kept."""
     s = dict(meta.get("settings") or {})
     s.setdefault("label_weight", meta.get("label_weight"))
+    s.setdefault("emb", meta.get("emb") or "original")      # a tuned SigLIP2 encoder's name (siglip_tune.py)
     s.setdefault("folds", meta.get("folds"))
     s.setdefault("pose", bool(meta.get("pose_dim")))
     s.setdefault("context", bool(meta.get("context")))

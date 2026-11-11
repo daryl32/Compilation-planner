@@ -108,7 +108,8 @@ def test_recipes_steer_the_picks_and_footage_is_never_reused(monkeypatch):
         assert by_type["intro"]["video_id"] != "vid_f"                     # vid_f is busy throughout
         summary = SMX.plan_summary(timeline)
         assert summary["fallback"] <= 2 and summary["slots"] == len(segments) and summary["mean_fit"] > 0.5
-        assert not opts.notes or all("no 🧭 timeline" in n_ for n_ in opts.notes)   # vid_d has no timeline
+        # vid_d has no timeline; these synthetic timelines carry no full-rate movement curve
+        assert all("no 🧭 timeline" in n_ or "frame-by-frame" in n_ for n_ in opts.notes)
     finally:
         shutil.rmtree(out, ignore_errors=True)
 
@@ -289,5 +290,38 @@ def test_story_score_uses_the_best_two_wanted_tags(monkeypatch):
         _, _, s_short = SMX._score_video(v, 8, short, None, 0.0, 0.5)
         _, _, s_long = SMX._score_video(v, 8, long, None, 0.0, 0.5)
         assert float(s_short.mean()) > 0.8 and abs(float(s_short.mean()) - float(s_long.mean())) < 0.02
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_a_timeline_without_people_counts_is_not_nobody_on_screen(monkeypatch):
+    """A student export without people counts leaves the timeline's people at 0 everywhere. That is "unknown":
+    such a video must compete like any other (59 of 162 videos never could, 11 Nov 2026)."""
+    out = _setup(monkeypatch)
+    try:
+        import core.story_matcher as SMX
+        import footage_timeline as FT
+        import recipes as RC
+        index = FT.load_index()
+        v = SMX._Video(FT.load("vid_a", index=index), index)
+        assert v.people_known
+        with np.load(out / "vid_a.npz") as z:
+            arrays = {k: z[k] for k in z.files}
+        arrays["people"] = np.zeros_like(arrays["people"])
+        FT._write_video(out, "vid_a", arrays)
+        blind = SMX._Video(FT.load("vid_a", index=index), index)
+        assert not blind.people_known and blind.nobody.mean() < 0.5       # the pose tracking still sees them
+        args = (8, RC.default("rhythmic"), np.linspace(0, 1, 120), 120.0, 0.0, 4.0, 0.5)
+        for only in (True, False):
+            a = SMX._score_video_x(v, *args, only)[0]
+            b = SMX._score_video_x(blind, *args, only)[0]
+            assert np.median(b) > 0.6 * np.median(a)                      # not a fifth of it
+        # …and where the pose tracking found nobody either, the penalty still applies
+        gone = arrays["move"].astype(np.float32).copy()
+        gone[:40] = np.nan
+        FT._write_video(out, "vid_a", {**arrays, "move": gone})
+        empty = SMX._Video(FT.load("vid_a", index=index), index)
+        c = SMX._score_video_x(empty, *args, True)[0]
+        assert c[:30].max() < 0.5 * np.median(c[60:])
     finally:
         shutil.rmtree(out, ignore_errors=True)
