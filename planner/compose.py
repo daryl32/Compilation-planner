@@ -347,7 +347,7 @@ def _do_pending_compile() -> None:
                            max_videos=int(st.session_state.get("compose_max_videos", 0) or 0),
                            movement_only=bool(st.session_state.get("compose_movement_only")),
                            min_clip=_min_clip(),
-                           level_range=float(st.session_state.get("compose_level_range", 0.5)),
+                           level_range=float(st.session_state.get("compose_level_range", 0.0)),
                            progress=lambda d, t: bar.progress(min(d / max(t, 1), 1.0), text=f"🤖 Compiling… block {d} of {t}"))
     except Exception as e:          # noqa: BLE001
         bar.empty()
@@ -382,13 +382,14 @@ def _options_row(ns: str) -> None:
                          "128 BPM (1.9 s). Or type your own; cuts stay on the beat, so it rounds up to whole beats. "
                          "0.5 = no minimum (the recipes' clip lengths alone). A section too short for two clips "
                          "stays one clip.")
-    st.slider("🎚️ Use the track's full range", 0.0, 1.0, 0.5, 0.25, key="compose_level_range",
+    st.slider("🎚️ Use the track's full range", 0.0, 1.0, 0.0, 0.25, key="compose_level_range",
               disabled=not bool(st.session_state.get("compose_movement_only")),
               help="🎯 Movement only. How far each track's loudness is stretched over the whole calm-to-lively range. "
                    "0: as measured — the loud parts of most songs all ask for nearly the same footage, and the "
                    "liveliest footage is never asked for. 1: the track's calmest part asks for calm footage and its "
                    "loudest for the liveliest, so a soft song's chorus is as lively as a heavy song's. In between, "
-                   "soft songs stay gentler. The order of the parts never changes.")
+                   "soft songs stay gentler. The order of the parts never changes. Extra punch for powerful songs; "
+                   "on a gentle one (Flowers at 0.5) it asked for footage too lively for the music.")
     st.toggle("🎯 Movement only", key="compose_movement_only",
               help="No recipes: every clip is picked on how its movement follows the music (frame by frame, against "
                    "the drums, bass or voice — whichever carries the bar) and how lively it is against how loud the "
