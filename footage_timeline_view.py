@@ -43,6 +43,8 @@ def _status_row() -> None:
                 f"{idx.get('emb_dim')} embedding numbers")
         if rep["scores_model"] and rep["scores_model"] != idx.get("model"):
             line += f" · ⚠️ the export is now **{rep['scores_model']}** — build again"
+        if idx.get("version") != FT.VERSION:
+            line += " · ⚠️ built before the frame-by-frame movement was kept — press **🧭 Build** (every video is redone)"
         c[0].markdown(line)
     else:
         c[0].markdown("**No footage timeline yet.** Build it from the vision data + the student export.")

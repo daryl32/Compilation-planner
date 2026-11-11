@@ -278,7 +278,8 @@ def suggest_videos(video_ids: tuple, tl_sig: tuple, top: int = 8) -> list:
 # ---------------------------------------------------------------------------
 
 def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, music_story: float = 0.5,
-                 smooth_contrast: float = 0.5, excluded: set = None, max_videos: int = 0, progress=None) -> dict:
+                 smooth_contrast: float = 0.5, excluded: set = None, max_videos: int = 0, progress=None,
+                 movement_only: bool = False) -> dict:
     import core.story_matcher as SMX
     from planner.data import build_footage_queues, load_all_catalogues
     from render_preview import colab_to_local
@@ -288,7 +289,8 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     segments = SCUT.story_segments(track, regions, all_recipes)
     queues = build_footage_queues(tuple(video_ids), (), LC.library_ranges())
     opts = SMX.StoryOptions(music_story=music_story, smooth_contrast=smooth_contrast, section_map=regions or None,
-                            max_videos=int(max_videos or 0), progress=progress, merge_blocks=True)
+                            max_videos=int(max_videos or 0), progress=progress, merge_blocks=True,
+                            movement_only=bool(movement_only))
     max_clips = 3 if split_screen else 1
     timeline, shortfall, unfilled = SMX.match_story(
         segments, queues, track, min_clips=1, max_clips=max_clips, ramp_start=0.5, ramp_end=0.9,
@@ -307,7 +309,8 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
         "tag_filter": [], "selected_videos": list(video_ids), "split_screen_enabled": split_screen,
         "min_clips": 1, "max_clips": max_clips, "ramp_start": 0.5, "ramp_end": 0.9, "density_contrast": 1.0,
         "vary_clip_count": False, "clip_count_seed": 0, "min_clip_len_sec": 1.0, "allow_same_video": False,
-        "story": {"music_story": music_story, "smooth_contrast": smooth_contrast, "max_videos": int(max_videos or 0)},
+        "story": {"music_story": music_story, "smooth_contrast": smooth_contrast, "max_videos": int(max_videos or 0),
+                  "movement_only": bool(movement_only)},
         "timeline": timeline,
     }
     return {"plan": plan, "segments": segments, "notes": list(opts.notes), "shortfall": shortfall,
@@ -334,6 +337,7 @@ def _do_pending_compile() -> None:
                            smooth_contrast=float(st.session_state.get("compose_smooth", 0.5)),
                            excluded=set(st.session_state.get("compose_excluded") or ()),
                            max_videos=int(st.session_state.get("compose_max_videos", 0) or 0),
+                           movement_only=bool(st.session_state.get("compose_movement_only")),
                            progress=lambda d, t: bar.progress(min(d / max(t, 1), 1.0), text=f"🤖 Compiling… block {d} of {t}"))
     except Exception as e:          # noqa: BLE001
         bar.empty()
@@ -352,10 +356,15 @@ def _options_row(ns: str) -> None:
     c[1].number_input("Max different videos", 0, 60, 0, key="compose_max_videos",
                       help="0 = no limit. A limit keeps the plan to fewer source videos — quicker renders, and fewer "
                            "files to fetch. Once the budget is spent, later blocks stay with the videos already in.")
-    c[2].slider("Music ↔ Story", 0.0, 1.0, 0.5, 0.05, key="compose_music_story",
+    only = bool(st.session_state.get("compose_movement_only"))
+    c[2].slider("Music ↔ Story", 0.0, 1.0, 0.5, 0.05, key="compose_music_story", disabled=only,
                 help="Left: the music fit decides. Right: the recipes' tags decide.")
     c[3].slider("Smooth ↔ Contrast", 0.0, 1.0, 0.5, 0.05, key="compose_smooth",
                 help="Left: shot sizes kept steady. Right: changes welcome at drops and section changes.")
+    st.toggle("🎯 Movement only", key="compose_movement_only",
+              help="No recipes: every clip is picked on how its movement follows the music (frame by frame, against "
+                   "the drums, bass or voice — whichever carries the bar) and how lively it is against how loud the "
+                   "music is. Tags, scene tags and roles are ignored. The cuts still come from the sections.")
 
 
 # ---------------------------------------------------------------------------
@@ -700,6 +709,7 @@ def render_result(res: dict) -> None:
     st.caption(f"{len(plan['timeline'])} blocks · {summary.get('videos', 0)} different videos used "
                f"(of {len(plan['selected_videos'])} in play) · {types}"
                + (f" · mean fit {summary['mean_fit']:.2f}" if summary.get("mean_fit") is not None else "")
+               + (f" · 🎯 movement sync {summary['sync']:.0%}" if summary.get("sync") is not None else "")
                + (f" · clips {summary['clip_sec'][0]:g}–{summary['clip_sec'][2]:g} s (typically {summary['clip_sec'][1]:g})"
                   if summary.get("clip_sec") else "")
                + (f" · {summary['merged']} made longer" if summary.get("merged") else "")
@@ -739,8 +749,10 @@ def render_result(res: dict) -> None:
                               + (f"  \n{', '.join(s.get('tags') or [])}" if s.get("tags") else ""))
                 how = (f" · split in {info['parts']}" if info.get("parts") else
                        f" · {info['joined']} clips back to back" if info.get("joined") else "")
-                r[3].caption(f"fit {info['fit']:.2f} (music {info.get('base', 0):.2f} · story {info.get('story', 0):.2f}){how}"
-                             if info.get("fit") is not None else "Classic's pick")
+                sync_bit = (f" · 🎯 {info['sync']:.0%}" + (f" (moved {info['slide']:+.2f} s)" if info.get("slide") else "")
+                            if info.get("sync") is not None else "")
+                r[3].caption(f"fit {info['fit']:.2f} (music {info.get('base', 0):.2f} · story {info.get('story', 0):.2f})"
+                             f"{sync_bit}{how}" if info.get("fit") is not None else "Classic's pick")
                 r[4].button("✅" if key in excluded else "🚫", key=f"compose_rej_{e['segment_index']}_{s['video_id']}_{s['scene_id']}",
                             help="Put back" if key in excluded else "Leave this clip out", on_click=_toggle_reject, args=(key,))
     b = st.columns([1.6, 0.5, 1.4, 1.4, 1.4, 1.6])
@@ -760,6 +772,18 @@ def render_result(res: dict) -> None:
                 help="Build the plan again — without the 🚫 clips, with the current Split screen / slider settings.",
                 on_click=_run_compile, args=(plan["track_id"], res["video_ids"], res.get("way", "song")))
     b[5].button("🎛️ Open in Classic", key="compose_classic", width="stretch", on_click=_open_in_classic, args=(res,))
+    if st.toggle("📥 Sync data", key="compose_sync_data",
+                 help="A file with every clip's movement next to its music, frame by frame — send it to Claude to tune "
+                      "the movement matching on real numbers."):
+        try:
+            import core.story_matcher as SMX
+            rep = SMX.sync_report(plan["timeline"], res["track"])
+            st.download_button(f"⬇️ {plan['track_id']}_sync.json"
+                               + (f" — as played {rep['sync_played_mean']:.0%}" if rep.get("sync_played_mean") is not None else ""),
+                               data=json.dumps(rep, separators=(",", ":")), file_name=f"{plan['track_id']}_sync.json",
+                               mime="application/json", key="compose_sync_dl")
+        except Exception as e:          # noqa: BLE001
+            st.caption(f"Couldn't put the sync data together: {e}")
     if name := st.session_state.get("compose_render"):
         from library_common import show_render_player
         from renders import load_render

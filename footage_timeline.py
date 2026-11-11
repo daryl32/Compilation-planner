@@ -7,6 +7,11 @@ scores a window on, in one small file per video:
         times        float32 (T,)        the half seconds (the student export's grid, STEP = 0.5 s)
         move         float16 (T,)        person movement (mean of the 15 fps person curve) — raw; scale it
                                          with the library's move_scale in index.json (scaled_move())
+        move_hi      float16 (F,)        the person curve itself, every frame of it (move_rate a second, 15) —
+                                         a beat at 120 BPM is half a second long, so the half-second means
+                                         above can't show movement on the beat at all; the matcher lines
+                                         clips up with the music on this one (core/sync.py)
+        move_rate    float32 ()          points a second in move_hi
         change       float16 (T,)        how fast movement is changing (|slope| over ±1 s, raw units/s)
         bpm          float16 (T,)        the scene's movement BPM at that point (NaN = none found)
         periodicity  float16 (T,)        how regular that movement is, 0–1 (0 = none)
@@ -73,7 +78,8 @@ CHANGE_HALF = 2            # |slope| of movement over ± this many points (±1 s
 MOVE_PCTS = (5.0, 95.0)    # library scaling of movement: these percentiles → 0 and 1
 FOLDER = "footage_timeline"
 STATUS_FILE = "build_status.json"
-VERSION = 1                # bump when the file layout changes (files with an older version are rebuilt)
+VERSION = 2                # bump when the file layout changes (files with an older version are rebuilt)
+#                            2 (11 Nov 2026): + move_hi / move_rate — the full-rate movement curve
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +408,7 @@ def build_video(video_id: str, vdir: Path, sc_index: dict, sc_folder: Path, pca:
     if people is None:
         people = np.zeros(len(times), np.uint8)
     return {"times": times.astype(np.float32), "move": move.astype(np.float16),
+            "move_hi": np.asarray(curve, np.float32).astype(np.float16), "move_rate": np.float32(POSE_FPS),
             "change": change.astype(np.float16), "bpm": bpm.astype(np.float16),
             "periodicity": per.astype(np.float16), "onset": onset.astype(np.float16),
             "scores": scores, "labelled": labelled, "shot": shot.astype(np.float16),

@@ -108,7 +108,8 @@ def test_recipes_steer_the_picks_and_footage_is_never_reused(monkeypatch):
         assert by_type["intro"]["video_id"] != "vid_f"                     # vid_f is busy throughout
         summary = SMX.plan_summary(timeline)
         assert summary["fallback"] <= 2 and summary["slots"] == len(segments) and summary["mean_fit"] > 0.5
-        assert not opts.notes or all("no 🧭 timeline" in n_ for n_ in opts.notes)   # vid_d has no timeline
+        # vid_d has no timeline; these synthetic timelines carry no full-rate movement curve
+        assert all("no 🧭 timeline" in n_ or "frame-by-frame" in n_ for n_ in opts.notes)
     finally:
         shutil.rmtree(out, ignore_errors=True)
 

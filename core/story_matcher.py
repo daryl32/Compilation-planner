@@ -20,7 +20,12 @@ For every block of the track:
      the first (anchor) pane's shot size.
 A window may run across Reviewer clip edges where the footage is continuous — neighbouring usable clips that
 touch with no hard cut (TransNetV2) on the join form one run; the pick is then a chain of back-to-back pieces.
-Excluded clips, the library range and hard cuts stay walls. A block no window is long enough for is split at
+Excluded clips, the library range and hard cuts stay walls.
+The "shape" part of base is worked out on the footage's full-rate movement curve (15 points a second, core/sync.py)
+wherever the timeline has it: every start frame is compared with the music, and the clip's start slides by up to a
+quarter second so its pushes land on the hits. 🎯 Movement only (StoryOptions.movement_only) drops the recipes'
+tags and movement bands altogether: the footage is picked on how its movement follows the music and how lively it
+is against how loud the music is — nothing else but the safeguards. A block no window is long enough for is split at
 the beat nearest its middle (up to twice) and each part gets its own recipe-scored window. Only what's still
 unfilled after that (no processed videos left, footage exhausted) falls back to Classic's chain fill, so the
 plan never has gaps. Each slot carries a "story" dict (type, fit, base, story) for the cards.
@@ -41,6 +46,7 @@ import recipes as RC
 import section_types as ST
 from core.footage import carve_span, get_candidate_spans, has_role
 from core.matching import PlanContext, excluded_for_block, fill_slot
+from core import sync as SY
 from core.shape import get_block_audio_curve, resample_curve
 
 STEP = FT.STEP
@@ -54,6 +60,11 @@ MAX_SPLIT_DEPTH = 2         # block → 2 parts → 4 parts
 MIN_GAP_POINTS = 2          # …at least this many half seconds apart
 JUNK_SHARE = 0.5            # nobody on screen for over half the window → heavy penalty
 W_BAND, W_TREND, W_SHAPE, W_BEAT = 0.45, 0.15, 0.25, 0.15      # inside base
+ONLY_W = (0.25, 0.10, 0.50, 0.15)   # 🎯 Movement only: level, trend, sync, beat — the sync leads
+ONLY_BAND = 0.15            # …the footage should be this close to the music's level (both 0–1 within their library / track)
+ONLY_TREND = 0.15           # …and rise or fall with it when the music moves by more than this across the block
+ONLY_BEAT_LOCK = 0.6
+SLIDE_SEC = STEP / 2        # a clip's start may move this far (a frame at a time) to land its pushes on the hits
 AVOID_WEIGHT = 0.5
 STORY_TOP = 2               # a window is judged on its best two wanted tags (e.g. a position + penetration)
 PREFER_BONUS = 0.1
@@ -78,6 +89,8 @@ class StoryOptions:
     merge_blocks: bool = False          # two neighbouring blocks of one section become one longer clip when the
                                         # footage fits the longer stretch as well (the new matcher's own flow only —
                                         # Classic's cards are tied to its own cut list)
+    movement_only: bool = False         # 🎯 no recipes: pick on how the movement follows the music and matches its
+                                        # level; tags, scene tags, roles and the recipes' movement bands are ignored
     progress: object = None             # progress(done_blocks, total_blocks) — for a progress bar
     notes: list = field(default_factory=list)
 
@@ -108,6 +121,19 @@ class _Video:
         self.pov = pov.astype(np.float64) if pov is not None else np.zeros(self.n)
         self._col = {str(t).lower(): k for k, t in enumerate(tl.tags)}
         self._cum = {}
+        self._mover = False            # the full-rate movement, prepared on first use (None: the file has none)
+
+    @property
+    def mover(self):
+        if self._mover is False:
+            self._mover = None
+            try:
+                hi = np.asarray(self.tl.move_hi, np.float32)
+                if len(hi) >= SY.MIN_FRAMES and np.isfinite(hi).any():
+                    self._mover = SY.Mover(hi, float(self.tl.move_rate))
+            except (AttributeError, ValueError, TypeError):
+                pass
+        return self._mover
 
     def col(self, tag: str):
         return self._col.get(str(tag).lower())
@@ -181,24 +207,56 @@ def _trend_fit(move: np.ndarray, n: int, trend: str) -> np.ndarray:
 # Scoring one block's windows in one video
 # ---------------------------------------------------------------------------
 
+def _music_trend(audio_curve) -> str:
+    """Does the music rise or fall across the stretch (its last third against its first)?"""
+    a = np.asarray(audio_curve, np.float64) if audio_curve is not None else np.zeros(0)
+    if len(a) < 6:
+        return "flat"
+    k = max(1, len(a) // 3)
+    d = float(a[-k:].mean() - a[:k].mean())
+    return "rise" if d > ONLY_TREND else "fall" if d < -ONLY_TREND else "flat"
+
+
 def _score_video(v: _Video, n: int, recipe: dict, audio_curve: np.ndarray, track_bpm: float,
                  music_story: float) -> tuple:
     """(fit, base, story) arrays over every window start of this video (NaN-free)."""
+    return _score_video_x(v, n, recipe, audio_curve, track_bpm, music_story)[:3]
+
+
+def _score_video_x(v: _Video, n: int, recipe: dict, audio_curve: np.ndarray, track_bpm: float, music_story: float,
+                   seconds: float = None, level: float = None, movement_only: bool = False) -> tuple:
+    """(fit, base, story, sync, slide) over every window start of this video. sync is the 0–1 movement-follows-music
+    score, slide the seconds to move the window's start by for its best alignment (zeros without a full-rate
+    curve). seconds: the stretch's true length; level: how loud the music is here, 0–1 within the track."""
     if v.n < n:
         e = np.zeros(0)
-        return e, e, e
+        return e, e, e, e, e
     mean_move = v.window_mean(v.move_f, n) / np.maximum(v.window_mean(v.has_move, n), 1e-6)
     mv = recipe["movement"]
-    band = _band_fit(mean_move, float(mv["lo"]), float(mv["hi"]))
-    trend = _trend_fit(v.move_f, n, mv.get("trend", "flat"))
-    shape = _shape_scores(v.move_f, n, audio_curve)
+    if movement_only:
+        lv = 0.5 if level is None else float(level)
+        band = _band_fit(mean_move, lv - ONLY_BAND, lv + ONLY_BAND)
+        trend = _trend_fit(v.move_f, n, _music_trend(audio_curve))
+    else:
+        band = _band_fit(mean_move, float(mv["lo"]), float(mv["hi"]))
+        trend = _trend_fit(v.move_f, n, mv.get("trend", "flat"))
+    fine = SY.sync_scores(v.mover, v.times, n, seconds, audio_curve, SLIDE_SEC) if seconds else None
+    if fine is not None:
+        shape, slide = fine
+    else:
+        shape, slide = _shape_scores(v.move_f, n, audio_curve), np.zeros(v.n - n + 1)
     bpm_mean = v.window_mean(np.nan_to_num(v.bpm.astype(np.float64), nan=0.0), n)
     bpm_has = v.window_mean(np.isfinite(v.bpm).astype(np.float64), n)
     mbpm = np.where(bpm_has > 0, bpm_mean / np.maximum(bpm_has, 1e-6), np.nan)
     beat_fit = _fold_ratio_fit(mbpm, track_bpm) * v.window_mean(np.nan_to_num(v.per.astype(np.float64)), n)
-    lock = float(recipe.get("beat_lock", 0.5))
+    lock = ONLY_BEAT_LOCK if movement_only else float(recipe.get("beat_lock", 0.5))
     beat = 1.0 - lock * (1.0 - beat_fit)
-    base = W_BAND * band + W_TREND * trend + W_SHAPE * shape + W_BEAT * beat
+    wb, wt, ws, wk = ONLY_W if movement_only else (W_BAND, W_TREND, W_SHAPE, W_BEAT)
+    base = wb * band + wt * trend + ws * shape + wk * beat
+    if movement_only:                  # no recipe: the music fit is the whole score
+        junk = v.window_mean(v.nobody, n) > JUNK_SHARE
+        fit = np.where(junk, base * 0.2, base)
+        return fit, base, np.full(len(base), 0.5), shape, slide
 
     # A recipe's wanted tags are alternatives, not a checklist: a window can show a position and an action, not
     # twelve things at once. So the story score is the window's best STORY_TOP weighted tags against the recipe's
@@ -228,7 +286,7 @@ def _score_video(v: _Video, n: int, recipe: dict, audio_curve: np.ndarray, track
     fit = (1.0 - music_story) * base + music_story * story
     junk = v.window_mean(v.nobody, n) > JUNK_SHARE
     fit = np.where(junk, fit * 0.2, fit)
-    return fit, base, story
+    return fit, base, story, shape, slide
 
 
 def _abs_start(span: dict) -> float:
@@ -359,6 +417,23 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
         _AD, drv = None, None
     ms = float(min(max(options.music_story, 0.0), 1.0))
     smooth = 1.0 - float(min(max(options.smooth_contrast, 0.0), 1.0))
+    only = bool(options.movement_only)
+    loud = drv["curves"].get("loudness") if drv is not None else None
+    if loud is not None and len(loud) > 8:
+        lv_lo, lv_hi = (float(x) for x in np.percentile(loud, [5, 95]))
+    else:
+        loud = None
+
+    def music_level(t0: float, t1: float):
+        """How loud the music is from t0 to t1, 0–1 within the track (None: unknown)."""
+        if loud is None:
+            return None
+        r_ = drv["rate"]
+        part = loud[int(t0 * r_):max(int(t0 * r_) + 1, int(t1 * r_))]
+        return float(np.clip((float(part.mean()) - lv_lo) / max(lv_hi - lv_lo, 1e-6), 0.0, 1.0)) if len(part) else None
+    if videos and not any(v.mover is not None for v in videos.values()):
+        options.notes.append("The 🧭 footage timeline was built before the frame-by-frame movement was kept — movement "
+                             "was matched on the half seconds. Press 🧭 Build (Media Library → Videos → Timeline) once.")
 
     timeline = []
     shortfall, unfilled_total = 0, 0.0
@@ -389,9 +464,9 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
         change_ok = shot_rule == "change" or (t_id != prev_type and shot_rule == "allow")
         shot_w = SHOT_PENALTY * smooth * {"hold": 1.0, "allow": 0.5, "change": 0.0}[shot_rule] * (0.5 if t_id != prev_type else 1.0)
 
-        req = [str(t).lower() for t in recipe.get("scene_require") or []]
-        pref = [str(t).lower() for t in recipe.get("scene_prefer") or []]
-        rec_roles = recipe.get("roles") or []
+        req = [] if only else [str(t).lower() for t in recipe.get("scene_require") or []]
+        pref = [] if only else [str(t).lower() for t in recipe.get("scene_prefer") or []]
+        rec_roles = [] if only else (recipe.get("roles") or [])
         budget_spent = bool(max_videos) and len(uses) >= max_videos
 
         def search(t0: float, t1: float, key) -> list:
@@ -435,14 +510,15 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
                     if cache is None:
                         cache = v._cum.get(("fit", key))
                         if cache is None:
-                            cache = v._cum[("fit", key)] = _score_video(v, nn, recipe, aud, track_bpm, ms)
-                    fit, base, story = cache
+                            cache = v._cum[("fit", key)] = _score_video_x(v, nn, recipe, aud, track_bpm, ms, dd,
+                                                                          music_level(t0, t1), only)
+                    fit, base, story, sync, slide = cache
                     starts = starts[starts < len(fit)]
                     if not len(starts):
                         continue
                     keep = min(TOP_PER_RUN, TOP_PER_SPAN * len(run))
                     for s_ in _top_spread(starts, fit, keep, max(MIN_GAP_POINTS, nn // 2)):
-                        ws = min(max(float(v.times[s_]), ra), rb - dd)
+                        ws = min(max(float(v.times[s_]) + float(slide[s_]), ra), rb - dd)     # slid onto the hits
                         we = ws + dd
                         pieces, over = [], []
                         for sp in run:
@@ -466,6 +542,7 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
                         if prev_pov is not None and smooth > 0 and bool(v.pov[s_]) != prev_pov:
                             total -= POV_PENALTY * smooth * (0.5 if change_ok else 1.0)
                         out.append({"total": total, "fit": float(fit[s_]), "base": float(base[s_]), "story": float(story[s_]),
+                                    "sync": float(sync[s_]), "slide": round(ws - float(v.times[s_]), 3),
                                     "video_id": vid_, "pieces": pieces, "shot": start_shot,
                                     "end_shot": _shot_at(v, min(s_ + nn - 1, v.n - 1)), "pov": bool(v.pov[s_])})
             out.sort(key=lambda c: -c["total"])
@@ -514,6 +591,7 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
 
         def _info(c: dict, **extra) -> dict:
             return {"type": t_id, "fit": round(c["fit"], 3), "base": round(c["base"], 3), "story": round(c["story"], 3),
+                    "sync": round(c["sync"], 3), "slide": c["slide"],
                     "shot": None if math.isnan(c["shot"]) else round(c["shot"], 2), **extra}
 
         # 1. whole-block windows, best first
@@ -572,7 +650,8 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
             mean = lambda k_: float(np.average([c[k_] for _, c in parts], weights=w))    # noqa: E731
             first, last = parts[0][1], parts[-1][1]
             slots.append(_slot_chain(picks, {"type": t_id, "fit": round(mean("fit"), 3), "base": round(mean("base"), 3),
-                                             "story": round(mean("story"), 3), "parts": len(parts),
+                                             "story": round(mean("story"), 3), "sync": round(mean("sync"), 3),
+                                             "parts": len(parts),
                                              "shot": None if math.isnan(first["shot"]) else round(first["shot"], 2)}))
             for _, c in parts:
                 used.add(c["video_id"])
@@ -633,6 +712,7 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
 def plan_summary(timeline: list) -> dict:
     """For the status line: blocks per section type, share of slots from the timeline, mean fit."""
     types, fits, fallback, total, split, joined = {}, [], 0, 0, 0, 0
+    syncs, sync_w = [], []
     for e in timeline:
         t = e.get("section_type")
         if t:
@@ -644,6 +724,9 @@ def plan_summary(timeline: list) -> dict:
                 fallback += 1
             else:
                 fits.append(info["fit"])
+                if info.get("sync") is not None:
+                    syncs.append(info["sync"])
+                    sync_w.append(max(e["track_time"][1] - e["track_time"][0], 1e-3))
             split += 1 if info.get("parts") else 0
             joined += 1 if info.get("joined") else 0
     videos = {c["video_id"] for e in timeline for s in e.get("scenes") or [] for c in s.get("chain") or []}
@@ -655,4 +738,60 @@ def plan_summary(timeline: list) -> dict:
     return {"types": types, "slots": total, "fallback": fallback, "videos": len(videos), "split": split, "joined": joined,
             "merged": sum(1 for e in timeline if e.get("merged")), "drivers": drivers,
             "clip_sec": [round(min(lens), 2), round(float(np.median(lens)), 2), round(max(lens), 2)] if lens else None,
-            "mean_fit": round(float(np.mean(fits)), 3) if fits else None}
+            "mean_fit": round(float(np.mean(fits)), 3) if fits else None,
+            # how well the movement follows the music over the whole plan (time-weighted; 0.5 = unrelated, 1 = together)
+            "sync": round(float(np.average(syncs, weights=sync_w)), 3) if syncs else None}
+
+
+def sync_report(timeline: list, track: dict, context_sec: float = 1.0) -> dict:
+    """The plan's movement against its music, clip by clip, at the movement curve's rate — for the 📥 sync data file
+    (the numbers a "does this clip move with the music?" question is answered from). Per piece of footage: the
+    stretch of music, the movement as played plus a second either side, the music's curves over the same stretch
+    (the drive curve the matcher compared with, and every stem curve the analysis has) and the 0–1 sync as played."""
+    import audio_drive as AD
+    index = FT.load_index()
+    try:
+        import section_cuts as _SCUT
+        beats = np.asarray(_SCUT._beats(track), float)
+    except Exception:          # noqa: BLE001
+        beats = np.zeros(0)
+    drv = AD.drivers(track, beats if len(beats) else None)
+    a_rate = float(drv["rate"])
+    r2 = lambda v: [None if not np.isfinite(x) else round(float(x), 3) for x in np.asarray(v, float).ravel()]    # noqa: E731
+    tls, rows, rate = {}, [], None
+    for e in timeline:
+        t = float(e["track_time"][0])
+        for slot in e.get("scenes") or []:
+            tt = t
+            for link in slot.get("chain") or []:
+                dur = float(link["clip_duration_sec"])
+                vid = link["video_id"]
+                if vid not in tls:
+                    tls[vid] = FT.load(vid, index=index)
+                tl = tls[vid]
+                row = {"music": [round(tt, 3), round(tt + dur, 3)], "type": e.get("section_type"), "driver": e.get("driver"),
+                       "video": vid, "scene": link.get("scene_id"), "clip_start": round(float(link["clip_start_sec"]), 3),
+                       "seconds": round(dur, 3), **{k: (slot.get("story") or {}).get(k) for k in ("fit", "base", "sync", "slide")}}
+                try:
+                    hi, rate = np.asarray(tl.move_hi, np.float32), float(tl.move_rate)
+                except (AttributeError, TypeError):
+                    hi = None
+                if hi is not None and len(hi):
+                    p0, m = int(round(float(link["clip_start_sec"]) * rate)), int(round(dur * rate))
+                    c = int(round(context_sec * rate))
+                    move = hi[max(p0, 0):p0 + m]
+                    lo, hi_ = int(tt * a_rate), max(int(tt * a_rate) + 1, int((tt + dur) * a_rate))
+                    row["move"] = r2(move)
+                    row["move_before"], row["move_after"] = r2(hi[max(p0 - c, 0):max(p0, 0)]), r2(hi[p0 + m:p0 + m + c])
+                    row["music_curves"] = {"drive": r2(SY.pool(drv["curve"][lo:hi_], len(move))),
+                                           **{k: r2(SY.pool(v[lo:hi_], len(move))) for k, v in drv["curves"].items()}}
+                    played = SY.sync_of(move, drv["curve"][lo:hi_], rate)
+                    row["sync_played"] = None if played is None else round(played, 3)
+                rows.append(row)
+                tt += dur
+    played = [r_["sync_played"] for r_ in rows if r_.get("sync_played") is not None]
+    return {"track_id": track.get("track_id"), "bpm": track.get("bpm"), "rate": rate, "music_rate": a_rate,
+            "sync_played_mean": round(float(np.mean(played)), 3) if played else None,
+            "how_to_read": "sync: 1 = the movement follows the music, 0.5 = unrelated, 0 = opposite. move / music_curves "
+                           "have one point per 1/rate s from the clip's first frame.",
+            "clips": rows}
