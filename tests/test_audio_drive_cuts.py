@@ -122,3 +122,25 @@ def test_bar_lines_are_filled_in_and_a_one_bar_driver_flicker_is_smoothed():
     drv = AD.drivers(tr, beats)
     assert AD.driver_at(drv, 9.0) == "drums" and AD.driver_at(drv, 25.0) == "vocals"
     assert len(drv["levels"]) == len(drv["driver"]) and set(drv["levels"][0]) == {"drums", "bass", "vocals", "loudness"}
+
+
+def test_no_clip_is_shorter_than_the_shortest_clip():
+    """Daryl, 11 Nov (01 AURA, 90 BPM): the drop's bar was cut into two 1.3 s clips — good footage, too short."""
+    import section_cuts as SC
+    assert abs(SC.auto_min_clip(60 / 90) - 4 * 60 / 90) < 1e-9          # a bar at 90 BPM
+    assert abs(SC.auto_min_clip(60 / 128) - 4 * 60 / 128) < 1e-9        # a bar at 128
+    assert abs(SC.auto_min_clip(60 / 70) - 2 * 60 / 70) < 1e-9          # two beats at 70 are long enough
+    beat = 60 / 90
+    beats = np.arange(0, 120, beat)
+    quick = {"pace": {"lo": 1.0, "hi": 1.5}, "movement": {"trend": "flat"}}
+    a, b = beats[36], beats[36 + 32]                                    # eight bars
+    free = SC.cut_section(beats, a, b, quick)
+    lens = np.diff(free + [b])
+    assert lens.min() < 1.5                                             # the recipe alone: two-beat clips
+    held = SC.cut_section(beats, a, b, quick, None, SC.auto_min_clip(beat))
+    lens = np.diff(held + [b])
+    assert lens.min() > 4 * beat - 0.01 and len(held) < len(free)
+    assert all(abs((c - a) / beat - round((c - a) / beat)) < 1e-6 for c in held)        # still on the beat
+    # one bar (the drop): one clip, not two halves; a typed minimum works the same way
+    assert SC.cut_section(beats, a, a + 4 * beat, quick, None, SC.auto_min_clip(beat)) == [a]
+    assert np.diff(SC.cut_section(beats, a, b, quick, None, 2.0) + [b]).min() >= 2.0 - 0.25 * beat

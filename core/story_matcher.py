@@ -808,6 +808,33 @@ def plan_summary(timeline: list) -> dict:
             "sync": round(float(np.average(syncs, weights=sync_w)), 3) if syncs else None}
 
 
+def _pixel_move(cache: dict, vid: str, link: dict, dur: float, m: int):
+    """The clip's on-screen change (the catalogue's frame-difference motion curve: how much of the picture changes
+    from one frame to the next — camera moves and whole bodies included, which the person curve leaves out), at the
+    movement curve's rate, as a share of the video's own busy level (its 95th percentile). None without it."""
+    try:
+        if vid not in cache:
+            import catalogue_store as CS
+            curves = CS.motion_curves(vid) or {}
+            vals = [np.asarray(c["values"], float) for c in curves.values() if len(c["values"])]
+            top = float(np.percentile(np.concatenate(vals), 95)) if vals else 0.0
+            cache[vid] = (curves, top)
+        curves, top = cache[vid]
+        c = curves.get(link.get("scene_id"))
+        if c is None:
+            c = curves.get(str(link.get("scene_id")))
+        if c is None or top <= 1e-9 or m < 1:
+            return None
+        fps = float(c["fps"])
+        a = int(round(float(link.get("offset_into_scene_sec") or 0.0) * fps))
+        part = np.asarray(c["values"], float)[a:a + max(1, int(round(dur * fps)))]
+        if len(part) < 2:
+            return None
+        return [round(float(x), 3) for x in SY.pool(part / top, m)]
+    except Exception:          # noqa: BLE001 — the file is a diagnostic: a missing curve must not break it
+        return None
+
+
 def sync_report(timeline: list, track: dict, context_sec: float = 1.0) -> dict:
     """The plan's movement against its music, clip by clip, at the movement curve's rate — for the 📥 sync data file
     (the numbers a "does this clip move with the music?" question is answered from). Per piece of footage: the
@@ -823,7 +850,7 @@ def sync_report(timeline: list, track: dict, context_sec: float = 1.0) -> dict:
     drv = AD.drivers(track, beats if len(beats) else None)
     a_rate = float(drv["rate"])
     r2 = lambda v: [None if not np.isfinite(x) else round(float(x), 3) for x in np.asarray(v, float).ravel()]    # noqa: E731
-    tls, rows, rate, bounces = {}, [], None, {}
+    tls, rows, rate, bounces, pixel = {}, [], None, {}, {}
     for e in timeline:
         t = float(e["track_time"][0])
         for slot in e.get("scenes") or []:
@@ -872,6 +899,9 @@ def sync_report(timeline: list, track: dict, context_sec: float = 1.0) -> dict:
                     if len(st_):
                         row["bounce"] = round(float(np.clip(st_.mean() / BOUNCE_FULL, 0.0, 1.0)), 3)
                         row["bounce_bpm"] = round(float(np.nanmedian(bpm_)), 1) if np.isfinite(bpm_).any() else None
+                    px = _pixel_move(pixel, vid, link, dur, len(move))
+                    if px is not None:
+                        row["pixel_move"] = px
                     played = SY.sync_of(move, drv["curve"][lo:hi_], rate)
                     row["sync_played"] = None if played is None else round(played, 3)
                 rows.append(row)
@@ -912,6 +942,8 @@ def sync_report(timeline: list, track: dict, context_sec: float = 1.0) -> dict:
                            "stretch, 0 = none. bounce: 1 = a strong regular up-and-down, 0 = smooth or irregular "
                            "(bounce_bpm = its tempo). The two should agree. level: how lively the music asks the footage "
                            "to be, move_level: how lively the clip is (both 0–1). shot: 0 extreme close-up … 3 wide. "
-                           "frozen: share of the clip with the picture frozen.",
+                           "frozen: share of the clip with the picture frozen. pixel_move: how much of the "
+                           "picture changes frame to frame (1 = the video's busy level) — camera and whole bodies "
+                           "included, unlike move.",
             "movement_by_shot_size": shot_table,
             "clips": rows}

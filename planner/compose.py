@@ -279,14 +279,14 @@ def suggest_videos(video_ids: tuple, tl_sig: tuple, top: int = 8) -> list:
 
 def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, music_story: float = 0.5,
                  smooth_contrast: float = 0.5, excluded: set = None, max_videos: int = 0, progress=None,
-                 movement_only: bool = False) -> dict:
+                 movement_only: bool = False, min_clip: float = None) -> dict:
     import core.story_matcher as SMX
     from planner.data import build_footage_queues, load_all_catalogues
     from render_preview import colab_to_local
     track = _load_track(track_id)
     regions = _section_regions(track)
     all_recipes = RC.load_all()
-    segments = SCUT.story_segments(track, regions, all_recipes)
+    segments = SCUT.story_segments(track, regions, all_recipes, min_clip)
     queues = build_footage_queues(tuple(video_ids), (), LC.library_ranges())
     opts = SMX.StoryOptions(music_story=music_story, smooth_contrast=smooth_contrast, section_map=regions or None,
                             max_videos=int(max_videos or 0), progress=progress, merge_blocks=True,
@@ -338,6 +338,7 @@ def _do_pending_compile() -> None:
                            excluded=set(st.session_state.get("compose_excluded") or ()),
                            max_videos=int(st.session_state.get("compose_max_videos", 0) or 0),
                            movement_only=bool(st.session_state.get("compose_movement_only")),
+                           min_clip=_min_clip(),
                            progress=lambda d, t: bar.progress(min(d / max(t, 1), 1.0), text=f"🤖 Compiling… block {d} of {t}"))
     except Exception as e:          # noqa: BLE001
         bar.empty()
@@ -348,6 +349,12 @@ def _do_pending_compile() -> None:
     res["way"] = job["way"]
     st.session_state[RESULT_KEY] = res
     st.session_state.pop("compose_render", None)
+
+
+def _min_clip():
+    """✂️ Shortest clip as the cuts want it: None = Auto (from the tempo), else seconds."""
+    v = float(st.session_state.get("compose_min_clip", 0.0) or 0.0)
+    return None if v <= 0 else v
 
 
 def _options_row(ns: str) -> None:
@@ -361,6 +368,11 @@ def _options_row(ns: str) -> None:
                 help="Left: the music fit decides. Right: the recipes' tags decide.")
     c[3].slider("Smooth ↔ Contrast", 0.0, 1.0, 0.5, 0.05, key="compose_smooth",
                 help="Left: shot sizes kept steady. Right: changes welcome at drops and section changes.")
+    st.number_input("✂️ Shortest clip (s)", 0.0, 10.0, 0.0, 0.5, key="compose_min_clip",
+                    help="0 = Auto: the shortest musical length of at least 1.4 s — a bar at 90 BPM (2.7 s), a bar at "
+                         "128 BPM (1.9 s). Or type your own; cuts stay on the beat, so it rounds up to whole beats. "
+                         "0.5 = no minimum (the recipes' clip lengths alone). A section too short for two clips "
+                         "stays one clip.")
     st.toggle("🎯 Movement only", key="compose_movement_only",
               help="No recipes: every clip is picked on how its movement follows the music (frame by frame, against "
                    "the drums, bass or voice — whichever carries the bar) and how lively it is against how loud the "
@@ -431,7 +443,7 @@ def _track_line(track_id: str) -> None:
     if not regions:
         st.warning("This track's sections can't be read — it needs the 🔬 audio analysis first.")
         return
-    segs = SCUT.story_segments(track, regions, RC.load_all())
+    segs = SCUT.story_segments(track, regions, RC.load_all(), _min_clip())
     tot = ST.totals(regions)
     st.caption("🧩 " + " · ".join(f"{ST.label(t)} {format_mmss(s)}" for t, s in sorted(tot.items(), key=lambda kv: -kv[1]))
                + f"  →  ✂️ {SCUT.describe(segs)}"

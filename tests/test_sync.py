@@ -122,6 +122,7 @@ def test_movement_only_picks_the_footage_that_moves_with_the_music_and_slides_it
         assert rep["rate"] == 15.0 and len(row["move"]) == len(row["music_curves"]["drive"]) and row["sync_played"] > 0.9
         assert len(row["move_before"]) == 15 and "loudness" in row["music_curves"]
         assert {"beat", "bounce", "move_level", "level"} <= set(row) and isinstance(rep["movement_by_shot_size"], dict)
+        assert len(row["pixel_move"]) == len(row["move"])     # the catalogue's on-screen motion beside the person curve
         # with recipes on, the frame-rate sync is the "shape" part of the music fit: every pick carries it and is slid
         track, queues, segments, regions = _plan_inputs(types)
         t2, _, _ = SMX.match_story(segments, queues, track, options=SMX.StoryOptions(section_map=regions, music_story=0.0))

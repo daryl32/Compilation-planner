@@ -18,6 +18,18 @@ import cut_scoring as CS
 import section_types as ST
 
 MIN_BLOCK_SEC = 0.5        # a sliver shorter than this at a section's end joins the block before it
+MIN_CLIP_FLOOR = 1.4       # ✂️ Shortest clip, Auto: the shortest musical length (1, 2, 4, 8 beats) at least this long —
+#                            a bar at 90 BPM (2.7 s), a bar at 128 (1.9 s), a bar at 170 (1.4 s), two beats at 70 (1.7 s).
+#                            Daryl, 11 Nov (01 AURA, 90 BPM): half-bar clips of 1.3 s were too short, however good.
+
+
+def auto_min_clip(beat: float) -> float:
+    """The shortest clip for a track whose beats are `beat` seconds apart (see MIN_CLIP_FLOOR)."""
+    beat = float(beat) if beat and beat > 0 else 0.5
+    for n in (1, 2, 4, 8, 16):
+        if n * beat >= MIN_CLIP_FLOOR - 1e-6:
+            return n * beat
+    return 16 * beat
 
 
 def _beats(track: dict) -> np.ndarray:
@@ -76,11 +88,13 @@ W_LENGTH = 0.5             # cost of a clip's distance from the wanted length (p
 W_UNMUSICAL = 0.4          # cost of a clip that isn't whole bars or half a bar long (3, 5, 7 beats…)
 
 
-def cut_section(beats: np.ndarray, start: float, end: float, recipe: dict, accent: np.ndarray = None) -> list:
+def cut_section(beats: np.ndarray, start: float, end: float, recipe: dict, accent: np.ndarray = None,
+                min_clip: float = 0.0) -> list:
     """Block starts inside [start, end) (incl. start). The section is divided as a whole: every clip within the
     recipe's range (so no short leftover at the end), cuts on the beats the music accents (`accent`, one value per
     beat — audio_drive.accents), clips a musical number of beats long, each as near the wanted length as that
-    allows. Without accents: the most even musical division."""
+    allows. Without accents: the most even musical division. min_clip: no clip shorter than this (seconds), whatever
+    the recipe's range says — a section too short for two such clips stays one clip."""
     beats = np.asarray(beats, float)
     sel = (beats > start + 1e-6) & (beats < end - 1e-6)
     inner = beats[sel]
@@ -91,6 +105,12 @@ def cut_section(beats: np.ndarray, start: float, end: float, recipe: dict, accen
     beat = float(np.median(np.diff(beats))) if beats.size > 1 else 0.5
     pc = recipe.get("pace") or {"lo": 2.0, "hi": 4.0}
     lo, hi = float(pc["lo"]), float(pc["hi"])
+    m = max(float(min_clip or 0.0) - 0.25 * beat, 0.0) if min_clip else 0.0      # cuts sit on beats that wobble a little
+    if m > 0:
+        if end - start < 2 * m:
+            return [start]
+        lo, hi = max(lo, m / (1 - RANGE_SLACK)), max(hi, m / (1 - RANGE_SLACK))
+        recipe = {**recipe, "pace": {"lo": lo, "hi": hi}}
     T = np.concatenate([[start], inner, [end]])
     A = np.concatenate([[0.0], acc, [0.0]])
     K = len(T)
@@ -125,18 +145,23 @@ def cut_section(beats: np.ndarray, start: float, end: float, recipe: dict, accen
             cuts.append(float(T[j]))
         return cuts[::-1]
     got = solve(max(lo * (1 - RANGE_SLACK), MIN_BLOCK_SEC), hi * (1 + RANGE_SLACK))
+    if got is None and m > 0:                           # the range can't tile it: any length from the shortest clip up
+        got = solve(m, max(hi * 2, end - start))
     if got is None:                                     # a section shorter than a clip, or one the range can't tile
         got = solve(MIN_BLOCK_SEC, max(hi * 2, end - start))
     return got or [start]
 
 
-def story_segments(track: dict, regions: list, recipes: dict) -> list:
+def story_segments(track: dict, regions: list, recipes: dict, min_clip: float = None) -> list:
     """Blocks for the whole track from its section map + the recipes' clip lengths, cut where the music accents
-    (audio_drive). Each block: start, end, energy, intensity, section_type, driver (what drives the music there)."""
+    (audio_drive). Each block: start, end, energy, intensity, section_type, driver (what drives the music there).
+    min_clip: the shortest clip in seconds — None: worked out from the tempo (auto_min_clip), 0: no minimum."""
     import audio_drive as AD
     duration = float(track["duration_sec"])
     beats = _beats(track)
     curve, rate = _energy_curve(track)
+    if min_clip is None:
+        min_clip = auto_min_clip(float(np.median(np.diff(beats))) if len(beats) > 1 else 0.5)
     try:
         drv = AD.drivers(track, beats)
         accent = AD.accents(track, beats, drv)
@@ -148,7 +173,7 @@ def story_segments(track: dict, regions: list, recipes: dict) -> list:
         if b <= a:
             continue
         recipe = recipes.get(r.get("type")) or {}
-        for s in cut_section(beats, a, b, recipe, accent):
+        for s in cut_section(beats, a, b, recipe, accent, min_clip):
             bounds.append((s, r.get("type")))
     if not bounds:
         bounds = [(0.0, None)]
