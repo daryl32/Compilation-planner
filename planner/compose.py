@@ -349,8 +349,9 @@ def _do_pending_compile() -> None:
                            max_videos=int(st.session_state.get("compose_max_videos", 0) or 0),
                            movement_only=bool(st.session_state.get("compose_movement_only")),
                            min_clip=_min_clip(),
-                           level_range=float(st.session_state.get("compose_level_range", 0.0)),
-                           bounce_speed=float(st.session_state.get("compose_bounce_speed", 0.0)),
+                           # 💥 Punch drives both: the track's range stretched, and bounce speed following the rhythm
+                           level_range=float(st.session_state.get("compose_punch", 0.0)),
+                           bounce_speed=float(st.session_state.get("compose_punch", 0.0)),
                            progress=lambda d, t: bar.progress(min(d / max(t, 1), 1.0), text=f"🤖 Compiling… block {d} of {t}"))
     except Exception as e:          # noqa: BLE001
         bar.empty()
@@ -385,20 +386,15 @@ def _options_row(ns: str) -> None:
                          "128 BPM (1.9 s). Or type your own; cuts stay on the beat, so it rounds up to whole beats. "
                          "0.5 = no minimum (the recipes' clip lengths alone). A section too short for two clips "
                          "stays one clip.")
-    st.slider("🎚️ Use the track's full range", 0.0, 1.0, 0.0, 0.25, key="compose_level_range",
+    st.slider("💥 Punch", 0.0, 1.0, 0.0, 0.25, key="compose_punch",
               disabled=not bool(st.session_state.get("compose_movement_only")),
-              help="🎯 Movement only. How far each track's loudness is stretched over the whole calm-to-lively range. "
-                   "0: as measured — the loud parts of most songs all ask for nearly the same footage, and the "
-                   "liveliest footage is never asked for. 1: the track's calmest part asks for calm footage and its "
-                   "loudest for the liveliest, so a soft song's chorus is as lively as a heavy song's. In between, "
-                   "soft songs stay gentler. The order of the parts never changes. Extra punch for powerful songs; "
-                   "on a gentle one (Flowers at 0.5) it asked for footage too lively for the music.")
-    st.slider("🥁 Bounce speed follows the rhythm", 0.0, 1.0, 0.0, 0.25, key="compose_bounce_speed",
-              disabled=not bool(st.session_state.get("compose_movement_only")),
-              help="🎯 Movement only. 0: a bounce at the track's tempo, half of it or double counts the same. Higher: "
-                   "where the drums are sparse (for that track) slow, long bounces are preferred, where they are "
-                   "busy fast ones — the more the higher the setting. It narrows the choice, so a slow track with "
-                   "little on-tempo footage may do worse.")
+              help="🎯 Movement only. Extra punch for powerful songs — two things turned up together. "
+                   "(1) The track's full range: its calmest part asks for calm footage and its loudest for the "
+                   "liveliest, so the peaks hit harder (at 0 the loud parts of most songs all ask for about the same, "
+                   "and the liveliest footage is never asked for). "
+                   "(2) Bounce speed follows the rhythm: slow, long bounces where the drums are sparse, fast ones "
+                   "where they are busy. "
+                   "Bad Times at 1 was a great result; a gentle song (Flowers at 0.5) got footage too lively for it.")
     st.toggle("🎯 Movement only", key="compose_movement_only",
               help="No recipes: every clip is picked on how its movement follows the music (frame by frame, against "
                    "the drums, bass or voice — whichever carries the bar) and how lively it is against how loud the "
