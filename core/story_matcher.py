@@ -122,7 +122,13 @@ class _Video:
         self.has_move = np.isfinite(self.move).astype(np.float64)
         self.scores = np.asarray(tl.scores, np.float32) / 100.0
         self.people = np.asarray(tl.people, np.float64)
-        self.nobody = (self.people == 0).astype(np.float64)
+        # A timeline built from a student export without people counts says 0 everywhere (footage_timeline fills the
+        # gap with zeros) — "unknown", not "nobody". 59 of Daryl's 162 videos were like that (11 Nov): every window
+        # took the nobody-on-screen penalty and none was ever picked. Without counts, a point has nobody on it only
+        # where the pose tracking found nobody either.
+        self.people_known = bool((self.people > 0).any())
+        self.nobody = ((self.people == 0).astype(np.float64) if self.people_known
+                       else (~np.isfinite(self.move)).astype(np.float64))
         self.shot = np.asarray(tl.shot, np.float32)
         self.bpm = np.asarray(tl.bpm, np.float32)
         self.per = np.asarray(tl.periodicity, np.float32)
@@ -876,6 +882,7 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
 def _video_stats(queues: dict, videos: dict, missing: list, stats: dict, blocks: int, uses: dict, usable: dict) -> dict:
     """{video_id: …} for EVERY video in play — the answer to "why was this video never picked?". Per video:
     timeline (has a 🧭 timeline: without one it can't be picked at all), seen (has on-screen motion curves),
+    people_data (its timeline has people counts; without them "nobody on screen" is read from the pose tracking),
     clips / usable_min (usable footage when the plan started), picked (times used), and over the plan's blocks:
     scored (blocks where it had a window long enough), first / top3 / top10 (blocks where its best window ranked
     there among all videos' best windows, penalties for reuse included), best_rank, median_rank, mean_gap (how far
@@ -885,7 +892,8 @@ def _video_stats(queues: dict, videos: dict, missing: list, stats: dict, blocks:
     out = {}
     for vid in queues:
         n_clips, secs = usable.get(vid, (0, 0.0))
-        row = {"timeline": vid in videos, "seen": False, "clips": int(n_clips), "usable_min": round(secs / 60.0, 1),
+        row = {"timeline": vid in videos, "seen": False,
+               **({"people_data": videos[vid].people_known} if vid in videos else {}), "clips": int(n_clips), "usable_min": round(secs / 60.0, 1),
                "picked": int(uses.get(vid, 0)), "scored": 0, "of_blocks": int(blocks)}
         v = videos.get(vid)
         if v is not None:
