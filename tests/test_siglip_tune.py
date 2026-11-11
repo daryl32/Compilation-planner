@@ -82,6 +82,11 @@ def test_end_to_end_on_a_tiny_encoder(tmp_path, monkeypatch):
     monkeypatch.setattr(S, "HERE", tmp_path)
     monkeypatch.setattr(S, "EMB_NAME", "")       # put back afterwards: the commands below change it
     _library(tmp_path, n_videos=8, minutes=0.5)
+    # a video name with accented letters and spaces, as in the real library (OpenCV can't write such paths on Windows)
+    odd = "Próbuje Sybiana ółć"
+    (tmp_path / "videos" / "vid05").rename(tmp_path / "videos" / odd)
+    lab = tmp_path / "library" / "training_labels.json"
+    lab.write_text(lab.read_text().replace("vid05", odd), encoding="utf-8")
     clip = tmp_path / "clip.mp4"                 # 28 s, so the last embeddings fall past its end
     subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=28:size=320x180:rate=25",
                     "-pix_fmt", "yuv420p", str(clip)], check=True)
@@ -92,6 +97,7 @@ def test_end_to_end_on_a_tiny_encoder(tmp_path, monkeypatch):
     assert FT.main(["frames", "--per-video", "4"]) == 0
     cut = list((tmp_path / "ft_frames").rglob("*.jpg"))
     assert cut and not list((tmp_path / "ft_frames").rglob("*.tmp.jpg"))
+    assert list((tmp_path / "ft_frames" / odd).glob("*.jpg"))
     assert FT.main(["frames", "--per-video", "4"]) == 0            # nothing new to cut
     assert len(list((tmp_path / "ft_frames").rglob("*.jpg"))) == len(cut)
 

@@ -193,8 +193,13 @@ def extract_frames(sel: dict) -> dict:
         got = 0
         for i, f in _decode(path, man, seconds=(last + 2) / TL.POSE_FPS):
             if i in need:
+                # encoded here and written by Python: OpenCV's own imwrite / imread fail without a word
+                # on Windows when the folder name has letters like ó
+                ok, buf = cv2.imencode(".jpg", f, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+                if not ok:
+                    continue
                 tmp = out / f"{i:07d}.tmp.jpg"
-                cv2.imwrite(str(tmp), f, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+                tmp.write_bytes(buf.tobytes())
                 tmp.replace(out / f"{i:07d}.jpg")
                 got += 1
         done += got
@@ -285,7 +290,10 @@ def _device():
 
 def _read_rgb(path: Path, augment: bool, rng: random.Random):
     import cv2
-    img = cv2.imread(str(path))
+    try:                                           # read by Python, decoded by OpenCV (see extract_frames)
+        img = cv2.imdecode(np.frombuffer(Path(path).read_bytes(), np.uint8), cv2.IMREAD_COLOR)
+    except OSError:
+        img = None
     if img is None:
         return None
     if augment:
