@@ -277,6 +277,12 @@ def suggest_videos(video_ids: tuple, tl_sig: tuple, top: int = 8) -> list:
 # Compiling
 # ---------------------------------------------------------------------------
 
+def _motion_curves(video_id: str) -> dict:
+    """{scene_id: {"fps", "values"}} — the catalogue's on-screen motion curves (for 🎯 Movement only)."""
+    import catalogue_store as CS
+    return CS.motion_curves(video_id)
+
+
 def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, music_story: float = 0.5,
                  smooth_contrast: float = 0.5, excluded: set = None, max_videos: int = 0, progress=None,
                  movement_only: bool = False, min_clip: float = None) -> dict:
@@ -290,7 +296,7 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     queues = build_footage_queues(tuple(video_ids), (), LC.library_ranges())
     opts = SMX.StoryOptions(music_story=music_story, smooth_contrast=smooth_contrast, section_map=regions or None,
                             max_videos=int(max_videos or 0), progress=progress, merge_blocks=True,
-                            movement_only=bool(movement_only))
+                            movement_only=bool(movement_only), curves_of=_motion_curves)
     max_clips = 3 if split_screen else 1
     timeline, shortfall, unfilled = SMX.match_story(
         segments, queues, track, min_clips=1, max_clips=max_clips, ramp_start=0.5, ramp_end=0.9,

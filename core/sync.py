@@ -99,10 +99,13 @@ def template(audio_curve, seconds: float, rate: float) -> np.ndarray:
     return smooth(pool(audio_curve, m), rate) if m >= 1 else np.zeros(0)
 
 
-def sync_scores(mover: Mover, times, n: int, seconds: float, audio_curve, slide_sec: float = 0.25) -> tuple:
+def sync_scores(mover: Mover, times, n: int, seconds: float, audio_curve, slide_sec: float = 0.25,
+                seen: Mover = None, seen_share: float = 0.5) -> tuple:
     """(sync 0–1, slide seconds) for every half-second window start s in 0 … len(times) − n: the best the window
     does when its start may move by up to ± slide_sec, and that move. None when it can't be worked out (no
-    full-rate curve, the stretch too short or too long, silence) — the caller falls back to the half seconds."""
+    full-rate curve, the stretch too short or too long, silence) — the caller falls back to the half seconds.
+    seen: a second curve at the same rate (the on-screen motion, pixel_curve) — where it covers the window, the
+    correlation is seen_share of its own and the rest the person curve's, and the slide suits the two together."""
     T = len(times)
     W = T - n + 1
     if mover is None or mover.n == 0 or W <= 0 or audio_curve is None or len(audio_curve) < 2:
@@ -112,6 +115,9 @@ def sync_scores(mover: Mover, times, n: int, seconds: float, audio_curve, slide_
     if m < MIN_FRAMES or m > MAX_TEMPLATE or mover.n < m or float(np.std(tpl)) < 1e-9:
         return None
     ncc = mover.correlate(tpl)
+    if seen is not None and seen.n == mover.n and abs(seen.rate - mover.rate) < 1e-6 and len(ncc):
+        there = (seen._ct[m:m + len(ncc)] - seen._ct[:len(ncc)]) / m >= MIN_TRACKED
+        ncc = np.where(there, (1.0 - seen_share) * ncc + seen_share * seen.correlate(tpl), ncc)
     P = len(ncc)
     h = max(0, int(round(slide_sec * mover.rate)))
     p0 = np.round(np.asarray(times[:W], np.float64) * mover.rate).astype(int)
@@ -202,7 +208,15 @@ def bounce(move_hi, rate: float, times) -> tuple:
     usual = float(np.percentile(std[seen >= MIN_TRACKED], 75)) if (seen >= MIN_TRACKED).any() else 0.0
     loud_enough = np.clip(std / max(BOUNCE_QUIET * usual, 1e-9), 0.0, 1.0) if usual > 1e-9 else np.zeros(T)
     strength = np.where(seen >= MIN_TRACKED, strength * loud_enough, 0.0)
-    bpm = np.where(strength > 0.05, 60.0 * rate / (best + lo), np.nan)
+    # the peak's true place lies between two frames (120 a minute is 7.5 frames at 15 a second): a parabola through
+    # the peak and its neighbours finds it
+    lag = (best + lo).astype(np.float64)
+    rows = np.arange(T)
+    y0, y1, y2 = ac[rows, np.maximum(best + lo - 1, 0)], ac[rows, best + lo], ac[rows, np.minimum(best + lo + 1, hi)]
+    curv = y0 - 2.0 * y1 + y2
+    inner = (best + lo > lo) & (best + lo < hi) & (curv < -1e-9)
+    lag = lag + np.where(inner, np.clip(0.5 * (y0 - y2) / np.where(inner, curv, -1.0), -0.5, 0.5), 0.0)
+    bpm = np.where(strength > 0.05, 60.0 * rate / lag, np.nan)
     return strength, bpm
 
 
@@ -235,3 +249,50 @@ def frozen(move_hi, rate: float, times, step: float) -> np.ndarray:
     lo = np.clip(np.round(times * rate).astype(int), 0, len(raw))
     hi = np.clip(np.round((times + step) * rate).astype(int), 0, len(raw))
     return (c[hi] - c[lo]) / np.maximum(hi - lo, 1)
+
+
+# ---------------------------------------------------------------------------
+# 👁️ The on-screen motion (11 Nov 2026)
+# ---------------------------------------------------------------------------
+# The person curve measures each keypoint against the body's own centre ("so a pan or zoom doesn't count — only limbs
+# moving"), so a whole body bouncing — every keypoint moving together — is taken out with the camera. On 01 AURA
+# (tests 3 and 4) the clips Daryl saw as long hard bounces read as calm and smooth, and a slow close-up read lively;
+# the catalogue's frame-difference curve (how much of the picture changes from one frame to the next) agreed with
+# his eyes in five of the six moments. So the matcher looks at both.
+
+def pixel_curve(scenes, n: int, rate: float) -> np.ndarray | None:
+    """One video's on-screen motion on the person curve's clock: n points at `rate` a second, each scene's
+    frame-difference values (scenes = [(start seconds, fps, values)]) pooled into place, as a share of the video's
+    own busy level (its 95th percentile; 1 = busy). NaN where no scene has a curve. None when there is nothing."""
+    out = np.full(max(int(n), 0), np.nan)
+    parts = []
+    for start, fps, vals in scenes:
+        v = np.asarray(vals, np.float64)
+        if not len(v) or not fps or fps <= 0:
+            continue
+        m = int(round(len(v) / float(fps) * rate))
+        p0 = int(round(float(start) * rate))
+        if m < 1 or p0 >= len(out) or p0 + m <= 0:
+            continue
+        pooled = pool(v, m)
+        a, b = max(p0, 0), min(p0 + m, len(out))
+        out[a:b] = pooled[a - p0:b - p0]
+        parts.append(v)
+    if not parts:
+        return None
+    top = float(np.percentile(np.concatenate(parts), 95))
+    return out / top if top > 1e-9 else None
+
+
+def half_second_level(curve, rate: float, times, step: float) -> np.ndarray:
+    """Mean of a full-rate curve over each point's `step` seconds (NaN where it has nothing there)."""
+    x = np.asarray(curve, np.float64)
+    ok = np.isfinite(x)
+    c = np.concatenate([[0.0], np.cumsum(np.where(ok, x, 0.0))])
+    k = np.concatenate([[0], np.cumsum(ok)])
+    times = np.asarray(times, np.float64)
+    lo = np.clip(np.round(times * rate).astype(int), 0, len(x))
+    hi = np.clip(np.round((times + step) * rate).astype(int), 0, len(x))
+    cnt = k[hi] - k[lo]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(cnt > 0, (c[hi] - c[lo]) / np.maximum(cnt, 1), np.nan)

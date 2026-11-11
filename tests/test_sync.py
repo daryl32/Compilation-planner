@@ -123,6 +123,7 @@ def test_movement_only_picks_the_footage_that_moves_with_the_music_and_slides_it
         assert len(row["move_before"]) == 15 and "loudness" in row["music_curves"]
         assert {"beat", "bounce", "move_level", "level"} <= set(row) and isinstance(rep["movement_by_shot_size"], dict)
         assert len(row["pixel_move"]) == len(row["move"])     # the catalogue's on-screen motion beside the person curve
+        assert "seen_level" in row and "seen_bounce" in row
         # with recipes on, the frame-rate sync is the "shape" part of the music fit: every pick carries it and is slid
         track, queues, segments, regions = _plan_inputs(types)
         t2, _, _ = SMX.match_story(segments, queues, track, options=SMX.StoryOptions(section_map=regions, music_story=0.0))
@@ -142,6 +143,8 @@ def test_bounce_tells_a_regular_up_and_down_from_smooth_or_random_movement():
     jitter = 0.005 * rng.standard_normal(len(t))
     bouncy, bpm = S.bounce(0.1 + 0.05 * np.maximum(0, np.sin(2 * np.pi * 1.5 * t)) + jitter, rate, times)
     assert bouncy.mean() > 0.9 and abs(np.nanmedian(bpm) - 90) < 2             # 1.5 a second, not half of it
+    _, b120 = S.bounce(0.1 + 0.05 * np.maximum(0, np.sin(2 * np.pi * 2.0 * t)) + jitter, rate, times)
+    assert abs(np.nanmedian(b120) - 120) < 3                                   # 7.5 frames a bounce: between two frames
     assert S.bounce(0.1 + 0.05 * np.sin(2 * np.pi * 0.08 * t) + jitter, rate, times)[0].max() < 0.1    # a slow swell
     assert S.bounce(0.1 + 0.03 * rng.standard_normal(len(t)), rate, times)[0].mean() < 0.15            # random
     half = 0.1 + 0.05 * np.maximum(0, np.sin(2 * np.pi * 1.5 * t)) + jitter
@@ -239,5 +242,64 @@ def test_a_frozen_picture_is_found_and_kept_out_of_the_plan(monkeypatch):
         for only in (True, False):
             fit = SMX._score_video_x(v, 8, RC.default("rhythmic"), np.full(120, 0.5), 120.0, 0.0, 4.0, 0.5, only)[0]
             assert fit[34:47].max() < 0.5 * np.median(fit[60:])
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_the_on_screen_motion_is_put_on_the_person_curves_clock():
+    from core import sync as S
+    # two scenes at 30 and 25 frames a second; the second starts at 4 s; nothing between 2 and 4 s
+    a, b = np.full(60, 2.0), np.full(50, 6.0)
+    px = S.pixel_curve([(0.0, 30.0, a), (4.0, 25.0, b)], 120, 15.0)
+    assert len(px) == 120 and np.allclose(px[:30], 2.0 / 6.0) and np.isnan(px[30:60]).all() and np.allclose(px[60:90], 1.0)
+    assert np.isnan(px[90:]).all() and S.pixel_curve([], 120, 15.0) is None
+    lv = S.half_second_level(px, 15.0, np.arange(0, 8, 0.5), 0.5)
+    assert abs(lv[0] - 1 / 3) < 1e-9 and np.isnan(lv[5]) and abs(lv[8] - 1.0) < 1e-9
+
+
+def test_movement_only_goes_by_what_is_seen_where_the_person_curve_misses_it(monkeypatch):
+    """01 AURA, tests 3–4: whole bodies bouncing read as calm on the person curve (it measures limbs against the
+    body's own centre). Here the person curve is the same quiet jitter throughout; the picture bounces on the
+    track's tempo in the first half and drifts in the second. A beat wants the first half, no beat the second —
+    and the music's own shape is found in the picture, not in the person curve."""
+    from tests.test_story_matcher import _setup
+    out = _setup(monkeypatch)
+    try:
+        import catalogue_store as CS
+        import core.story_matcher as SMX
+        import footage_timeline as FT
+        import recipes as RC
+        from core import sync as S
+        vids = {v["video_id"]: v for v in CS.video_index().values()}
+        dur = float(vids["vid_a"]["duration"])
+        n_f = int(dur * 15) + 15
+        rng = np.random.default_rng(7)
+        _add_full_rate(out, "vid_a", 0.05 + 0.01 * rng.random(n_f))
+        index = FT.load_index()
+        v = SMX._Video(FT.load("vid_a", index=index), index)
+        t = np.arange(n_f * 2) / 30.0                          # the picture, 30 frames a second
+        pic = 4.0 + 6.0 * np.maximum(0, np.sin(2 * np.pi * 2.0 * t)) + 0.1 * rng.standard_normal(len(t))
+        half = len(t) // 2
+        pic[half:] = 6.0 + 1.5 * np.sin(2 * np.pi * 0.05 * t[half:]) + 0.1 * rng.standard_normal(len(t) - half)
+        music = (np.mod(np.arange(120) / 30.0, 1.0) < 0.2) * 1.0 + 0.3 * rng.random(120)      # 4 s, its own shape
+        at = 70.2                                              # …which the picture does from 70.2 s
+        p = int(round(at * 30))
+        pic[p:p + 120] = 6.0 + 6.0 * music
+        v.set_seen([(0.0, 30.0, pic)])
+        assert v.seen is not None and v.seen_mover.n == v.mover.n
+        args = (v, 8, RC.default("rhythmic"), music, 120.0, 0.0, 4.0, 0.5, True)
+        on, _, _, sync, slide = SMX._score_video_x(*args, beat=1.0)
+        off = SMX._score_video_x(*args, beat=0.0)[0]
+        mid = len(on) // 2
+        a, b = slice(4, mid - 12), slice(mid + 12, 130)
+        # (the level asked for moves with the beat too, so the swing is smaller than the bounce's share alone)
+        assert (on[a].mean() - on[b].mean()) - (off[a].mean() - off[b].mean()) > 0.08 and on[a].mean() > on[b].mean()
+        assert v.bounce_window(8, 120.0)[a].mean() > 0.5 and v.bounce_window(8, 120.0)[b].mean() < 0.1
+        s_ = int(sync.argmax())
+        assert abs(v.times[s_] + slide[s_] - at) < 0.1 and sync[s_] > 0.75           # half the picture's 1.0, half the person curve's nothing
+        # recipes on: the on-screen motion plays no part
+        r1 = SMX._score_video_x(*args[:8], False)[0]
+        v2 = SMX._Video(FT.load("vid_a", index=index), index)
+        assert np.allclose(r1, SMX._score_video_x(v2, *args[1:8], False)[0])
     finally:
         shutil.rmtree(out, ignore_errors=True)
