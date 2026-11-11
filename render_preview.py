@@ -13,6 +13,10 @@ server, one that isn't is STREAMED from Google Drive (stream=True, the default):
 ffmpeg reads the file over HTTPS with range requests, so only the seconds each
 clip uses are fetched and nothing is stored. If a stream fails, those files are
 downloaded as before and the segment is rendered again from the local copy.
+
+⚡ Quick preview (quick=True): a video with a 480p preview copy on this machine (the proxies the Reviewer scrubs
+with) is read from that copy — nothing is fetched at all. The preview is 640×360, so the copy loses nothing.
+Segments are rendered several at a time (workers): with Drive streams the wait is the network, not the processor.
 """
 
 import re
@@ -25,7 +29,11 @@ from pathlib import Path
 
 from tqdm import tqdm
 
+import config
 from config import DRIVE_ROOT, CATALOGUE_DIR, AUDIO_DIR
+
+PROXY_DIR = Path(getattr(config, "PROXY_DIR", Path(CATALOGUE_DIR).parent / "proxies"))    # as auto_sync.PROXY_DIR
+RENDER_WORKERS = 4         # segments rendered at once
 
 PREVIEW_WIDTH = 640
 PREVIEW_HEIGHT = 360
@@ -110,9 +118,22 @@ class SourceResolver:
         self.notice = notice or (lambda msg: None)
         self._ids = {}
         self.streamed, self.downloaded = set(), set()
+        self.proxies = {}              # raw source → its 480p preview copy on this machine (⚡ Quick preview)
+
+    def use_proxies(self, video_ids) -> int:
+        """⚡ Quick preview: read each of these videos from its 480p preview copy where there is one here.
+        Returns how many have one."""
+        for vid in set(video_ids):
+            p = PROXY_DIR / f"{vid}.mp4"
+            try:
+                if p.exists() and p.stat().st_size > 0:
+                    self.proxies[get_video_raw_source(vid)] = p
+            except OSError:
+                pass
+        return len(self.proxies)
 
     def is_local(self, raw: str) -> bool:
-        return Path(colab_to_local(raw)).exists()
+        return raw in self.proxies or Path(colab_to_local(raw)).exists()
 
     def check(self, raws) -> list:
         """Error strings for sources that can be neither read here nor streamed."""
@@ -134,6 +155,8 @@ class SourceResolver:
         return errors
 
     def input_args(self, raw: str) -> list:
+        if raw in self.proxies:
+            return ["-i", str(self.proxies[raw])]
         local = colab_to_local(raw)
         if Path(local).exists():
             return ["-i", local]
@@ -309,7 +332,8 @@ def render_segment(entry: dict, idx: int, tmp_dir: Path, sources: SourceResolver
 
 
 def render_plan_dict(plan: dict, output_path: str, progress_callback=None, stream: bool = True,
-                     notice=None, app_version: str = None, extra_meta: dict = None) -> dict:
+                     notice=None, app_version: str = None, extra_meta: dict = None, quick: bool = False,
+                     workers: int = None) -> dict:
     """Core renderer, operating on an already-loaded plan dict. Used both by
     the CLI (render_plan below) and directly by the planner app on its
     in-memory plan, with no need to write/read a JSON file in between.
@@ -318,13 +342,27 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
     console-only output. stream: read sources that aren't on this machine
     straight from Google Drive (see module docstring). notice(text): status
     messages, e.g. when a stream fails and a file is downloaded instead.
-    Returns {"streamed": n, "downloaded": n, "local": n} source-file counts.
+    quick: ⚡ read videos from their 480p preview copies where this machine has them. workers: segments
+    rendered at once (default RENDER_WORKERS; 1 = one after another, as before).
+    Returns {"streamed": n, "downloaded": n, "local": n, "quick": n} source-file counts.
     Also writes the render's metadata sidecar (renders.py) next to the MP4;
     extra_meta (e.g. the planner's full project state) is stored in it too."""
+    import threading
     import time
+    from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
     started = time.time()
     check_ffmpeg()
-    sources = SourceResolver(stream=stream, notice=notice)
+    notices = []                   # worker threads leave their messages here; the caller's thread shows them
+    sources = SourceResolver(stream=stream, notice=notices.append)
+    if quick:
+        sources.use_proxies(link["video_id"] for entry in plan["timeline"]
+                            for slot in entry.get("scenes", []) for link in slot.get("chain", []))
+    quick_at_start = set(sources.proxies)
+    fallback_lock = threading.Lock()   # one download at a time, and never the same file twice
+
+    def show_notices():
+        while notices and notice:
+            notice(notices.pop(0))
 
     track_raw = get_track_raw_source(plan["track_id"])
     all_raw = {track_raw}
@@ -333,7 +371,7 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
     missing = sources.check(all_raw)
     if missing:
         raise FileNotFoundError("Some source files can't be read:\n" + "\n".join(missing))
-    local_at_start = {r for r in all_raw if sources.is_local(r)}
+    local_at_start = {r for r in all_raw if sources.is_local(r) and r not in quick_at_start}
 
     def with_fallback(raws, do):
         """Run do(). If it fails while streaming any of raws: download the ones whose
@@ -342,19 +380,28 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
         try:
             return do()
         except RuntimeError:
+            with fallback_lock:
+                had_copy = [r for r in raws if sources.proxies.pop(r, None) is not None]
             remote = [r for r in raws if not sources.is_local(r)]
             if not remote:
                 raise
-        broken = [r for r in remote if not sources.stream_works(r)]
-        # First retry: download just the broken streams (or nothing, if all open).
-        errs = sources.download(broken)
+        if had_copy:                   # a preview copy may be the broken one: once more from the originals
+            try:
+                return do()
+            except RuntimeError:
+                pass
+        with fallback_lock:
+            broken = [r for r in remote if not sources.stream_works(r)]
+            # First retry: download just the broken streams (or nothing, if all open).
+            errs = sources.download(broken)
         if not errs:
             try:
                 return do()
             except RuntimeError:
                 pass
         # Last resort: everything this step needs, downloaded.
-        errs = sources.download(remote)
+        with fallback_lock:
+            errs = sources.download(remote)
         if errs:
             raise RuntimeError("Streaming failed and the download fallback failed too:\n"
                                + "\n".join(errs))
@@ -362,14 +409,34 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        clip_paths = []
         total = len(plan["timeline"])
-
-        for i, entry in enumerate(tqdm(plan["timeline"], desc="Rendering segments")):
-            clip_paths.append(with_fallback(segment_sources(entry),
-                                            lambda e=entry, i=i: render_segment(e, i, tmp_dir, sources)))
-            if progress_callback:
-                progress_callback(i + 1, total)
+        clip_paths = [None] * total
+        n_workers = max(1, min(int(workers or RENDER_WORKERS), total or 1))
+        bar = tqdm(total=total, desc="Rendering segments")
+        done = 0
+        # Segments are rendered several at a time; progress and messages are reported from this thread only
+        # (a Streamlit progress bar can't be touched from a worker thread).
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            jobs = {pool.submit(with_fallback, segment_sources(entry),
+                                lambda e=entry, i=i: render_segment(e, i, tmp_dir, sources)): i
+                    for i, entry in enumerate(plan["timeline"])}
+            pending = set(jobs)
+            try:
+                while pending:
+                    finished, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                    show_notices()
+                    for job in finished:
+                        clip_paths[jobs[job]] = job.result()         # raises here if the segment failed
+                        done += 1
+                        bar.update(1)
+                        if progress_callback:
+                            progress_callback(done, total)
+            except BaseException:
+                for job in pending:
+                    job.cancel()
+                raise
+        bar.close()
+        show_notices()
 
         # Concatenate
         concat_list = tmp_dir / "concat.txt"
@@ -392,9 +459,11 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
         ]))
 
     print(f"\nDone: {output_path}")
+    show_notices()
     stats = {"streamed": len(sources.streamed - sources.downloaded),
              "downloaded": len(sources.downloaded),
-             "local": len(local_at_start)}
+             "local": len(local_at_start),
+             "quick": len(quick_at_start & set(sources.proxies))}
     try:
         from renders import write_render_metadata
         write_render_metadata(output_path, plan, render_seconds=time.time() - started,

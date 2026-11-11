@@ -588,8 +588,9 @@ def _save(res: dict) -> None:
         st.session_state["compose_msg"] = ("success", f"Saved locally: {out.name}")
 
 
-def _missing_sources(plan: dict) -> list:
-    """(raw source, local path) for the track and every video the plan uses that isn't on this machine."""
+def _missing_sources(plan: dict, quick: bool = False) -> list:
+    """(raw source, local path) for the track and every video the plan uses that isn't on this machine. quick:
+    a video with a 480p preview copy here isn't missing (⚡ Quick preview reads the copy)."""
     from planner.data import load_all_catalogues
     from render_preview import colab_to_local
     cats = load_all_catalogues()
@@ -600,6 +601,8 @@ def _missing_sources(plan: dict) -> list:
     for e in plan["timeline"]:
         for slot in e["scenes"]:
             for link in slot["chain"]:
+                if quick and LC.proxy_path(link["video_id"]).exists():
+                    continue
                 needed.add(cats[link["video_id"]]["source_path"])
     out = []
     for raw in sorted(needed):
@@ -642,8 +645,9 @@ def _do_pending_render(res: dict) -> None:
     import fnmatch, re
     plan = res["plan"]
     stream = bool(st.session_state.get("compose_stream", True))
+    quick = bool(st.session_state.get("compose_quick", True))
     if not stream:
-        missing = _missing_sources(plan)
+        missing = _missing_sources(plan, quick)
         if missing:
             errs = _download_sources(missing)
             if errs:
@@ -666,11 +670,12 @@ def _do_pending_render(res: dict) -> None:
         bar.progress(last[0], text=f"Rendering segment {d}/{t}{eta}")
 
     try:
-        stats = render_plan_dict(plan, str(out), progress_callback=_prog, stream=stream,
+        stats = render_plan_dict(plan, str(out), progress_callback=_prog, stream=stream, quick=quick,
                                  notice=lambda txt: bar.progress(last[0], text=txt), app_version=APP_VERSION,
                                  extra_meta={"project_name": f"🤖 {plan['track_id']}"}) or {}
         secs = time.time() - t0
-        how = [f"{stats[k]} {w}" for k, w in (("streamed", "streamed from Drive"), ("downloaded", "downloaded"),
+        how = [f"{stats[k]} {w}" for k, w in (("quick", "from the 480p copies"), ("streamed", "streamed from Drive"),
+                                             ("downloaded", "downloaded"),
                                              ("local", "already on the server")) if stats.get(k)]
         token = drive_token()
         note = ("info", f"Rendered {out.name} in {int(secs // 60)}:{int(secs % 60):02d}. Connect Google Drive (sidebar) to save renders there.")
@@ -778,11 +783,15 @@ def render_result(res: dict) -> None:
     b = st.columns([1.6, 0.5, 1.4, 1.4, 1.4, 1.6])
     b[0].button("🎬 Render preview", key="compose_render_btn", type="primary", width="stretch", on_click=_queue_render)
     with b[1].popover("⚙️", width="stretch", help="Render options"):
+        st.toggle("⚡ Quick preview — use the 480p copies on the server", value=True, key="compose_quick",
+                  help="On: every video with a preview copy here is read from it — nothing is fetched, so the render "
+                       "starts at once however many videos the plan uses. The preview is 640×360, so nothing is lost. "
+                       "Off: the original files (streamed or downloaded, as set below).")
         st.toggle("Stream original videos from Google Drive", value=True, key="compose_stream",
                   help="On: only the seconds each clip uses are fetched from Drive while rendering — nothing stored. "
                        "Off: every missing source file is downloaded to the server first (slower the first time, "
                        "faster for every render after). Fewer different videos (the limit above) = less to fetch.")
-        missing = _missing_sources(plan)
+        missing = _missing_sources(plan, bool(st.session_state.get("compose_quick", True)))
         st.caption(f"{len(missing)} source file{'s' if len(missing) != 1 else ''} not on the server yet"
                    if missing else "Every source file is on the server — renders are quick.")
     b[2].button("💾 Save plan", key="compose_save", width="stretch", on_click=_save, args=(res,))
