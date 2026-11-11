@@ -67,6 +67,13 @@ def test_a_short_clip_is_trusted_less():
     long_ = S.sync_of(beat[:60], beat[:60], rate)
     assert 0.5 < short < long_ and long_ > 0.99
     assert S.sync_of(np.full(60, np.nan), beat[:60], rate) is None
+    # with the on-screen motion: half its correlation, half the person curve's — as the matcher scores it
+    flat = 0.1 + 0.01 * np.random.default_rng(4).random(60)                  # a person curve that says nothing
+    alone = S.sync_of(flat, beat[:60], rate)
+    both = S.sync_of(flat, beat[:60], rate, beat[:60], 0.5)
+    assert abs(both - ((alone - 0.5) * 0.5 + 0.5 + 0.25)) < 1e-6 and both > alone + 0.15
+    assert S.sync_of(np.full(60, np.nan), beat[:60], rate, beat[:60]) > 0.99   # nobody tracked: the picture alone
+    assert S.sync_of(flat, beat[:60], rate, np.full(60, np.nan)) == alone      # no picture: the person curve alone
 
 
 def _add_full_rate(out, vid: str, curve) -> None:
@@ -124,6 +131,15 @@ def test_movement_only_picks_the_footage_that_moves_with_the_music_and_slides_it
         assert {"beat", "bounce", "move_level", "level"} <= set(row) and isinstance(rep["movement_by_shot_size"], dict)
         assert len(row["pixel_move"]) == len(row["move"])     # the catalogue's on-screen motion beside the person curve
         assert "seen_level" in row and "seen_bounce" in row
+        assert "sync_played_seen" not in row                  # no curves were given to the matcher: person curve only
+        # given the catalogue's curves, the matcher uses them and the file scores the clips the same way
+        track, queues, segments, regions = _plan_inputs(types)
+        opts3 = SMX.StoryOptions(section_map=regions, movement_only=True, curves_of=CS.motion_curves)
+        t3, _, _ = SMX.match_story(segments, queues, track, options=opts3)
+        assert any(s_["story"].get("seen") for e in t3 for s_ in e["scenes"])
+        rep3 = SMX.sync_report(t3, track)
+        both = [r for r in rep3["clips"] if "sync_played_seen" in r and "sync_played_person" in r]
+        assert both and all(abs(r["sync_played"] - (r["sync_played_person"] + r["sync_played_seen"]) / 2) < 0.002 for r in both)
         # with recipes on, the frame-rate sync is the "shape" part of the music fit: every pick carries it and is slid
         track, queues, segments, regions = _plan_inputs(types)
         t2, _, _ = SMX.match_story(segments, queues, track, options=SMX.StoryOptions(section_map=regions, music_story=0.0))

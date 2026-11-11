@@ -135,8 +135,8 @@ def sync_scores(mover: Mover, times, n: int, seconds: float, audio_curve, slide_
     return (corr + 1.0) / 2.0, slide
 
 
-def sync_of(move_slice, audio_slice, rate: float) -> float | None:
-    """One clip against its music, as played (no sliding): the same 0–1 measure, or None if it can't be said."""
+def _corr_of(move_slice, audio_slice, rate: float) -> float | None:
+    """Correlation (−1…1) of one curve with its music as played, or None if it can't be said."""
     x = np.asarray(move_slice, np.float64)
     if len(x) < MIN_FRAMES or float(np.isfinite(x).mean()) < MIN_TRACKED:
         return None
@@ -146,7 +146,26 @@ def sync_of(move_slice, audio_slice, rate: float) -> float | None:
     sx, sa = float(np.sqrt((x * x).mean())), float(np.sqrt((a * a).mean()))
     if sx < 1e-6 or sa < 1e-9:
         return None
-    return float((np.clip(float((x * a).mean()) / (sx * sa), -1.0, 1.0) * min(1.0, len(x) / SHORT_FRAMES) + 1.0) / 2.0)
+    return float(np.clip(float((x * a).mean()) / (sx * sa), -1.0, 1.0))
+
+
+def sync_of(move_slice, audio_slice, rate: float, seen_slice=None, seen_share: float = 0.5) -> float | None:
+    """One clip against its music, as played (no sliding): the same 0–1 measure the matcher picks on, or None if
+    it can't be said. seen_slice: the clip's on-screen motion at the same rate — where the matcher used it
+    (🎯 Movement only), the score is seen_share of its correlation and the rest the person curve's, as in
+    sync_scores; with only one of the two curves usable, that one."""
+    n = len(np.asarray(move_slice))
+    c = _corr_of(move_slice, audio_slice, rate)
+    if seen_slice is not None and len(seen_slice) >= MIN_FRAMES:
+        c2 = _corr_of(seen_slice, audio_slice, rate)
+        if c2 is not None:
+            if c is None:
+                c, n = c2, len(np.asarray(seen_slice))
+            else:
+                c = (1.0 - seen_share) * c + seen_share * c2
+    if c is None:
+        return None
+    return float((c * min(1.0, n / SHORT_FRAMES) + 1.0) / 2.0)
 
 
 # ---------------------------------------------------------------------------

@@ -726,6 +726,7 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
         def _info(c: dict, **extra) -> dict:
             return {"type": t_id, "fit": round(c["fit"], 3), "base": round(c["base"], 3), "story": round(c["story"], 3),
                     "sync": round(c["sync"], 3), "slide": c["slide"],
+                    **({"seen": True} if only and videos[c["video_id"]].seen_mover is not None else {}),
                     **({"level": round(lv_, 3)} if (lv_ := music_level(seg["start"], seg["end"])) is not None and only else {}),
                     "shot": None if math.isnan(c["shot"]) else round(c["shot"], 2), **extra}
 
@@ -1001,11 +1002,19 @@ def sync_report(timeline: list, track: dict, context_sec: float = 1.0) -> dict:
                     px = _pixel_move(pixel, vid, link, dur, len(move))
                     if px is not None:
                         row["pixel_move"] = px
-                    played = SY.sync_of(move, drv["curve"][lo:hi_], rate)
+                    # as played, on what the matcher picked on: both curves where it used the on-screen motion
+                    used_seen = bool((slot.get("story") or {}).get("seen")) and px is not None
+                    played = SY.sync_of(move, drv["curve"][lo:hi_], rate, px if used_seen else None, SEEN_SYNC)
                     row["sync_played"] = None if played is None else round(played, 3)
+                    if used_seen:              # …and each curve on its own, to see which one carries it
+                        for name, part in (("sync_played_person", SY.sync_of(move, drv["curve"][lo:hi_], rate)),
+                                           ("sync_played_seen", SY.sync_of(px, drv["curve"][lo:hi_], rate))):
+                            if part is not None:
+                                row[name] = round(part, 3)
                 rows.append(row)
                 tt += dur
     played = [r_["sync_played"] for r_ in rows if r_.get("sync_played") is not None]
+    secs = [r_["seconds"] for r_ in rows if r_.get("sync_played") is not None]
     # is the movement measure the same thing at every shot size? Over the whole of every video in the plan: how much
     # movement a close-up shows against a wide shot (0–1 within the library), and how bouncy each reads
     by_shot = {}
@@ -1035,8 +1044,12 @@ def sync_report(timeline: list, track: dict, context_sec: float = 1.0) -> dict:
                                 "bounce_mean": round(float(np.clip(bo / BOUNCE_FULL, 0, 1).mean()), 3),
                                 "bouncy_share": round(float((bo / BOUNCE_FULL >= 0.5).mean()), 3)}
     return {"track_id": track.get("track_id"), "bpm": track.get("bpm"), "rate": rate, "music_rate": a_rate,
-            "sync_played_mean": round(float(np.mean(played)), 3) if played else None,
-            "how_to_read": "sync: 1 = the movement follows the music, 0.5 = unrelated, 0 = opposite. move / music_curves "
+            # time-weighted, like the plan's own 🎯 figure: a 0.3 s join doesn't count as much as a 5 s clip
+            "sync_played_mean": round(float(np.average(played, weights=np.maximum(secs, 1e-3))), 3) if played else None,
+            "how_to_read": "sync: 1 = the movement follows the music, 0.5 = unrelated, 0 = opposite (sync = what the "
+                           "matcher scored, sync_played = the same measure on the clip as it plays; both use the "
+                           "person curve and the on-screen motion together where the matcher did, and "
+                           "sync_played_person / sync_played_seen give each alone). move / music_curves "
                            "have one point per 1/rate s from the clip's first frame. beat: 1 = a full drum beat in this "
                            "stretch, 0 = none. bounce: 1 = a strong regular up-and-down, 0 = smooth or irregular "
                            "(bounce_bpm = its tempo). The two should agree. level: how lively the music asks the footage "
