@@ -245,3 +245,32 @@ def test_sections_parts_and_blocks():
     fig = SV.lines_figure(found)
     assert any(sh.line.color.startswith("rgba(255,255,255") for sh in fig.layout.shapes)   # the block cuts on the chart
     assert list(fig.layout.xaxis.ticktext)[:2] == ["1", "5"]                                # bars numbered on the axis
+
+
+def test_a_steady_bar_grid_from_the_beats():
+    """AURA, 12 Nov: the stored bar lines had half bars and odd ones in places; the beats were steady. Sections,
+    parts and blocks sit on one bar line every four beats, beat 1 voted by the stored lines."""
+    import section_bounds as SB
+    beat = 0.667
+    beats = 0.3 + np.arange(150) * beat                          # steady beats, stopping 8 s before the end
+    dur = float(beats[-1]) + 8.0
+    good = beats[::4]
+    down = np.sort(np.concatenate([good, beats[2::4][10:18], [float(beats[101]), float(beats[103])]]))   # half bars, strays
+    track = {"beat_times": beats.tolist(), "duration_sec": dur, "analysis": {"downbeats": down.tolist(), "beats_per_bar": 4}}
+    stored = np.concatenate([[0.0], down])
+    assert SB._uneven(stored, dur)                               # the stored lines are uneven …
+    bars = SB.steady_bars(track, stored, dur)
+    assert bars[0] == 0.0 and SB._uneven(bars, dur) == []        # … the grid isn't
+    d = np.diff(bars)[1:]
+    assert np.allclose(d, 4 * beat, atol=0.02)
+    assert all(np.min(np.abs(good - t)) < 0.01 for t in bars[1:] if t <= beats[-1])    # on the real bar lines
+    assert bars[-1] > beats[-1] and dur - bars[-1] >= 0.25 * 4 * beat                  # carried on past the last beat
+    # no usable beats: the stored lines are used as they are
+    assert np.array_equal(SB.steady_bars({"beat_times": [0.5, 1.0]}, stored, dur), stored)
+    # the matcher's own bar lines (audio_drive) are not touched
+    import audio_drive as AD
+    from tests.fixtures import load_track
+    tr = load_track(DATA, "song_full")
+    before = AD.drivers(tr)["bars"].copy()
+    SB.for_track(tr)
+    assert np.array_equal(AD.drivers(tr)["bars"], before)

@@ -71,11 +71,49 @@ LIKE = 0.1                 # two sections are alike when their layers and level 
 # What is playing, bar by bar
 # ---------------------------------------------------------------------------
 
+def steady_bars(track: dict, stored, duration: float, beats=None) -> np.ndarray:
+    """Bar starts (from 0) on a STEADY grid: one bar line every four beats, beat 1 voted by the analysis' own bar
+    lines (core/bars.regular_bars), carried on at the same step to the end of the track where the beats stop early.
+    The stored bar lines are used as they are only when the track has no usable beats.
+    Why: the stored lines can be uneven — on AURA (12 Nov) the model marked half bars for bars 13–20 and odd ones
+    at 26–31 (bars of 1.3, 2.0 and 0.65 s in a 2.67 s grid), which made blocks of 1.3 s, then, once short blocks
+    were paired up, blocks of 3.3 and 4.7 s with too few cuts. The beats themselves were steady throughout."""
+    stored = np.asarray(stored, float)
+    b = np.asarray(beats if beats is not None else track.get("beat_times") or (), float)
+    if b.size < 8:
+        return stored
+    try:
+        from core import bars as BARS
+        a = track.get("analysis") or {}
+        grid = np.asarray(BARS.regular_bars(b, a.get("downbeats") or [], int(a.get("beats_per_bar") or 4)), float)
+    except Exception:          # noqa: BLE001
+        return stored
+    if grid.size < 4:
+        return stored
+    bar = float(np.median(np.diff(grid)))
+    if bar <= 0:
+        return stored
+    tail = []
+    t = float(grid[-1]) + bar
+    while t < float(duration) - 0.5 * bar:              # the beats stop before the track does: the grid carries on
+        tail.append(t)
+        t += bar
+    head = []
+    t = float(grid[0]) - bar
+    while t > 0.5 * bar:                                # … and starts before the first beat that was found
+        head.insert(0, t)
+        t -= bar
+    grid = np.concatenate([head, grid, tail])
+    grid = grid[(grid > 0.5 * bar) & (grid < float(duration) - 0.25 * bar)]
+    return np.concatenate([[0.0], grid])
+
+
 def bar_levels(track: dict, beats=None) -> dict:
     """{"bars": bar starts (from 0), "duration", "levels": {layer: one 0–1 value per bar}, "change": novelty at each
     bar line or None}. Layers the analysis doesn't have are left out; loudness is always there."""
     drv = AD.drivers(track, beats)
-    bars, rate, curves, duration = np.asarray(drv["bars"], float), drv["rate"], dict(drv["curves"]), drv["duration"]
+    rate, curves, duration = drv["rate"], dict(drv["curves"]), drv["duration"]
+    bars = steady_bars(track, drv["bars"], duration, beats)
     n = len(curves["loudness"])
     a = track.get("analysis") or {}
     a_rate = float(a.get("rate", rate))
@@ -417,7 +455,7 @@ def blocks(secs: list, bars, duration: float, vocal_starts=(), vocal_ends=(), mi
                                   if last + 0.5 <= c + d <= nxt - 0.5 and abs((c + d) * 2 - round((c + d) * 2)) < 1e-6
                                   and (c + d) * bar_sec - last * bar_sec >= MIN_SLACK * min_sec
                                   and not mid_phrase(time_at(c + d))), None)
-                    if moved is None and nxt - last <= BLOCK_MAX_BARS:
+                    if moved is None and nxt - last <= BLOCK_MAX_BARS and (nxt - last) * bar_sec <= BLOCK_MAX_SEC:
                         continue                         # no clean bar nearby: one longer block
                     c = c if moved is None else moved
                 kept.append(c)
