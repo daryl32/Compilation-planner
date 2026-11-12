@@ -161,9 +161,10 @@ def render_sections(tracks: dict, track_bits, play=None) -> None:
 # 📐 Lines from the music — sections from scratch, step 1 (section_bounds.py): no names yet
 # ---------------------------------------------------------------------------
 
-def lines_figure(found: dict, height: int = 250):
+def lines_figure(found: dict, height: int = 270):
     """What is playing bar by bar (one row per layer, darker = more of it) with the found lines across it: main
-    lines solid, lesser ones dotted; the sections numbered along the top."""
+    lines solid, lesser ones dotted, the block cuts thin and white; the sections numbered along the top (parts
+    lettered), the bars numbered along the bottom."""
     import numpy as np
     import plotly.graph_objects as go
     import section_bounds as SB
@@ -172,17 +173,30 @@ def lines_figure(found: dict, height: int = 250):
     names = [k for k in SB.LAYERS if k in found["levels"]][::-1]
     fig = go.Figure(go.Heatmap(
         x=(bars + ends) / 2, y=[f"{SB.EMOJI[k]} {SB.NAME[k]}" for k in names],
-        z=[found["levels"][k] for k in names], zmin=0, zmax=1, colorscale="Blues", showscale=True, xgap=1, ygap=2,
+        z=[found["levels"][k] for k in names], zmin=0, zmax=1, colorscale="Blues", showscale=True, xgap=0, ygap=2,
         colorbar=dict(title=dict(text="level", side="right"), thickness=12, len=0.95, tickvals=[0, 0.15, 0.3, 0.5, 1],
                       ticktext=["0 silent", "0.15 off", "0.3 playing", "0.5", "1 strongest"], tickfont=dict(size=10)),
         hovertemplate="%{y} · %{x:.1f}s · %{z:.2f}<extra></extra>"))
+    line_at = {round(ln["time"], 2) for ln in found["lines"]}
+    for b in (found.get("blocks") or [])[1:]:              # the block cuts between the lines: thin, white
+        if round(b["start"], 2) not in line_at:
+            for colour, width in (("rgba(20,20,30,0.9)", 3.2), ("rgba(255,255,255,0.98)", 1.2)):   # white on a dark
+                fig.add_shape(type="line", x0=b["start"], x1=b["start"], y0=0, y1=1, yref="paper",   # edge: shows on
+                              line=dict(color=colour, width=width))                                  # any cell
     for ln in found["lines"]:
         fig.add_vline(x=ln["time"], line_color="#ff4b4b", line_width=2.5 if ln["level"] == 1 else 1.2,
                       line_dash="solid" if ln["level"] == 1 else "dot")
     for sc in found["sections"]:
         fig.add_annotation(x=(sc["start"] + sc["end"]) / 2, y=1.0, yref="paper", yanchor="bottom", showarrow=False,
-                           text=f"<b>{sc['n']}</b>", font=dict(size=11))
-    fig.update_layout(height=height, margin=dict(t=22, b=4, l=6, r=6), xaxis=dict(range=[0, dur], ticksuffix="s"),
+                           text=f"<b>{sc.get('label', sc['n'])}</b>", font=dict(size=11))
+    bars_ = found["bars"]
+    step = 4 if len(bars_) <= 80 else 8                    # the bars stay on the axis: a tick each, numbered
+    fig.update_xaxes(tickmode="array", tickvals=bars_[::step], ticktext=[str(k + 1) for k in range(0, len(bars_), step)],
+                     ticks="outside", ticklen=4)
+    fig.add_annotation(x=0, y=0, xref="paper", yref="paper", xanchor="right", yanchor="top", showarrow=False,
+                       text="bar ", font=dict(size=10))
+    fig.update_layout(height=height, margin=dict(t=22, b=24, l=6, r=6), xaxis=dict(range=[0, dur]),
+                      yaxis=dict(automargin=True, ticks="", tickfont=dict(size=12)),
                       paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
     return fig
 
@@ -210,21 +224,32 @@ def _render_lines(track: dict, play=None) -> None:
                        "the laptop measures the real stems (and adds 🎹 instruments).")
         missing = [SB.NAME[k] for k in SB.LAYERS if k not in found["levels"] and k != "other"]
         main = sum(1 for ln in found["lines"] if ln["level"] == 1)
-        st.caption(f"{len(found['sections'])} sections · {main} big changes, {len(found['lines']) - main} smaller"
+        blocks = found.get("blocks") or []
+        st.caption(f"{found['sections'][-1]['main']} sections in {len(found['sections'])} parts · {main} big changes "
+                   f"(solid: a new section), {len(found['lines']) - main} smaller (dotted: a new part, 2a → 2b) · "
+                   f"**{len(blocks)} blocks** (thin white lines: the cuts inside a part)"
                    + (f" · not in this track's analysis: {', '.join(missing)}" if missing else ""))
-        st.dataframe([{"#": sc["n"], "From": format_mmss(sc["start"]), "To": format_mmss(sc["end"]),
+        def cut_into(label):
+            mine = [b for b in blocks if b["section"] == label]
+            return (" + ".join(f"{b['bars']:g}" for b in mine) + " bars — " + mine[0]["why"]) if mine else ""
+        st.dataframe([{"#": sc["label"], "From": format_mmss(sc["start"]), "To": format_mmss(sc["end"]),
                        "Bars": sc["bars"], "Change": "big" if sc["level"] == 1 else "small",
                        "What changes at its start": " · ".join(sc["why"]),
-                       "What it is (profile)": sc.get("words", "")} for sc in found["sections"]],
+                       "What it is (profile)": sc.get("words", ""),
+                       "Cut into blocks of": cut_into(sc["label"])} for sc in found["sections"]],
                      hide_index=True, width="stretch", key="sec_ln_table")
         st.caption("Profile = step 2: the layers playing · how loud within this track (quiet / medium / loud) · "
                    "how busy the drums are (hits a second) · rising or falling · “like N” = the same profile as "
-                   "section N. A section type will be a named profile.")
+                   "section N. A section type will be a named profile. Blocks: every line is a cut; inside a part "
+                   "the profile sets the length — busy loud drums 1 bar, other drum parts 2, voice / instruments "
+                   "leading 2 or 4, hardly anything playing 4 — shorter towards the end of a rising part, longer "
+                   "towards the end of a falling one, never inside a sung phrase where the voice leads, never "
+                   "under the shortest clip.")
         st.caption("Key: each cell is one bar of one layer, 0–1 against that layer's own strongest moments in this "
                    "track (drums and hats: how hard the hits are; the rest: the average level). From 0.3 a layer "
                    "counts as playing, under 0.15 as off. Tap a cell for its number.")
         with st.expander("🔢 The numbers per section"):
-            st.dataframe([{"#": sc["n"], "From": format_mmss(sc["start"]), "Bars": sc["bars"],
+            st.dataframe([{"#": sc["label"], "From": format_mmss(sc["start"]), "Bars": sc["bars"],
                            **{f"{SB.EMOJI[k]} {SB.NAME[k]}": sc["playing"].get(k) for k in SB.LAYERS
                               if k in found["levels"]},
                            "Level in track": sc["profile"]["level"], "Drum hits /s": sc["profile"]["busy"],
@@ -268,8 +293,11 @@ def player_config(found: dict) -> dict:
             "layers": [f"{SB.EMOJI[k]} {SB.NAME[k]}" for k in names],
             "z": [[round(float(v), 2) for v in found["levels"][k]] for k in names],
             "lines": [{"t": ln["time"], "big": ln["level"] == 1} for ln in found["lines"]],
-            "sections": [{"n": sc["n"], "a": sc["start"], "b": sc["end"],
-                          "why": " · ".join(sc["why"]), "words": sc.get("words", "")} for sc in found["sections"]]}
+            "sections": [{"n": sc["n"], "label": sc.get("label", str(sc["n"])), "main": sc.get("main", sc["n"]),
+                          "a": sc["start"], "b": sc["end"],
+                          "why": " · ".join(sc["why"]), "words": sc.get("words", "")} for sc in found["sections"]],
+            "blocks": [{"n": b["n"], "a": b["start"], "b": b["end"], "bars": b["bars"], "why": b["why"]}
+                       for b in found.get("blocks") or []]}
 
 
 def lines_player(clip_path, found: dict, key: str) -> None:
@@ -296,6 +324,7 @@ def lines_player(clip_path, found: dict, key: str) -> None:
   <span>1 = strongest in this track</span>
   <span style="margin-left:10px;border-left:2.5px solid #ff4b4b;padding-left:4px">big change</span>
   <span style="border-left:1.5px dotted #ff4b4b;padding-left:4px">smaller change</span>
+  <span style="border-left:1.5px solid #fff;padding-left:4px">block cut</span>
  </div>
  <audio id="a_{key}" controls style="width:100%;height:34px" src="data:audio/mp4;base64,{data}"></audio>
  <div id="r_{key}" style="margin-top:6px;font-size:15px;font-variant-numeric:tabular-nums"></div>
@@ -323,11 +352,18 @@ def lines_player(clip_path, found: dict, key: str) -> None:
   for (let r = 0; r < rows; r++) {{
    for (let k = 0; k < cfg.bars.length; k++) {{
     ctx.fillStyle = col(cfg.z[r][k]);
-    ctx.fillRect(x(cfg.bars[k]) + 0.5, TOP + r * RH + 1, Math.max(1, x(ends[k]) - x(cfg.bars[k]) - 1), RH - 2);
+    ctx.fillRect(x(cfg.bars[k]), TOP + r * RH + 1, Math.max(1, x(ends[k]) - x(cfg.bars[k]) + 0.6), RH - 2);
    }}
    ctx.fillStyle = "#ddd"; ctx.font = "13px sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
    ctx.fillText(cfg.layers[r], 4, TOP + r * RH + RH / 2);
   }}
+  // the block cuts between the lines: thin and white (the bars themselves are on the axis below)
+  const lineAt = new Set(cfg.lines.map(l => l.t.toFixed(2)));
+  cfg.blocks.slice(1).forEach(b => {{ if (lineAt.has(b.a.toFixed(2))) return;
+   for (const [c, w] of [["rgba(20,20,30,0.9)", 4], ["rgba(255,255,255,0.98)", 1.6]]) {{     // white on a dark edge
+    ctx.strokeStyle = c; ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(x(b.a), TOP); ctx.lineTo(x(b.a), BOT); ctx.stroke(); }} }});
+  const blk = cfg.blocks.find(b => now >= b.a - 1e-6 && now < b.b) || cfg.blocks[cfg.blocks.length - 1];
+  if (blk) {{ ctx.fillStyle = "rgba(255,214,10,0.22)"; ctx.fillRect(x(blk.a), TOP, x(blk.b) - x(blk.a), rows * RH); }}
   // the section being played, lit
   if (cur) {{ ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 2; ctx.strokeRect(x(cur.a) + 1, TOP - 1, x(cur.b) - x(cur.a) - 2, rows * RH + 2); }}
   // the lines and the section numbers
@@ -339,7 +375,7 @@ def lines_player(clip_path, found: dict, key: str) -> None:
   for (const s of cfg.sections) {{
    const on = cur && s.n === cur.n;
    ctx.font = (on ? "bold 17px" : "bold 14px") + " sans-serif"; ctx.fillStyle = on ? "#ffffff" : "#bdbdbd";
-   if (x(s.b) - x(s.a) > 14) ctx.fillText(String(s.n), (x(s.a) + x(s.b)) / 2, 22);
+   if (x(s.b) - x(s.a) > 14) ctx.fillText(s.label, (x(s.a) + x(s.b)) / 2, 22);
   }}
   // bar numbers: every bar a tick, a number every 4 (or 8 when crowded)
   const step = (W - G) / cfg.bars.length < 9 ? 8 : 4;
@@ -354,9 +390,10 @@ def lines_player(clip_path, found: dict, key: str) -> None:
   ctx.strokeStyle = "#ffd60a"; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(x(now), 0); ctx.lineTo(x(now), H); ctx.stroke();
   const k = barAt(now), beat = Math.min(4, 1 + Math.floor((now - cfg.bars[k]) / Math.max(ends[k] - cfg.bars[k], 0.001) * 4));
   rd.innerHTML = "<b>" + mmss(now) + "</b> &nbsp;&middot;&nbsp; bar <b>" + (k + 1) + "</b>." + beat + " of " + cfg.bars.length
-    + " &nbsp;&middot;&nbsp; section <b>" + (cur ? cur.n : "-") + "</b> of " + cfg.sections.length
-    + (cur ? " &nbsp;(" + mmss(cur.a) + " &ndash; " + mmss(cur.b) + ")" : "");
-  wd.textContent = cur ? ("starts with: " + cur.why + "   |   it is: " + cur.words) : "";
+    + " &nbsp;&middot;&nbsp; section <b>" + (cur ? cur.label : "-") + "</b>"
+    + (cur ? " &nbsp;(" + mmss(cur.a) + " &ndash; " + mmss(cur.b) + ")" : "")
+    + (blk ? " &nbsp;&middot;&nbsp; block <b>" + blk.n + "</b> of " + cfg.blocks.length + " &nbsp;(" + blk.bars + (blk.bars == 1 ? " bar, " : " bars, ") + (blk.b - blk.a).toFixed(1) + " s)" : "");
+  wd.textContent = cur ? ("starts with: " + cur.why + "   |   it is: " + cur.words + (blk ? "   |   blocks: " + blk.why : "")) : "";
  }}
  let raf = null;
  function tick() {{ draw(au.currentTime); raf = requestAnimationFrame(tick); }}

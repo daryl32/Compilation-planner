@@ -129,7 +129,7 @@ def test_a_profile_per_section():
     assert verse["profile"]["on"] == ["vocals"] and verse["profile"]["busy"] is None
     assert hit["profile"]["on"] == ["drums", "bass"] and hit["profile"]["level_word"] == "loud"
     assert hit["profile"]["busy"] == 4.0 and "drums (4.0/s)" in hit["words"] and "🥁 drums + 🎸 bass" in hit["words"]
-    assert again["profile"]["like"] == verse["n"] and f"like {verse['n']}" in again["words"]
+    assert again["profile"]["like"] == verse["label"] and f"like {verse['label']}" in again["words"]
     assert verse["profile"]["like"] is None
     rising = [s for s in secs if s["profile"]["trend"] == "rising"]
     assert rising and all(12 * 2.0 - 4 <= s["start"] < 20 * 2.0 for s in rising) and "↗ rising" in rising[0]["words"]
@@ -170,3 +170,64 @@ def test_the_real_stems_are_used_when_the_laptop_has_measured_them():
     # the matcher's own reading (audio_drive) is untouched by the stem curves
     import audio_drive as AD
     assert np.allclose(AD.drivers(track)["curve"], AD.drivers(load_track(DATA, "song_full"))["curve"])
+
+
+def test_sections_parts_and_blocks():
+    """A big change starts a section, a smaller one a part of it; the profile sets the block lengths."""
+    import section_bounds as SB
+    n = 44
+    bars = np.arange(n) * 2.0                                   # 120 BPM: a bar is 2 s
+    drums, voice, loud = np.zeros(n), np.zeros(n), np.full(n, 0.12)
+    voice[6:14] = 0.6;  loud[6:14] = 0.3                         # the voice alone (a smaller change → a part)
+    loud[14:22] = np.linspace(0.35, 0.8, 8); voice[14:22] = 0.6  # still the voice, rising
+    drums[22:36] = 0.9; loud[22:36] = 0.95                       # the hit: busy loud drums
+    lv = {"drums": drums, "vocals": voice, "loudness": loud}
+    hits = np.where(drums > 0, 5.0, 0.0)
+    lines = SB.find_lines(bars, lv, n * 2.0)
+    secs = SB.profile(SB.sections(bars, lv, n * 2.0, lines), bars, lv, hits)
+    labels = [s["label"] for s in secs]
+    assert labels[0] in ("1", "1a") and len(set(labels)) == len(labels)
+    assert all(s["main"] >= 1 for s in secs) and [s["main"] for s in secs] == sorted(s["main"] for s in secs)
+    for s_, ln in zip(secs[1:], lines):                          # a solid line: a new number; a dotted one: a letter
+        prev = secs[secs.index(s_) - 1]
+        assert (s_["main"] == prev["main"] + 1) == (ln["level"] == 1)
+    blks = SB.blocks(secs, bars, n * 2.0)
+    assert blks[0]["start"] == 0.0 and blks[-1]["end"] == n * 2.0
+    assert all(abs(a["end"] - b["start"]) < 1e-6 for a, b in zip(blks, blks[1:]))        # the whole track, in order
+    starts = {round(b["start"], 2) for b in blks}
+    assert all(round(ln["time"], 2) in starts for ln in lines)                            # every line is a cut
+    assert all(b["end"] - b["start"] >= 1.4 - 1e-6 for b in blks)                         # never under the shortest clip
+    assert all(b["bars"] in (0.5, 1, 2, 3, 4, 5, 6, 8) for b in blks)
+    in_hit = [b for b in blks if 44.0 <= b["start"] < 72.0]
+    assert in_hit and all(b["bars"] == 1 and "busy loud drums" in b["why"] for b in in_hit)
+    quiet = [b for b in blks if b["end"] <= 12.0]
+    assert quiet and all(b["bars"] >= 2 for b in quiet) and "hardly anything playing" in quiet[0]["why"]
+    rising = [b for b in blks if 28.0 <= b["start"] < 44.0]
+    assert rising[0]["bars"] >= rising[-1]["bars"] and "speeding up" in rising[0]["why"]  # shorter towards the hit
+    # musical lengths: six bars at a pace of four is 4 + 2; a scrap joins the block before it
+    assert SB._fill(6, lambda x: 4.0) == [4.0, 2.0] and SB._fill(5, lambda x: 4.0) == [5.0]
+    assert SB._fill(3, lambda x: 2.0) == [2.0, 1.0] and SB._fill(8, lambda x: 2.0) == [2.0] * 4
+    # the voice leads and a cut would land inside a sung phrase: it moves to a clean bar line (or is dropped)
+    part = [{**secs[1], "bar": 0, "profile": {**secs[1]["profile"], "on": ["vocals"], "trend": "steady",
+                                               "level_word": "medium"}}]
+    plain = SB.blocks(part, bars[:8], 16.0)
+    assert [b["bars"] for b in plain] == [2, 2, 2, 2]
+    sung = SB.blocks(part, bars[:8], 16.0, vocal_starts=[2.5], vocal_ends=[9.5])           # one phrase over 4 and 8 s
+    cuts = [b["start"] for b in sung[1:]]
+    assert 4.0 not in cuts and 8.0 not in cuts and all(not (2.5 + 0.7 < c < 9.5 - 0.7) for c in cuts)
+    assert sung[0]["start"] == 0.0 and sung[-1]["end"] == 16.0
+    # slow tempo: a pace that would make a block longer than 8 s is halved; half bars only where they are still a clip
+    assert SB._pace({"on": []}, 2.7, 1.4)[0] == 2.0 and SB._pace({"on": []}, 1.9, 1.4)[0] == 4.0
+    busy = {"on": ["drums"], "busy_word": "busy", "level_word": "loud"}
+    assert SB._pace(busy, 3.0, 1.4)[0] == 0.5 and SB._pace(busy, 2.0, 1.4)[0] == 1.0
+    # a real library track, and the page's player
+    from tests.fixtures import load_track
+    import sections_view as SV
+    found = SB.for_track(load_track(DATA, "song_full"))
+    assert found["blocks"] and found["blocks"][-1]["end"] == found["duration"]
+    assert {b["section"] for b in found["blocks"]} == {s["label"] for s in found["sections"]}
+    cfg = SV.player_config(found)
+    assert len(cfg["blocks"]) == len(found["blocks"]) and cfg["sections"][0]["label"] == found["sections"][0]["label"]
+    fig = SV.lines_figure(found)
+    assert any(sh.line.color.startswith("rgba(255,255,255") for sh in fig.layout.shapes)   # the block cuts on the chart
+    assert list(fig.layout.xaxis.ticktext)[:2] == ["1", "5"]                                # bars numbered on the axis
