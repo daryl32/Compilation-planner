@@ -243,6 +243,9 @@ def upload_local(only: list = None) -> int:
         there = set(H.remote_ls(remote))
         todo = [v for v in vids if v not in there]
         items = [(root / v / f, f"{v}/{f}") for v in todo for f in VIDEO_FILES if (root / v / f).exists()]
+        # …and the embeddings a tuned encoder made for them (siglip_tune.py), so the server can score them
+        items += [(p, f"{v}/{p.name}") for v in todo for p in sorted((root / v).glob("embeddings_*.npz"))
+                  if ".tmp." not in p.name]
         mb = sum(p.stat().st_size for p, _ in items) / 1e6
         print(f"{len(vids)} laptop-only video(s); {len(todo)} new on the server ({mb:.0f} MB)…", flush=True)
         H.send(items, remote)

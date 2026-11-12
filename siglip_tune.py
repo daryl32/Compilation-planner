@@ -28,7 +28,9 @@ Usage (from the activated .venv in scene-labeling\scripts, or siglip_tune.bat):
     python siglip_tune.py check                 does it fit and how long will it take (run this first)
     python siglip_tune.py frames                cut the training pictures (once; picks up where it stopped)
     python siglip_tune.py train --name ft1      fine-tune (keeps the best epoch on the held-out videos)
-    python siglip_tune.py embed --name ft1      every video's embeddings again (picks up where it stopped)
+    python siglip_tune.py embed --name ft1      every video's embeddings again (picks up where it stopped),
+                                                then sent to the server
+    python siglip_tune.py push --name ft1       just send them (and the encoder) to the server — the hub
     python siglip_tune.py all --name ft1        frames, train, embed
 Options: --blocks 4, --epochs 3, --batch 16 (try 8 if the GPU runs out of memory), --lr 1e-5,
 --per-video 150, --max-frames 30000, --no-augment, --only vidA vidB (embed), --redo (embed).
@@ -155,15 +157,40 @@ def _proxy(video: str):
     return p, {"proxy": info}
 
 
-def _decode(path: Path, man: dict, seconds: float = None):
+def _decode(path: Path, man: dict, seconds: float = None, step: int = 1):
     """(frame index, BGR picture) for the whole preview copy — the same ffmpeg command, so the same
-    pictures bit for bit, as the pose / embedding step (modal_trial._pose_cmd)."""
+    pictures bit for bit, as the pose / embedding step (modal_trial._pose_cmd). step > 1: only every
+    step-th frame leaves ffmpeg (framestep, before the resize) — the same pictures, far less work."""
     import modal_trial as MT
     cmd, w, h = MT._pose_cmd(str(path), man)
+    if step > 1:
+        k = cmd.index("-vf") + 1
+        a, b = cmd[k].split(",", 1)                      # "fps=15", "scale=w:h"
+        cmd = cmd[:k] + [f"{a},framestep={step},{b}"] + cmd[k + 1:]
     if seconds:
         cmd = cmd[:-5] + ["-t", f"{seconds:g}"] + cmd[-5:]
     for i, f in enumerate(MT._frames(cmd, w, h)):
-        yield i, f
+        yield i * step, f
+
+
+_FAST = {}
+
+
+def fast_ok(path: Path, man: dict, step: int) -> bool:
+    """Does this ffmpeg's framestep give exactly the pictures the full decode gives? Checked once per run on
+    the first 8 seconds of a video; if not (or it fails), the full decode is used."""
+    if step not in _FAST:
+        try:
+            slow = [f.copy() for i, f in _decode(path, man, seconds=8.0) if i % step == 0]
+            fast = [f.copy() for _, f in _decode(path, man, seconds=8.0, step=step)]
+            n = min(len(slow), len(fast))
+            _FAST[step] = n >= 3 and abs(len(slow) - len(fast)) <= 1 and all(
+                np.array_equal(a, b) for a, b in zip(slow[:n], fast[:n]))
+        except Exception:      # noqa: BLE001 — an ffmpeg without framestep
+            _FAST[step] = False
+        if not _FAST[step]:
+            print("   (this ffmpeg's frame skipping gives other pictures — using the full decode)", flush=True)
+    return _FAST[step]
 
 
 def extract_frames(sel: dict) -> dict:
@@ -528,7 +555,9 @@ def embed_video(model, proc, path: Path, man: dict, times: np.ndarray, seconds: 
         bf.clear()
         bi.clear()
 
-    for i, f in _decode(path, man, seconds=seconds):
+    every = int(round(TL.POSE_FPS / 2))              # the embeddings' own step: every 8th frame of 15 a second
+    step = every if len(idx) and not (idx % every).any() and fast_ok(path, man, every) else 1
+    for i, f in _decode(path, man, seconds=seconds, step=step):
         if i in want:
             bf.append(f.copy())
             bi.append(i)
@@ -547,7 +576,17 @@ def embed_video(model, proc, path: Path, man: dict, times: np.ndarray, seconds: 
     return np.stack(out), borrowed
 
 
-def embed(name: str, only: list = None, redo: bool = False) -> int:
+def encoders_in_use() -> list:
+    """Encoders whose embeddings the library already has (a tuned.pt and at least one video embedded with
+    it) — new videos get theirs too (local_vision.py)."""
+    root, enc = ST.WORK / "videos", ST.WORK / "encoders"
+    if not root.exists() or not enc.exists():
+        return []
+    return sorted(d.name for d in enc.iterdir() if (d / "tuned.pt").exists()
+                  and any(root.glob(f"*/{ST.emb_file(d.name)}")))
+
+
+def embed(name: str, only: list = None, redo: bool = False, send: bool = True) -> int:
     root = ST.WORK / "videos"
     vids = sorted(d.name for d in root.iterdir() if d.is_dir() and (d / "embeddings.npz").exists()) \
         if root.exists() else []
@@ -557,11 +596,11 @@ def embed(name: str, only: list = None, redo: bool = False) -> int:
     todo = [v for v in vids if redo or not (root / v / fname).exists()]
     if not todo:
         print(f"Every video already has {fname} (--redo to make them again).")
-        return 0
+        return push(name) if send else 0
     print(f"Loading SigLIP2 with encoder '{name}'…", flush=True)
     model, proc = load_tuned(name)
     print(f"Embedding {len(todo)} of {len(vids)} videos again ({len(vids) - len(todo)} already done)…", flush=True)
-    t0, secs, problems = time.time(), 0.0, []
+    t0, secs, problems, n_emb = time.time(), 0.0, [], 0
     for k, v in enumerate(todo, 1):
         path, man = _proxy(v)
         if path is None:
@@ -577,6 +616,7 @@ def embed(name: str, only: list = None, redo: bool = False) -> int:
         np.savez_compressed(tmp, frame_times=times, frame_embs=emb, encoder=name, base=EMB_MODEL)
         tmp.replace(root / v / fname)
         secs += float(man["proxy"].get("duration") or 0.0)
+        n_emb += len(times)
         el = time.time() - t0
         print(f"[{k}/{len(todo)}] {v}: {len(times):,} embeddings"
               + (f" ({borrowed} past the end of the file — neighbour's used)" if borrowed else "")
@@ -586,8 +626,65 @@ def embed(name: str, only: list = None, redo: bool = False) -> int:
         for p in problems[:10]:
             print("   " + p)
         return 1
-    print(f"\nDone: {len(todo)} videos ({secs / 3600:.1f} h of footage) in {(time.time() - t0) / 60:.0f} min.\n"
-          f"Next:  student_tags.bat train --name v16-{name} --emb {name}")
+    el = time.time() - t0
+    print(f"\nDone: {len(todo)} videos ({secs / 3600:.1f} h of footage) in {el / 60:.0f} min "
+          f"({n_emb / max(el, 1e-6):.0f} embeddings a second).")
+    return push(name) if send else 0
+
+
+# ---------------------------------------------------------------------------
+# push — the tuned embeddings (and the encoder, as its only other copy) to the server, the hub
+# ---------------------------------------------------------------------------
+
+def push(name: str, chunk: int = 15) -> int:
+    """Laptop → server: embeddings_<name>.npz for every video the server has and lacks it for, plus the
+    encoder's files. Then the server can export / rescore a student trained on them. Does nothing on the
+    server itself or with no server set."""
+    import student_hub as H
+    if not H.server():
+        return 0
+    import shlex
+    root, fname = ST.WORK / "videos", ST.emb_file(name)
+    try:
+        work = H.remote_paths()["work"]
+        there = set(H.remote_ls(f"{work}/videos"))
+        r = H.run_remote(f"cd {shlex.quote(work + '/videos')} 2>/dev/null && ls -1 */{shlex.quote(fname)} "
+                         "2>/dev/null || true", timeout=120)
+        if r.returncode != 0:
+            raise RuntimeError(H.why_failed(r))
+        done = {ln.rsplit("/", 1)[0] for ln in r.stdout.splitlines() if ln.strip()}
+        mine = sorted(d.name for d in root.iterdir() if (d / fname).exists()) if root.exists() else []
+        todo = [v for v in mine if v in there and v not in done]
+        lacking = sorted(there - set(mine))
+        enc = encoder_dir(name)
+        enc_there = set(H.remote_ls(f"{work}/encoders/{name}"))
+        enc_items = [(p, p.name) for p in sorted(enc.iterdir()) if p.is_file() and p.name not in enc_there
+                     and ".tmp." not in p.name] if enc.exists() else []
+        if enc_items:
+            print(f"Sending the encoder '{name}' to the server "
+                  f"({sum(p.stat().st_size for p, _ in enc_items) / 1e6:.0f} MB)…", flush=True)
+            H.send(enc_items, f"{work}/encoders/{name}")
+        if todo:
+            mb = sum((root / v / fname).stat().st_size for v in todo) / 1e6
+            print(f"Sending {fname} for {len(todo)} video(s) to the server ({mb:.0f} MB)…", flush=True)
+            for s in range(0, len(todo), chunk):
+                part = todo[s:s + chunk]
+                H.send([(root / v / fname, f"{v}/{fname}") for v in part], f"{work}/videos")
+                print(f"   {min(s + chunk, len(todo))} of {len(todo)}", flush=True)
+        else:
+            print(f"The server already has {fname} for every video it shares with this laptop.")
+        not_there = [v for v in mine if v not in there]
+        if not_there:
+            print(f"   {len(not_there)} laptop video(s) aren't on the server yet — `student_tags upload-local` "
+                  "sends them, with these embeddings.")
+        if lacking:
+            print(f"⚠️ The server has {len(lacking)} video(s) this laptop has no {fname} for "
+                  f"(e.g. {', '.join(lacking[:3])}) — the server can't export until they have one: "
+                  "`student_tags fetch`, then `siglip_tune embed` again.")
+            return 1
+    except Exception as e:              # noqa: BLE001
+        print(f"Couldn't send them to the server: {e}")
+        return 1
     return 0
 
 
@@ -700,7 +797,7 @@ def check(blocks: int, batch: int, per_video: int, max_frames: int) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Fine-tune SigLIP2's last blocks on your tags (laptop GPU).")
-    ap.add_argument("command", choices=["check", "frames", "train", "embed", "all"])
+    ap.add_argument("command", choices=["check", "frames", "train", "embed", "push", "all"])
     ap.add_argument("--name", default="ft1", help="encoder name (default ft1)")
     ap.add_argument("--blocks", type=int, default=BLOCKS, help=f"transformer blocks trained (default {BLOCKS} of 27)")
     ap.add_argument("--epochs", type=int, default=EPOCHS)
@@ -717,6 +814,12 @@ def main(argv=None) -> int:
     ST.WORK.mkdir(exist_ok=True)
     if a.command == "check":
         return check(a.blocks, a.batch, a.per_video, a.max_frames)
+    if a.command == "push":
+        import student_hub as H
+        if not H.server():
+            print("No server set — add STUDENT_SERVER = \"root@<server address>\" to config.py.")
+            return 1
+        return push(a.name)
     if a.command in ("frames", "all"):
         ds, sel, _ = _selection(a.per_video, a.max_frames)
         extract_frames(sel)

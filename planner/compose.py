@@ -324,8 +324,111 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     }
     return {"plan": plan, "segments": segments, "notes": list(opts.notes), "shortfall": shortfall,
             "unfilled": unfilled, "summary": SMX.plan_summary(timeline), "track": track,
-            "video_stats": dict(opts.video_stats),
+            "video_stats": dict(opts.video_stats), "alternatives": dict(opts.alternatives),
             "made": time.strftime("%H:%M:%S")}
+
+
+def rework_plan(res: dict, redo: set, force: dict = None, excluded: set = None) -> dict:
+    """🔁 Match only some blocks of a compiled plan again; every other block stays exactly as it is and its footage
+    stays out of reach. redo: timeline entry indices; force: {entry index: an alternative from res["alternatives"]}
+    to put in that block. Same settings as the compile. Returns the updated result."""
+    import core.story_matcher as SMX
+    from planner.data import build_footage_queues, load_all_catalogues
+    from render_preview import colab_to_local
+    plan = res["plan"]
+    timeline_old = plan["timeline"]
+    redo = {int(k) for k in redo} | {int(k) for k in (force or {})}
+    segments = [{"start": float(e["track_time"][0]), "end": float(e["track_time"][1]),
+                 "energy": e.get("segment_energy", 0.5), "intensity": e.get("segment_intensity", e.get("segment_energy", 0.5)),
+                 "section_type": e.get("section_type"), "driver": e.get("driver")} for e in timeline_old]
+    story = plan.get("story") or {}
+    queues = build_footage_queues(tuple(res["video_ids"]), (), LC.library_ranges())
+    opts = SMX.StoryOptions(music_story=float(story.get("music_story", 0.5)),
+                            smooth_contrast=float(story.get("smooth_contrast", 0.5)),
+                            section_map=(plan.get("segmentation") or {}).get("section_map") or None,
+                            max_videos=int(story.get("max_videos") or 0), merge_blocks=False,
+                            movement_only=bool(story.get("movement_only")), curves_of=_motion_curves,
+                            level_range=float(story.get("level_range") or 0.0),
+                            bounce_speed=float(story.get("bounce_speed") or 0.0),
+                            keep={k: e for k, e in enumerate(timeline_old) if k not in redo},
+                            force={int(k): v for k, v in (force or {}).items()})
+    excluded = set(excluded if excluded is not None else (tuple(k) for k in plan.get("globally_rejected_clips") or ()))
+    timeline, shortfall, unfilled = SMX.match_story(
+        segments, queues, res["track"], min_clips=int(plan.get("min_clips", 1)), max_clips=int(plan.get("max_clips", 1)),
+        ramp_start=float(plan.get("ramp_start", 0.5)), ramp_end=float(plan.get("ramp_end", 0.9)),
+        global_excluded=excluded, options=opts)
+    catalogues = load_all_catalogues()
+    for k, e in enumerate(timeline):
+        e["merged"] = bool(timeline_old[k].get("merged")) if k < len(timeline_old) else False
+        if k in redo:
+            for slot in e["scenes"]:
+                for link in slot["chain"]:
+                    link["source_path"] = colab_to_local(catalogues[link["video_id"]]["source_path"])
+    new_plan = {**plan, "timeline": timeline, "globally_rejected_clips": [list(k) for k in excluded]}
+    return {**res, "plan": new_plan, "summary": SMX.plan_summary(timeline),
+            "shortfall": shortfall, "alternatives": {**(res.get("alternatives") or {}), **opts.alternatives},
+            "reworked": sorted(redo), "made": time.strftime("%H:%M:%S")}
+
+
+def _queue_rework(redo: list, force: dict = None) -> None:
+    st.session_state["compose_rework"] = {"redo": list(redo), "force": dict(force or {})}
+
+
+def _do_pending_rework(res: dict) -> None:
+    job = st.session_state.pop("compose_rework", None)
+    if not job:
+        return
+    n = len(set(job["redo"]) | set(job["force"]))
+    with st.spinner(f"🔁 Matching {n} block{'s' if n != 1 else ''} again — the rest of the plan stays as it is…"):
+        try:
+            new = rework_plan(res, set(job["redo"]), job["force"],
+                              excluded={tuple(k) for k in st.session_state.get("compose_excluded") or ()})
+        except Exception as e:          # noqa: BLE001
+            st.session_state["compose_msg"] = ("error", f"Couldn't redo those blocks: {e}")
+            return
+    st.session_state[RESULT_KEY] = new
+    st.session_state.pop("compose_render", None)
+    what = "Swapped in your pick" if job["force"] else f"Redid {n} block{'s' if n != 1 else ''}"
+    st.session_state["compose_msg"] = ("success", f"🔁 {what} — every other clip is unchanged. Render again to see it.")
+    st.rerun()
+
+
+def _marked_blocks(plan: dict, excluded: set) -> list:
+    """Timeline entries holding a 🚫 clip."""
+    return [k for k, e in enumerate(plan["timeline"])
+            if any((link["video_id"], link["scene_id"]) in excluded for s in e["scenes"] for link in s.get("chain") or [])]
+
+
+def _alternatives_row(res: dict, entry_index: int, excluded: set, cats: dict) -> None:
+    """🔁 The block's next-best clips, as thumbnails — tap one to put it in (no recompile)."""
+    import core.story_matcher as SMX
+    from core.footage import _tc_to_seconds
+    from planner.data import get_nearest_thumbnail
+    alts = SMX.free_alternatives(res["plan"]["timeline"], entry_index,
+                                 (res.get("alternatives") or {}).get(entry_index), excluded)
+    if not alts:
+        st.caption("🔁 No other clip from this block's search is free — ↻ Redo marked blocks searches it again.")
+        return
+    st.caption("🔁 Next best for this block — tap ✅ to put one in:")
+    per_row = 3
+    for row in range(0, len(alts), per_row):
+        cols = st.columns(per_row)
+        for col, alt in zip(cols, alts[row:row + per_row]):
+            scene_id, off, dur = alt["pieces"][0]
+            start = None
+            for sc in (cats.get(alt["video_id"]) or {}).get("scenes") or []:
+                if sc.get("scene_id") == scene_id:
+                    start = _tc_to_seconds(sc["start_tc"]) + float(off)
+                    break
+            with col:
+                thumb = get_nearest_thumbnail(cats, alt["video_id"], start or 0.0) if start is not None else None
+                if thumb is not None:
+                    LC.safe_image(thumb, width=150)
+                sync = f" · 🎯 {alt['sync']:.0%}" if alt.get("sync") is not None else ""
+                st.caption(f"{alt['video_id'][:28]}  \n{format_mmss(start or 0)} · fit {alt.get('fit') or 0:.2f}{sync}"
+                           + (f" · {len(alt['pieces'])} clips" if len(alt["pieces"]) > 1 else ""))
+                st.button("✅ Use", key=f"compose_alt_{entry_index}_{alt['video_id']}_{scene_id}_{off}",
+                          width="stretch", on_click=_queue_rework, args=([], {entry_index: alt}))
 
 
 def _run_compile(track_id: str, video_ids: list, ns: str) -> None:
@@ -741,6 +844,7 @@ def _toggle_reject(key: tuple) -> None:
 
 
 def render_result(res: dict) -> None:
+    _do_pending_rework(res)
     plan, summary = res["plan"], res["summary"]
     _do_pending_render(res)
     c = st.columns([5, 1.4])
@@ -768,10 +872,11 @@ def render_result(res: dict) -> None:
     _strip_chart(res)
     excluded = set(st.session_state.get("compose_excluded") or ())
     with st.expander(f"🎞️ Clips ({sum(len(e['scenes']) for e in plan['timeline'])})", expanded=False):
-        st.caption("🚫 a clip you don't want, then ↻ Recompile — it's left out of the whole plan.")
+        st.caption("🚫 a clip you don't want: its block's next-best clips appear — ✅ one to swap it in, or "
+                   "↻ Redo marked blocks to search those blocks again. Either way the rest of the plan stays as it is.")
         from planner.data import get_nearest_thumbnail, load_all_catalogues
         cats = load_all_catalogues()
-        for e in plan["timeline"]:
+        for k_entry, e in enumerate(plan["timeline"]):
             a, b = e["track_time"]
             for s in e["scenes"]:
                 info = s.get("story") or {}
@@ -796,6 +901,15 @@ def render_result(res: dict) -> None:
                              f"{sync_bit}{how}" if info.get("fit") is not None else "Classic's pick")
                 r[4].button("✅" if key in excluded else "🚫", key=f"compose_rej_{e['segment_index']}_{s['video_id']}_{s['scene_id']}",
                             help="Put back" if key in excluded else "Leave this clip out", on_click=_toggle_reject, args=(key,))
+                if key in excluded:
+                    _alternatives_row(res, k_entry, excluded, cats)
+    marked = _marked_blocks(plan, excluded)
+    if marked:
+        st.button(f"🔁 Redo {len(marked)} marked block{'s' if len(marked) != 1 else ''} — the rest stays as it is",
+                  key="compose_redo", type="primary", width="stretch",
+                  help="Search only the blocks with a 🚫 clip again (same settings as the compile); every other clip "
+                       "stays exactly where it is. ↻ Recompile builds the whole plan again.",
+                  on_click=_queue_rework, args=(marked, {}))
     b = st.columns([1.6, 0.5, 1.4, 1.4, 1.4, 1.6])
     b[0].button("🎬 Render preview", key="compose_render_btn", type="primary", width="stretch", on_click=_queue_render)
     with b[1].popover("⚙️", width="stretch", help="Render options"):
@@ -814,7 +928,7 @@ def render_result(res: dict) -> None:
     b[3].download_button("⬇️ Download", data=json.dumps(plan, indent=2), file_name=f"{plan['track_id']}_plan.json",
                          mime="application/json", width="stretch", key="compose_dl")
     b[4].button("↻ Recompile", key="compose_again", width="stretch",
-                help="Build the plan again — without the 🚫 clips, with the current Split screen / slider settings.",
+                help="Build the whole plan again — without the 🚫 clips, with the current Split screen / slider settings.",
                 on_click=_run_compile, args=(plan["track_id"], res["video_ids"], res.get("way", "song")))
     b[5].button("🎛️ Open in Classic", key="compose_classic", width="stretch", on_click=_open_in_classic, args=(res,))
     if st.toggle("📥 Sync data", key="compose_sync_data",

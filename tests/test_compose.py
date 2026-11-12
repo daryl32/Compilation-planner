@@ -87,6 +87,30 @@ def test_planner_landing_and_new_matcher_pages(monkeypatch):
         at.button(key="cv_go").click().run()
         assert not errors(at), errors(at)
         assert at.session_state[PC_RESULT()]["way"] == "video"
+        # 🔁 on the result page: 🚫 a clip → its block's next-best clips show; ✅ one swaps it in, 🔁 redoes the block
+        at.session_state["compose_movement_only"] = True
+        at.button(key="compose_again").click().run()
+        assert not errors(at), errors(at)
+        res = at.session_state[PC_RESULT()]
+        import core.story_matcher as SMX
+        tl = res["plan"]["timeline"]
+        k = next((i for i in range(1, len(tl)) if tl[i]["scenes"] and SMX.free_alternatives(tl, i, res["alternatives"].get(i))), None)
+        if k is not None:
+            s0 = tl[k]["scenes"][0]
+            rej = [b for b in at.button if b.key and b.key.startswith(f"compose_rej_{tl[k]['segment_index']}_{s0['video_id']}_")]
+            rej[0].click().run()
+            assert not errors(at), errors(at)
+            use = [b for b in at.button if b.key and b.key.startswith(f"compose_alt_{k}_")]
+            assert use and [b for b in at.button if b.key == "compose_redo"]
+            before = [[(l["video_id"], l["clip_start_sec"]) for s_ in e["scenes"] for l in s_["chain"]] for e in tl]
+            use[0].click().run()
+            assert not errors(at), errors(at)
+            t2 = at.session_state[PC_RESULT()]["plan"]["timeline"]
+            after = [[(l["video_id"], l["clip_start_sec"]) for s_ in e["scenes"] for l in s_["chain"]] for e in t2]
+            assert after[k] != before[k] and all(a_ == b_ for i, (a_, b_) in enumerate(zip(before, after)) if i != k)
+            assert t2[k]["scenes"][0]["story"].get("chosen")
+            at.button(key="compose_redo").click().run() if [b for b in at.button if b.key == "compose_redo"] else None
+            assert not errors(at), errors(at)
         # Classic is untouched behind the landing
         at.button(key="compose_back").click().run()
         at.session_state["planner_mode"] = "🎛️ Classic"
@@ -100,3 +124,50 @@ def test_planner_landing_and_new_matcher_pages(monkeypatch):
 def PC_RESULT():
     import planner.compose as PC
     return PC.RESULT_KEY
+
+
+def test_redo_only_the_marked_blocks_and_swap_in_an_alternative(monkeypatch):
+    """🔁 Reject a clip → only its block is matched again, every other clip stays exactly as it was and no footage
+    is used twice; the block's next-best clips are kept, and one of them can be put in directly."""
+    out = _timelines(monkeypatch)
+    try:
+        import core.story_matcher as SMX
+        import planner.compose as PC
+        vids = ["vid_a", "vid_b", "vid_c", "vid_f"]
+        for only in (True, False):
+            res = PC.compile_plan("song_full", vids, movement_only=only)
+            res["video_ids"] = vids
+            tl = res["plan"]["timeline"]
+            assert set(res["alternatives"]) == set(range(len(tl)))
+            sig = lambda e: [(l["video_id"], l["scene_id"], l["clip_start_sec"], l["clip_duration_sec"])   # noqa: E731
+                             for s in e["scenes"] for l in s["chain"]]
+            picked = [i for i, e in enumerate(tl) if e["scenes"] and e["scenes"][0]["story"].get("fit") is not None and i > 0]
+            k = next((i for i in picked if SMX.free_alternatives(tl, i, res["alternatives"][i])), picked[0])
+            gone = (tl[k]["scenes"][0]["video_id"], tl[k]["scenes"][0]["scene_id"])
+            new = PC.rework_plan(res, {k}, excluded={gone})
+            t2 = new["plan"]["timeline"]
+            assert len(t2) == len(tl) and new["reworked"] == [k]
+            assert all(sig(a) == sig(b) for i, (a, b) in enumerate(zip(tl, t2)) if i != k)        # the rest untouched
+            assert gone not in {(l["video_id"], l["scene_id"]) for s in t2[k]["scenes"] for l in s["chain"]}
+            assert all(abs(a["track_time"][0] - b["track_time"][0]) < 1e-6 for a, b in zip(tl, t2))
+            used = {}
+            for e in t2:                                                                          # nothing used twice
+                for s in e["scenes"]:
+                    for l in s["chain"]:
+                        a_ = l["clip_start_sec"]
+                        for b0, b1 in used.get(l["video_id"], []):
+                            assert min(b1, a_ + l["clip_duration_sec"]) - max(b0, a_) <= 0.05
+                        used.setdefault(l["video_id"], []).append((a_, a_ + l["clip_duration_sec"]))
+            # the alternatives on offer are free, and one can be put in as it is
+            alts = SMX.free_alternatives(t2, k, new["alternatives"][k], {gone})
+            assert alts or not only                               # the movement-only plan has one to offer here
+            if alts:
+                pick = alts[-1]
+                t3 = PC.rework_plan(new, set(), {k: pick}, excluded={gone})["plan"]["timeline"]
+                slot = t3[k]["scenes"][0]
+                assert slot["video_id"] == pick["video_id"] and slot["story"].get("chosen")
+                assert [(l["scene_id"], round(l["offset_into_scene_sec"], 2)) for l in slot["chain"]] == \
+                       [(p[0], round(p[1], 2)) for p in pick["pieces"]]
+                assert all(sig(a) == sig(b) for i, (a, b) in enumerate(zip(t2, t3)) if i != k)
+    finally:
+        shutil.rmtree(out, ignore_errors=True)

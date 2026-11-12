@@ -134,6 +134,16 @@ def test_end_to_end_on_a_tiny_encoder(tmp_path, monkeypatch):
     plain, _ = FT.embed_video(m0, p0, clip, {"proxy": {"width": 320, "height": 180}}, np.array([0.0, 0.53, 1.07]))
     assert not np.allclose(plain.astype(np.float32), e[:3], atol=1e-3)
 
+    # frame skipping inside ffmpeg gives the same embeddings as the full decode
+    grid = np.round(np.arange(0, 12) * 8 / TL.POSE_FPS, 2)          # the real embedding times: every 8th frame
+    FT._FAST.clear()
+    quick, _ = FT.embed_video(m0, p0, clip, {"proxy": {"width": 320, "height": 180}}, grid)
+    assert FT._FAST == {8: True}
+    monkeypatch.setattr(FT, "fast_ok", lambda *a: False)
+    full, _ = FT.embed_video(m0, p0, clip, {"proxy": {"width": 320, "height": 180}}, grid)
+    assert np.array_equal(quick, full)
+    assert FT.encoders_in_use() == ["t"]
+
     # the student trains on them, records it, and scores again from the saved model
     assert S.main(["train", "--name", "s-t", "--epochs", "3", "--folds", "2", "--emb", "t"]) == 0
     smeta = json.loads((tmp_path / "models" / "s-t" / "meta.json").read_text())
@@ -152,3 +162,44 @@ def test_end_to_end_on_a_tiny_encoder(tmp_path, monkeypatch):
         f.rename(f.with_name("gone.npz"))
     assert S.main(["rescore-all"]) == 0
     assert S.main(["export", "--name", "s-t"]) == 1
+
+
+def test_push_sends_the_tuned_embeddings_and_encoder_to_the_server(tmp_path, monkeypatch, capsys):
+    """Laptop → server over ssh (stood in for by a script that runs the command here)."""
+    import sys
+    import student_hub as H
+    fake = tmp_path / "fake_ssh.py"
+    fake.write_text("import subprocess, sys\nsys.exit(subprocess.run(['sh', '-c', sys.argv[2]]).returncode)\n")
+    srv, lap = tmp_path / "server" / "student" / "_student", tmp_path / "laptop"
+    names = ["vid a", "Próbuje b", "vid c"]
+    for v in names[:2] + ["only on the server"]:
+        (srv / "videos" / v).mkdir(parents=True)
+        (srv / "videos" / v / "embeddings.npz").write_text("x")
+    for v in names:
+        (lap / "videos" / v).mkdir(parents=True)
+        (lap / "videos" / v / "embeddings.npz").write_text("x")
+        (lap / "videos" / v / "vision.json").write_text("x")
+        (lap / "videos" / v / "embeddings_ft1.npz").write_text("tuned " + v)
+    (lap / "encoders" / "ft1").mkdir(parents=True)
+    (lap / "encoders" / "ft1" / "tuned.pt").write_bytes(b"weights")
+    (lap / "encoders" / "ft1" / "meta.json").write_text("{}")
+    monkeypatch.setattr(S, "WORK", lap)
+    assert FT.push("ft1") == 0                                       # no server set: nothing to do
+    monkeypatch.setenv("STUDENT_SERVER", "root@test")
+    monkeypatch.setenv("STUDENT_SSH", f"{sys.executable} {fake}")
+    monkeypatch.setenv("STUDENT_WORK_DIR", str(tmp_path / "server" / "student"))
+    H._PATHS.clear()
+    assert FT.main(["push", "--name", "ft1"]) == 1                   # the server has a video the laptop can't cover
+    assert "only on the server" in capsys.readouterr().out
+    for v in names[:2]:
+        assert (srv / "videos" / v / "embeddings_ft1.npz").read_text() == "tuned " + v
+    assert not (srv / "videos" / "vid c").exists()                   # not on the server yet: upload-local's job
+    assert (srv / "encoders" / "ft1" / "tuned.pt").read_bytes() == b"weights"
+    (srv / "videos" / "only on the server" / "embeddings.npz").unlink()
+    (srv / "videos" / "only on the server").rmdir()
+    assert FT.push("ft1") == 0 and "already has" in capsys.readouterr().out
+    # a new laptop video goes up with its tuned embeddings
+    assert S.upload_local() == 0
+    assert (srv / "videos" / "vid c" / "embeddings_ft1.npz").read_text() == "tuned vid c"
+    assert (srv / "videos" / "vid c" / "vision.json").exists()
+    H._PATHS.clear()
