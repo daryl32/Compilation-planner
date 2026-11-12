@@ -143,6 +143,7 @@ def render_sections(tracks: dict, track_bits, play=None) -> None:
     state_line = ("**unsaved changes** — 💾 Save to keep them" if s.get("dirty") else
                   "suggested, not saved yet — 💾 Save to keep it" if s.get("source") == "suggested" else "saved ✅")
     st.caption(f"{tid} · {state_line}")
+    _render_lines(track, play)
     import story_map as STM
     import story_map_editor as SME
     cuts = [sg["start"] for sg in segs] + [float(track["duration_sec"])]
@@ -154,6 +155,71 @@ def render_sections(tracks: dict, track_bits, play=None) -> None:
     SME.render_editor(track, segs, ns="sec", get_regions=lambda: _state().get("regions") or [], set_regions=_set,
                       version=s.get("v", 0), analysis=analysis, play=play_part, roles=ST.types_as_roles(), suggest=suggest,
                       allow_none=False, thing="type", clear=False)
+
+
+# ---------------------------------------------------------------------------
+# 📐 Lines from the music — sections from scratch, step 1 (section_bounds.py): no names yet
+# ---------------------------------------------------------------------------
+
+def lines_figure(found: dict, height: int = 250):
+    """What is playing bar by bar (one row per layer, darker = more of it) with the found lines across it: main
+    lines solid, lesser ones dotted; the sections numbered along the top."""
+    import numpy as np
+    import plotly.graph_objects as go
+    import section_bounds as SB
+    bars, dur = np.asarray(found["bars"], float), float(found["duration"])
+    ends = np.append(bars[1:], dur)
+    names = [k for k in SB.LAYERS if k in found["levels"]][::-1]
+    fig = go.Figure(go.Heatmap(
+        x=(bars + ends) / 2, y=[f"{SB.EMOJI[k]} {SB.NAME[k]}" for k in names],
+        z=[found["levels"][k] for k in names], zmin=0, zmax=1, colorscale="Blues", showscale=False, xgap=1, ygap=2,
+        hovertemplate="%{y} · %{x:.1f}s · %{z:.2f}<extra></extra>"))
+    for ln in found["lines"]:
+        fig.add_vline(x=ln["time"], line_color="#ff4b4b", line_width=2.5 if ln["level"] == 1 else 1.2,
+                      line_dash="solid" if ln["level"] == 1 else "dot")
+    for sc in found["sections"]:
+        fig.add_annotation(x=(sc["start"] + sc["end"]) / 2, y=1.0, yref="paper", yanchor="bottom", showarrow=False,
+                           text=f"<b>{sc['n']}</b>", font=dict(size=11))
+    fig.update_layout(height=height, margin=dict(t=22, b=4, l=6, r=6), xaxis=dict(range=[0, dur], ticksuffix="s"),
+                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    return fig
+
+
+def _render_lines(track: dict, play=None) -> None:
+    import section_bounds as SB
+    with st.expander("📐 New — lines from the music (no names yet)"):
+        st.caption("Sections from scratch, step 1: a line wherever the music changes — a layer comes in or drops "
+                   "out, it gets louder or quieter, the sound changes — always on a bar line. No types yet: this "
+                   "only shows WHERE the song divides. Solid = a big change, dotted = a smaller one. It doesn't "
+                   "touch the saved sections below.")
+        try:
+            found = SB.for_track(track)
+        except Exception as e:          # noqa: BLE001
+            st.caption(f"Couldn't read this track's layers: {e}")
+            return
+        if not found["lines"]:
+            st.info("No lines found — this track may need the extra 🔬 analysis.")
+            return
+        st.plotly_chart(lines_figure(found), width="stretch", key="sec_ln_chart", config={"displayModeBar": False})
+        missing = [SB.NAME[k] for k in SB.LAYERS if k not in found["levels"]]
+        main = sum(1 for ln in found["lines"] if ln["level"] == 1)
+        st.caption(f"{len(found['sections'])} sections · {main} big changes, {len(found['lines']) - main} smaller"
+                   + (f" · not in this track's analysis: {', '.join(missing)}" if missing else ""))
+        st.dataframe([{"#": sc["n"], "From": format_mmss(sc["start"]), "To": format_mmss(sc["end"]),
+                       "Bars": sc["bars"], "Change": "big" if sc["level"] == 1 else "small",
+                       "What changes at its start": " · ".join(sc["why"])} for sc in found["sections"]],
+                     hide_index=True, width="stretch", key="sec_ln_table")
+        if play is not None:
+            c = st.columns([2.2, 1.4])
+            pick = c[0].selectbox("▶ Hear a section", [0] + [sc["n"] for sc in found["sections"]], key="sec_ln_play",
+                                  format_func=lambda n: "—" if not n else (
+                                      f"{n} · {format_mmss(found['sections'][n - 1]['start'])}–"
+                                      f"{format_mmss(found['sections'][n - 1]['end'])}"))
+            lead = c[1].toggle("2 s lead-in", value=True, key="sec_ln_lead",
+                               help="Starts two seconds before the line, so you hear the change itself.")
+            if pick:
+                sc = found["sections"][pick - 1]
+                play(track, {"start": sc["start"], "end": sc["end"]}, lead, f"sec_ln_{track.get('track_id')}_{pick}")
 
 
 # ---------------------------------------------------------------------------

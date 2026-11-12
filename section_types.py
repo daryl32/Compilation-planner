@@ -315,6 +315,11 @@ def tuning_export(track: dict, regions: list, analysis: dict = None, source: str
         out["vocal_ends"] = r2(an.get("vocal_ends") or [])
     except Exception as e:          # noqa: BLE001
         out["beats_error"] = str(e)
+    try:          # 📐 sections from scratch, step 1: the lines found straight from the layers (section_bounds.py)
+        import section_bounds as SB
+        out["lines"] = SB.for_track(track)
+    except Exception as e:          # noqa: BLE001
+        out["lines_error"] = str(e)
     return out
 
 
