@@ -196,7 +196,7 @@ def test_sections_parts_and_blocks():
     assert all(abs(a["end"] - b["start"]) < 1e-6 for a, b in zip(blks, blks[1:]))        # the whole track, in order
     starts = {round(b["start"], 2) for b in blks}
     assert all(round(ln["time"], 2) in starts for ln in lines)                            # every line is a cut
-    assert all(b["end"] - b["start"] >= 1.4 - 1e-6 for b in blks)                         # never under the shortest clip
+    assert all(b["end"] - b["start"] >= 2.0 - 1e-6 for b in blks)                         # never under the shortest clip
     assert all(b["bars"] in (0.5, 1, 2, 3, 4, 5, 6, 8) for b in blks)
     in_hit = [b for b in blks if 44.0 <= b["start"] < 72.0]
     assert in_hit and all(b["bars"] == 1 and "busy loud drums" in b["why"] for b in in_hit)
@@ -220,6 +220,20 @@ def test_sections_parts_and_blocks():
     assert SB._pace({"on": []}, 2.7, 1.4)[0] == 2.0 and SB._pace({"on": []}, 1.9, 1.4)[0] == 4.0
     busy = {"on": ["drums"], "busy_word": "busy", "level_word": "loud"}
     assert SB._pace(busy, 3.0, 1.4)[0] == 0.5 and SB._pace(busy, 2.0, 1.4)[0] == 1.0
+    assert SB._pace(busy, 2.62, 2.667)[0] == 1.0                  # a bar a touch under four beats is still a bar
+    # AURA, 12 Nov: where the bar lines are uneven, "one-bar" blocks came out at 1.3 s and 0.6 / 0.7 s. Blocks are
+    # sized in seconds: short ones pair up within their part, the last short one joins the block before it
+    ub = np.concatenate([np.arange(8) * 2.6, 20.8 + np.arange(8) * 1.3, [31.2, 31.85, 32.5], 35.1 + np.arange(4) * 2.6])
+    part = [{"n": 1, "label": "1", "bar": 0, "profile": dict(busy, trend="steady")}]
+    got = SB.blocks(part, ub, 45.5, beat=0.65)                    # 92 BPM: the shortest block is a bar, 2.6 s
+    assert all(b["end"] - b["start"] >= 2.6 - 0.06 for b in got), [(b["start"], b["end"]) for b in got]
+    assert got[0]["start"] == 0.0 and got[-1]["end"] == 45.5 and [b["n"] for b in got] == list(range(1, len(got) + 1))
+    assert [round(b["start"], 1) for b in got if 20.8 <= b["start"] < 31.2] == [20.8, 23.4, 26.0, 28.6]   # paired up
+    assert SB._uneven(ub, 45.5) and SB._uneven(np.arange(10) * 2.0, 20.0) == []
+    two = [{"n": 1, "label": "1", "bar": 0, "profile": dict(busy, trend="steady")},
+           {"n": 2, "label": "2", "bar": 2, "profile": dict(busy, trend="steady")}]
+    kept = SB.blocks(two, np.arange(6) * 1.0, 6.0, beat=0.5)       # a line is a cut even after a short last block
+    assert 2.0 in [b["start"] for b in kept] and all(b["section"] in ("1", "2") for b in kept)
     # a real library track, and the page's player
     from tests.fixtures import load_track
     import sections_view as SV

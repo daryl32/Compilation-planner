@@ -217,6 +217,11 @@ def _render_lines(track: dict, play=None) -> None:
             st.info("No lines found — this track may need the extra 🔬 analysis.")
             return
         st.plotly_chart(lines_figure(found), width="stretch", key="sec_ln_chart", config={"displayModeBar": False})
+        if found.get("uneven_bars"):
+            ub = found["uneven_bars"]
+            st.caption(f"⚠️ This track's bar lines are uneven at bar{'s' if len(ub) != 1 else ''} "
+                       f"{', '.join(map(str, ub[:12]))}{'…' if len(ub) > 12 else ''} (much shorter or longer than "
+                       "its usual bar) — blocks there are sized in seconds, so none comes out too short.")
         if found.get("stems"):
             st.caption("🎚️ Drums, bass and instruments are read from this track's real stems.")
         else:
@@ -244,7 +249,7 @@ def _render_lines(track: dict, play=None) -> None:
                    "the profile sets the length — busy loud drums 1 bar, other drum parts 2, voice / instruments "
                    "leading 2 or 4, hardly anything playing 4 — shorter towards the end of a rising part, longer "
                    "towards the end of a falling one, never inside a sung phrase where the voice leads, never "
-                   "under the shortest clip.")
+                   "under the shortest clip for the tempo (a bar at 90 BPM) — shorter ones are paired up.")
         st.caption("Key: each cell is one bar of one layer, 0–1 against that layer's own strongest moments in this "
                    "track (drums and hats: how hard the hits are; the rest: the average level). From 0.3 a layer "
                    "counts as playing, under 0.15 as off. Tap a cell for its number.")
