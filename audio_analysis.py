@@ -22,6 +22,8 @@ Extra analysis, stored under track["analysis"] (all curves at 30 Hz, 0–1):
   builds, drops  build-ups ([{start, end}]) and the drop each leads into
   vocals         vocal loudness curve + vocal_starts / vocal_ends — only when
                  Demucs is installed (otherwise None)
+  stem_curves    {rate, drums, bass, other, share} — how loud each Demucs stem is; added by
+                 the laptop (analyse_audio_local.py), kept when the analysis is redone
 
 Needs only numpy, scipy and ffmpeg. Optional, used automatically if installed:
   pip install beat_this    (better downbeats; needs torch)
@@ -535,6 +537,39 @@ def vocal_curve_from(vocals: np.ndarray, sr: int, n_out: int) -> np.ndarray:
     return v[:n_out]
 
 
+STEM_CURVES = ("drums", "bass", "other")
+
+
+def stem_curves(parts: dict, sr: int) -> dict:
+    """🎚️ How loud each Demucs stem is, 30 times a second — the REAL drums, bass and other instruments, where
+    kick / snare / hat / low only read the full mix by frequency band (a bass guitar and a kick drum share a band).
+    parts: {"drums" / "bass" / "other": samples (mono, or (n, channels))} at sample rate sr.
+    → {"rate", "drums", "bass", "other": 0–1 against that stem's own strong level, "share": {stem: its strong
+    level against the strongest stem's}} — a stem with a tiny share is hardly in the song (Demucs leaves a little
+    bleed in an empty stem, which its own 0–1 curve would blow up to full scale)."""
+    raw = {}
+    for k in STEM_CURVES:
+        y = parts.get(k)
+        if y is None or not len(y):
+            continue
+        y = np.asarray(y)
+        if y.ndim > 1:
+            y = y.mean(axis=1)
+        hop = max(1, int(sr / OUT_RATE))
+        nfr = len(y) // hop
+        if nfr < 2:
+            continue
+        raw[k] = np.sqrt(np.mean(y[:nfr * hop].astype(np.float64).reshape(nfr, hop) ** 2, axis=1))
+    if not raw:
+        return {}
+    top = {k: float(np.percentile(v, 99.0)) for k, v in raw.items()}
+    best = max(top.values()) or 1.0
+    out = {"rate": OUT_RATE, "share": {k: round(top[k] / best, 3) for k in raw}}
+    for k, v in raw.items():
+        out[k] = [round(float(x), 2) for x in _norm01(v, 99.0)]
+    return out
+
+
 def separate_stems(path) -> tuple:
     """🎤 Split a song into (vocals, instrumental, sample rate) with Demucs (htdemucs):
     float32 arrays (n, 2); instrumental = drums + bass + other. For 🎚️ mashups that put one
@@ -749,6 +784,9 @@ def analyse_file(path, existing: dict = None, beats_per_bar: int = 4, with_vocal
         "vocals": _r(vocals) if vocals is not None else None,
         "vocal_starts": vocal_starts, "vocal_ends": vocal_ends,
     }
+    kept = ((existing or {}).get("analysis") or {}).get("stem_curves")
+    if kept:                                   # made by the laptop from the Demucs stems — a redo here keeps them
+        analysis["stem_curves"] = kept
     say("finding the key")
     out = {"analysis": analysis, "key": key_from_spectrum(mag, rms)}
     if beats_method != "existing":

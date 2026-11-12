@@ -18,6 +18,8 @@ that track is still missing:
       no key               → the key
       no stems (or only     → vocals, instrumental, drums, bass and other .m4a in
       vocals + instrumental)  <Drive>/scene-labeling/stems/<track>/ (track["stems"])
+      no stem curves        → how loud the drums, bass and other stems are, 30 times a second
+                              (analysis["stem_curves"]) — read from the saved stems, no Demucs
   • Track that has everything — skipped.
 
 Demucs runs once per track and gives both the vocals for the analysis and the
@@ -139,6 +141,7 @@ def track_status(track: dict) -> dict:
         "key": bool(track.get("key")),
         "stems": all(st.get(p) for p in STEM_PARTS),
         "stems4": all(st.get(p) for p in FOUR_STEMS),
+        "curves": bool((a.get("stem_curves") or {}).get("drums")),
         "by": track.get("analysed_by") or ("colab" if track.get("beat_times") else "?"),
         "when": (a.get("analysed_at") or "")[:10],
     }
@@ -160,7 +163,9 @@ def missing_parts(track: dict | None, *, demucs: bool, stems: bool, beat_this: b
         need.add("key")
     if demucs and stems and not (st["stems"] and st["stems4"]):
         need.add("stems")            # tracks with only vocals + instrumental get drums / bass / other too
-    return need
+    if demucs and not st["curves"]:
+        need.add("curves")           # 🎚️ how loud each stem is, for the 📐 section lines (read from the saved
+    return need                      # stems when they are there — no second Demucs pass)
 
 
 def report() -> None:
@@ -224,8 +229,8 @@ def describe(parts: set) -> str:
     if "new" in parts:
         return "new — full analysis" + (" + stems" if "stems" in parts else "")
     names = {"fresh": "from scratch (beats too)", "analysis": "extra analysis (beats kept)", "vocals": "vocals",
-             "key": "key", "stems": "stems"}
-    order = ["fresh", "analysis", "vocals", "key", "stems"]
+             "key": "key", "stems": "stems", "curves": "stem curves"}
+    order = ["fresh", "analysis", "vocals", "key", "stems", "curves"]
     shown = [names[p] for p in order if p in parts and not (p == "analysis" and "fresh" in parts)]
     return "missing: " + ", ".join(shown)
 
@@ -266,11 +271,25 @@ def run_job(audio_file: Path, tid: str, parts: set, rel: str, with_vocals: bool)
         new = "new" in parts or "fresh" in parts
         analysis = new or "analysis" in parts
         sep = None
-        if with_vocals and ("stems" in parts or "vocals" in parts or analysis):
+        saved = {k: stems_dir(tid) / f"{k}.m4a" for k in AA.STEM_CURVES}
+        from_files = "curves" in parts and all(p.exists() for p in saved.values())
+        if with_vocals and ("stems" in parts or "vocals" in parts or analysis
+                            or ("curves" in parts and not from_files)):
             say("separating vocals, drums, bass and other (Demucs)")
             four, sr = AA.separate_all(local)
             inst = sum(four[k] for k in four if k != "vocals").astype("float32")
             sep = (four["vocals"], inst, sr, four)
+        curves = None
+        if sep is not None:                       # the stems are in memory anyway: their curves cost nothing
+            curves = AA.stem_curves(sep[3], sep[2])
+        elif from_files:
+            say("reading the saved drums, bass and other stems")
+            try:
+                curves = AA.stem_curves({k: AA.decode_audio(p) for k, p in saved.items()}, AA.SR)
+            except Exception as e:                # noqa: BLE001 — a stem that won't decode: next run tries again
+                say(f"couldn't read the stems ({e})")
+        if curves:
+            done.append("stem curves")
         existing = None if new else read_json(json_path)
         result = None
         if analysis:
@@ -312,6 +331,13 @@ def run_job(audio_file: Path, tid: str, parts: set, rel: str, with_vocals: bool)
         track = {"track_id": tid, **(current or {}), **(result or {})}
     if stems:
         track["stems"] = stems
+    if curves and track.get("analysis"):          # onto the analysis' own clock (as long as its other curves)
+        a = track["analysis"]
+        n_out = int(len(a.get("kick") or []) or round(float(track.get("duration_sec") or 0) * AA.OUT_RATE))
+        for k in AA.STEM_CURVES:
+            if k in curves and n_out:
+                curves[k] = (list(curves[k]) + [0.0] * n_out)[:n_out]
+        a["stem_curves"] = curves
     track.setdefault("track_id", tid)
     track["source_path"] = track.get("source_path") or f"/content/drive/MyDrive/{rel}"
     write_json(json_path, track)

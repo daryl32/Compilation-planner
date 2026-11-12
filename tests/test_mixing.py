@@ -493,13 +493,15 @@ def test_local_analysis_does_only_what_each_track_is_missing(mixlib, monkeypatch
     js.write_text(json.dumps(track))
     try:
         kw = dict(demucs=True, stems=True)
-        assert AL.missing_parts(track, **kw) == {"vocals", "stems"}
+        assert AL.missing_parts(track, **kw) == {"vocals", "stems", "curves"}
         assert AL.missing_parts(None, **kw) == {"new", "key", "vocals", "stems"}
         _done = {**track, "analysis": {**track["analysis"], "vocals": [0.1]}}
-        assert AL.missing_parts({**_done, "stems": {"vocals": "v", "instrumental": "i"}}, **kw) == {"stems"}
-        assert AL.missing_parts({**_done, "stems": {k: k for k in AL.ALL_STEMS}}, **kw) == set()
+        assert AL.missing_parts({**_done, "stems": {"vocals": "v", "instrumental": "i"}}, **kw) == {"stems", "curves"}
+        assert AL.missing_parts({**_done, "stems": {k: k for k in AL.ALL_STEMS}}, **kw) == {"curves"}
+        _curved = {**_done, "analysis": {**_done["analysis"], "stem_curves": {"drums": [0.5]}}}
+        assert AL.missing_parts({**_curved, "stems": {k: k for k in AL.ALL_STEMS}}, **kw) == set()
         jobs = {tid: parts for _, tid, parts in AL.plan_jobs(lib, None, **kw)}
-        assert jobs == {"mix_song_c": {"vocals", "stems"}, "brand_new": {"new", "key", "vocals", "stems"}}
+        assert jobs == {"mix_song_c": {"vocals", "stems", "curves"}, "brand_new": {"new", "key", "vocals", "stems"}}
 
         f = lib / "mix_song_c.m4a"
         AL.run_job(f, "mix_song_c", jobs["mix_song_c"], "Audio-Library/mix_song_c.m4a", True)
@@ -511,7 +513,17 @@ def test_local_analysis_does_only_what_each_track_is_missing(mixlib, monkeypatch
         assert made["analysis"]["vocals"] and made["analysis"]["methods"]["vocals"] == "demucs"
         assert made["beat_times"] == track["beat_times"]          # beats untouched
         assert calls == ["mix_song_c.m4a"]                         # one Demucs pass
+        sc = made["analysis"]["stem_curves"]                       # 🎚️ how loud each stem is, on the analysis' clock
+        assert set(sc) == {"rate", "share", "drums", "bass", "other"} and max(sc["share"].values()) == 1.0
+        assert len(sc["drums"]) == len(made["analysis"]["kick"]) and 0.0 <= min(sc["drums"]) <= max(sc["drums"]) <= 1.0
         assert AL.missing_parts(made, **kw) == set()
+        # a track that has its stems but no curves yet: read from the saved stems, no second Demucs pass
+        del made["analysis"]["stem_curves"]
+        js.write_text(json.dumps(made))
+        assert AL.missing_parts(made, **kw) == {"curves"}
+        AL.run_job(f, "mix_song_c", {"curves"}, "Audio-Library/mix_song_c.m4a", True)
+        again = json.loads(js.read_text())
+        assert calls == ["mix_song_c.m4a"] and len(again["analysis"]["stem_curves"]["bass"]) == len(made["analysis"]["kick"])
 
         AL.run_job(lib / "brand_new.m4a", "brand_new", jobs["brand_new"], "Audio-Library/brand_new.m4a", True)
         new = json.loads((audio_dir / "brand_new.json").read_text())

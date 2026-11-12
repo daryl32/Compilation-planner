@@ -554,3 +554,19 @@ def test_server_hub_models_runs_and_videos(tmp_path, monkeypatch):
     assert (srv / "catalogue" / "student_runs" / "runs@laptop.json").exists()
     monkeypatch.delenv("STUDENT_SERVER")
     assert S.push_models() == 0 and S.pull_models() == 0               # on the server: nothing to do
+
+
+def test_labels_on_videos_without_vision_data_are_reported(tmp_path):
+    """Labels made on 📚 other videos (Compare tags) only train once local_vision has read the video — say so."""
+    import student_tags as STT
+    (tmp_path / "vid_a").mkdir()
+    labels = [{"video_id": "vid_a", "t": 1.0}, {"video_id": "vid_x", "t": 2.0}, {"video_id": "vid_x", "t": 3.0}]
+    partials = [{"video_id": "vid_y", "t": 1.0, "yes": [], "no": ["dance"], "done": ["action"]},
+                {"video_id": "vid_a", "t": 5.0, "yes": ["dance"], "no": []}]
+    assert STT.labels_without_vision(labels, partials, tmp_path) == {"vid_x": 2, "vid_y": 1}
+    assert STT.labels_without_vision(labels[:1], partials[1:], tmp_path) == {}
+    # a category finished with nothing in it (only "no" answers) still teaches the student those tags
+    import numpy as np
+    y, w = np.full(2, 0.7, np.float32), np.zeros(2, np.float32)
+    assert STT.apply_partial(y, w, partials[0], {"dance": 0, "crowd": 1}, 3.0) == 1
+    assert y[0] == 0.0 and w[0] == 3.0 and w[1] == 0.0

@@ -1301,6 +1301,23 @@ def partial_markdown(ds: dict, prob, rows, thresholds, svocab=None, ref: dict | 
     return md
 
 
+def labels_without_vision(labels: list, partials: list, root: Path = None) -> dict:
+    """{video_id: how many of your labels and ▦ batch tags sit on it} for the videos that have no folder of
+    vision data here (_student/videos/<video>) — training can't use those answers: it has no picture embeddings
+    to learn them from. Typically 📚 other videos labelled in Compare tags before local_vision has read them."""
+    root = root or WORK / "videos"
+    try:
+        have = {p.name for p in root.iterdir() if p.is_dir()}
+    except OSError:
+        have = set()
+    out = {}
+    for i in list(labels or []) + list(partials or []):
+        v = i.get("video_id")
+        if v and v not in have:
+            out[v] = out.get(v, 0) + 1
+    return dict(sorted(out.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def _prepare(label_weight: float, use_trust: bool = True, use_pose: bool = False):
     vocab, labels, test = _vocab(), _labels(), set(test_videos())
     partials = _partials(labels)
@@ -1347,6 +1364,11 @@ def _prepare(label_weight: float, use_trust: bool = True, use_pose: bool = False
               "(scored per tag)")
     if ds["skipped"]:
         print(f"   skipped {len(ds['skipped'])} video(s) with unreadable embeddings: {', '.join(ds['skipped'][:5])}")
+    lost = labels_without_vision(labels, partials)
+    if lost:
+        print(f"⚠️ {sum(lost.values())} of your labels / batch tags are on {len(lost)} video(s) with no vision data "
+              f"here, so they are NOT used (e.g. {', '.join(list(lost)[:3])}) — run local_vision.bat on those "
+              "videos, then train again.")
     return vocab, labels, test, ds, train_rows, val_rows, test_rows
 
 
