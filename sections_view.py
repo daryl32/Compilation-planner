@@ -162,27 +162,23 @@ def render_sections(tracks: dict, track_bits, play=None) -> None:
 # ---------------------------------------------------------------------------
 
 RULE_ADDS, RULE_TAKES = "#2ecc71", "#ff9f1a"      # 🟢 a cut the 🎤 vocal rule adds · 🟠 one it takes away
-ACCENT_ADDS, ACCENT_TAKES, ACCENT_TICK = "#c77dff", "#ff6b9d", "#4dd0e1"   # 🟣 the ⚡ accent override adds · 🩷 takes
-#                                                                            away · ▼ where an accent is
 
 
-def _marks(rule_cuts: dict = None, accent_cuts: dict = None) -> list:
+def _marks(rule_cuts: dict = None) -> list:
     """The marker lines for the chart and the player: [{"t", "c" colour, "dash", "m" the sign in its box}] — cuts
     taken away first (dashes, ✕), so a cut that is added shows on top."""
     out = []
-    for cuts, adds, takes, sign in ((rule_cuts, RULE_ADDS, RULE_TAKES, "＋"), (accent_cuts, ACCENT_ADDS, ACCENT_TAKES, "⚡")):
+    for cuts, adds, takes, sign in ((rule_cuts, RULE_ADDS, RULE_TAKES, "＋"),):
         out += [{"t": float(t), "c": takes, "dash": True, "m": "✕"} for t in (cuts or {}).get("removed") or []]
         out += [{"t": float(t), "c": adds, "dash": False, "m": sign} for t in (cuts or {}).get("added") or []]
     return sorted(out, key=lambda m: not m["dash"])
 
 
-def lines_figure(found: dict, height: int = 270, rule_cuts: dict = None, accent_cuts: dict = None,
-                 accents: list = None):
+def lines_figure(found: dict, height: int = 270, rule_cuts: dict = None):
     """What is playing bar by bar (one row per layer, darker = more of it) with the found lines across it: main
     lines solid, lesser ones dotted, the block cuts thin and white; the sections numbered along the top (parts
     lettered), the bars numbered along the bottom. rule_cuts (_rule_cuts): where the 🎤 vocal rule adds a cut
-    (green, ＋) or takes one away (orange dashes, ✕), drawn whichever way the switch is set; accent_cuts: the same
-    for the ⚡ accent override (purple ⚡ / pink dashes ✕); accents: the accents themselves, a ▼ along the top."""
+    (green, ＋) or takes one away (orange dashes, ✕), drawn whichever way the switch is set."""
     import numpy as np
     import plotly.graph_objects as go
     import section_bounds as SB
@@ -201,15 +197,11 @@ def lines_figure(found: dict, height: int = 270, rule_cuts: dict = None, accent_
             for colour, width in (("rgba(20,20,30,0.9)", 3.2), ("rgba(255,255,255,0.98)", 1.2)):   # white on a dark
                 fig.add_shape(type="line", x0=b["start"], x1=b["start"], y0=0, y1=1, yref="paper",   # edge: shows on
                               line=dict(color=colour, width=width))                                  # any cell
-    for m in _marks(rule_cuts, accent_cuts):
+    for m in _marks(rule_cuts):
         fig.add_shape(type="line", x0=m["t"], x1=m["t"], y0=0, y1=1, yref="paper",
                       line=dict(color=m["c"], width=3, dash="dash" if m["dash"] else "solid"))
         fig.add_annotation(x=m["t"], y=0.0, yref="paper", yanchor="bottom", showarrow=False, text=f"<b>{m['m']}</b>",
                            font=dict(size=12, color="#111"), bgcolor=m["c"], borderpad=1)
-    for a in accents or []:
-        fig.add_annotation(x=a["time"], y=1.0, yref="paper", yanchor="top", showarrow=False, text="▼",
-                           font=dict(size=9 + round(6 * float(a.get("strength", 0.5))), color=ACCENT_TICK),
-                           hovertext=f"⚡ {a.get('why', '')} · strength {a.get('strength', 0):.2f}")
     for ln in found["lines"]:
         fig.add_vline(x=ln["time"], line_color="#ff4b4b", line_width=2.5 if ln["level"] == 1 else 1.2,
                       line_dash="solid" if ln["level"] == 1 else "dot")
@@ -284,9 +276,8 @@ def _mirror(widget, label: str, name: str, place: str, default, **kw):
 
 
 def _line_controls(place: str, full: bool = True) -> None:
-    """The switches of the 📐 page — the cut mode, the 🎤 vocal rule, the ⚡ accent override, how strong an accent
-    must be, and hiding either set of markers. Drawn above the chart (full) and again beside the player."""
-    import accent_cuts as AC
+    """The switches of the 📐 page — the cut mode, the 🎤 vocal rule and hiding its markers. Drawn above the chart
+    (full) and again beside the player."""
     if st.session_state.get("sec_ln_mode") not in CUT_NAMES:
         st.session_state["sec_ln_mode"] = "new"
     _mirror(st.segmented_control, "Cuts", "mode", place, "new", options=["old", "new"], format_func=CUT_NAMES.get,
@@ -298,33 +289,19 @@ def _line_controls(place: str, full: bool = True) -> None:
     c = st.columns(2)
     with c[0]:
         _mirror(st.toggle, "🎤 Vocal rule", "vocal", place, True,
-                help="On (as before): in a part the voice leads (voice playing, no drums), a cut that would land "
+                help="On (the default): in a part the voice leads (voice playing, no drums), a cut that would land "
                      "inside a sung phrase moves to a clean bar or half-bar line, or is dropped — one longer block. "
                      "Off: the cuts stay where the pace puts them, sung phrase or not. Works on both 🅰 Old and "
                      "🅱 New; the section lines don't change, only the blocks.")
+    with c[1]:
         _mirror(st.toggle, "🙈 Hide vocal markers", "hide_vocal", place, False,
                 help="Takes the green ＋ and orange ✕ lines off the chart and the player. The rule itself is "
                      "unchanged.")
-    with c[1]:
-        _mirror(st.toggle, "⚡ Accent override", "accent", place, False,
-                help="Off (as before): the cuts as the mode makes them. On: a strong accent — a drum hit far above "
-                     "the hits around it, an instruments stab with no drums, a sung phrase starting, a sharp jump "
-                     "in loudness — gets a cut. A cut within a beat of it is pulled onto it; otherwise the block "
-                     "is split there. Blocks next to an accent may be as short as half the usual shortest clip. "
-                     "Works on both 🅰 Old and 🅱 New, after the vocal rule; section lines never move.")
-        _mirror(st.toggle, "🙈 Hide accent markers", "hide_accent", place, False,
-                help="Takes the ▼ accents and the purple ⚡ / pink ✕ lines off the chart and the player. The "
-                     "override itself is unchanged.")
-    _mirror(st.slider, "⚡ How strong an accent must be", "need", place, AC.NEED, min_value=AC.FLOOR, max_value=1.0,
-            step=0.05,
-            help="Lower = more accents count (more cuts change); higher = only the biggest moments. The ▼ on the "
-                 "chart show the accents that count at this setting, whether the override is on or off.")
     if not full:
         st.caption("These are the same switches as above the chart — either set works.")
 
 
 def _render_lines(track: dict, play=None) -> None:
-    import accent_cuts as AC
     import section_bounds as SB
     with st.expander("📐 New — lines from the music (no names yet)"):
         st.caption("Sections from scratch, steps 1–2: a line wherever the music changes — a layer comes in or drops "
@@ -333,20 +310,11 @@ def _render_lines(track: dict, play=None) -> None:
                    "touch the saved sections below. ▶ at the bottom plays the whole track over it.")
         _line_controls("top")
         ss = st.session_state
-        mode, vocal, accent, need = ss["sec_ln_mode"], bool(ss["sec_ln_vocal"]), bool(ss["sec_ln_accent"]), float(ss["sec_ln_need"])
+        mode, vocal = ss["sec_ln_mode"], bool(ss["sec_ln_vocal"])
         try:
-            base = {True: _both_cuts(track, True), False: _both_cuts(track, False)}
-            found_accents, beat = AC.find(track), SB._beat_sec(track)
-
-            def cut(v: bool, a: bool) -> dict:               # both modes, with / without the rule and the override
-                return {m: AC.apply(f, found_accents, need, beat) if a else f for m, f in base[v].items()}
-            both = cut(vocal, accent)
+            both, other = _both_cuts(track, vocal), _both_cuts(track, not vocal)
             found = both[mode]
-            other = cut(not vocal, accent)
             rule = _rule_cuts(*((both[mode], other[mode]) if vocal else (other[mode], both[mode])))
-            with_acc, without_acc = cut(vocal, True), cut(vocal, False)
-            acc_cuts = _rule_cuts(with_acc[mode], without_acc[mode])
-            counted = [a for a in found_accents if a["strength"] >= need - 1e-9]
         except Exception as e:          # noqa: BLE001
             st.caption(f"Couldn't read this track's layers: {e}")
             return
@@ -370,23 +338,10 @@ def _render_lines(track: dict, play=None) -> None:
                            f"{'s' if len(rule['added']) != 1 else ''} the rule adds · 🟠 ✕ {len(rule['removed'])} "
                            f"it takes away (a moved cut is one of each). They stay marked whichever way the "
                            f"switch is set — {'🟠 are not cuts right now' if vocal else '🟢 are not cuts right now'}.")
-        did = [a["did"] for a in with_acc[mode].get("accents") or []]
-        normal, short = AC.minimums(found, beat)
-        if not counted:
-            st.caption("⚡ No accent in this track is strong enough at this setting — lower the slider to count more.")
-        else:
-            st.caption(f"⚡ Accent override **{'on' if accent else 'off'}** — {len(counted)} accent"
-                       f"{'s' if len(counted) != 1 else ''} count at this strength (▼). In this mode "
-                       f"{'it' if accent else 'switching it on'} adds {did.count('added a cut')} cut"
-                       f"{'s' if did.count('added a cut') != 1 else ''} (🟣 ⚡), moves {did.count('moved a cut')} "
-                       f"(🩷 ✕ → 🟣 ⚡), finds {did.count('on a cut')} already on a cut and {did.count('no room')} "
-                       f"with no room. Shortest block beside an accent {short:.1f} s (elsewhere {normal:.1f} s).")
         if not found["lines"]:
             st.info("No lines found — this track may need the extra 🔬 analysis.")
             return
-        show = dict(rule_cuts=None if ss["sec_ln_hide_vocal"] else rule,
-                    accent_cuts=None if ss["sec_ln_hide_accent"] else acc_cuts,
-                    accents=None if ss["sec_ln_hide_accent"] else counted)
+        show = dict(rule_cuts=None if ss["sec_ln_hide_vocal"] else rule)
         st.plotly_chart(lines_figure(found, **show), width="stretch", key="sec_ln_chart",
                         config={"displayModeBar": False})
         if found.get("uneven_bars"):
@@ -424,7 +379,7 @@ def _render_lines(track: dict, play=None) -> None:
                        "instruments leading 2 or 4, hardly anything playing 4 — shorter towards the end of a rising "
                        "part, longer towards the end of a falling one, never inside a sung phrase where the voice "
                        "leads (🎤 vocal rule), never under the shortest clip for the tempo (a bar at 90 BPM) — "
-                       "shorter ones are paired up — except beside a strong accent when the ⚡ override is on.")
+                       "shorter ones are paired up.")
             st.caption("Key: each cell is one bar of one layer, 0–1 against that layer's own strongest moments in "
                        "this track (drums and hats: how hard the hits are; the rest: the average level). From 0.3 a "
                        "layer counts as playing, under 0.15 as off. Tap a cell for its number.")
@@ -435,11 +390,6 @@ def _render_lines(track: dict, play=None) -> None:
                                "Level in track": sc["profile"]["level"], "Drum hits /s": sc["profile"]["busy"],
                                "Loudness change": sc["profile"]["change"]} for sc in found["sections"]],
                              hide_index=True, width="stretch", key="sec_ln_nums")
-            if counted and st.toggle("⚡ The accents", key="sec_ln_acc_on"):
-                happened = {a["time"]: a["did"] for a in with_acc[mode].get("accents") or []}
-                st.dataframe([{"At": format_mmss(a["time"]), "Strength": a["strength"], "What": a["why"],
-                               "With the override on": happened.get(a["time"], "")} for a in counted],
-                             hide_index=True, width="stretch", key="sec_ln_acc")
         if st.toggle("▶ Play the whole track with the lines", key="sec_ln_whole",
                      help="The full song with a cursor moving over the layers and the lines; under it the time "
                           "code, the bar number and the section you are in. Tap the picture to jump."):
@@ -472,9 +422,9 @@ def _whole_track_clip(track: dict) -> tuple:
         return None, f"Couldn't prepare the music: {e}"
 
 
-def player_config(found: dict, rule_cuts: dict = None, accent_cuts: dict = None, accents: list = None) -> dict:
+def player_config(found: dict, rule_cuts: dict = None) -> dict:
     """What the whole-track player draws: the layers bar by bar, the lines, the sections and the bar starts —
-    and where the 🎤 vocal rule / the ⚡ accent override add or take away a cut, and the accents (see lines_figure)."""
+    and where the 🎤 vocal rule adds or takes away a cut (see lines_figure)."""
     import section_bounds as SB
     names = [k for k in SB.LAYERS if k in found["levels"]]
     return {"dur": float(found["duration"]), "bars": [round(float(b), 3) for b in found["bars"]],
@@ -486,12 +436,10 @@ def player_config(found: dict, rule_cuts: dict = None, accent_cuts: dict = None,
                           "why": " · ".join(sc["why"]), "words": sc.get("words", "")} for sc in found["sections"]],
             "blocks": [{"n": b["n"], "a": b["start"], "b": b["end"], "bars": b["bars"], "why": b["why"]}
                        for b in found.get("blocks") or []],
-            "marks": _marks(rule_cuts, accent_cuts),
-            "ticks": [{"t": float(a["time"]), "s": float(a.get("strength", 0.5))} for a in accents or []]}
+            "marks": _marks(rule_cuts)}
 
 
-def lines_player(clip_path, found: dict, key: str, rule_cuts: dict = None, accent_cuts: dict = None,
-                 accents: list = None, remember: str = "") -> None:
+def lines_player(clip_path, found: dict, key: str, rule_cuts: dict = None, remember: str = "") -> None:
     """The whole song with a cursor synced to it over the layers and the lines; under it the time code, the bar
     number and the section being played, with what changed at its start and its profile. Tap to jump.
     remember: a name for this track — the place in the song (and whether it was playing) is kept under it in the
@@ -505,17 +453,13 @@ def lines_player(clip_path, found: dict, key: str, rule_cuts: dict = None, accen
     except OSError:
         st.audio(str(clip_path))
         return
-    cfg = player_config(found, rule_cuts, accent_cuts, accents)
+    cfg = player_config(found, rule_cuts)
     cfg["remember"] = remember
     seen = {m["c"] for m in cfg["marks"]}
     rule_key = " ".join(
         f'<span style="border-left:3px {style} {colour};padding-left:4px">{words}</span>'
         for colour, style, words in ((RULE_ADDS, "solid", "+ vocal rule adds"),
-                                     (RULE_TAKES, "dashed", "&#10005; vocal rule takes away"),
-                                     (ACCENT_ADDS, "solid", "&#9889; accent adds"),
-                                     (ACCENT_TAKES, "dashed", "&#10005; accent takes away")) if colour in seen)
-    if cfg["ticks"]:
-        rule_key += f' <span style="color:{ACCENT_TICK}">&#9660; accent</span>'
+                                     (RULE_TAKES, "dashed", "&#10005; vocal rule takes away")) if colour in seen)
     rows = len(cfg["layers"])
     ch = 30 + rows * 20 + 26                      # section numbers · the layers · bar numbers
     _html(f"""
@@ -566,14 +510,11 @@ def lines_player(clip_path, found: dict, key: str, rule_cuts: dict = None, accen
   cfg.blocks.slice(1).forEach(b => {{ if (lineAt.has(b.a.toFixed(2))) return;
    for (const [c, w] of [["rgba(20,20,30,0.9)", 4], ["rgba(255,255,255,0.98)", 1.6]]) {{     // white on a dark edge
     ctx.strokeStyle = c; ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(x(b.a), TOP); ctx.lineTo(x(b.a), BOT); ctx.stroke(); }} }});
-  // marker lines: where the vocal rule / the accent override take a cut away (dashes, x) or add one
+  // marker lines: where the vocal rule takes a cut away (dashes, x) or adds one
   for (const m of cfg.marks) {{
    ctx.strokeStyle = m.c; ctx.lineWidth = 3; ctx.setLineDash(m.dash ? [6, 4] : []); ctx.beginPath(); ctx.moveTo(x(m.t), TOP); ctx.lineTo(x(m.t), BOT); ctx.stroke(); ctx.setLineDash([]);
    ctx.fillStyle = m.c; ctx.fillRect(x(m.t) - 7, BOT - 14, 14, 14);
    ctx.fillStyle = "#111"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(m.m, x(m.t), BOT - 7); }}
-  // the accents: a small triangle along the top of the layers, bigger = stronger
-  for (const a of cfg.ticks) {{ const h = 5 + 5 * a.s;
-   ctx.fillStyle = "{ACCENT_TICK}"; ctx.beginPath(); ctx.moveTo(x(a.t) - h * 0.7, TOP - 1); ctx.lineTo(x(a.t) + h * 0.7, TOP - 1); ctx.lineTo(x(a.t), TOP - 1 + h); ctx.closePath(); ctx.fill(); }}
   const blk = cfg.blocks.find(b => now >= b.a - 1e-6 && now < b.b) || cfg.blocks[cfg.blocks.length - 1];
   if (blk) {{ ctx.fillStyle = "rgba(255,214,10,0.22)"; ctx.fillRect(x(blk.a), TOP, x(blk.b) - x(blk.a), rows * RH); }}
   // the section being played, lit

@@ -7,6 +7,9 @@ beats long. A "rise" trend shortens the clips from hi to lo through the section,
 section aims a little above the middle. Section boundaries are always cuts. Each block carries the same fields Classic's segments do (start, end, energy, intensity) plus its
 section type.
 
+line_segments() is the other source of blocks (12 Nov): the 📐 lines from the music with their own pace, for the
+new matcher's "✂️ Cuts" choice — the same block shape, so the matcher doesn't care which made them.
+
 No Streamlit in here.
 """
 
@@ -188,6 +191,38 @@ def story_segments(track: dict, regions: list, recipes: dict, min_clip: float = 
         out.append({"start": round(s, 3), "end": round(e, 3), "energy": round(energy, 4),
                     "intensity": round(energy, 4), "section_type": t,
                     "driver": AD.driver_at(drv, (s + e) / 2) if drv else "loudness"})
+    if out:
+        out[-1]["end"] = round(duration, 3)
+    return out
+
+
+def line_segments(track: dict, regions: list = None, vocal_rule: bool = True) -> list:
+    """Blocks for the whole track from 📐 lines from the music (section_bounds.py, the 🅱 New cuts of the Sections
+    page): a line wherever the music changes, each part cut at the pace its profile asks for — no section map and
+    no recipe pace. Same shape as story_segments. section_type: the type the saved / suggested section map
+    (regions) has at the block's middle, for the recipes — the lines themselves have no types yet. line_section:
+    the part's label on the 📐 page (2a, 2b). vocal_rule: the 🎤 switch of that page."""
+    import audio_drive as AD
+    import section_bounds as SB
+    duration = float(track["duration_sec"])
+    found = SB.for_track(track, vocal_rule=vocal_rule)
+    curve, rate = _energy_curve(track)
+    try:
+        drv = AD.drivers(track, _beats(track))
+    except Exception:          # noqa: BLE001
+        drv = None
+    out = []
+    for b in found.get("blocks") or []:
+        s, e = float(b["start"]), float(min(b["end"], duration))
+        if e - s < MIN_BLOCK_SEC and out:
+            out[-1]["end"] = round(e, 3)
+            continue
+        energy = _mean_energy(curve, rate, s, e)
+        out.append({"start": round(s, 3), "end": round(e, 3), "energy": round(energy, 4),
+                    "intensity": round(energy, 4),
+                    "section_type": ST.type_at(regions, (s + e) / 2) if regions else None,
+                    "driver": AD.driver_at(drv, (s + e) / 2) if drv else "loudness",
+                    "line_section": b.get("section")})
     if out:
         out[-1]["end"] = round(duration, 3)
     return out

@@ -346,101 +346,16 @@ def test_old_and_new_cuts_side_by_side():
     assert {"＋", "✕"} <= {a.text.replace("<b>", "").replace("</b>", "") for a in fig.layout.annotations}
     assert [(m["m"], m["dash"], m["c"]) for m in SV.player_config(new, marks)["marks"]] == [
         ("✕", True, SV.RULE_TAKES), ("＋", False, SV.RULE_ADDS)]
-    assert SV.player_config(new)["marks"] == [] and SV.player_config(new)["ticks"] == []
+    assert SV.player_config(new)["marks"] == []
     at.session_state["sec_ln_vocal"] = False
     at.run()
     assert not errors(at), errors(at)
     assert any("🎤" in c.value for c in at.caption)
 
 
-def _accent_track():
-    """90 BPM, 64 s: steady drums throughout with one hit three times the rest at 21.33 s (beat 3 of a bar), a sung
-    phrase starting at 41.0 s, and the loudness stepping up at 32 s."""
-    beat, rate, dur = 60 / 90, 30, 64.0
-    beats = np.arange(int(dur / beat)) * beat
-    n = int(dur * rate)
-    t = np.arange(n) / rate
-    hit = np.cos(np.pi * np.clip((t % beat) / 0.12, 0, 1)) * 0.5 + 0.5          # a spike on every beat
-    drums = 0.4 * hit
-    big = int(round(beats[32] * rate))
-    drums[big:big + 3] = 1.2
-    loud = np.where(t >= 32.0, 0.8, 0.3)
-    return {"track_id": "accents", "duration_sec": dur, "bpm": 90.0, "beat_times": beats.round(3).tolist(),
-            "hires": {"rate": rate, "rms": loud.round(3).tolist(), "onset": drums.round(3).tolist()},
-            "analysis": {"rate": rate, "beats_per_bar": 4, "downbeats": beats[::4].round(3).tolist(),
-                         "kick": drums.round(3).tolist(), "snare": (drums * 0.2).round(3).tolist(),
-                         "vocals": np.where((t >= 41.0) & (t < 47.0), 0.8, 0.0).tolist(),
-                         "vocal_starts": [41.0], "vocal_ends": [47.0]}}
-
-
-def test_accents_and_the_accent_override():
-    """⚡ An accent — a drum hit far above the usual, a sung phrase starting, a jump in loudness — gets a cut: a cut
-    within a beat is pulled onto it, otherwise the block is split, only where both sides stay at least half the
-    shortest clip. Section lines never move; off = the blocks exactly as they were. Both cut modes."""
-    import accent_cuts as AC
-    import section_bounds as SB
-    import section_bounds_old as SBO
-    import sections_view as SV
-    tr = _accent_track()
-    acc = AC.find(tr)
-    at = {a["time"]: a for a in acc}
-    big = round(32 * 60 / 90, 3)
-    assert big in at and "drum" in at[big]["kinds"] and at[big]["strength"] >= 0.9       # the one big hit
-    assert sum("drum" in a["kinds"] for a in acc) == 1                                   # … not every beat
-    assert any("voice" in a["kinds"] and abs(a["time"] - 41.0) < 0.35 for a in acc)
-    assert any("jump" in a["kinds"] and abs(a["time"] - 32.0) < 0.35 for a in acc)
-    assert all(AC.FLOOR <= a["strength"] <= 1 and a["why"] for a in acc) and acc == sorted(acc, key=lambda a: a["time"])
-    assert AC.find({"track_id": "x", "duration_sec": 5.0}) == []
-    for mod in (SB, SBO):
-        f = mod.for_track(tr)
-        beat = SB._beat_sec(tr)
-        normal, short = AC.minimums(f, beat)
-        assert short == max(AC.ACCENT_FLOOR, normal / 2) and normal == 4 * beat          # a bar at 90 BPM, half of it
-        g = AC.apply(f, acc, 0.6, beat)
-        cuts = lambda x: [b["start"] for b in x["blocks"][1:]]                         # noqa: E731
-        assert big in cuts(g) and g["blocks"][0]["start"] == 0.0 and g["blocks"][-1]["end"] == f["blocks"][-1]["end"]
-        assert all(a["end"] == b["start"] for a, b in zip(g["blocks"], g["blocks"][1:]))
-        assert [b["n"] for b in g["blocks"]] == list(range(1, len(g["blocks"]) + 1))
-        lines = [round(ln["time"], 3) for ln in f["lines"]]
-        assert all(any(abs(c - ln) < 1e-6 for c in cuts(g)) for ln in lines)             # the lines are still cuts
-        assert min(b["end"] - b["start"] for b in g["blocks"]) >= min(
-            short, min(b["end"] - b["start"] for b in f["blocks"])) - 1e-6
-        did = {a["time"]: a["did"] for a in g["accents"]}
-        assert did[big] in ("added a cut", "moved a cut", "on a cut")
-        assert any("⚡ accent" in b["why"] for b in g["blocks"]) or did[big] == "on a cut"
-        same = [b for b in g["blocks"] if any(b["start"] == o["start"] and b["end"] == o["end"] for o in f["blocks"])]
-        assert all({**b, "n": 0} in [{**o, "n": 0} for o in f["blocks"]] for b in same)  # untouched blocks: as they were
-        assert AC.apply(f, acc, 1.01, beat)["blocks"] == f["blocks"]                     # nothing strong enough: no change
-        assert AC.apply(f, [], 0.6, beat)["blocks"] == f["blocks"]
-        d = SV._rule_cuts(g, f)
-        assert big in d["added"] or did[big] == "on a cut"
-    # pulled, not doubled: a cut half a beat from the accent moves onto it; too near a line: no room
-    f = {"duration": 20.0, "bars": [0.0, 4.0, 8.0, 12.0, 16.0], "lines": [{"time": 8.0}],
-         "sections": [{"n": 1, "label": "1", "start": 0.0, "end": 8.0}, {"n": 2, "label": "2", "start": 8.0, "end": 20.0}],
-         "blocks": [{"n": 1, "start": 0.0, "end": 4.0, "bars": 1, "section": "1", "why": "x"},
-                    {"n": 2, "start": 4.0, "end": 8.0, "bars": 1, "section": "1", "why": "x"},
-                    {"n": 3, "start": 8.0, "end": 20.0, "bars": 3, "section": "2", "why": "y"}]}
-    g = AC.apply(f, [{"time": 4.5, "strength": 0.9, "kinds": ["drum"], "why": "w"},
-                     {"time": 8.4, "strength": 0.8, "kinds": ["drum"], "why": "w"},
-                     {"time": 14.0, "strength": 0.7, "kinds": ["jump"], "why": "w"}], 0.6, beat=1.0)
-    assert [b["start"] for b in g["blocks"]] == [0.0, 4.5, 8.0, 14.0]
-    assert [a["did"] for a in g["accents"]] == ["moved a cut", "no room", "added a cut"]
-    assert [b["section"] for b in g["blocks"]] == ["1", "1", "2", "2"] and g["blocks"][3]["why"] == "y · ⚡ accent"
-    # the chart and the player: purple ⚡ where the override adds, pink ✕ where it takes away, ▼ on the accents
-    marks = SV._marks({"added": [1.0], "removed": [2.0]}, {"added": [4.5], "removed": [4.0]})
-    assert [(m["t"], m["m"], m["c"]) for m in marks] == [
-        (2.0, "✕", SV.RULE_TAKES), (4.0, "✕", SV.ACCENT_TAKES), (1.0, "＋", SV.RULE_ADDS), (4.5, "⚡", SV.ACCENT_ADDS)]
-    full = SB.for_track(tr)
-    fig = SV.lines_figure(full, accent_cuts={"added": [big], "removed": []}, accents=acc)
-    assert sum(a.text == "▼" for a in fig.layout.annotations) == len(acc)
-    assert len(fig.layout.shapes) == len(SV.lines_figure(full).layout.shapes) + 1
-    cfg = SV.player_config(full, None, {"added": [big], "removed": []}, acc)
-    assert len(cfg["ticks"]) == len(acc) and cfg["marks"][0]["m"] == "⚡"
-
-
 def test_the_switches_show_twice_and_the_table_folds_away():
-    """The 📐 page: every switch sits above the chart and again beside the player, one value behind both; markers
-    can be hidden; the sections table is folded away until asked for."""
+    """The 📐 page: every switch sits above the chart and again beside the player, one value behind both; the
+    vocal markers can be hidden; the sections table is folded away until asked for."""
     from tests.apptest_util import errors, page_app
     at = page_app("pages/3_Media_Library.py", timeout=300)
     at.session_state["lib_kind"] = "🎵 Audio"
@@ -448,27 +363,27 @@ def test_the_switches_show_twice_and_the_table_folds_away():
     at.run()
     assert not errors(at), errors(at)
     ss = at.session_state
-    assert (ss["sec_ln_mode"], ss["sec_ln_vocal"], ss["sec_ln_accent"]) == ("new", True, False)
-    assert ss["sec_ln_hide_vocal"] is False and ss["sec_ln_hide_accent"] is False and 0.3 <= ss["sec_ln_need"] <= 1
+    assert (ss["sec_ln_mode"], ss["sec_ln_vocal"], ss["sec_ln_hide_vocal"]) == ("new", True, False)
+    assert "sec_ln_accent" not in ss                                        # the ⚡ accent override was dropped, 12 Nov
     top = {t.key: t for t in at.toggle}
-    assert {"sec_ln_vocal__top", "sec_ln_accent__top", "sec_ln_hide_vocal__top", "sec_ln_hide_accent__top"} <= set(top)
+    assert {"sec_ln_vocal__top", "sec_ln_hide_vocal__top"} <= set(top)
     assert "sec_ln_vocal__play" not in top                                  # the player isn't open yet
     assert any("📋" in e.label for e in at.expander)
-    top["sec_ln_accent__top"].set_value(True).run()                         # a copy flips the one value …
+    top["sec_ln_vocal__top"].set_value(False).run()                         # a copy flips the one value …
     assert not errors(at), errors(at)
-    assert at.session_state["sec_ln_accent"] is True
-    assert any("⚡ Accent override **on**" in c.value or "⚡ No accent" in c.value for c in at.caption)
+    assert at.session_state["sec_ln_vocal"] is False
+    {t.key: t for t in at.toggle}["sec_ln_vocal__top"].set_value(True).run()
+    assert at.session_state["sec_ln_vocal"] is True
     at.session_state["sec_ln_whole"] = True
     at.run()
     assert not errors(at), errors(at)
     both = {t.key: t for t in at.toggle}
     if "sec_ln_vocal__play" in both:                                        # (the test data has the audio file)
-        assert both["sec_ln_accent__play"].value is True and both["sec_ln_vocal__play"].value is True
+        assert both["sec_ln_vocal__play"].value is True
         both["sec_ln_vocal__play"].set_value(False).run()                   # … and so does the other copy
         assert not errors(at), errors(at)
         assert at.session_state["sec_ln_vocal"] is False
         assert {t.key: t for t in at.toggle}["sec_ln_vocal__top"].value is False
-    for name in ("hide_vocal", "hide_accent"):
-        {t.key: t for t in at.toggle}[f"sec_ln_{name}__top"].set_value(True).run()
-        assert not errors(at), errors(at)
-        assert at.session_state[f"sec_ln_{name}"] is True
+    {t.key: t for t in at.toggle}["sec_ln_hide_vocal__top"].set_value(True).run()
+    assert not errors(at), errors(at)
+    assert at.session_state["sec_ln_hide_vocal"] is True

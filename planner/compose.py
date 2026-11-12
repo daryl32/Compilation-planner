@@ -286,17 +286,29 @@ def _motion_curves(video_id: str) -> dict:
 def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, music_story: float = 0.5,
                  smooth_contrast: float = 0.5, excluded: set = None, max_videos: int = 0, progress=None,
                  movement_only: bool = False, min_clip: float = None, level_range: float = 0.0,
-                 bounce_speed: float = 0.0) -> dict:
+                 bounce_speed: float = 0.0, cuts: str = "sections", vocal_rule: bool = True) -> dict:
+    """cuts: "sections" — the 🧩 section map at each 🍳 recipe's pace (as always); "lines" — the 📐 lines from the
+    music with their own blocks (section_bounds.py), every block kept as cut (no two joined into one clip)."""
     import core.story_matcher as SMX
     from planner.data import build_footage_queues, load_all_catalogues
     from render_preview import colab_to_local
     track = _load_track(track_id)
     regions = _section_regions(track)
     all_recipes = RC.load_all()
-    segments = SCUT.story_segments(track, regions, all_recipes, min_clip)
+    segments, cut_note = [], None
+    if cuts == "lines":
+        try:
+            segments = SCUT.line_segments(track, regions, vocal_rule)
+        except Exception as e:          # noqa: BLE001
+            cut_note = f"✂️ The 📐 lines couldn't be read for this track ({e}) — cut from the 🧩 section map instead."
+        if not segments and cut_note is None:
+            cut_note = "✂️ No 📐 lines found for this track — cut from the 🧩 section map instead."
+    if not segments:
+        cuts = "sections"
+        segments = SCUT.story_segments(track, regions, all_recipes, min_clip)
     queues = build_footage_queues(tuple(video_ids), (), LC.library_ranges())
     opts = SMX.StoryOptions(music_story=music_story, smooth_contrast=smooth_contrast, section_map=regions or None,
-                            max_videos=int(max_videos or 0), progress=progress, merge_blocks=True,
+                            max_videos=int(max_videos or 0), progress=progress, merge_blocks=cuts != "lines",
                             movement_only=bool(movement_only), curves_of=_motion_curves,
                             level_range=float(level_range or 0.0), bounce_speed=float(bounce_speed or 0.0))
     max_clips = 3 if split_screen else 1
@@ -311,7 +323,8 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     plan = {
         "track_id": track_id, "matching_mode": "Auto story", "track_source_path": colab_to_local(track["source_path"]),
         "track_duration_sec": track["duration_sec"], "bpm": track.get("bpm"),
-        "segmentation": {"method": "sections", "section_map": regions, "paces": {t: r.get("pace") for t, r in all_recipes.items()}},
+        "segmentation": {"method": cuts, "section_map": regions, "paces": {t: r.get("pace") for t, r in all_recipes.items()},
+                         **({"vocal_rule": bool(vocal_rule)} if cuts == "lines" else {})},
         "sequential_video_order": False, "globally_rejected_clips": [list(k) for k in (excluded or ())],
         "video_time_ranges": {k: list(v) for k, v in LC.library_ranges().items() if k in video_ids},
         "tag_filter": [], "selected_videos": list(video_ids), "split_screen_enabled": split_screen,
@@ -322,7 +335,11 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
                   "bounce_speed": float(bounce_speed or 0.0)},
         "timeline": timeline,
     }
-    return {"plan": plan, "segments": segments, "notes": list(opts.notes), "shortfall": shortfall,
+    if cuts == "lines":
+        cut_note = (f"✂️ Cuts: 📐 lines from the music, 🎤 vocal rule {'on' if vocal_rule else 'off'} — "
+                    f"{' · '.join(SCUT.describe(segments).split(' · ')[:2])}")
+    return {"plan": plan, "segments": segments, "notes": ([cut_note] if cut_note else []) + list(opts.notes),
+            "shortfall": shortfall,
             "unfilled": unfilled, "summary": SMX.plan_summary(timeline), "track": track,
             "video_stats": dict(opts.video_stats), "alternatives": dict(opts.alternatives),
             "made": time.strftime("%H:%M:%S")}
@@ -452,6 +469,7 @@ def _do_pending_compile() -> None:
                            max_videos=int(st.session_state.get("compose_max_videos", 0) or 0),
                            movement_only=bool(st.session_state.get("compose_movement_only")),
                            min_clip=_min_clip(),
+                           cuts=_cuts(), vocal_rule=bool(st.session_state.get("compose_vocal_rule", True)),
                            # 💥 Punch drives both: the track's range stretched, and bounce speed following the rhythm
                            level_range=float(st.session_state.get("compose_punch", 0.0)),
                            bounce_speed=float(st.session_state.get("compose_punch", 0.0)),
@@ -473,7 +491,30 @@ def _min_clip():
     return None if v <= 0 else v
 
 
+CUTS = {"sections": "🧩 Section map + recipes (as before)", "lines": "📐 Lines from the music (new)"}
+
+
+def _cuts() -> str:
+    """✂️ Where the blocks come from: "sections" (the section map at the recipes' pace) or "lines"."""
+    v = st.session_state.get("compose_cuts")
+    return v if v in CUTS else "sections"
+
+
 def _options_row(ns: str) -> None:
+    if st.session_state.get("compose_cuts") not in CUTS:
+        st.session_state["compose_cuts"] = "sections"
+    st.segmented_control(
+        "✂️ Cuts", list(CUTS), key="compose_cuts", format_func=CUTS.get,
+        help="Where the blocks (the clip lengths) come from. 🧩 As before: the track's section map, each section cut "
+             "at its recipe's clip length. 📐 New: the lines found straight from the music (🧩 Sections → 📐, 🅱 New "
+             "cuts) — a cut wherever the music changes, and inside each part blocks of 1, 2 or 4 bars by how loud "
+             "and busy it is. Every 📐 block is kept as cut (two are never joined into one clip), and ✂️ Shortest "
+             "clip doesn't apply — the 📐 blocks have their own minimum from the tempo. The recipes still read "
+             "each block's type from the section map, so for now 📐 is best judged with 🎯 Movement only.")
+    if _cuts() == "lines":
+        st.toggle("🎤 Vocal rule", value=True, key="compose_vocal_rule",
+                  help="On: where the voice leads (no drums), no cut inside a sung phrase. The same switch as on "
+                       "the 📐 Sections page.")
     c = st.columns([1.3, 1.6, 2, 2])
     c[0].toggle("🪟 Split screen", key="compose_split", help="Off: one clip per block. On: up to three at the loudest blocks.")
     c[1].number_input("Max different videos", 0, 60, 0, key="compose_max_videos",
@@ -484,7 +525,7 @@ def _options_row(ns: str) -> None:
                 help="Left: the music fit decides. Right: the recipes' tags decide.")
     c[3].slider("Smooth ↔ Contrast", 0.0, 1.0, 0.5, 0.05, key="compose_smooth",
                 help="Left: shot sizes kept steady. Right: changes welcome at drops and section changes.")
-    st.number_input("✂️ Shortest clip (s)", 0.0, 10.0, 0.0, 0.5, key="compose_min_clip",
+    st.number_input("✂️ Shortest clip (s)", 0.0, 10.0, 0.0, 0.5, key="compose_min_clip", disabled=_cuts() == "lines",
                     help="0 = Auto: the shortest musical length of at least 1.4 s — a bar at 90 BPM (2.7 s), a bar at "
                          "128 BPM (1.9 s). Or type your own; cuts stay on the beat, so it rounds up to whole beats. "
                          "0.5 = no minimum (the recipes' clip lengths alone). A section too short for two clips "
@@ -568,10 +609,18 @@ def _track_line(track_id: str) -> None:
     if not regions:
         st.warning("This track's sections can't be read — it needs the 🔬 audio analysis first.")
         return
-    segs = SCUT.story_segments(track, regions, RC.load_all(), _min_clip())
+    segs = []
+    if _cuts() == "lines":
+        try:
+            segs = SCUT.line_segments(track, regions, bool(st.session_state.get("compose_vocal_rule", True)))
+        except Exception:          # noqa: BLE001
+            segs = []
+    lines_used = bool(segs)
+    if not segs:
+        segs = SCUT.story_segments(track, regions, RC.load_all(), _min_clip())
     tot = ST.totals(regions)
     st.caption("🧩 " + " · ".join(f"{ST.label(t)} {format_mmss(s)}" for t, s in sorted(tot.items(), key=lambda kv: -kv[1]))
-               + f"  →  ✂️ {SCUT.describe(segs)}"
+               + f"  →  ✂️ {'📐 lines: ' if lines_used else ''}{SCUT.describe(segs)}"
                + ("" if ST.saved_map(track_id) else "  · suggested map (save one in 📁 Media Library → 🎵 Audio → 🧩 Sections)"))
 
 
