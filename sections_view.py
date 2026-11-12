@@ -246,7 +246,7 @@ def _render_lines(track: dict, play=None) -> None:
         st.caption("Profile = step 2: the layers playing · how loud within this track (quiet / medium / loud) · "
                    "how busy the drums are (hits a second) · rising or falling · “like N” = the same profile as "
                    "section N. A section type will be a named profile. Blocks: every line is a cut; inside a part "
-                   "the profile sets the length — busy loud drums 1 bar, other drum parts 2, voice / instruments "
+                   "the profile sets the length — loud drum parts 1 bar, other drum parts 2, voice / instruments "
                    "leading 2 or 4, hardly anything playing 4 — shorter towards the end of a rising part, longer "
                    "towards the end of a falling one, never inside a sung phrase where the voice leads, never "
                    "under the shortest clip for the tempo (a bar at 90 BPM) — shorter ones are paired up.")

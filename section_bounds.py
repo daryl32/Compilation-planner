@@ -17,7 +17,7 @@ Sections and parts. A big change (a solid line) starts a new SECTION; a smaller 
 inside it — sections are numbered 1, 2, 3 and their parts 3a, 3b. Every part has its own profile.
 
 Blocks (blocks) — the clips' lengths, from the same measurements and still no type names. Every line is a cut.
-Inside a part the profile sets the pace: busy loud drums 1 bar (half a bar where that is still a clip), other drum
+Inside a part the profile sets the pace: loud drums 1 bar (half a bar where that is still a clip), other drum
 parts 2 bars, parts led by the voice / instruments 2 or 4 bars, hardly anything playing 4 bars; a rising part's
 blocks get shorter towards its end, a falling part's longer; lengths are musical (½, 1, 2, 4, 8 bars — 6 bars is
 4 + 2); in a part the voice leads no cut lands inside a sung phrase; and no block is shorter, in seconds, than
@@ -54,6 +54,7 @@ NAME = {"drums": "drums", "hats": "hats", "bass": "bass", "other": "instruments"
 WINDOWS = (2, 4)           # bars before / after a line that are compared
 MIN_SIZE = 0.22            # a change smaller than this is not a line
 STRONG = 0.5               # a change this big is a main line (level 1); the rest are level 2
+BREAK_FALL = 0.3           # a one-bar break: the loudness that bar is this far under the two bars either side of it
 MIN_GAP_BARS = 2           # lines are at least this far apart (a one-bar break apart)
 SAY_STEP = 0.15            # a layer's step is named in the line's reason from this size
 OFF, ON = 0.15, 0.3        # a layer "comes in" from under OFF to at least ON, and "drops out" the other way
@@ -227,9 +228,14 @@ def find_lines(bars, levels: dict, duration: float, change=None) -> list:
     # several bars either side smooths a single bar away, so it is looked for directly (this bar against BOTH its
     # neighbours) and gets a line on each side
     stop = {}
+    loud = lv.get("loudness")
     for k in range(1, n - 1):
         dip = np.sqrt(sum((WEIGHT[name] * max(0.0, min(v[k - 1], v[k + 1]) - v[k])) ** 2 for name, v in lv.items()))
-        if dip >= STRONG and float(duration) - bars[k + 1] >= 0.5:
+        # the BAND stops: the loudness itself falls away for that one bar — and it is one bar on its own, not a
+        # pattern that alternates bar by bar (Midnight Sun's bass line plays every other bar: 31 "breaks", 12 Nov)
+        alone = loud is None or (min(loud[k - 1], loud[k + 1]) - loud[k] >= BREAK_FALL
+                                 and all(loud[j] - loud[k] >= BREAK_FALL for j in (k - 2, k + 2) if 0 <= j < n))
+        if dip >= STRONG and alone and float(duration) - bars[k + 1] >= 0.5:
             stop[k], stop[k + 1] = ("⏸️ the band stops for a bar", dip), ("▶️ the band comes back in", dip)
     chosen = list(stop)
     for k in sorted(cand, key=lambda k: -size[k]):                  # strongest first, keeping their distance
@@ -347,10 +353,12 @@ def _pace(prof: dict, bar_sec: float, min_sec: float) -> tuple:
     """(block length in bars, why) for a part with this profile."""
     on = prof.get("on") or []
     if "drums" in on:
-        if prof.get("busy_word") == "busy" and prof.get("level_word") == "loud":
-            length, why = (0.5, "busy loud drums") if bar_sec / 2 >= MIN_SLACK * min_sec else (1.0, "busy loud drums")
+        # by how LOUD the part is, not how busy its drums rank: on AURA two near-identical loud drum sections read
+        # 5.0 and 4.7 hits a second, fell either side of "busy", and were cut at one bar and at two (12 Nov)
+        if prof.get("level_word") == "loud":
+            length, why = (0.5, "loud drums") if bar_sec / 2 >= MIN_SLACK * min_sec else (1.0, "loud drums")
         else:
-            length, why = 2.0, f"{prof.get('busy_word') or 'steady'} drums, {prof.get('level_word')}"
+            length, why = 2.0, f"drums, {prof.get('level_word')}"
     elif on:
         lead = "voice" if "vocals" in on else "instruments" if "other" in on else "bass"
         length, why = (4.0, f"{lead} leading, quiet") if prof.get("level_word") == "quiet" else (2.0, f"{lead} leading")

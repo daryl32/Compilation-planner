@@ -199,7 +199,7 @@ def test_sections_parts_and_blocks():
     assert all(b["end"] - b["start"] >= 2.0 - 1e-6 for b in blks)                         # never under the shortest clip
     assert all(b["bars"] in (0.5, 1, 2, 3, 4, 5, 6, 8) for b in blks)
     in_hit = [b for b in blks if 44.0 <= b["start"] < 72.0]
-    assert in_hit and all(b["bars"] == 1 and "busy loud drums" in b["why"] for b in in_hit)
+    assert in_hit and all(b["bars"] == 1 and "loud drums" in b["why"] for b in in_hit)
     quiet = [b for b in blks if b["end"] <= 12.0]
     assert quiet and all(b["bars"] >= 2 for b in quiet) and "hardly anything playing" in quiet[0]["why"]
     rising = [b for b in blks if 28.0 <= b["start"] < 44.0]
@@ -220,6 +220,9 @@ def test_sections_parts_and_blocks():
     assert SB._pace({"on": []}, 2.7, 1.4)[0] == 2.0 and SB._pace({"on": []}, 1.9, 1.4)[0] == 4.0
     busy = {"on": ["drums"], "busy_word": "busy", "level_word": "loud"}
     assert SB._pace(busy, 3.0, 1.4)[0] == 0.5 and SB._pace(busy, 2.0, 1.4)[0] == 1.0
+    # two loud drum parts are cut alike, however their drums rank (AURA's sections 3 and 5, 12 Nov)
+    assert SB._pace(dict(busy, busy_word="steady"), 2.67, 2.67) == SB._pace(busy, 2.67, 2.67)
+    assert SB._pace(dict(busy, level_word="medium"), 2.67, 2.67)[0] == 2.0
     assert SB._pace(busy, 2.62, 2.667)[0] == 1.0                  # a bar a touch under four beats is still a bar
     # AURA, 12 Nov: where the bar lines are uneven, "one-bar" blocks came out at 1.3 s and 0.6 / 0.7 s. Blocks are
     # sized in seconds: short ones pair up within their part, the last short one joins the block before it
