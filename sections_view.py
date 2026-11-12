@@ -208,11 +208,30 @@ def _render_lines(track: dict, play=None) -> None:
                    "out, it gets louder or quieter, the sound changes — always on a bar line. No types yet: this "
                    "only shows WHERE the song divides. Solid = a big change, dotted = a smaller one. It doesn't "
                    "touch the saved sections below. ▶ at the bottom plays the whole track over it.")
+        if st.session_state.get("sec_ln_mode") not in ("new", "old"):
+            st.session_state["sec_ln_mode"] = "new"
+        mode = st.segmented_control(
+            "Cuts", ["old", "new"], key="sec_ln_mode",
+            format_func={"old": "🅰 Old cuts (as on main, v1.59.0)", "new": "🅱 New cuts"}.get,
+            help="The same track cut two ways, to compare by ear. 🅰 Old: exactly as released in v1.59.0 — the "
+                 "stored bar lines, blocks counted in bars, drum parts paced by how busy the drums rank. 🅱 New: a "
+                 "steady bar grid from the beats, no block under the shortest clip for the tempo (short ones "
+                 "pair up), loud drum parts all cut at one bar, a pattern that alternates bar by bar no longer "
+                 "read as one-bar breaks. Section, bar and block numbers differ between the two.") or "new"
         try:
-            found = SB.for_track(track)
+            import section_bounds_old as SBO
+            both = {"new": SB.for_track(track), "old": SBO.for_track(track)}
+            found = both[mode]
         except Exception as e:          # noqa: BLE001
             st.caption(f"Couldn't read this track's layers: {e}")
             return
+
+        def _sum(f):
+            d = [b["end"] - b["start"] for b in f.get("blocks") or []]
+            return (f"{len(f['bars'])} bars · {f['sections'][-1]['main']} sections · {len(d)} blocks, "
+                    f"{min(d):.1f}–{max(d):.1f} s") if d else "no blocks"
+        st.caption(f"{'**🅰 Old**' if mode == 'old' else '🅰 Old'}: {_sum(both['old'])}  \n"
+                   f"{'**🅱 New**' if mode == 'new' else '🅱 New'}: {_sum(both['new'])}")
         if not found["lines"]:
             st.info("No lines found — this track may need the extra 🔬 analysis.")
             return
@@ -270,7 +289,7 @@ def _render_lines(track: dict, play=None) -> None:
                     play(track, {"start": 0.0, "end": min(5.0, float(track["duration_sec"]))}, False,
                          f"sec_ln_dl_{track.get('track_id')}")
             else:
-                lines_player(clip, found, f"ln_{abs(hash(track.get('track_id'))) % 10 ** 8}")
+                lines_player(clip, found, f"ln_{mode}_{abs(hash(track.get('track_id'))) % 10 ** 8}")
 
 
 def _whole_track_clip(track: dict) -> tuple:

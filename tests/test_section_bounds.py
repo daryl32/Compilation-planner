@@ -277,3 +277,46 @@ def test_a_steady_bar_grid_from_the_beats():
     before = AD.drivers(tr)["bars"].copy()
     SB.for_track(tr)
     assert np.array_equal(AD.drivers(tr)["bars"], before)
+
+
+def test_old_and_new_cuts_side_by_side():
+    """🅰 Old = the module as released in v1.59.0, kept word for word; 🅱 New = today's. The page switches."""
+    import section_bounds as SB
+    import section_bounds_old as SBO
+    import sections_view as SV
+    from tests.apptest_util import errors, page_app
+    from tests.fixtures import load_track
+    tr = load_track(DATA, "song_full")
+    old, new = SBO.for_track(tr), SB.for_track(tr)
+    assert {"bars", "levels", "lines", "sections", "blocks"} <= set(old) and old["blocks"] and new["blocks"]
+    assert all(s_["label"] and s_["words"] for s_ in old["sections"])
+    for f in (old, new):                                      # both draw: the chart and the player
+        assert SV.lines_figure(f).data and SV.player_config(f)["blocks"]
+    # the case the switch is for: uneven stored bar lines over steady beats (AURA, 12 Nov)
+    beat = 0.667
+    beats = (0.3 + np.arange(160) * beat)
+    down = np.sort(np.concatenate([beats[::4], beats[2::4][10:18]]))            # half bars for eight bars
+    n = int(107 * 30)
+    t = np.arange(n) / 30
+    loud = np.where((t > 20) & (t < 80), 0.9, 0.1)
+    kick = loud * (0.5 + 0.5 * np.cos(2 * np.pi * ((t - 0.3) % beat) / beat) ** 8)
+    track = {"track_id": "uneven", "duration_sec": 107.0, "bpm": 90.0, "beat_times": beats.round(3).tolist(),
+             "hires": {"rate": 30, "rms": loud.round(3).tolist(), "onset": kick.round(3).tolist()},
+             "analysis": {"rate": 30, "beats_per_bar": 4, "downbeats": down.round(3).tolist(),
+                          "kick": kick.round(3).tolist(), "snare": (kick * 0.5).round(3).tolist()}}
+    o, w = SBO.for_track(track), SB.for_track(track)
+    short = lambda f: min(b["end"] - b["start"] for b in f["blocks"])        # noqa: E731
+    assert short(w) >= 2.2 and short(o) <= short(w) + 1e-6    # new: none under a bar; old never longer than new
+    assert len(o["bars"]) > len(w["bars"]) and SB._uneven(o["bars"], 107.0) and not w["uneven_bars"]
+    # the page: new by default, the switch shows the old ones
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎵 Audio"
+    at.session_state["aud_kind"] = "🧩 Sections"
+    at.run()
+    assert not errors(at), errors(at)
+    assert at.session_state["sec_ln_mode"] == "new"
+    assert any("🅰 Old" in c.value and "**🅱 New**" in c.value for c in at.caption)
+    at.session_state["sec_ln_mode"] = "old"
+    at.run()
+    assert not errors(at), errors(at)
+    assert any("**🅰 Old**" in c.value for c in at.caption)
