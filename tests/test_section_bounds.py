@@ -216,6 +216,9 @@ def test_sections_parts_and_blocks():
     cuts = [b["start"] for b in sung[1:]]
     assert 4.0 not in cuts and 8.0 not in cuts and all(not (2.5 + 0.7 < c < 9.5 - 0.7) for c in cuts)
     assert sung[0]["start"] == 0.0 and sung[-1]["end"] == 16.0
+    # 🎤 the vocal rule switched off: the cuts stay where the pace put them, sung phrase or not
+    off = SB.blocks(part, bars[:8], 16.0, vocal_starts=[2.5], vocal_ends=[9.5], vocal_rule=False)
+    assert [(b["start"], b["end"]) for b in off] == [(b["start"], b["end"]) for b in plain] and off != sung
     # slow tempo: a pace that would make a block longer than 8 s is halved; half bars only where they are still a clip
     assert SB._pace({"on": []}, 2.7, 1.4)[0] == 2.0 and SB._pace({"on": []}, 1.9, 1.4)[0] == 4.0
     busy = {"on": ["drums"], "busy_word": "busy", "level_word": "loud"}
@@ -320,3 +323,20 @@ def test_old_and_new_cuts_side_by_side():
     at.run()
     assert not errors(at), errors(at)
     assert any("**🅰 Old**" in c.value for c in at.caption)
+    # 🎤 the vocal rule: a switch for both modes. On = exactly as before; off = the same in both as a track with
+    # no sung-phrase marks (the old module is not edited); the lines and sections never change
+    assert at.session_state["sec_ln_vocal"] is True
+    on, no = SV._both_cuts(tr), SV._both_cuts(tr, False)
+    assert on["old"] == old and on["new"] == new
+    bare = {**tr, "analysis": {**(tr.get("analysis") or {}), "vocal_starts": [], "vocal_ends": []}}
+    assert no["old"] == SBO.for_track(bare) and no["new"]["blocks"] == SB.for_track(bare)["blocks"]
+    assert all(no[m]["lines"] == on[m]["lines"] and no[m]["sections"] == on[m]["sections"] for m in on)
+    assert SV._cuts_changed(on["new"], on["new"]) == [] and SV._changed_words([]) == "nothing"
+    two = {"blocks": [{"section": "1", "start": 0.0, "end": 4.0}, {"section": "2a", "start": 4.0, "end": 8.0}]}
+    one = {"blocks": [{"section": "1", "start": 0.0, "end": 4.0}, {"section": "2a", "start": 4.0, "end": 6.0},
+                      {"section": "2a", "start": 6.0, "end": 8.0}]}
+    assert SV._cuts_changed(two, one) == ["2a"] and SV._changed_words(["2a"]) == "section 2a"
+    at.session_state["sec_ln_vocal"] = False
+    at.run()
+    assert not errors(at), errors(at)
+    assert any("🎤" in c.value for c in at.caption)

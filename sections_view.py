@@ -201,6 +201,34 @@ def lines_figure(found: dict, height: int = 270):
     return fig
 
 
+def _both_cuts(track: dict, vocal_rule: bool = True) -> dict:
+    """The track cut both ways: {"new", "old"}. vocal_rule=False switches the sung-phrase rule off in both. The old
+    module is the v1.59.0 reference and is not edited: it skips the rule when a track has no sung-phrase marks,
+    so it is given a copy of the track without them (it reads them for nothing else)."""
+    import section_bounds as SB
+    import section_bounds_old as SBO
+    old_track = track if vocal_rule else {
+        **track, "analysis": {**(track.get("analysis") or {}), "vocal_starts": [], "vocal_ends": []}}
+    return {"new": SB.for_track(track, vocal_rule=vocal_rule), "old": SBO.for_track(old_track)}
+
+
+def _cuts_changed(a: dict, b: dict) -> list:
+    """The sections (part labels) whose block cuts differ between two results of the same mode, in track order."""
+    def cuts(f):
+        out = {}
+        for blk in f.get("blocks") or []:
+            out.setdefault(blk["section"], []).append((blk["start"], blk["end"]))
+        return out
+    ca, cb = cuts(a), cuts(b)
+    return [k for k in ca if ca[k] != cb.get(k)] + [k for k in cb if k not in ca]
+
+
+def _changed_words(labels: list) -> str:
+    if not labels:
+        return "nothing"
+    return f"section{'s' if len(labels) != 1 else ''} {', '.join(labels[:10])}{'…' if len(labels) > 10 else ''}"
+
+
 def _render_lines(track: dict, play=None) -> None:
     import section_bounds as SB
     with st.expander("📐 New — lines from the music (no names yet)"):
@@ -218,9 +246,14 @@ def _render_lines(track: dict, play=None) -> None:
                  "steady bar grid from the beats, no block under the shortest clip for the tempo (short ones "
                  "pair up), loud drum parts all cut at one bar, a pattern that alternates bar by bar no longer "
                  "read as one-bar breaks. Section, bar and block numbers differ between the two.") or "new"
+        vocal = st.toggle(
+            "🎤 Vocal rule", value=True, key="sec_ln_vocal",
+            help="On (as before): in a part the voice leads (voice playing, no drums), a cut that would land "
+                 "inside a sung phrase moves to a clean bar or half-bar line, or is dropped — one longer block. "
+                 "Off: the cuts stay where the pace puts them, sung phrase or not. Works on both 🅰 Old and 🅱 New; "
+                 "the section lines don't change, only the blocks.")
         try:
-            import section_bounds_old as SBO
-            both = {"new": SB.for_track(track), "old": SBO.for_track(track)}
+            both, other = _both_cuts(track, vocal), _both_cuts(track, not vocal)
             found = both[mode]
         except Exception as e:          # noqa: BLE001
             st.caption(f"Couldn't read this track's layers: {e}")
@@ -232,6 +265,14 @@ def _render_lines(track: dict, play=None) -> None:
                     f"{min(d):.1f}–{max(d):.1f} s") if d else "no blocks"
         st.caption(f"{'**🅰 Old**' if mode == 'old' else '🅰 Old'}: {_sum(both['old'])}  \n"
                    f"{'**🅱 New**' if mode == 'new' else '🅱 New'}: {_sum(both['new'])}")
+        moved = {m: _cuts_changed(both[m], other[m]) for m in ("old", "new")}
+        if not any(moved.values()):
+            st.caption("🎤 The vocal rule changes no cut in this track, in either mode (it only acts in parts "
+                       "where the voice plays without drums).")
+        else:
+            st.caption(f"🎤 Vocal rule **{'on' if vocal else 'off'}** — switching it "
+                       f"{'off' if vocal else 'on'} changes: 🅰 Old {_changed_words(moved['old'])} · "
+                       f"🅱 New {_changed_words(moved['new'])}")
         if not found["lines"]:
             st.info("No lines found — this track may need the extra 🔬 analysis.")
             return
@@ -289,7 +330,8 @@ def _render_lines(track: dict, play=None) -> None:
                     play(track, {"start": 0.0, "end": min(5.0, float(track["duration_sec"]))}, False,
                          f"sec_ln_dl_{track.get('track_id')}")
             else:
-                lines_player(clip, found, f"ln_{mode}_{abs(hash(track.get('track_id'))) % 10 ** 8}")
+                lines_player(clip, found,
+                             f"ln_{mode}_{'v' if vocal else 'n'}_{abs(hash(track.get('track_id'))) % 10 ** 8}")
 
 
 def _whole_track_clip(track: dict) -> tuple:

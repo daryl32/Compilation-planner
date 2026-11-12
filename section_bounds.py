@@ -414,11 +414,12 @@ def _merge_short(out: list, min_sec: float) -> list:
 
 
 def blocks(secs: list, bars, duration: float, vocal_starts=(), vocal_ends=(), min_sec: float = None,
-           beat: float = None) -> list:
+           beat: float = None, vocal_rule: bool = True) -> list:
     """The blocks of a track, in order: {"n", "start", "end", "bars", "section" (the part's label), "why"}.
     secs: the sections with their profiles (profile()). min_sec: the shortest block in seconds — default: the
     matcher's ✂️ Shortest clip on Auto for this tempo (section_cuts.auto_min_clip: the shortest musical length of
-    at least 1.4 s — a bar at 90 BPM); beat: seconds between beats (default: a quarter of the typical bar)."""
+    at least 1.4 s — a bar at 90 BPM); beat: seconds between beats (default: a quarter of the typical bar).
+    vocal_rule=False: cuts stay where the pace puts them, sung phrase or not (the 🎤 switch on the 📐 page)."""
     bars = np.asarray(bars, float)
     n = len(bars)
     if n < 2 or not secs:
@@ -454,7 +455,8 @@ def blocks(secs: list, bars, duration: float, vocal_starts=(), vocal_ends=(), mi
             return base
         lens = _fill(float(b - a), length_at)
         cuts = list(np.cumsum(lens)[:-1] + a)           # inside the part, in bars
-        if "drums" not in (prof.get("on") or []) and "vocals" in (prof.get("on") or []) and len(vs):
+        if "drums" not in (prof.get("on") or []) and "vocals" in (prof.get("on") or []) and len(vs) \
+                and vocal_rule:
             kept, last = [], float(a)                   # the voice leads: no cut in the middle of a sung phrase
             for k, c in enumerate(cuts):
                 nxt = cuts[k + 1] if k + 1 < len(cuts) else float(b)
@@ -495,9 +497,9 @@ def _uneven(bars, duration: float) -> list:
     return [int(k) + 1 for k in np.flatnonzero((d < 0.6 * med) | (d > 1.6 * med)) if k < len(bars) - 1 and k > 0]
 
 
-def for_track(track: dict, beats=None) -> dict:
+def for_track(track: dict, beats=None, vocal_rule: bool = True) -> dict:
     """Everything for one track: {"bars", "duration", "levels", "hits", "lines", "sections", "blocks"} — lists,
-    ready for JSON; every section (part) carries its profile."""
+    ready for JSON; every section (part) carries its profile. vocal_rule: see blocks()."""
     bl = bar_levels(track, beats)
     lines = find_lines(bl["bars"], bl["levels"], bl["duration"], bl["change"])
     secs = profile(sections(bl["bars"], bl["levels"], bl["duration"], lines), bl["bars"], bl["levels"], bl["hits"])
@@ -507,7 +509,8 @@ def for_track(track: dict, beats=None) -> dict:
             "stems": list(bl["stems"]),
             "lines": lines, "sections": secs,
             "blocks": blocks(secs, bl["bars"], bl["duration"], (track.get("analysis") or {}).get("vocal_starts"),
-                             (track.get("analysis") or {}).get("vocal_ends"), beat=_beat_sec(track)),
+                             (track.get("analysis") or {}).get("vocal_ends"), beat=_beat_sec(track),
+                             vocal_rule=vocal_rule),
             "uneven_bars": _uneven(bl["bars"], bl["duration"])}
 
 
