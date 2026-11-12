@@ -216,6 +216,22 @@ def reviewed(moment: dict, category: str = None) -> bool:
     return bool(category) and category in ((moment.get("partial") or {}).get("done") or [])
 
 
+def progress_table(videos: dict, categories: list) -> dict:
+    """📊 Review progress per video and per category: {"rows": [{"video", "frames", "full" (frames with your full
+    label), "by" {category: frames reviewed in it}}] least reviewed first, "total": the same summed}.
+    A frame with a full label counts as reviewed in every category."""
+    rows = []
+    for vid, v in videos.items():
+        ms = v.get("moments") or []
+        rows.append({"video": vid, "frames": len(ms), "full": sum(1 for m in ms if m.get("mine") is not None),
+                     "by": {c: sum(1 for m in ms if reviewed(m, c)) for c in categories}})
+    rows.sort(key=lambda r: ((sum(r["by"].values()) / (r["frames"] * len(categories))) if r["frames"] and categories
+                             else (r["full"] / r["frames"] if r["frames"] else 1.0), r["video"].lower()))
+    total = {"video": "All", "frames": sum(r["frames"] for r in rows), "full": sum(r["full"] for r in rows),
+             "by": {c: sum(r["by"][c] for r in rows) for c in categories}}
+    return {"rows": rows, "total": total}
+
+
 def progress(videos: dict, category: str = None) -> dict:
     """{video_id: (frames reviewed, frames)} — overall, or for one category."""
     return {vid: (sum(1 for m in v.get("moments") or [] if reviewed(m, category)), len(v.get("moments") or []))

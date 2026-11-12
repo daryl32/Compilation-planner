@@ -325,6 +325,43 @@ def _with_library(view: dict) -> dict:
     return {**view, "videos": {**view["videos"], **extra, **other}, "teachers": teachers}
 
 
+def _pick_from_table(names: list) -> None:
+    """A row tapped in the progress table: that video goes into the Video box."""
+    sel = (st.session_state.get("tr_prog_table") or {}).get("selection") or {}
+    rows = sel.get("rows") or []
+    if rows and 0 <= rows[0] < len(names):
+        st.session_state["tr_vid"] = names[rows[0]]
+        st.session_state["tr_page"] = 1
+        st.session_state["tr_gpage"] = 1
+
+
+def _progress_table(videos: dict, cats: list) -> None:
+    """📊 Per video and per category: how much of it you've reviewed — to see where the training data is thin."""
+    with st.expander("📊 Review progress — per video, per category"):
+        if not videos:
+            st.caption("No videos in this selection.")
+            return
+        tab = TR.progress_table(videos, cats)
+        pct = lambda d, n: round(100 * d / n) if n else 0     # noqa: E731
+        t = tab["total"]
+        st.caption("How much of each video you've reviewed, in % of its frames — least reviewed first. **All** = a "
+                   "full label; a category = a full label, or that category finished with 🧹. Tap a row to put that "
+                   "video in the Video box. It follows the Videos choice above (🧠 / 🧪 / 📚).")
+        st.caption("Everything shown: " + " · ".join(
+            [f"**All {pct(t['full'], t['frames'])}%**"] + [f"{c} {pct(t['by'][c], t['frames'])}%" for c in cats])
+            + f" · {t['frames']:,} frames in {len(tab['rows'])} videos")
+        names = [r["video"] for r in tab["rows"]]
+        data = [{"Video": r["video"], "Frames": r["frames"], "All": pct(r["full"], r["frames"]),
+                 **{c: pct(r["by"][c], r["frames"]) for c in cats}} for r in tab["rows"]]
+        bar = lambda label: st.column_config.ProgressColumn(label, min_value=0, max_value=100, format="%d%%",  # noqa: E731
+                                                            width="small")
+        st.dataframe(data, hide_index=True, width="stretch", key="tr_prog_table", height=min(460, 38 + 35 * len(data)),
+                     on_select=lambda: _pick_from_table(names), selection_mode="single-row",
+                     column_config={"Video": st.column_config.TextColumn("Video", width="large"),
+                                    "Frames": st.column_config.NumberColumn("Frames", width="small"),
+                                    "All": bar("All"), **{c: bar(c) for c in cats}})
+
+
 def _video_sets(videos: dict) -> dict:
     """{"train" / "test" / "other": set of video ids} — every video is in exactly one."""
     test = TR.test_set_videos()
@@ -431,6 +468,7 @@ def _compare(data: dict) -> None:
     done_v = sum(1 for d, n in prog.values() if n and d == n)
     st.caption(f"{'**' + cat + '**' if cat else 'Full labels'}: reviewed on **{sum(d for d, _ in prog.values()):,}** of "
                f"{sum(n for _, n in prog.values()):,} frames · **{done_v}** of {len(prog)} videos done")
+    _progress_table(videos, cats)
     if only_open:
         videos = {v: d for v, d in videos.items() if prog[v][0] < prog[v][1]}
     if st.session_state.get("tr_vid") not in ["(all videos)"] + sorted(videos):
