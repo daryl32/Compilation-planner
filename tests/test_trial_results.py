@@ -201,6 +201,7 @@ def test_view_random_order_and_todo(bundle, no_labels):
     at.session_state["tr_order"] = "random"
     at.session_state["tr_filter"] = "todo"
     at.session_state["tr_sub"] = "🖼️ Compare tags"
+    at.session_state["tr_set"] = "train"                 # All would mix in 📚 the library's other videos
     at.run()
     assert not errors(at), errors(at)
     before = at.session_state["tr_seed"] if "tr_seed" in at.session_state else 0
@@ -739,7 +740,7 @@ def test_partial_labels_reach_the_view(clean_labels):
     TLB.batch_tag([{"video_id": "vid_a", "t": 12.0, "scene_id": 1}], add=["crowd"], remove=["dance"])
     videos = TR.with_saved_labels(_bundle()["videos"], TLB.load_labels())
     m = [m for m in videos["vid_a"]["moments"] if m["key"] == "s1_0"][0]
-    assert m["partial"] == {"yes": ["crowd"], "no": ["dance"]}
+    assert m["partial"] == {"yes": ["crowd"], "no": ["dance"], "done": []}
     assert TR.your_answer(m, "Crowd") is True and TR.your_answer(m, "dance") is False
     assert TR.your_answer(m, "night") is None and TR.model_has(m, "dance")
     assert TR.picked_by(m, "crowd", "mine") and TR.picked_by(m, "crowd", "both")
@@ -752,6 +753,7 @@ def test_grid_view_batch_tags(bundle, clean_labels):
     at.session_state["tl_view"] = "🧪 Trial results"
     at.session_state["tr_sub"] = "🖼️ Compare tags"
     at.session_state["tr_view"] = "grid"
+    at.session_state["tr_set"] = "train"                 # the trial's videos, not 📚 the rest of the library
     at.run()
     assert not errors(at), errors(at)
     ticks = [c for c in at.checkbox if c.key and c.key.startswith("tr_gt_")]
@@ -903,7 +905,8 @@ def test_grid_thumbnails_are_small(tmp_path):
 
 
 def test_new_test_videos_in_compare_tags(bundle, clean_labels):
-    """🧪 New test videos show in Compare tags (Batch box) with frames from the preview copy, for the grid."""
+    """🧪 New test videos show in Compare tags (Videos → 🧪 Test set, with the original test videos) with frames from
+    the preview copy, for the grid."""
     import subprocess
     import catalogue_store as CS
     from library_common import proxy_path
@@ -911,24 +914,24 @@ def test_new_test_videos_in_compare_tags(bundle, clean_labels):
     TLB = clean_labels
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg not installed")
-    p = proxy_path("vid_a")
+    p = proxy_path("vid_c")
     existed = p.exists()
     if not existed:
         p.parent.mkdir(parents=True, exist_ok=True)
-        dur = max(s["end"] for s in CS.video_index()["vid_a"]["scenes"]) + 1
+        dur = max(s["end"] for s in CS.video_index()["vid_c"]["scenes"]) + 1
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
                         f"testsrc=size=320x180:rate=10:duration={dur:.0f}", "-pix_fmt", "yuv420p", str(p)], check=True)
     had_extra = TLB.EXTRA_TEST_FILE.read_bytes() if TLB.EXTRA_TEST_FILE.exists() else None
     try:
-        TLB.save_extra_test(["vid_a"])
+        TLB.save_extra_test(["vid_c"])
         vids = TR.new_test_videos(CS.video_index())
-        ms = vids["vid_a"]["moments"]
+        ms = vids["vid_c"]["moments"]
         assert len(ms) == TLB.TEST_MOMENTS_PER_VIDEO and TR.frame_path(ms[0]).exists()
-        assert TR.moment_id("vid_a", ms[0]) == TLB.card_id("tags", "vid_a", ms[0]["t"])   # same label as its card
+        assert TR.moment_id("vid_c", ms[0]) == TLB.card_id("tags", "vid_c", ms[0]["t"])   # same label as its card
         at = page_app("pages/6_Training_Labels.py")
         at.session_state["tl_view"] = "🧪 Trial results"
         at.session_state["tr_sub"] = "🖼️ Compare tags"
-        at.session_state["tr_batch"] = TR.NEW_TEST_BATCH
+        at.session_state["tr_set"] = "test"
         at.session_state["tr_view"] = "grid"
         at.run()
         assert not errors(at), errors(at)
@@ -939,10 +942,8 @@ def test_new_test_videos_in_compare_tags(bundle, clean_labels):
         at.button(key="tr_g_add_top").click().run()
         assert not errors(at), errors(at)
         part = [i for i in TLB.load_labels() if i["type"] == "partial"]
-        assert len(part) == 1 and part[0]["video_id"] == "vid_a" and part[0]["t"] == ms[0]["t"]
-        at.session_state["tr_sub"] = "🗄️ Teacher"
-        at.run()
-        assert any("no teacher run" in i.value for i in at.info)
+        assert len(part) == 1 and part[0]["video_id"] == "vid_c" and part[0]["t"] == ms[0]["t"]
+        assert "new test" not in [str(o) for o in at.selectbox(key="tr_batch").options]   # one place to find them
     finally:
         if had_extra is None:
             TLB.EXTRA_TEST_FILE.unlink(missing_ok=True)
@@ -950,3 +951,160 @@ def test_new_test_videos_in_compare_tags(bundle, clean_labels):
             TLB.EXTRA_TEST_FILE.write_bytes(had_extra)
         if not existed:
             p.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# One category at a time, one Videos control, 📚 the other videos (12 Nov 2026)
+# ---------------------------------------------------------------------------
+
+def test_finish_one_category_at_a_time(clean_labels):
+    TLB = clean_labels
+    vocab = [dict(r, group_required=(r["group"] == "shot")) for r in VOCAB]
+    cats = {c["title"]: c for c in TLB.categories(vocab)}
+    assert set(cats) == {"position", "shot"} and cats["shot"]["required"] and not cats["position"]["required"]
+    ms = [{"video_id": "v", "t": 5.0, "scene_id": 0}, {"video_id": "v", "t": 9.0, "scene_id": 1},
+          {"video_id": "v", "t": 13.0, "scene_id": 2}]
+    TLB.batch_tag(ms[:1], add=["Cowgirl"], rows=vocab)                 # 9.0 and 13.0: looked at, no position there
+    res = TLB.finish_category(ms, "position", vocab)
+    assert res["done"] == 3 and res["full"] == 0 and res["skipped"] == []
+    items = {i["id"]: i for i in TLB.load_labels()}
+    a, b = items[TLB.partial_id("v", 5.0)], items[TLB.partial_id("v", 9.0)]
+    assert a["yes"] == ["Cowgirl"] and a["done"] == ["position"]
+    assert {t.lower() for t in a["no"]} == {t.lower() for t in cats["position"]["tags"]} - {"cowgirl"}
+    assert b["yes"] == [] and b["done"] == ["position"] and len(b["no"]) == len(cats["position"]["tags"])
+    assert not {t.lower() for t in a["no"]} & {t.lower() for t in cats["shot"]["tags"]}        # shot left alone
+    assert TLB.finish_category(ms, "position", vocab)["done"] == 0                                 # nothing left to do
+    # the view: reviewed in that category only, and "not reviewed yet" follows the category
+    vids = TR.with_saved_labels({"v": {"moments": [{"key": f"k{m['t']}", "t": m["t"], "mine": None, "teachers": {}}
+                                                   for m in ms]}}, TLB.load_labels())
+    got = vids["v"]["moments"]
+    assert all(TR.reviewed(m, "position") for m in got) and not any(TR.reviewed(m, "shot") for m in got)
+    assert not any(TR.reviewed(m) for m in got)
+    assert TR.progress(vids, "position") == {"v": (3, 3)} and TR.progress(vids, "shot") == {"v": (0, 3)}
+    assert TR.filter_moments(got, "todo", category="position") == []
+    assert len(TR.filter_moments(got, "todo", category="shot")) == 3 and len(TR.filter_moments(got, "todo")) == 3
+    # a batch tag afterwards keeps the category finished
+    TLB.batch_tag(ms[1:2], add=["Medium shot"], rows=vocab)
+    assert {i["id"]: i for i in TLB.load_labels()}[TLB.partial_id("v", 9.0)]["done"] == ["position"]
+    # the needs-a-tag category: frames with no shot tag stay not reviewed; the last category makes a full label
+    res = TLB.finish_category(ms, "shot", vocab)
+    assert res["done"] == 1 and res["full"] == 1 and sorted(res["skipped"]) == [("v", 5.0), ("v", 13.0)]
+    items = {i["id"]: i for i in TLB.load_labels()}
+    full = items[TLB.card_id("tags", "v", 9.0)]
+    assert full["type"] == "tags" and full["tags"] == ["Medium shot"] and full["from_batch"]
+    assert TLB.partial_id("v", 9.0) not in items and "shot" not in items[TLB.partial_id("v", 5.0)]["done"]
+    TLB.undo_batch(res["undo"])
+    items = {i["id"]: i for i in TLB.load_labels()}
+    assert TLB.card_id("tags", "v", 9.0) not in items and items[TLB.partial_id("v", 9.0)]["done"] == ["position"]
+    # a frame with a full label is never touched
+    TLB.finish_category(ms, "shot", vocab)
+    before = json.dumps(TLB.load_labels(), sort_keys=True)
+    assert TLB.finish_category(ms[1:2], "position", vocab)["done"] == 0
+    assert json.dumps(TLB.load_labels(), sort_keys=True) == before
+    assert TLB.finish_category(ms, "nope", vocab) == {"done": 0, "full": 0, "skipped": [], "undo": []}
+
+
+def test_other_videos_with_the_students_tags(bundle, tmp_path, clean_labels):
+    import numpy as np
+    import catalogue_store as CS
+    TLB = clean_labels
+    index = CS.video_index()
+    known = set(_bundle()["videos"])
+    had_extra = TLB.EXTRA_TEST_FILE.read_bytes() if TLB.EXTRA_TEST_FILE.exists() else None
+    try:
+        TLB.save_extra_test(["vid_c"])
+        ids = TR.other_video_ids(index, known)
+        assert ids == ["vid_d", "vid_e", "vid_f"]                          # not the trial's, not the test set's
+        folder = tmp_path / "student_scores"
+        folder.mkdir()
+        assert TR.student_index(folder) == {} and TR.student_tags_at("vid_d", [1.0], folder=folder) is None
+        (folder / "index.json").write_text(json.dumps({"model": "v16-ft1", "created": "2026-11-12 08:00",
+                                                       "tags": ["dance", "Blonde", "crowd"], "cutoffs": [50, 50, 70]}))
+        times = np.arange(0, 400, 0.5, dtype=np.float32)
+        scores = np.zeros((len(times), 3), np.uint8)
+        scores[:, 0] = 80                                                  # dance everywhere
+        scores[:, 1] = 99                                                  # hair: never shown per frame
+        scores[times >= 20, 2] = 70                                        # crowd from 20 s, exactly on its cut-off
+        np.savez_compressed(folder / "vid_d.npz", times=times, scores=scores)
+        TR._STUDENT_CACHE.clear()
+        assert TR.student_tags_at("vid_d", [3.2, 20.1], folder=folder) == [["dance"], ["dance", "crowd"]]
+        vids = TR.other_videos(index, known=known, scores_folder=folder)
+        assert sorted(vids) == ids and all(d["other"] and d["batch"] == TR.OTHER_BATCH for d in vids.values())
+        ms = vids["vid_d"]["moments"]
+        assert len(ms) == TLB.TEST_MOMENTS_PER_VIDEO and ms[0]["proxy_frame"] and ms[0]["mine"] is None
+        assert all(m["teachers"][TR.STUDENT]["tags"][0] == "dance" for m in ms)
+        assert vids["vid_e"]["moments"][0]["teachers"] == {}               # the student hasn't scored this one
+        assert TR.moment_id("vid_d", ms[0]) == TLB.card_id("tags", "vid_d", ms[0]["t"])
+        assert TR.model_has(ms[0], "dance") and not TR.model_has(ms[0], "Blonde")
+    finally:
+        TR._STUDENT_CACHE.clear()
+        if had_extra is None:
+            TLB.EXTRA_TEST_FILE.unlink(missing_ok=True)
+        else:
+            TLB.EXTRA_TEST_FILE.write_bytes(had_extra)
+
+
+def test_category_pass_on_the_page(bundle, clean_labels):
+    """The review pass: Videos → one set, Category, not reviewed in it, ▦ Grid, 🧹 for that category alone."""
+    from tests.apptest_util import errors, page_app
+    TLB = clean_labels
+    backup = TLB.VOCAB_FILE.read_bytes() if TLB.VOCAB_FILE.exists() else None
+    try:
+        TLB.save_vocabulary([{"tag": "dance", "group": "action"}, {"tag": "crowd", "group": "action"},
+                             {"tag": "night", "group": "place"}, {"tag": "street", "group": "place"}])
+        at = page_app("pages/6_Training_Labels.py")
+        at.session_state["tl_view"] = "🧪 Trial results"
+        at.session_state["tr_sub"] = "🖼️ Compare tags"
+        at.run()
+        assert not errors(at), errors(at)
+        kinds = at.session_state["tr_set"], [str(c.value) for c in at.caption]
+        assert kinds[0] == "all" and any("Full labels" in c for c in kinds[1])
+        labels = [c.value for c in at.caption]
+        assert any("videos done" in c for c in labels)
+        cat_box = at.selectbox(key="tr_cat")
+        assert list(cat_box.options) == ["(all categories)", "action", "place"]
+        at.session_state["tr_set"] = "train"
+        at.session_state["tr_cat"] = "action"
+        at.session_state["tr_filter"] = "todo"
+        at.session_state["tr_view"] = "grid"
+        at.run()
+        assert not errors(at), errors(at)
+        assert at.selectbox(key="tr_g_cat").value == "action" and at.selectbox(key="tr_g_cat").disabled
+        assert set(at.selectbox(key="tr_tag").options) <= {"(any tag)", "dance", "crowd"}
+        ticks = [c for c in at.checkbox if c.key and c.key.startswith("tr_gt_")]
+        n = len(ticks)
+        assert n == 2                                                # vid_a's labelled frame is reviewed already
+        btn = at.button(key="tr_fincat_btn")
+        assert btn.label == f"🧹 Remove all not-reviewed action tags ({n})"
+        btn.click().run()
+        assert any("Mark **action** as reviewed" in w.value for w in at.warning)
+        at.button(key="tr_fincat_yes").click().run()
+        assert not errors(at), errors(at)
+        parts = [i for i in TLB.load_labels() if i["type"] == "partial"]
+        assert len(parts) == n and all(i["done"] == ["action"] and i["yes"] == [] for i in parts)
+        assert not [c for c in at.checkbox if c.key and c.key.startswith("tr_gt_")]      # nothing left in action
+        assert any("**action**: reviewed on **3** of 3 frames" in c.value for c in at.caption)
+        at.session_state["tr_cat"] = "place"                          # the other category is still all to do
+        at.run()
+        assert len([c for c in at.checkbox if c.key and c.key.startswith("tr_gt_")]) == n
+        at.session_state["tr_vid_open"] = True                        # only videos not fully reviewed (in place)
+        at.session_state["tr_cat"] = "action"
+        at.session_state["tr_filter"] = "all"
+        at.run()
+        assert not errors(at), errors(at)
+        assert list(at.selectbox(key="tr_vid").options) == ["(all videos)"]
+        # ↩️ Undo puts the frames back
+        at.button(key="tr_g_undo_btn").click().run()
+        assert not [i for i in TLB.load_labels() if i["type"] == "partial"]
+        # 📚 the other videos are one tap away, and the set counts add up
+        at.session_state["tr_vid_open"] = False
+        at.session_state["tr_cat"] = "(all categories)"
+        at.session_state["tr_set"] = "other"
+        at.run()
+        assert not errors(at), errors(at)
+        assert len(at.selectbox(key="tr_vid").options) == 1 + 4      # vid_c … vid_f: never in a batch
+    finally:
+        if backup is None:
+            TLB.VOCAB_FILE.unlink(missing_ok=True)
+        else:
+            TLB.VOCAB_FILE.write_bytes(backup)
