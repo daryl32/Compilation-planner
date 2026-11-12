@@ -25,6 +25,7 @@ CHIP_STYLE = {
 PER_PAGE = 12
 GRID_PAGE = 48
 GRID_ALL = "🗂️ All categories"
+CAT_ALL = "(all categories)"
 # ▦ Grid on a touch screen, like Photos on the iPad: tap a picture to tick it; put a finger on a picture and
 # swipe sideways to tick (or untick) every frame you pass over — down the page too, a whole range at a time.
 # An up / down swipe still scrolls. It only clicks the frames' own tick boxes, so nothing reloads until ➕ / ➖.
@@ -305,6 +306,77 @@ def _rules_panel(videos: dict, rows: list) -> None:
                       on_click=lambda: st.session_state.update(tr_filter="rules", tr_page=1))
 
 
+def _with_library(view: dict) -> dict:
+    """The trial's videos plus the ones that were never in a Modal batch: your 🧪 new test videos (60 moments each,
+    nothing from any model) and 📚 every other video in the library (60 moments each, the student's tags as the
+    model's where it has scored the video). Videos the trial already has are left as they are."""
+    try:
+        import catalogue_store as CS
+        from library_common import library_ranges
+        index, ranges = CS.video_index(), library_ranges()
+        extra = {v: d for v, d in TR.new_test_videos(index, ranges).items() if v not in view["videos"]}
+        other = TR.other_videos(index, ranges, known=set(view["videos"]) | set(extra))
+    except Exception as e:          # noqa: BLE001 — the trial's own videos still show
+        st.caption(f"Couldn't add the library's other videos: {e}")
+        return view
+    teachers = dict(view.get("teachers") or {})
+    if any((m.get("teachers") or {}).get(TR.STUDENT) for d in other.values() for m in d["moments"]):
+        teachers[TR.STUDENT] = TR.student_index().get("model") or "student"
+    return {**view, "videos": {**view["videos"], **extra, **other}, "teachers": teachers}
+
+
+def _video_sets(videos: dict) -> dict:
+    """{"train" / "test" / "other": set of video ids} — every video is in exactly one."""
+    test = TR.test_set_videos()
+    out = {"train": set(), "test": set(), "other": set()}
+    for v, d in videos.items():
+        out["test" if (v in test or d.get("new_test")) else "other" if d.get("other") else "train"].add(v)
+    return out
+
+
+def _finish_cat(items: list, cat: str, rows: list) -> None:
+    res = TLB.finish_category(items, cat, rows)
+    st.session_state.pop("tr_fincat_ask", None)
+    what = f"{cat}: reviewed on {res['done']} frame{'s' if res['done'] != 1 else ''}"
+    if res["undo"]:
+        st.session_state["tr_g_undo"] = {"undo": res["undo"], "what": what}
+    st.session_state["tr_saved_note"] = (what + (f" · {res['full']} are full labels now" if res["full"] else "")
+                                         + (f" · {len(res['skipped'])} left (no {cat} tag yet)" if res["skipped"] else ""))
+
+
+def _finish_cat_panel(moments: list, cat: str, rows: list) -> None:
+    """🧹 Remove all not-reviewed tags in ONE category, on every frame the filters show: the category's tags you
+    added stay, the rest of the category counts as not there, and the category is marked reviewed on those frames."""
+    todo = [(v, m) for v, m in moments if not TR.reviewed(m, cat)]
+    items = [{"video_id": v, "scene_id": m.get("scene_id"), "t": float(m["t"]),
+              "label_id": m.get("gold_id") or TR.moment_id(v, m),
+              "suggested": sorted({t for r in (m.get("teachers") or {}).values() for t in r.get("tags") or []})}
+             for v, m in todo]
+    if st.session_state.get("tr_fincat_ask") != cat:
+        st.button(f"🧹 Remove all not-reviewed {cat} tags ({len(items)})", key="tr_fincat_btn", width="stretch",
+                  disabled=not items, on_click=lambda: st.session_state.update(tr_fincat_ask=cat),
+                  help=f"For every frame shown that isn't reviewed in {cat} yet: keep the {cat} tags you added, "
+                       f"count every other {cat} tag as not there, and mark {cat} as reviewed on it. Other "
+                       "categories aren't touched. A frame reviewed in every category becomes a full label.")
+        return
+    info = next((c for c in TLB.categories(rows) if c["title"] == cat), None) or {"tags": [], "required": False}
+    in_cat = {TR.norm(t) for t in info["tags"]}
+    empty = sum(1 for _, m in todo
+                if not any(TR.norm(t) in in_cat for t in (m.get("partial") or {}).get("yes") or [])) \
+        if info["required"] else 0
+    n_vid = len({v for v, _ in todo})
+    st.warning(f"Mark **{cat}** as reviewed on **{len(items) - empty}** frame{'s' if len(items) - empty != 1 else ''} "
+               f"in {n_vid} video{'s' if n_vid != 1 else ''}: the {cat} tags you added stay, every other {cat} tag "
+               "counts as not there."
+               + (f" **{empty}** stay not reviewed — every frame needs a {cat} tag and they have none yet."
+                  if empty else ""))
+    a, b = st.columns(2)
+    a.button("🧹 Yes, remove them", key="tr_fincat_yes", type="primary", width="stretch",
+             on_click=_finish_cat, args=(items, cat, rows))
+    b.button("Cancel", key="tr_fincat_no", width="stretch",
+             on_click=lambda: st.session_state.pop("tr_fincat_ask", None))
+
+
 def _compare(data: dict) -> None:
     videos = TR.with_saved_labels(data["videos"], TLB.load_labels())
     note = st.session_state.pop("tr_saved_note", None)
@@ -321,27 +393,54 @@ def _compare(data: dict) -> None:
                if (k != "disagree" or len(teachers) > 1) and (k != "suspect" or test_ids)}
     if st.session_state.get("tr_filter") not in filters:
         st.session_state["tr_filter"] = "all"
-    test_vids = TR.test_set_videos()
-    if test_vids:
-        n_test = len(test_vids & set(videos))
+    vocab_rows, _ = TLB.load_vocabulary()
+    sets = _video_sets(videos)
+    kinds = ["all"] + [k for k in ("train", "test", "other") if sets[k]]
+    if len(kinds) > 2:
+        if st.session_state.get("tr_set") not in kinds:
+            st.session_state["tr_set"] = "all"
         which = st.segmented_control(
-            "Videos", ["all", "train", "test"], key="tr_set", default="all",
-            format_func={"all": "All", "train": f"🧠 Training only ({len(videos) - n_test})",
-                         "test": f"🧪 Test set only ({n_test} of {len(test_vids)})"}.get,
-            help="🧠 Training only = every video except the 🧪 test set: frames you label there go into the next "
-                 "LoRA training (each moment here already has its frames on Modal). 🧪 Test set only = the "
-                 "held-out videos the test runs are scored on. Pick “All batches” above to see every video.")
-        if which == "train":
-            videos = {v: d for v, d in videos.items() if v not in test_vids}
-        elif which == "test":
-            videos = {v: d for v, d in videos.items() if v in test_vids}
+            "Videos", kinds, key="tr_set",
+            format_func={"all": f"All ({len(videos)})", "train": f"🧠 Training set ({len(sets['train'])})",
+                         "test": f"🧪 Test set ({len(sets['test'])})",
+                         "other": f"📚 Other videos ({len(sets['other'])})"}.get,
+            help="🧠 Training set = the videos from your Modal batches, minus the test set: what you label there "
+                 "trains the next model. 🧪 Test set = the held-out videos the runs are scored on — the original "
+                 "ones and the ones you added, together. 📚 Other videos = the rest of the library, never in a "
+                 "batch: 60 frames each, with the student's tags as the model's where it has scored the video. "
+                 "The test set's added videos and the other videos show with “All batches” above.") or "all"
+        if which != "all":
+            videos = {v: d for v, d in videos.items() if v in sets[which]}
+    cats = [c_["title"] for c_ in TLB.categories(vocab_rows)]
+    if st.session_state.get("tr_cat") not in [CAT_ALL] + cats:
+        st.session_state["tr_cat"] = CAT_ALL
     with st.container(key="tl_wrap_tr_filters"):
-        c = st.columns([3, 2, 2, 2])
+        c = st.columns([3, 2, 2, 2, 2])
+    cat = c[2].selectbox("Category", [CAT_ALL] + cats, key="tr_cat",
+                         help="Work on one category at a time: ▦ Grid opens on it, “Not reviewed by me yet” and "
+                              "📼 below count only that category, the Tag box lists only its tags, and 🧹 removes "
+                              "the not-reviewed tags of that category alone.")
+    cat = None if cat == CAT_ALL else cat
+    prog = TR.progress(videos, cat)
+    with st.container(key="tl_wrap_tr_vidtodo"):
+        only_open = st.toggle(
+            "📼 Only videos not fully reviewed", key="tr_vid_open",
+            help="Leaves out every video whose frames you've all reviewed"
+                 + (f" in {cat}." if cat else " (a full label on every frame).")
+                 + " The Video box shows each video's count, ✅ when it's done.")
+    done_v = sum(1 for d, n in prog.values() if n and d == n)
+    st.caption(f"{'**' + cat + '**' if cat else 'Full labels'}: reviewed on **{sum(d for d, _ in prog.values()):,}** of "
+               f"{sum(n for _, n in prog.values()):,} frames · **{done_v}** of {len(prog)} videos done")
+    if only_open:
+        videos = {v: d for v, d in videos.items() if prog[v][0] < prog[v][1]}
     if st.session_state.get("tr_vid") not in ["(all videos)"] + sorted(videos):
         st.session_state.pop("tr_vid", None)          # e.g. after switching batch
-    vid = c[0].selectbox("Video", ["(all videos)"] + sorted(videos), key="tr_vid")
-    how = c[1].selectbox("Show", list(filters), format_func=filters.get, key="tr_filter")
-    order = c[3].selectbox("Order", ["video", "random"], key="tr_order",
+    vid = c[0].selectbox("Video", ["(all videos)"] + sorted(videos), key="tr_vid",
+                         format_func=lambda v: v if v not in prog else
+                         f"{'✅ ' if prog[v][0] == prog[v][1] else ''}{v} — {prog[v][0]}/{prog[v][1]}")
+    how = c[1].selectbox("Show", list(filters), key="tr_filter",
+                         format_func=lambda k: f"Not reviewed in {cat} yet" if (k == "todo" and cat) else filters[k])
+    order = c[4].selectbox("Order", ["video", "random"], key="tr_order",
                            format_func={"video": "By video and time", "random": "🎲 Random"}.get,
                            help="Random mixes frames from every video, so a review isn't stuck in one video.")
     if st.session_state.get("tr_view") not in ("cards", "grid"):
@@ -372,11 +471,15 @@ def _compare(data: dict) -> None:
         st.button(f"↩️ Undo: {u['what']}", key="tr_g_undo_btn", on_click=_gundo)
     all_tags = sorted({t for v in videos.values() for m in v["moments"]
                        for t in (m.get("mine") or []) + ([] if no_old else (m.get("old") or []))
+                       + list((m.get("partial") or {}).get("yes") or [])
                        + [x for r in m.get("teachers", {}).values() for x in r.get("tags") or []]},
                       key=str.lower)
+    if cat:                                       # one category: only its tags
+        in_cat = {TR.norm(t) for c_ in TLB.categories(vocab_rows) if c_["title"] == cat for t in c_["tags"]}
+        all_tags = [t for t in all_tags if TR.norm(t) in in_cat]
     if st.session_state.get("tr_tag") not in ["(any tag)"] + all_tags:
         st.session_state["tr_tag"] = "(any tag)"          # e.g. an old-only tag after turning 🙈 on
-    tag = c[2].selectbox("Tag", ["(any tag)"] + all_tags, key="tr_tag")
+    tag = c[3].selectbox("Tag", ["(any tag)"] + all_tags, key="tr_tag")
     by = "any"
     if tag != "(any tag)":
         if st.session_state.get("tr_by") not in TR.PICKED_BY:
@@ -388,10 +491,10 @@ def _compare(data: dict) -> None:
                  "🤝 Both of us = you and the model agree. Anyone also counts the old tags unless 🙈 is on.") \
             or "any"
     pool = [(v, m) for v in (sorted(videos) if vid == "(all videos)" else [vid]) for m in videos[v]["moments"]]
-    vocab_rows, _ = TLB.load_vocabulary()
     problems = (lambda tags: TLB.rule_problems(tags, vocab_rows))
     moments = [(v, m) for v, m in pool
-               if TR.filter_moments([m], how, None if tag == "(any tag)" else tag, problems, skip_old=no_old, by=by)
+               if TR.filter_moments([m], how, None if tag == "(any tag)" else tag, problems, skip_old=no_old, by=by,
+                                    category=cat)
                and (not only_part or (m.get("partial") and m.get("mine") is None))]
     sus, sus_runs = {}, []
     if how == "suspect":
@@ -424,11 +527,14 @@ def _compare(data: dict) -> None:
                   help="A new random sample. Frames you save drop out of “Not reviewed by me yet”.")
         moments = TR.ordered(moments, "random", st.session_state.get("tr_seed", 0))
 
-    if only_part:
+    if cat:                                       # one category at a time: its own 🧹
+        with part_cols[1]:
+            _finish_cat_panel(moments, cat, vocab_rows)
+    elif only_part:
         with part_cols[1]:
             _finish_panel(moments, vocab_rows)
     if mode == "grid":
-        _grid_fragment(moments, vocab_rows, tag, only_part)
+        _grid_fragment(moments, vocab_rows, tag, only_part, cat)
         return
     _rules_panel(videos, vocab_rows)
     agr = TR.agreement([m for _, m in pool])
@@ -454,12 +560,15 @@ def _compare(data: dict) -> None:
     def label(v, k):
         """The teacher's real name for this video (e.g. '32B FP8' — an FP8-only video is saved under
         the 32B's slot), else the slot name."""
+        if k == TR.STUDENT:
+            return f"🎓 {data.get('teachers', {}).get(k) or 'student'}"
         model = (((videos[v].get("run") or {}).get("tagging") or {}).get(k) or {}).get("model")
         return TR.teacher_label(model) if model else k.upper()
 
     for v, m in moments[(page - 1) * PER_PAGE: page * PER_PAGE]:
         # only the teachers that tagged this moment (one "not tagged" row if none did)
-        here = [k for k in teachers if (m.get("teachers") or {}).get(k)] or teachers[:1]
+        # (a frame cut from the library — a 🧪 new test or 📚 other video — that no model has tagged: no row at all)
+        here = [k for k in teachers if (m.get("teachers") or {}).get(k)] or ([] if m.get("proxy_frame") else teachers[:1])
         with st.container(border=True, key=f"tr_wrap_card_{_k(v, m)}"):
             a, b = st.columns([3, 7])        # picture ~25% smaller than before (was 2:3), more room for tags
             with a:
@@ -554,11 +663,17 @@ def _compare(data: dict) -> None:
 # ▦ Grid: batch tagging many frames at once
 # ---------------------------------------------------------------------------
 
-def _gtags(m: dict, in_cat: list) -> list:
+def _gtags(m: dict, in_cat: list, cat_of: dict = None) -> list:
     """The tags to mark under a thumbnail: every tag of the open category that you or the model have on
-    this frame (or you've said no to in a batch), in vocabulary order."""
-    no = {TR.norm(t) for t in (m.get("partial") or {}).get("no") or []}
-    return [t for t in in_cat if TR.your_answer(m, t) is True or TR.model_has(m, t) or TR.norm(t) in no]
+    this frame (or you've said no to in a batch), in vocabulary order. In a category you've finished with 🧹
+    every other tag is "no" — there only the ones the model had are shown as ✗, not the whole category.
+    cat_of: {normalised tag: its category}."""
+    part = m.get("partial") or {}
+    no = {TR.norm(t) for t in part.get("no") or []}
+    done = set(part.get("done") or [])
+    swept = (lambda t: (cat_of or {}).get(TR.norm(t)) in done) if done else (lambda t: False)
+    return [t for t in in_cat if TR.your_answer(m, t) is True or TR.model_has(m, t)
+            or (TR.norm(t) in no and not swept(t))]
 
 
 def _gstate(m: dict, tags: list, picked=()) -> str:
@@ -724,15 +839,15 @@ def _thumb(p: Path) -> Path:
 
 
 @st.fragment
-def _grid_fragment(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
+def _grid_fragment(moments: list, rows: list, tag: str, only_part: bool = False, lock: str = None) -> None:
     """The grid on its own: picking tags, changing category or page and Select all reload only the grid, not
     the whole page. ➕ / ➖ / 🧹 refresh everything (the filters may change)."""
     if st.session_state.pop("tr_g_full", False):
         st.rerun(scope="app")
-    _grid(moments, rows, tag, only_part)
+    _grid(moments, rows, tag, only_part, lock)
 
 
-def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
+def _grid(moments: list, rows: list, tag: str, only_part: bool = False, lock: str = None) -> None:
     """Small thumbnails packed together: pick tags, tick frames, then ➕ Add / ➖ Remove."""
     st.markdown("<style>" + GRID_CSS + "</style>", unsafe_allow_html=True)
     st.html(GRID_JS, unsafe_allow_javascript=True)
@@ -741,6 +856,7 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
         st.info("No tag vocabulary yet — add tags in 📒 Vocabulary.")
         return
     titles = [g[0] for g in groups] + [GRID_ALL]
+    cat_of = {TR.norm(t): g[0] for g in groups for t in g[2]}
     if tag != "(any tag)" and st.session_state.get("tr_g_lasttag") != tag:
         # the Tag filter changed: open its category and pick it
         st.session_state["tr_g_lasttag"] = tag
@@ -750,9 +866,13 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
                 if tag not in (st.session_state.get("tr_g_chosen") or []):
                     st.session_state["tr_g_chosen"] = list(st.session_state.get("tr_g_chosen") or []) + [tag]
                 break
+    if lock in titles:                         # the Category filter above is on: the grid stays on it
+        st.session_state["tr_g_cat"] = lock
+    else:
+        lock = None
     if st.session_state.get("tr_g_cat") not in titles:
         st.session_state["tr_g_cat"] = titles[0]
-    cat, in_cat = _gpicker(groups, titles, "")
+    cat, in_cat = _gpicker(groups, titles, "", lock)
     chosen = list(st.session_state.get("tr_g_chosen") or [])
     if chosen:
         ruled = sorted(TLB._never_with(chosen, rows) - set(chosen), key=str.lower)
@@ -795,21 +915,21 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False) -> None:
                     else:
                         st.caption("🖼️ not synced")
                     st.checkbox(format_mmss(m["t"]), key=_gtick_key(v, m), help=f"{v} · scene {m.get('scene_id')}")
-                    state = _gstate(m, _gtags(m, in_cat), chosen)
+                    state = _gstate(m, _gtags(m, in_cat, cat_of), chosen)
                     if only_part and m.get("partial") and m.get("mine") is None:
                         state += _todo_html(TR.still_to_review(m), small=True)
                     if state:
                         st.markdown(state, unsafe_allow_html=True)
         _gbar("bottom", items, rows)
     # the tag picker and the page box again at the bottom, so a long page needs no scrolling back up
-    _gpicker(groups, titles, "_b")
+    _gpicker(groups, titles, "_b", lock)
     if pages > 1:
         st.session_state["tr_gpage_b"] = page
         st.number_input(f"Page (of {pages}) — {len(moments)} frames", 1, pages, key="tr_gpage_b",
                         on_change=lambda: st.session_state.update(tr_gpage=st.session_state["tr_gpage_b"]))
 
 
-def _gpicker(groups: list, titles: list, sfx: str) -> tuple:
+def _gpicker(groups: list, titles: list, sfx: str, lock: str = None) -> tuple:
     """The Category box and its tag pills (sfx "" at the top, "_b" the copy at the bottom). Both copies
     share one category (tr_g_cat) and one set of picked tags (tr_g_chosen). Returns (category, its tags)."""
     if sfx:                                   # the bottom copy follows the top one
@@ -817,10 +937,10 @@ def _gpicker(groups: list, titles: list, sfx: str) -> tuple:
     chosen = list(st.session_state.get("tr_g_chosen") or [])
     with st.container(key=f"tl_wrap_tr_gpick{sfx}"):
         a, b = st.columns([2, 7])
-        cat = a.selectbox("Category", titles, key="tr_g_cat" + sfx,
+        cat = a.selectbox("Category", titles, key="tr_g_cat" + sfx, disabled=bool(lock),
                           on_change=(lambda: st.session_state.update(tr_g_cat=st.session_state["tr_g_cat" + sfx]))
                           if sfx else None,
-                          help=f"{GRID_ALL}: every category's tags under each frame — a final check that everything "
+                          help=("Set by the Category filter at the top of the page. " if lock else "") + f"{GRID_ALL}: every category's tags under each frame — a final check that everything "
                                "you've corrected is right.")
         in_cat = (list(dict.fromkeys(t for g in groups for t in g[2])) if cat == GRID_ALL
                   else next(g[2] for g in groups if g[0] == cat))
@@ -1241,9 +1361,8 @@ def render() -> None:
     if "?" in blist:
         st.caption("Batch numbers appear after the next export — on the server: "
                    "`modal run modal_trial.py --stage results`.")
-    names = {None: "All batches", **{b: f"Batch {b}" if b != "?" else "Batch not recorded" for b in blist},
-             TR.NEW_TEST_BATCH: "🧪 New test videos"}
-    opts = [None] + blist + ([TR.NEW_TEST_BATCH] if TLB.load_extra_test() else [])
+    names = {None: "All batches", **{b: f"Batch {b}" if b != "?" else "Batch not recorded" for b in blist}}
+    opts = [None] + blist
     if st.session_state.get("tr_batch") not in opts:
         st.session_state.pop("tr_batch", None)
     pages = [SRV.RESULTS, "🖼️ Compare tags", "🕺 Motion", "🏷️ Scene tags", SRV.TEACHER]
@@ -1261,13 +1380,10 @@ def render() -> None:
     with st.container(key="tl_wrap_tr_top"):
         a, _ = st.columns([1, 3])
         batch = a.selectbox("Batch", opts, format_func=names.get, key="tr_batch",
-                            help="Look at one batch run on its own, or all of them together. 🧪 New test videos = "
-                                 "the videos you added to the test set (🎯 Cards → 🧪 New test videos): 60 moments "
-                                 "each, label them here in ▦ Grid.")
+                            help="Look at one Modal batch on its own, or all of them together. In 🖼️ Compare tags, "
+                                 "All batches also brings in the videos that were never in a batch — your 🧪 new "
+                                 "test videos and 📚 the rest of the library: pick them with Videos below.")
     if sub == SRV.TEACHER:
-        if batch == TR.NEW_TEST_BATCH:
-            st.info("🧪 New test videos have no teacher run — pick a batch, or All batches.")
-            return
         view = {**data, "videos": TR.in_batch(data["videos"], batch)}
         st.caption("The teacher's tools — its tuning finished on 3 Nov. Useful again if more Modal batches are run.")
         with st.expander(f"📊 Scores for {names.get(batch)} — per tag, and 🎚️ thresholds", expanded=True):
@@ -1277,22 +1393,9 @@ def render() -> None:
                 st.info("No videos in this batch.")
         SRV.teacher_runs(data)
         return
-    if batch == TR.NEW_TEST_BATCH:
-        if sub != "🖼️ Compare tags":
-            st.info("🧪 New test videos have no Modal run yet — they're only in 🖼️ Compare tags (for labelling).")
-            return
-        import catalogue_store as CS
-        from library_common import library_ranges
-        view = {**data, "teachers": {}, "videos": TR.new_test_videos(CS.video_index(), library_ranges())}
-        if not view["videos"]:
-            st.info("None of your new test videos has a catalogue here yet.")
-            return
-        st.caption("🧪 Your new test videos — 60 moments each, spread evenly, nothing from any model. Label them in "
-                   "▦ Grid one category at a time, then 🧩 Only part-reviewed frames → 🧹 to finish them as full labels "
-                   "(only full labels count in the test).")
-        _compare(view)
-        return
     view = {**data, "videos": TR.in_batch(data["videos"], batch)}
+    if sub == "🖼️ Compare tags" and batch is None:
+        view = _with_library(view)             # + 🧪 new test videos and 📚 the rest of the library
     if not view["videos"]:
         st.info("No videos in this batch.")
         return

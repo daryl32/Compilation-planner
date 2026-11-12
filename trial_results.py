@@ -73,7 +73,8 @@ def with_saved_labels(videos: dict, items: list) -> dict:
             pid = TLB.partial_id(vid, float(m["t"]))
             if pid in part and m.get("mine") is None:
                 m = {**m, "partial": {"yes": list(part[pid].get("yes") or []),
-                                      "no": list(part[pid].get("no") or [])}}
+                                      "no": list(part[pid].get("no") or []),
+                                      "done": list(part[pid].get("done") or [])}}
             ms.append(m)
         out[vid] = {**v, "moments": ms}
     return out
@@ -121,6 +122,104 @@ def new_test_videos(index: dict, ranges: dict = None, extra: list = None) -> dic
         if ms:
             out[vid] = {"batch": NEW_TEST_BATCH, "moments": ms, "new_test": True, "duration": v.get("duration")}
     return out
+
+
+# ---------------------------------------------------------------------------
+# 📚 The rest of the library: videos that have never been through a Modal batch and aren't in the test set
+# ---------------------------------------------------------------------------
+OTHER_BATCH = "other"          # their "batch"
+STUDENT = "student"            # the row their model tags sit in (the student's half-second scores)
+_STUDENT_CACHE: dict = {}
+
+
+def student_index(folder: Path = None) -> dict:
+    """The student export's index (catalogue/student_scores/index.json): {"model", "created", "tags", "cutoffs"},
+    or {} when there's no export on this machine."""
+    folder = Path(folder) if folder else Path(CATALOGUE_DIR) / "student_scores"
+    try:
+        idx = json.loads((folder / "index.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return idx if isinstance(idx, dict) and idx.get("tags") else {}
+
+
+def student_tags_at(video_id: str, times: list, index: dict = None, folder: Path = None):
+    """The student's tags at each of `times` in one video — every tag whose score at the nearest half second
+    reaches its cut-off, hair left out (per video now): [[tags], …], or None when the student hasn't scored it."""
+    import numpy as np
+    import training_labels as TLB
+    folder = Path(folder) if folder else Path(CATALOGUE_DIR) / "student_scores"
+    index = student_index(folder) if index is None else index
+    if not index:
+        return None
+    key = (str(folder), video_id, index.get("model"), index.get("created"))
+    if key not in _STUDENT_CACHE:
+        if len(_STUDENT_CACHE) > 600:
+            _STUDENT_CACHE.clear()
+        try:
+            with np.load(folder / f"{video_id}.npz") as z:
+                _STUDENT_CACHE[key] = (np.asarray(z["times"], np.float32), np.asarray(z["scores"], np.uint8))
+        except (OSError, KeyError, ValueError):
+            _STUDENT_CACHE[key] = None
+    got = _STUDENT_CACHE[key]
+    tags = list(index.get("tags") or [])
+    if got is None or not len(got[0]) or got[1].ndim != 2 or got[1].shape[1] != len(tags):
+        return None
+    ts, sc = got
+    cut = np.asarray(index.get("cutoffs") or [50] * len(tags), np.float32)
+    show = np.array([not TLB.is_hidden(t) for t in tags], bool)
+    out = []
+    for t in times:
+        row = sc[int(np.argmin(np.abs(ts - float(t))))]
+        out.append([tags[j] for j in np.flatnonzero((row >= cut) & show)])
+    return out
+
+
+def other_video_ids(index: dict, known) -> list:
+    """The library's videos that are in neither the trial results (`known`) nor the 🧪 test set."""
+    skip = set(known or ()) | test_set_videos()
+    return sorted({v["video_id"] for v in index.values()} - skip)
+
+
+def other_videos(index: dict, ranges: dict = None, known=(), scores_folder: Path = None) -> dict:
+    """📚 The other videos as Compare-tags videos: 60 evenly spread moments each (the same moments a 🧪 new test
+    video gets), pictures from the preview copies, and — where the student has scored the video — the student's
+    tags as the model's. {video_id: {"batch": OTHER_BATCH, "moments", "other": True}}."""
+    import training_labels as TLB
+    ranges = ranges or {}
+    by_vid = {v["video_id"]: v for v in index.values()}
+    sidx = student_index(scores_folder)
+    out = {}
+    for vid in other_video_ids(index, known):
+        v = by_vid[vid]
+        picks = TLB.test_moments(v, ranges.get(vid))
+        if not picks:
+            continue
+        guess = student_tags_at(vid, [t for t, _ in picks], sidx, scores_folder) if sidx else None
+        ms = [{"key": f"nt_{t:.2f}", "t": t, "scene_id": sc["scene_id"], "video_id": vid, "proxy_frame": True,
+               "mine": None, "old": list(sc.get("tags") or []),
+               "teachers": {STUDENT: {"tags": guess[k]}} if guess is not None else {}}
+              for k, (t, sc) in enumerate(picks)]
+        out[vid] = {"batch": OTHER_BATCH, "moments": ms, "other": True, "duration": v.get("duration")}
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Review progress — per frame, per category, per video
+# ---------------------------------------------------------------------------
+
+def reviewed(moment: dict, category: str = None) -> bool:
+    """You've reviewed this frame: it has your full label — or, with a category, you've finished that category
+    on it (🧹 in ▦ Grid)."""
+    if moment.get("mine") is not None:
+        return True
+    return bool(category) and category in ((moment.get("partial") or {}).get("done") or [])
+
+
+def progress(videos: dict, category: str = None) -> dict:
+    """{video_id: (frames reviewed, frames)} — overall, or for one category."""
+    return {vid: (sum(1 for m in v.get("moments") or [] if reviewed(m, category)), len(v.get("moments") or []))
+            for vid, v in videos.items()}
 
 
 def norm(tag) -> str:
@@ -285,7 +384,7 @@ def picked_by(moment: dict, tag: str, who: str = "any", skip_old: bool = False) 
 
 
 def filter_moments(moments: list, how: str = "all", tag: str | None = None, problems=None,
-                   skip_old: bool = False, by: str = "any") -> list:
+                   skip_old: bool = False, by: str = "any", category: str = None) -> list:
     """problems: tags -> list of rule problems (training_labels.rule_problems with your vocabulary),
     for the "rules" filter — your labelled frames whose tags break a rule. skip_old: the tag filter looks
     only at the models' tags (and yours), not the old tags. by: whose confirmed picks the tag filter
@@ -296,7 +395,7 @@ def filter_moments(moments: list, how: str = "all", tag: str | None = None, prob
             continue
         if how == "mine" and m.get("mine") is None:
             continue
-        if how == "todo" and m.get("mine") is not None:
+        if how == "todo" and reviewed(m, category):       # with a category: not reviewed in THAT category yet
             continue
         if how == "wrong" and not any_wrong(m):
             continue

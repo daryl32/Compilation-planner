@@ -503,6 +503,8 @@ def batch_tag(moments: list, add=(), remove=(), rows: list = None) -> dict:
         item = {"id": pid, "type": "partial", "video_id": m["video_id"], "scene_id": m.get("scene_id"),
                 "t": float(m["t"]), "yes": sorted(yes.values(), key=str.lower),
                 "no": sorted(no.values(), key=str.lower), "labelled_at": now, "vocab_version": ver}
+        if (old or {}).get("done"):
+            item["done"] = list(old["done"])          # categories you've finished on this frame stay finished
         if old is not None and old.get("yes") == item["yes"] and old.get("no") == item["no"]:
             continue
         out["undo"].append((pid, old))
@@ -552,6 +554,83 @@ def finish_partials(moments: list, rows: list = None) -> dict:
                     "from_batch": True, "labelled_at": now, "vocab_version": ver}
         new[pid] = None
         out["done"] += 1
+    if out["done"]:
+        kept = [i for i in items if i["id"] not in new]
+        _write_labels(kept + [v for v in new.values() if v is not None])
+    return out
+
+
+def categories(rows: list) -> list:
+    """The vocabulary's categories as ▦ Grid shows them (chip_groups: hair left out), each with whether every
+    frame needs a tag from it (🗂️ Category order): [{"title", "tags", "required"}]."""
+    rows = rows or []
+    required = {g["group"] for g in group_settings(rows) if g["required"]}
+    group_of_set = {}
+    for r in rows:
+        if r.get("one_of"):
+            group_of_set.setdefault(r["one_of"], r.get("group") or "other")
+    out = []
+    for title, single, tags in chip_groups(rows):
+        group = group_of_set.get(title) if single else ("other" if title == "Tags" else title)
+        out.append({"title": title, "tags": list(tags), "required": group in required})
+    return out
+
+
+def finish_category(moments: list, category: str, rows: list = None) -> dict:
+    """🧹 One category at a time: on every moment given, keep the tags of `category` you added, mark every other
+    tag of that category as not there, and note the category as reviewed on that frame ("done" on its partial
+    label). Other categories are left exactly as they are. A frame with nothing from a "needs a tag" category is
+    left not reviewed. A frame you've fully labelled is already reviewed and isn't touched. When every category
+    has been reviewed on a frame it becomes a full label (as finish_partials makes one).
+    moments: [{"video_id", "scene_id", "t", "label_id"?, "suggested"?}].
+    Returns {"done": n, "full": n that became full labels, "skipped": [(video_id, t)], "undo": [...]}."""
+    rows = rows or []
+    cats = categories(rows)
+    cat = next((c for c in cats if c["title"] == category), None)
+    out = {"done": 0, "full": 0, "skipped": [], "undo": []}
+    if cat is None:
+        return out
+    in_cat = {t.lower(): t for t in cat["tags"]}
+    titles = [c["title"] for c in cats]
+    items = load_labels()
+    by_id = {i["id"]: i for i in items}
+    now, ver = time.strftime("%Y-%m-%dT%H:%M:%S"), vocabulary_version()
+    new = {}
+    for m in moments:
+        lid = m.get("label_id") or card_id("tags", m["video_id"], float(m["t"]))
+        full = by_id.get(lid)
+        if full is not None and full.get("type") == "tags" and not full.get("skipped"):
+            continue                                            # a full label: every category is reviewed already
+        pid = partial_id(m["video_id"], float(m["t"]))
+        part = by_id.get(pid) if (by_id.get(pid) or {}).get("type") == "partial" else None
+        yes = {t.lower(): t for t in (part or {}).get("yes") or []}
+        no = {t.lower(): t for t in (part or {}).get("no") or []}
+        done = [d for d in (part or {}).get("done") or [] if d in titles]
+        if category in done and all(k in yes or k in no for k in in_cat):
+            continue
+        if cat["required"] and not any(k in yes for k in in_cat):
+            out["skipped"].append((m["video_id"], float(m["t"])))
+            continue
+        for k, t in in_cat.items():
+            if k not in yes:
+                no[k] = t
+        done = [d for d in titles if d in done or d == category]
+        out["undo"].append((pid, part))
+        out["done"] += 1
+        if len(done) == len(titles):                            # the last category: a full label now
+            kept = list(yes.values())
+            hidden = [t for t in (m.get("suggested") or []) if is_hidden(t) and str(t).lower() not in no]
+            out["undo"].append((lid, by_id.get(lid)))
+            new[lid] = {"id": lid, "type": "tags", "video_id": m["video_id"], "scene_id": m.get("scene_id"),
+                        "t": float(m["t"]), "suggested": list(m.get("suggested") or kept),
+                        "tags": keep_hidden(sorted(kept, key=str.lower), hidden),
+                        "from_batch": True, "labelled_at": now, "vocab_version": ver}
+            new[pid] = None
+            out["full"] += 1
+            continue
+        new[pid] = {"id": pid, "type": "partial", "video_id": m["video_id"], "scene_id": m.get("scene_id"),
+                    "t": float(m["t"]), "yes": sorted(yes.values(), key=str.lower),
+                    "no": sorted(no.values(), key=str.lower), "done": done, "labelled_at": now, "vocab_version": ver}
     if out["done"]:
         kept = [i for i in items if i["id"] not in new]
         _write_labels(kept + [v for v in new.values() if v is not None])
