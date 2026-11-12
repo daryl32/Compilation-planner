@@ -92,3 +92,66 @@ def test_the_lines_show_on_the_sections_page():
     assert any("lines from the music" in e.label for e in at.expander)
     assert at.selectbox(key="sec_ln_play").value == 0
     assert [sb for sb in at.selectbox if str(sb.key).startswith("sec_role_")], "the editor below is still there"
+
+
+def test_a_profile_per_section():
+    """Step 2: what each section IS, in measurements — layers, level within the track, drums, trend, repeats."""
+    import section_bounds as SB
+    n = 40
+    bars = np.arange(n) * 2.0
+    drums, voice, bass, loud = np.zeros(n), np.zeros(n), np.zeros(n), np.full(n, 0.15)
+    voice[4:12] = 0.6;  loud[4:12] = 0.4                      # 2: voice alone, medium
+    loud[12:20] = np.linspace(0.4, 0.85, 8)                   # 3: a build — rising, no line inside it
+    drums[20:28] = 0.8; bass[20:28] = 0.7; loud[20:28] = 0.9  # 4: drums + bass, loud
+    voice[28:36] = 0.6; loud[28:36] = 0.4                     # 5: the voice alone again → like 2
+    lv = {"drums": drums, "vocals": voice, "bass": bass, "loudness": loud}
+    hits = np.where(drums > 0, 4.0, 0.0)
+    lines = SB.find_lines(bars, lv, n * 2.0)
+    secs = SB.profile(SB.sections(bars, lv, n * 2.0, lines), bars, lv, hits)
+    by_start = {s["start"]: s for s in secs}
+    quiet, verse, hit, again = by_start[0.0], by_start[8.0], by_start[40.0], by_start[56.0]
+    assert quiet["profile"]["on"] == [] and quiet["profile"]["level_word"] == "quiet"
+    assert verse["profile"]["on"] == ["vocals"] and verse["profile"]["busy"] is None
+    assert hit["profile"]["on"] == ["drums", "bass"] and hit["profile"]["level_word"] == "loud"
+    assert hit["profile"]["busy"] == 4.0 and "drums (4.0/s)" in hit["words"] and "🥁 drums + 🎸 bass" in hit["words"]
+    assert again["profile"]["like"] == verse["n"] and f"like {verse['n']}" in again["words"]
+    assert verse["profile"]["like"] is None
+    rising = [s for s in secs if s["profile"]["trend"] == "rising"]
+    assert rising and all(12 * 2.0 - 4 <= s["start"] < 20 * 2.0 for s in rising) and "↗ rising" in rising[0]["words"]
+    assert all(0.0 <= s["profile"]["level"] <= 1.0 for s in secs)
+    # a real library track: every section has one, JSON-ready
+    import json
+    from tests.fixtures import load_track
+    found = SB.for_track(load_track(DATA, "song_full"))
+    assert all(s["words"] and s["profile"]["trend"] in ("rising", "falling", "steady") for s in found["sections"])
+    assert len(found["hits"]) == len(found["bars"])
+    json.dumps(found)
+
+
+def test_the_real_stems_are_used_when_the_laptop_has_measured_them():
+    import section_bounds as SB
+    from tests.fixtures import load_track
+    track = load_track(DATA, "song_full")
+    plain = SB.for_track(track)
+    assert plain["stems"] == [] and "other" not in plain["levels"]
+    n = len(track["analysis"]["kick"])
+    half = n // 2
+    track["analysis"]["stem_curves"] = {
+        "rate": track["analysis"]["rate"], "share": {"drums": 1.0, "bass": 0.02, "other": 0.6},
+        "drums": [0.0] * half + [0.9] * (n - half),          # the drum stem only plays in the second half
+        "bass": [0.8] * n,                                    # bleed in an empty stem: hardly in the song
+        "other": [0.7] * half + [0.0] * (n - half)}
+    found = SB.for_track(track)
+    assert found["stems"] == ["drums", "bass", "other"] and "other" in found["levels"]
+    bars = np.asarray(found["bars"])
+    mid = float(track["duration_sec"]) / 2
+    d = np.asarray(found["levels"]["drums"])
+    assert d[bars < mid - 3].max() < 0.1 and d[bars > mid + 3].min() > 0.8
+    assert max(found["levels"]["bass"]) == 0.0
+    line = min(found["lines"], key=lambda ln: abs(ln["time"] - mid))
+    assert abs(line["time"] - mid) < 3 and "🥁 drums come in" in line["why"] and "🎹 instruments drop out" in line["why"]
+    first, last = found["sections"][0]["profile"]["on"], found["sections"][-1]["profile"]["on"]
+    assert "other" in first and "drums" not in first and "drums" in last and "bass" not in last
+    # the matcher's own reading (audio_drive) is untouched by the stem curves
+    import audio_drive as AD
+    assert np.allclose(AD.drivers(track)["curve"], AD.drivers(load_track(DATA, "song_full"))["curve"])

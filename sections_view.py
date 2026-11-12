@@ -188,7 +188,7 @@ def lines_figure(found: dict, height: int = 250):
 def _render_lines(track: dict, play=None) -> None:
     import section_bounds as SB
     with st.expander("📐 New — lines from the music (no names yet)"):
-        st.caption("Sections from scratch, step 1: a line wherever the music changes — a layer comes in or drops "
+        st.caption("Sections from scratch, steps 1–2: a line wherever the music changes — a layer comes in or drops "
                    "out, it gets louder or quieter, the sound changes — always on a bar line. No types yet: this "
                    "only shows WHERE the song divides. Solid = a big change, dotted = a smaller one. It doesn't "
                    "touch the saved sections below.")
@@ -201,14 +201,23 @@ def _render_lines(track: dict, play=None) -> None:
             st.info("No lines found — this track may need the extra 🔬 analysis.")
             return
         st.plotly_chart(lines_figure(found), width="stretch", key="sec_ln_chart", config={"displayModeBar": False})
-        missing = [SB.NAME[k] for k in SB.LAYERS if k not in found["levels"]]
+        if found.get("stems"):
+            st.caption("🎚️ Drums, bass and instruments are read from this track's real stems.")
+        else:
+            st.caption("🎚️ Drums and bass are read from the full mix by pitch range here — run_audio_analysis.bat on "
+                       "the laptop measures the real stems (and adds 🎹 instruments).")
+        missing = [SB.NAME[k] for k in SB.LAYERS if k not in found["levels"] and k != "other"]
         main = sum(1 for ln in found["lines"] if ln["level"] == 1)
         st.caption(f"{len(found['sections'])} sections · {main} big changes, {len(found['lines']) - main} smaller"
                    + (f" · not in this track's analysis: {', '.join(missing)}" if missing else ""))
         st.dataframe([{"#": sc["n"], "From": format_mmss(sc["start"]), "To": format_mmss(sc["end"]),
                        "Bars": sc["bars"], "Change": "big" if sc["level"] == 1 else "small",
-                       "What changes at its start": " · ".join(sc["why"])} for sc in found["sections"]],
+                       "What changes at its start": " · ".join(sc["why"]),
+                       "What it is (profile)": sc.get("words", "")} for sc in found["sections"]],
                      hide_index=True, width="stretch", key="sec_ln_table")
+        st.caption("Profile = step 2: the layers playing · how loud within this track (quiet / medium / loud) · "
+                   "how busy the drums are (hits a second) · rising or falling · “like N” = the same profile as "
+                   "section N. A section type will be a named profile.")
         if play is not None:
             c = st.columns([2.2, 1.4])
             pick = c[0].selectbox("▶ Hear a section", [0] + [sc["n"] for sc in found["sections"]], key="sec_ln_play",
