@@ -336,6 +336,16 @@ def test_old_and_new_cuts_side_by_side():
     one = {"blocks": [{"section": "1", "start": 0.0, "end": 4.0}, {"section": "2a", "start": 4.0, "end": 6.0},
                       {"section": "2a", "start": 6.0, "end": 8.0}]}
     assert SV._cuts_changed(two, one) == ["2a"] and SV._changed_words(["2a"]) == "section 2a"
+    # the chart and the player mark where the rule adds (🟢 ＋) or takes away (🟠 ✕) a cut, either way the switch is
+    rc = SV._rule_cuts(one, two)
+    assert rc == {"added": [6.0], "removed": []} and SV._rule_cuts(two, one) == {"added": [], "removed": [6.0]}
+    assert SV._rule_cuts(on["new"], on["new"]) == {"added": [], "removed": []}
+    marks = {"added": [new["blocks"][1]["start"] + 0.5], "removed": [new["blocks"][2]["start"] + 0.5]}
+    plain_fig, fig = SV.lines_figure(new), SV.lines_figure(new, rule_cuts=marks)
+    assert len(fig.layout.shapes) == len(plain_fig.layout.shapes) + 2
+    assert {"＋", "✕"} <= {a.text.replace("<b>", "").replace("</b>", "") for a in fig.layout.annotations}
+    assert SV.player_config(new, marks)["rule"] == marks
+    assert SV.player_config(new)["rule"] == {"added": [], "removed": []}
     at.session_state["sec_ln_vocal"] = False
     at.run()
     assert not errors(at), errors(at)

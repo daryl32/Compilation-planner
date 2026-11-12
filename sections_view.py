@@ -161,10 +161,14 @@ def render_sections(tracks: dict, track_bits, play=None) -> None:
 # 📐 Lines from the music — sections from scratch, step 1 (section_bounds.py): no names yet
 # ---------------------------------------------------------------------------
 
-def lines_figure(found: dict, height: int = 270):
+RULE_ADDS, RULE_TAKES = "#2ecc71", "#ff9f1a"      # 🟢 a cut the 🎤 vocal rule adds · 🟠 one it takes away
+
+
+def lines_figure(found: dict, height: int = 270, rule_cuts: dict = None):
     """What is playing bar by bar (one row per layer, darker = more of it) with the found lines across it: main
     lines solid, lesser ones dotted, the block cuts thin and white; the sections numbered along the top (parts
-    lettered), the bars numbered along the bottom."""
+    lettered), the bars numbered along the bottom. rule_cuts (_rule_cuts): where the 🎤 vocal rule adds a cut
+    (green, ＋) or takes one away (orange dashes, ✕), drawn whichever way the switch is set."""
     import numpy as np
     import plotly.graph_objects as go
     import section_bounds as SB
@@ -183,6 +187,12 @@ def lines_figure(found: dict, height: int = 270):
             for colour, width in (("rgba(20,20,30,0.9)", 3.2), ("rgba(255,255,255,0.98)", 1.2)):   # white on a dark
                 fig.add_shape(type="line", x0=b["start"], x1=b["start"], y0=0, y1=1, yref="paper",   # edge: shows on
                               line=dict(color=colour, width=width))                                  # any cell
+    for kind, colour, dash, mark in (("removed", RULE_TAKES, "dash", "✕"), ("added", RULE_ADDS, "solid", "＋")):
+        for t in (rule_cuts or {}).get(kind) or []:
+            fig.add_shape(type="line", x0=t, x1=t, y0=0, y1=1, yref="paper",
+                          line=dict(color=colour, width=3, dash=dash))
+            fig.add_annotation(x=t, y=0.0, yref="paper", yanchor="bottom", showarrow=False, text=f"<b>{mark}</b>",
+                               font=dict(size=12, color="#111"), bgcolor=colour, borderpad=1)
     for ln in found["lines"]:
         fig.add_vline(x=ln["time"], line_color="#ff4b4b", line_width=2.5 if ln["level"] == 1 else 1.2,
                       line_dash="solid" if ln["level"] == 1 else "dot")
@@ -221,6 +231,15 @@ def _cuts_changed(a: dict, b: dict) -> list:
         return out
     ca, cb = cuts(a), cuts(b)
     return [k for k in ca if ca[k] != cb.get(k)] + [k for k in cb if k not in ca]
+
+
+def _rule_cuts(on: dict, off: dict) -> dict:
+    """What the 🎤 vocal rule does to the cuts of one mode: {"added": times that are a cut only with the rule on,
+    "removed": times that are a cut only with it off}. A cut the rule moves is one of each."""
+    def cuts(f):
+        return {round(float(b["start"]), 2) for b in (f.get("blocks") or [])[1:]}
+    a, b = cuts(on), cuts(off)
+    return {"added": sorted(a - b), "removed": sorted(b - a)}
 
 
 def _changed_words(labels: list) -> str:
@@ -266,6 +285,7 @@ def _render_lines(track: dict, play=None) -> None:
         st.caption(f"{'**🅰 Old**' if mode == 'old' else '🅰 Old'}: {_sum(both['old'])}  \n"
                    f"{'**🅱 New**' if mode == 'new' else '🅱 New'}: {_sum(both['new'])}")
         moved = {m: _cuts_changed(both[m], other[m]) for m in ("old", "new")}
+        rule = _rule_cuts(*((both[mode], other[mode]) if vocal else (other[mode], both[mode])))
         if not any(moved.values()):
             st.caption("🎤 The vocal rule changes no cut in this track, in either mode (it only acts in parts "
                        "where the voice plays without drums).")
@@ -273,10 +293,15 @@ def _render_lines(track: dict, play=None) -> None:
             st.caption(f"🎤 Vocal rule **{'on' if vocal else 'off'}** — switching it "
                        f"{'off' if vocal else 'on'} changes: 🅰 Old {_changed_words(moved['old'])} · "
                        f"🅱 New {_changed_words(moved['new'])}")
+            if rule["added"] or rule["removed"]:
+                st.caption(f"On the chart, in this mode: 🟢 ＋ {len(rule['added'])} cut"
+                           f"{'s' if len(rule['added']) != 1 else ''} the rule adds · 🟠 ✕ {len(rule['removed'])} "
+                           f"it takes away (a moved cut is one of each). They stay marked whichever way the "
+                           f"switch is set — {'🟠 are not cuts right now' if vocal else '🟢 are not cuts right now'}.")
         if not found["lines"]:
             st.info("No lines found — this track may need the extra 🔬 analysis.")
             return
-        st.plotly_chart(lines_figure(found), width="stretch", key="sec_ln_chart", config={"displayModeBar": False})
+        st.plotly_chart(lines_figure(found, rule_cuts=rule), width="stretch", key="sec_ln_chart", config={"displayModeBar": False})
         if found.get("uneven_bars"):
             ub = found["uneven_bars"]
             st.caption(f"⚠️ This track's bar lines are uneven at bar{'s' if len(ub) != 1 else ''} "
@@ -331,7 +356,8 @@ def _render_lines(track: dict, play=None) -> None:
                          f"sec_ln_dl_{track.get('track_id')}")
             else:
                 lines_player(clip, found,
-                             f"ln_{mode}_{'v' if vocal else 'n'}_{abs(hash(track.get('track_id'))) % 10 ** 8}")
+                             f"ln_{mode}_{'v' if vocal else 'n'}_{abs(hash(track.get('track_id'))) % 10 ** 8}",
+                             rule_cuts=rule)
 
 
 def _whole_track_clip(track: dict) -> tuple:
@@ -351,8 +377,9 @@ def _whole_track_clip(track: dict) -> tuple:
         return None, f"Couldn't prepare the music: {e}"
 
 
-def player_config(found: dict) -> dict:
-    """What the whole-track player draws: the layers bar by bar, the lines, the sections and the bar starts."""
+def player_config(found: dict, rule_cuts: dict = None) -> dict:
+    """What the whole-track player draws: the layers bar by bar, the lines, the sections and the bar starts —
+    and where the 🎤 vocal rule adds or takes away a cut (rule_cuts, see lines_figure)."""
     import section_bounds as SB
     names = [k for k in SB.LAYERS if k in found["levels"]]
     return {"dur": float(found["duration"]), "bars": [round(float(b), 3) for b in found["bars"]],
@@ -363,10 +390,12 @@ def player_config(found: dict) -> dict:
                           "a": sc["start"], "b": sc["end"],
                           "why": " · ".join(sc["why"]), "words": sc.get("words", "")} for sc in found["sections"]],
             "blocks": [{"n": b["n"], "a": b["start"], "b": b["end"], "bars": b["bars"], "why": b["why"]}
-                       for b in found.get("blocks") or []]}
+                       for b in found.get("blocks") or []],
+            "rule": {"added": list((rule_cuts or {}).get("added") or []),
+                     "removed": list((rule_cuts or {}).get("removed") or [])}}
 
 
-def lines_player(clip_path, found: dict, key: str) -> None:
+def lines_player(clip_path, found: dict, key: str, rule_cuts: dict = None) -> None:
     """The whole song with a cursor synced to it over the layers and the lines; under it the time code, the bar
     number and the section being played, with what changed at its start and its profile. Tap to jump."""
     import base64
@@ -378,7 +407,10 @@ def lines_player(clip_path, found: dict, key: str) -> None:
     except OSError:
         st.audio(str(clip_path))
         return
-    cfg = player_config(found)
+    cfg = player_config(found, rule_cuts)
+    rule_key = "" if not (cfg["rule"]["added"] or cfg["rule"]["removed"]) else (
+        f'<span style="border-left:3px solid {RULE_ADDS};padding-left:4px">+ vocal rule adds</span> '
+        f'<span style="border-left:3px dashed {RULE_TAKES};padding-left:4px">&#10005; vocal rule takes away</span>')
     rows = len(cfg["layers"])
     ch = 30 + rows * 20 + 26                      # section numbers · the layers · bar numbers
     _html(f"""
@@ -391,6 +423,7 @@ def lines_player(clip_path, found: dict, key: str) -> None:
   <span style="margin-left:10px;border-left:2.5px solid #ff4b4b;padding-left:4px">big change</span>
   <span style="border-left:1.5px dotted #ff4b4b;padding-left:4px">smaller change</span>
   <span style="border-left:1.5px solid #fff;padding-left:4px">block cut</span>
+  {rule_key}
  </div>
  <audio id="a_{key}" controls style="width:100%;height:34px" src="data:audio/mp4;base64,{data}"></audio>
  <div id="r_{key}" style="margin-top:6px;font-size:15px;font-variant-numeric:tabular-nums"></div>
@@ -428,6 +461,12 @@ def lines_player(clip_path, found: dict, key: str) -> None:
   cfg.blocks.slice(1).forEach(b => {{ if (lineAt.has(b.a.toFixed(2))) return;
    for (const [c, w] of [["rgba(20,20,30,0.9)", 4], ["rgba(255,255,255,0.98)", 1.6]]) {{     // white on a dark edge
     ctx.strokeStyle = c; ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(x(b.a), TOP); ctx.lineTo(x(b.a), BOT); ctx.stroke(); }} }});
+  // the vocal rule: orange dashes + x where it takes a cut away, green + plus where it adds one
+  for (const [ts, c, dash, mark] of [[cfg.rule.removed, "{RULE_TAKES}", [6, 4], "\u2715"], [cfg.rule.added, "{RULE_ADDS}", [], "+"]]) {{
+   for (const t of ts) {{
+    ctx.strokeStyle = c; ctx.lineWidth = 3; ctx.setLineDash(dash); ctx.beginPath(); ctx.moveTo(x(t), TOP); ctx.lineTo(x(t), BOT); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = c; ctx.fillRect(x(t) - 7, BOT - 14, 14, 14);
+    ctx.fillStyle = "#111"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(mark, x(t), BOT - 7); }} }}
   const blk = cfg.blocks.find(b => now >= b.a - 1e-6 && now < b.b) || cfg.blocks[cfg.blocks.length - 1];
   if (blk) {{ ctx.fillStyle = "rgba(255,214,10,0.22)"; ctx.fillRect(x(blk.a), TOP, x(blk.b) - x(blk.a), rows * RH); }}
   // the section being played, lit
