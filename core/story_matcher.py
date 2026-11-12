@@ -82,6 +82,8 @@ ONLY_TREND = 0.15           # …and rise or fall with it when the music moves b
 ONLY_BEAT_LOCK = 0.6
 SLIDE_SEC = STEP / 2        # a clip's start may move this far (a frame at a time) to land its pushes on the hits
 AVOID_WEIGHT = 0.5
+ALT_KEEP = 24                # next-best windows kept per block for the 🔁 alternatives (up to ALT_PER_VIDEO per video:
+ALT_PER_VIDEO = 2           # a later block may have taken one of them by the time it is offered)
 STORY_TOP = 2               # a window is judged on its best two wanted tags (e.g. a position + penetration)
 PREFER_BONUS = 0.1
 ROLE_BONUS = 0.1
@@ -116,6 +118,11 @@ class StoryOptions:
     curves_of: object = None            # curves_of(video_id) → {scene_id: {"fps", "values"}}: the catalogue's on-screen
                                         # motion. 🎯 Movement only then judges the footage on it too (None: person curve only)
     video_stats: dict = field(default_factory=dict)      # filled in: how every video in play fared (see _video_stats)
+    alternatives: dict = field(default_factory=dict)     # filled in: {timeline entry index: the block's next-best
+                                                         # windows, one per video, best first} (see _alt)
+    keep: dict | None = None            # {segment index: timeline entry} — blocks kept exactly as they are (only the
+                                        # others are matched again; their footage stays out of reach)
+    force: dict | None = None           # {segment index: candidate} — this window goes in that block first
     progress: object = None             # progress(done_blocks, total_blocks) — for a progress bar
     notes: list = field(default_factory=list)
 
@@ -511,6 +518,24 @@ def _slot(pick: dict, info: dict) -> dict:
             "clip_start_sec": pick["clip_start_sec"], "story": info}
 
 
+def _alt(c: dict) -> dict:
+    """A candidate window as kept for the 🔁 alternatives: everything needed to show it and to put it in."""
+    return {"video_id": c["video_id"], "pieces": [list(p_) for p_ in c["pieces"]],
+            **{k: (None if isinstance(c.get(k), float) and math.isnan(c[k]) else c.get(k))
+               for k in ("total", "fit", "base", "story", "sync", "slide", "shot", "end_shot", "pov")}}
+
+
+def _carve_entry(queues: dict, entry: dict, sequential: bool) -> None:
+    """Take a kept block's footage out of the queues, so no other block can use it again."""
+    for slot in entry.get("scenes") or []:
+        for link in slot.get("chain") or []:
+            try:
+                carve_span(queues, link["video_id"], link["scene_id"], float(link["offset_into_scene_sec"]),
+                           float(link["clip_duration_sec"]), sequential)
+            except (ValueError, KeyError):
+                pass                   # already gone (a range or exclusion changed): nothing to take
+
+
 def _slot_chain(picks: list, info: dict) -> dict:
     """A slot from one or more picks played back to back (a window across clip edges, or a split block)."""
     first = picks[0]
@@ -672,9 +697,27 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
     last_block = []                # the picks of the block before (for the neighbour-repeat rule)
     merged_away = set()            # blocks taken into the one before them
 
+    keep = dict(options.keep or {})
+    force = dict(options.force or {})
+    for entry in keep.values():        # 🔁 kept blocks: their footage is used, their videos count as used
+        _carve_entry(queues, entry, sequential)
+        for slot in entry.get("scenes") or []:
+            for link in slot.get("chain") or []:
+                uses[link["video_id"]] = uses.get(link["video_id"], 0) + 1
+
     max_videos = int(options.max_videos or 0)
     for i, seg in enumerate(segments):
         if i in merged_away:
+            continue
+        if i in keep:                  # kept as it is — but it is still the block before the next one
+            entry = {**keep[i], "segment_index": len(timeline)}
+            timeline.append(entry)
+            last_block = [c for s_ in entry.get("scenes") or [] for c in s_.get("chain") or []]
+            if entry.get("scenes"):
+                first_ = entry["scenes"][0].get("story") or {}
+                sh_ = first_.get("shot")
+                prev_shot = float(sh_) if sh_ is not None else float("nan")
+            prev_type = entry.get("section_type", prev_type)
             continue
         if options.progress:
             try:
@@ -866,6 +909,26 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
             st_["fit_gap"].append(gaps[vid_][1])
         stats_blocks[0] += 1
 
+        # 🔁 the block's next-best windows — what the result page offers in place of a pick
+        alts, per_v = [], {}
+        for c in cands:
+            if per_v.get(c["video_id"], 0) < ALT_PER_VIDEO:
+                per_v[c["video_id"]] = per_v.get(c["video_id"], 0) + 1
+                alts.append(_alt(c))
+                if len(alts) >= ALT_KEEP:
+                    break
+        options.alternatives[len(timeline)] = alts
+        if i in force:                 # a window chosen by hand goes in first (if its footage is still free)
+            fc = dict(force[i])
+            fc["pieces"] = [tuple(p_) for p_ in fc["pieces"]]
+            for k_ in ("shot", "end_shot"):
+                fc[k_] = float("nan") if fc.get(k_) is None else float(fc[k_])
+            fc["pov"] = bool(fc.get("pov"))
+            fc["_chosen"] = True
+            for k_ in ("total", "fit", "base", "story", "sync", "slide"):
+                fc[k_] = float(fc.get(k_) or 0.0)
+            cands = [fc] + [c for c in cands if c["video_id"] != fc["video_id"]]
+
         # 2. fill the slots
         slots, used = [], set()
         anchor_shot = float("nan")
@@ -881,7 +944,8 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
             picks = take(c)
             if not picks:
                 continue
-            slots.append(_slot_chain(picks, _info(c, **({"joined": len(picks)} if len(picks) > 1 else {}))))
+            slots.append(_slot_chain(picks, _info(c, **({"joined": len(picks)} if len(picks) > 1 else {}),
+                                                  **({"chosen": True} if c.get("_chosen") else {}))))
             used.add(c["video_id"])
             uses[c["video_id"]] = uses.get(c["video_id"], 0) + 1
             if len(slots) == 1:
@@ -1225,3 +1289,35 @@ def sync_report(timeline: list, track: dict, context_sec: float = 1.0, video_sta
             **({"videos": video_stats, "videos_how_to_read": _video_stats.__doc__.split("Per video:", 1)[1].strip()}
                if video_stats else {}),
             "clips": rows}
+
+
+def free_alternatives(timeline: list, entry_index: int, alternatives: list, excluded: set = (), limit: int = 6) -> list:
+    """The block's kept next-best windows that could go in now: none from a rejected clip, none overlapping footage
+    another block of the plan already uses (the block's own picks don't count — they are what would be replaced).
+    One window per video, best first."""
+    used = {}
+    for k, e in enumerate(timeline):
+        if k == entry_index:
+            continue
+        for slot in e.get("scenes") or []:
+            for link in slot.get("chain") or []:
+                a = float(link["offset_into_scene_sec"])
+                used.setdefault((link["video_id"], link["scene_id"]), []).append((a, a + float(link["clip_duration_sec"])))
+    own = {(link["video_id"], link["scene_id"]) for slot in timeline[entry_index].get("scenes") or []
+           for link in slot.get("chain") or []} if 0 <= entry_index < len(timeline) else set()
+    out = []
+    for alt in alternatives or []:
+        ok = True
+        for scene_id, off, dur in alt["pieces"]:
+            key = (alt["video_id"], scene_id)
+            if key in excluded or (key in own and not alt.get("_keep_own")):
+                ok = False
+                break
+            if any(min(b_, off + dur) - max(a_, off) > 0.05 for a_, b_ in used.get(key, ())):
+                ok = False
+                break
+        if ok and alt["video_id"] not in {o["video_id"] for o in out}:
+            out.append(alt)
+            if len(out) >= limit:
+                break
+    return out
