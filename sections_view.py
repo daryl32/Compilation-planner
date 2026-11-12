@@ -172,7 +172,9 @@ def lines_figure(found: dict, height: int = 250):
     names = [k for k in SB.LAYERS if k in found["levels"]][::-1]
     fig = go.Figure(go.Heatmap(
         x=(bars + ends) / 2, y=[f"{SB.EMOJI[k]} {SB.NAME[k]}" for k in names],
-        z=[found["levels"][k] for k in names], zmin=0, zmax=1, colorscale="Blues", showscale=False, xgap=1, ygap=2,
+        z=[found["levels"][k] for k in names], zmin=0, zmax=1, colorscale="Blues", showscale=True, xgap=1, ygap=2,
+        colorbar=dict(title=dict(text="level", side="right"), thickness=12, len=0.95, tickvals=[0, 0.15, 0.3, 0.5, 1],
+                      ticktext=["0 silent", "0.15 off", "0.3 playing", "0.5", "1 strongest"], tickfont=dict(size=10)),
         hovertemplate="%{y} · %{x:.1f}s · %{z:.2f}<extra></extra>"))
     for ln in found["lines"]:
         fig.add_vline(x=ln["time"], line_color="#ff4b4b", line_width=2.5 if ln["level"] == 1 else 1.2,
@@ -191,7 +193,7 @@ def _render_lines(track: dict, play=None) -> None:
         st.caption("Sections from scratch, steps 1–2: a line wherever the music changes — a layer comes in or drops "
                    "out, it gets louder or quieter, the sound changes — always on a bar line. No types yet: this "
                    "only shows WHERE the song divides. Solid = a big change, dotted = a smaller one. It doesn't "
-                   "touch the saved sections below.")
+                   "touch the saved sections below. ▶ at the bottom plays the whole track over it.")
         try:
             found = SB.for_track(track)
         except Exception as e:          # noqa: BLE001
@@ -218,17 +220,156 @@ def _render_lines(track: dict, play=None) -> None:
         st.caption("Profile = step 2: the layers playing · how loud within this track (quiet / medium / loud) · "
                    "how busy the drums are (hits a second) · rising or falling · “like N” = the same profile as "
                    "section N. A section type will be a named profile.")
-        if play is not None:
-            c = st.columns([2.2, 1.4])
-            pick = c[0].selectbox("▶ Hear a section", [0] + [sc["n"] for sc in found["sections"]], key="sec_ln_play",
-                                  format_func=lambda n: "—" if not n else (
-                                      f"{n} · {format_mmss(found['sections'][n - 1]['start'])}–"
-                                      f"{format_mmss(found['sections'][n - 1]['end'])}"))
-            lead = c[1].toggle("2 s lead-in", value=True, key="sec_ln_lead",
-                               help="Starts two seconds before the line, so you hear the change itself.")
-            if pick:
-                sc = found["sections"][pick - 1]
-                play(track, {"start": sc["start"], "end": sc["end"]}, lead, f"sec_ln_{track.get('track_id')}_{pick}")
+        st.caption("Key: each cell is one bar of one layer, 0–1 against that layer's own strongest moments in this "
+                   "track (drums and hats: how hard the hits are; the rest: the average level). From 0.3 a layer "
+                   "counts as playing, under 0.15 as off. Tap a cell for its number.")
+        with st.expander("🔢 The numbers per section"):
+            st.dataframe([{"#": sc["n"], "From": format_mmss(sc["start"]), "Bars": sc["bars"],
+                           **{f"{SB.EMOJI[k]} {SB.NAME[k]}": sc["playing"].get(k) for k in SB.LAYERS
+                              if k in found["levels"]},
+                           "Level in track": sc["profile"]["level"], "Drum hits /s": sc["profile"]["busy"],
+                           "Loudness change": sc["profile"]["change"]} for sc in found["sections"]],
+                         hide_index=True, width="stretch", key="sec_ln_nums")
+        if st.toggle("▶ Play the whole track with the lines", key="sec_ln_whole",
+                     help="The full song with a cursor moving over the layers and the lines; under it the time "
+                          "code, the bar number and the section you are in. Tap the picture to jump."):
+            clip, err = _whole_track_clip(track)
+            if clip is None:
+                st.warning(err)
+                if play is not None:               # the Media Library's player offers the download from Drive
+                    play(track, {"start": 0.0, "end": min(5.0, float(track["duration_sec"]))}, False,
+                         f"sec_ln_dl_{track.get('track_id')}")
+            else:
+                lines_player(clip, found, f"ln_{abs(hash(track.get('track_id'))) % 10 ** 8}")
+
+
+def _whole_track_clip(track: dict) -> tuple:
+    """(path of a small copy of the whole song, None) or (None, why not) — cut once, then cached."""
+    try:
+        from pathlib import Path
+        from config import PREVIEW_DIR
+        from render_preview import colab_to_local
+        import preview_snippets
+        path = Path(colab_to_local(track.get("source_path", "")))
+        if not path.exists():
+            return None, "This track's audio isn't on the server yet — download it below, then switch ▶ on again."
+        clip, err = preview_snippets.make_audio_snippet(Path(PREVIEW_DIR) / "snippets", path, 0.0,
+                                                        float(track["duration_sec"]))
+        return (clip, None) if clip else (None, f"Couldn't prepare the music: {err}")
+    except Exception as e:          # noqa: BLE001
+        return None, f"Couldn't prepare the music: {e}"
+
+
+def player_config(found: dict) -> dict:
+    """What the whole-track player draws: the layers bar by bar, the lines, the sections and the bar starts."""
+    import section_bounds as SB
+    names = [k for k in SB.LAYERS if k in found["levels"]]
+    return {"dur": float(found["duration"]), "bars": [round(float(b), 3) for b in found["bars"]],
+            "layers": [f"{SB.EMOJI[k]} {SB.NAME[k]}" for k in names],
+            "z": [[round(float(v), 2) for v in found["levels"][k]] for k in names],
+            "lines": [{"t": ln["time"], "big": ln["level"] == 1} for ln in found["lines"]],
+            "sections": [{"n": sc["n"], "a": sc["start"], "b": sc["end"],
+                          "why": " · ".join(sc["why"]), "words": sc.get("words", "")} for sc in found["sections"]]}
+
+
+def lines_player(clip_path, found: dict, key: str) -> None:
+    """The whole song with a cursor synced to it over the layers and the lines; under it the time code, the bar
+    number and the section being played, with what changed at its start and its profile. Tap to jump."""
+    import base64
+    import json as _json
+    from pathlib import Path
+    from streamlit.components.v1 import html as _html
+    try:
+        data = base64.b64encode(Path(clip_path).read_bytes()).decode("ascii")
+    except OSError:
+        st.audio(str(clip_path))
+        return
+    cfg = player_config(found)
+    rows = len(cfg["layers"])
+    ch = 30 + rows * 20 + 26                      # section numbers · the layers · bar numbers
+    _html(f"""
+<div style="font-family:sans-serif;color:#ddd">
+ <canvas id="c_{key}" width="1400" height="{ch}" style="width:100%;height:{ch}px;display:block;touch-action:manipulation"></canvas>
+ <div style="display:flex;align-items:center;gap:8px;margin:4px 0 2px;font-size:11px;color:#aaa">
+  <span>key</span><span>0</span>
+  <span style="display:inline-block;width:150px;height:10px;border-radius:2px;background:linear-gradient(90deg,rgb(247,251,255),rgb(107,174,214),rgb(8,48,107))"></span>
+  <span>1 = strongest in this track</span>
+  <span style="margin-left:10px;border-left:2.5px solid #ff4b4b;padding-left:4px">big change</span>
+  <span style="border-left:1.5px dotted #ff4b4b;padding-left:4px">smaller change</span>
+ </div>
+ <audio id="a_{key}" controls style="width:100%;height:34px" src="data:audio/mp4;base64,{data}"></audio>
+ <div id="r_{key}" style="margin-top:6px;font-size:15px;font-variant-numeric:tabular-nums"></div>
+ <div id="w_{key}" style="margin-top:2px;font-size:12.5px;color:#aaa;min-height:2.4em"></div>
+</div>
+<script>
+(function() {{
+ const cfg = {_json.dumps(cfg)};
+ const cv = document.getElementById("c_{key}"), ctx = cv.getContext("2d");
+ const au = document.getElementById("a_{key}"), rd = document.getElementById("r_{key}"), wd = document.getElementById("w_{key}");
+ const W = cv.width, H = cv.height, G = 118, TOP = 30, RH = 20, rows = cfg.layers.length, BOT = TOP + rows * RH;
+ const x = t => G + t / cfg.dur * (W - G);
+ const mmss = t => {{ const m = Math.floor(t / 60), s = t - m * 60; return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1); }};
+ const ends = cfg.bars.slice(1).concat([cfg.dur]);
+ const col = v => {{ v = Math.max(0, Math.min(1, v));           // white to blue, as the chart above
+   const a = [247, 251, 255], m = [107, 174, 214], b = [8, 48, 107];
+   const p = v < 0.5 ? [a, m, v * 2] : [m, b, (v - 0.5) * 2];
+   return "rgb(" + [0, 1, 2].map(i => Math.round(p[0][i] + (p[1][i] - p[0][i]) * p[2])).join(",") + ")"; }};
+ const barAt = t => {{ let k = 0; for (let i = 0; i < cfg.bars.length; i++) {{ if (cfg.bars[i] <= t + 1e-6) k = i; else break; }} return k; }};
+ const secAt = t => cfg.sections.find(s => t >= s.a - 1e-6 && t < s.b) || cfg.sections[cfg.sections.length - 1];
+ function draw(now) {{
+  ctx.clearRect(0, 0, W, H);
+  const cur = secAt(now);
+  // the layers, bar by bar
+  for (let r = 0; r < rows; r++) {{
+   for (let k = 0; k < cfg.bars.length; k++) {{
+    ctx.fillStyle = col(cfg.z[r][k]);
+    ctx.fillRect(x(cfg.bars[k]) + 0.5, TOP + r * RH + 1, Math.max(1, x(ends[k]) - x(cfg.bars[k]) - 1), RH - 2);
+   }}
+   ctx.fillStyle = "#ddd"; ctx.font = "13px sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+   ctx.fillText(cfg.layers[r], 4, TOP + r * RH + RH / 2);
+  }}
+  // the section being played, lit
+  if (cur) {{ ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 2; ctx.strokeRect(x(cur.a) + 1, TOP - 1, x(cur.b) - x(cur.a) - 2, rows * RH + 2); }}
+  // the lines and the section numbers
+  for (const ln of cfg.lines) {{
+   ctx.strokeStyle = "#ff4b4b"; ctx.lineWidth = ln.big ? 3 : 1.5; ctx.setLineDash(ln.big ? [] : [4, 4]);
+   ctx.beginPath(); ctx.moveTo(x(ln.t), 6); ctx.lineTo(x(ln.t), BOT + 4); ctx.stroke();
+  }}
+  ctx.setLineDash([]); ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+  for (const s of cfg.sections) {{
+   const on = cur && s.n === cur.n;
+   ctx.font = (on ? "bold 17px" : "bold 14px") + " sans-serif"; ctx.fillStyle = on ? "#ffffff" : "#bdbdbd";
+   if (x(s.b) - x(s.a) > 14) ctx.fillText(String(s.n), (x(s.a) + x(s.b)) / 2, 22);
+  }}
+  // bar numbers: every bar a tick, a number every 4 (or 8 when crowded)
+  const step = (W - G) / cfg.bars.length < 9 ? 8 : 4;
+  ctx.font = "11px sans-serif"; ctx.fillStyle = "#a8a8a8"; ctx.strokeStyle = "rgba(160,160,160,0.6)"; ctx.lineWidth = 1;
+  cfg.bars.forEach((b, k) => {{
+   const major = k % step === 0;
+   ctx.beginPath(); ctx.moveTo(x(b), BOT + 2); ctx.lineTo(x(b), BOT + (major ? 9 : 5)); ctx.stroke();
+   if (major) ctx.fillText(String(k + 1), x(b), BOT + 21);
+  }});
+  ctx.textAlign = "left"; ctx.fillText("bar", 4, BOT + 21); ctx.fillText("section", 4, 22);
+  // the cursor
+  ctx.strokeStyle = "#ffd60a"; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(x(now), 0); ctx.lineTo(x(now), H); ctx.stroke();
+  const k = barAt(now), beat = Math.min(4, 1 + Math.floor((now - cfg.bars[k]) / Math.max(ends[k] - cfg.bars[k], 0.001) * 4));
+  rd.innerHTML = "<b>" + mmss(now) + "</b> &nbsp;&middot;&nbsp; bar <b>" + (k + 1) + "</b>." + beat + " of " + cfg.bars.length
+    + " &nbsp;&middot;&nbsp; section <b>" + (cur ? cur.n : "-") + "</b> of " + cfg.sections.length
+    + (cur ? " &nbsp;(" + mmss(cur.a) + " &ndash; " + mmss(cur.b) + ")" : "");
+  wd.textContent = cur ? ("starts with: " + cur.why + "   |   it is: " + cur.words) : "";
+ }}
+ let raf = null;
+ function tick() {{ draw(au.currentTime); raf = requestAnimationFrame(tick); }}
+ au.addEventListener("play", () => {{ if (!raf) tick(); }});
+ au.addEventListener("pause", () => {{ cancelAnimationFrame(raf); raf = null; draw(au.currentTime); }});
+ au.addEventListener("seeked", () => {{ if (!raf) draw(au.currentTime); }});
+ au.addEventListener("ended", () => {{ cancelAnimationFrame(raf); raf = null; draw(cfg.dur); }});
+ cv.addEventListener("click", ev => {{ const rect = cv.getBoundingClientRect();
+   const t = ((ev.clientX - rect.left) / rect.width * W - G) / (W - G) * cfg.dur;
+   au.currentTime = Math.max(0, Math.min(cfg.dur - 0.05, t)); draw(au.currentTime); }});
+ draw(0);
+}})();
+</script>""", height=ch + 34 + 28 + 78)
 
 
 # ---------------------------------------------------------------------------

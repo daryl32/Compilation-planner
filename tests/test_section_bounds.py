@@ -90,8 +90,23 @@ def test_the_lines_show_on_the_sections_page():
     at.run()
     assert not errors(at), errors(at)
     assert any("lines from the music" in e.label for e in at.expander)
-    assert at.selectbox(key="sec_ln_play").value == 0
+    assert not [sb for sb in at.selectbox if sb.key == "sec_ln_play"]             # replaced by the whole-track player
+    assert at.toggle(key="sec_ln_whole").value is False
     assert [sb for sb in at.selectbox if str(sb.key).startswith("sec_role_")], "the editor below is still there"
+    assert fig.data[0].showscale and "0.3 playing" in fig.data[0].colorbar.ticktext            # the heatmap's key
+    # what the player draws: every layer bar by bar, the lines, the sections — bars numbered from 1 in the page
+    found = SB.for_track(load_track(DATA, "song_full"))
+    cfg = SV.player_config(found)
+    assert len(cfg["z"]) == len(cfg["layers"]) and all(len(r) == len(cfg["bars"]) for r in cfg["z"])
+    assert [ln["t"] for ln in cfg["lines"]] == [ln["time"] for ln in found["lines"]]
+    assert cfg["sections"][0]["a"] == 0.0 and abs(cfg["sections"][-1]["b"] - cfg["dur"]) < 0.01
+    assert all(s_["words"] and s_["why"] for s_ in cfg["sections"])
+    import json
+    json.dumps(cfg)
+    # with the switch on and no audio file on this machine: a plain message, no error
+    at.toggle(key="sec_ln_whole").set_value(True).run()
+    assert not errors(at), errors(at)
+    assert any("isn't on the server yet" in w.value or "Couldn't prepare" in w.value for w in at.warning)
 
 
 def test_a_profile_per_section():
