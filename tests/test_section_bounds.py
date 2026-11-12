@@ -196,10 +196,10 @@ def test_sections_parts_and_blocks():
     assert all(abs(a["end"] - b["start"]) < 1e-6 for a, b in zip(blks, blks[1:]))        # the whole track, in order
     starts = {round(b["start"], 2) for b in blks}
     assert all(round(ln["time"], 2) in starts for ln in lines)                            # every line is a cut
-    assert all(b["end"] - b["start"] >= 1.4 - 1e-6 for b in blks)                         # never under the shortest clip
+    assert all(b["end"] - b["start"] >= 2.0 - 1e-6 for b in blks)                         # never under the shortest clip
     assert all(b["bars"] in (0.5, 1, 2, 3, 4, 5, 6, 8) for b in blks)
     in_hit = [b for b in blks if 44.0 <= b["start"] < 72.0]
-    assert in_hit and all(b["bars"] == 1 and "busy loud drums" in b["why"] for b in in_hit)
+    assert in_hit and all(b["bars"] == 1 and "loud drums" in b["why"] for b in in_hit)
     quiet = [b for b in blks if b["end"] <= 12.0]
     assert quiet and all(b["bars"] >= 2 for b in quiet) and "hardly anything playing" in quiet[0]["why"]
     rising = [b for b in blks if 28.0 <= b["start"] < 44.0]
@@ -220,6 +220,23 @@ def test_sections_parts_and_blocks():
     assert SB._pace({"on": []}, 2.7, 1.4)[0] == 2.0 and SB._pace({"on": []}, 1.9, 1.4)[0] == 4.0
     busy = {"on": ["drums"], "busy_word": "busy", "level_word": "loud"}
     assert SB._pace(busy, 3.0, 1.4)[0] == 0.5 and SB._pace(busy, 2.0, 1.4)[0] == 1.0
+    # two loud drum parts are cut alike, however their drums rank (AURA's sections 3 and 5, 12 Nov)
+    assert SB._pace(dict(busy, busy_word="steady"), 2.67, 2.67) == SB._pace(busy, 2.67, 2.67)
+    assert SB._pace(dict(busy, level_word="medium"), 2.67, 2.67)[0] == 2.0
+    assert SB._pace(busy, 2.62, 2.667)[0] == 1.0                  # a bar a touch under four beats is still a bar
+    # AURA, 12 Nov: where the bar lines are uneven, "one-bar" blocks came out at 1.3 s and 0.6 / 0.7 s. Blocks are
+    # sized in seconds: short ones pair up within their part, the last short one joins the block before it
+    ub = np.concatenate([np.arange(8) * 2.6, 20.8 + np.arange(8) * 1.3, [31.2, 31.85, 32.5], 35.1 + np.arange(4) * 2.6])
+    part = [{"n": 1, "label": "1", "bar": 0, "profile": dict(busy, trend="steady")}]
+    got = SB.blocks(part, ub, 45.5, beat=0.65)                    # 92 BPM: the shortest block is a bar, 2.6 s
+    assert all(b["end"] - b["start"] >= 2.6 - 0.06 for b in got), [(b["start"], b["end"]) for b in got]
+    assert got[0]["start"] == 0.0 and got[-1]["end"] == 45.5 and [b["n"] for b in got] == list(range(1, len(got) + 1))
+    assert [round(b["start"], 1) for b in got if 20.8 <= b["start"] < 31.2] == [20.8, 23.4, 26.0, 28.6]   # paired up
+    assert SB._uneven(ub, 45.5) and SB._uneven(np.arange(10) * 2.0, 20.0) == []
+    two = [{"n": 1, "label": "1", "bar": 0, "profile": dict(busy, trend="steady")},
+           {"n": 2, "label": "2", "bar": 2, "profile": dict(busy, trend="steady")}]
+    kept = SB.blocks(two, np.arange(6) * 1.0, 6.0, beat=0.5)       # a line is a cut even after a short last block
+    assert 2.0 in [b["start"] for b in kept] and all(b["section"] in ("1", "2") for b in kept)
     # a real library track, and the page's player
     from tests.fixtures import load_track
     import sections_view as SV
@@ -231,3 +248,75 @@ def test_sections_parts_and_blocks():
     fig = SV.lines_figure(found)
     assert any(sh.line.color.startswith("rgba(255,255,255") for sh in fig.layout.shapes)   # the block cuts on the chart
     assert list(fig.layout.xaxis.ticktext)[:2] == ["1", "5"]                                # bars numbered on the axis
+
+
+def test_a_steady_bar_grid_from_the_beats():
+    """AURA, 12 Nov: the stored bar lines had half bars and odd ones in places; the beats were steady. Sections,
+    parts and blocks sit on one bar line every four beats, beat 1 voted by the stored lines."""
+    import section_bounds as SB
+    beat = 0.667
+    beats = 0.3 + np.arange(150) * beat                          # steady beats, stopping 8 s before the end
+    dur = float(beats[-1]) + 8.0
+    good = beats[::4]
+    down = np.sort(np.concatenate([good, beats[2::4][10:18], [float(beats[101]), float(beats[103])]]))   # half bars, strays
+    track = {"beat_times": beats.tolist(), "duration_sec": dur, "analysis": {"downbeats": down.tolist(), "beats_per_bar": 4}}
+    stored = np.concatenate([[0.0], down])
+    assert SB._uneven(stored, dur)                               # the stored lines are uneven …
+    bars = SB.steady_bars(track, stored, dur)
+    assert bars[0] == 0.0 and SB._uneven(bars, dur) == []        # … the grid isn't
+    d = np.diff(bars)[1:]
+    assert np.allclose(d, 4 * beat, atol=0.02)
+    assert all(np.min(np.abs(good - t)) < 0.01 for t in bars[1:] if t <= beats[-1])    # on the real bar lines
+    assert bars[-1] > beats[-1] and dur - bars[-1] >= 0.25 * 4 * beat                  # carried on past the last beat
+    # no usable beats: the stored lines are used as they are
+    assert np.array_equal(SB.steady_bars({"beat_times": [0.5, 1.0]}, stored, dur), stored)
+    # the matcher's own bar lines (audio_drive) are not touched
+    import audio_drive as AD
+    from tests.fixtures import load_track
+    tr = load_track(DATA, "song_full")
+    before = AD.drivers(tr)["bars"].copy()
+    SB.for_track(tr)
+    assert np.array_equal(AD.drivers(tr)["bars"], before)
+
+
+def test_old_and_new_cuts_side_by_side():
+    """🅰 Old = the module as released in v1.59.0, kept word for word; 🅱 New = today's. The page switches."""
+    import section_bounds as SB
+    import section_bounds_old as SBO
+    import sections_view as SV
+    from tests.apptest_util import errors, page_app
+    from tests.fixtures import load_track
+    tr = load_track(DATA, "song_full")
+    old, new = SBO.for_track(tr), SB.for_track(tr)
+    assert {"bars", "levels", "lines", "sections", "blocks"} <= set(old) and old["blocks"] and new["blocks"]
+    assert all(s_["label"] and s_["words"] for s_ in old["sections"])
+    for f in (old, new):                                      # both draw: the chart and the player
+        assert SV.lines_figure(f).data and SV.player_config(f)["blocks"]
+    # the case the switch is for: uneven stored bar lines over steady beats (AURA, 12 Nov)
+    beat = 0.667
+    beats = (0.3 + np.arange(160) * beat)
+    down = np.sort(np.concatenate([beats[::4], beats[2::4][10:18]]))            # half bars for eight bars
+    n = int(107 * 30)
+    t = np.arange(n) / 30
+    loud = np.where((t > 20) & (t < 80), 0.9, 0.1)
+    kick = loud * (0.5 + 0.5 * np.cos(2 * np.pi * ((t - 0.3) % beat) / beat) ** 8)
+    track = {"track_id": "uneven", "duration_sec": 107.0, "bpm": 90.0, "beat_times": beats.round(3).tolist(),
+             "hires": {"rate": 30, "rms": loud.round(3).tolist(), "onset": kick.round(3).tolist()},
+             "analysis": {"rate": 30, "beats_per_bar": 4, "downbeats": down.round(3).tolist(),
+                          "kick": kick.round(3).tolist(), "snare": (kick * 0.5).round(3).tolist()}}
+    o, w = SBO.for_track(track), SB.for_track(track)
+    short = lambda f: min(b["end"] - b["start"] for b in f["blocks"])        # noqa: E731
+    assert short(w) >= 2.2 and short(o) <= short(w) + 1e-6    # new: none under a bar; old never longer than new
+    assert len(o["bars"]) > len(w["bars"]) and SB._uneven(o["bars"], 107.0) and not w["uneven_bars"]
+    # the page: new by default, the switch shows the old ones
+    at = page_app("pages/3_Media_Library.py", timeout=300)
+    at.session_state["lib_kind"] = "🎵 Audio"
+    at.session_state["aud_kind"] = "🧩 Sections"
+    at.run()
+    assert not errors(at), errors(at)
+    assert at.session_state["sec_ln_mode"] == "new"
+    assert any("🅰 Old" in c.value and "**🅱 New**" in c.value for c in at.caption)
+    at.session_state["sec_ln_mode"] = "old"
+    at.run()
+    assert not errors(at), errors(at)
+    assert any("**🅰 Old**" in c.value for c in at.caption)

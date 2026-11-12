@@ -17,11 +17,11 @@ Sections and parts. A big change (a solid line) starts a new SECTION; a smaller 
 inside it — sections are numbered 1, 2, 3 and their parts 3a, 3b. Every part has its own profile.
 
 Blocks (blocks) — the clips' lengths, from the same measurements and still no type names. Every line is a cut.
-Inside a part the profile sets the pace: busy loud drums 1 bar (half a bar where that is still a clip), other drum
+Inside a part the profile sets the pace: loud drums 1 bar (half a bar where that is still a clip), other drum
 parts 2 bars, parts led by the voice / instruments 2 or 4 bars, hardly anything playing 4 bars; a rising part's
 blocks get shorter towards its end, a falling part's longer; lengths are musical (½, 1, 2, 4, 8 bars — 6 bars is
-4 + 2); in a part the voice leads no cut lands inside a sung phrase; no block is shorter than the matcher's
-shortest clip (section_cuts.MIN_CLIP_FLOOR).
+4 + 2); in a part the voice leads no cut lands inside a sung phrase; and no block is shorter, in seconds, than
+the matcher's ✂️ Shortest clip on Auto for the tempo (a bar at 90 BPM) — short ones are paired up.
 
 How a line is found. Every layer is read once per bar, 0–1 against the track's own strong level (so any track
 compares: audio_drive._norm). At each bar line the bars after it are compared with the bars before it, per layer,
@@ -54,6 +54,7 @@ NAME = {"drums": "drums", "hats": "hats", "bass": "bass", "other": "instruments"
 WINDOWS = (2, 4)           # bars before / after a line that are compared
 MIN_SIZE = 0.22            # a change smaller than this is not a line
 STRONG = 0.5               # a change this big is a main line (level 1); the rest are level 2
+BREAK_FALL = 0.3           # a one-bar break: the loudness that bar is this far under the two bars either side of it
 MIN_GAP_BARS = 2           # lines are at least this far apart (a one-bar break apart)
 SAY_STEP = 0.15            # a layer's step is named in the line's reason from this size
 OFF, ON = 0.15, 0.3        # a layer "comes in" from under OFF to at least ON, and "drops out" the other way
@@ -71,11 +72,49 @@ LIKE = 0.1                 # two sections are alike when their layers and level 
 # What is playing, bar by bar
 # ---------------------------------------------------------------------------
 
+def steady_bars(track: dict, stored, duration: float, beats=None) -> np.ndarray:
+    """Bar starts (from 0) on a STEADY grid: one bar line every four beats, beat 1 voted by the analysis' own bar
+    lines (core/bars.regular_bars), carried on at the same step to the end of the track where the beats stop early.
+    The stored bar lines are used as they are only when the track has no usable beats.
+    Why: the stored lines can be uneven — on AURA (12 Nov) the model marked half bars for bars 13–20 and odd ones
+    at 26–31 (bars of 1.3, 2.0 and 0.65 s in a 2.67 s grid), which made blocks of 1.3 s, then, once short blocks
+    were paired up, blocks of 3.3 and 4.7 s with too few cuts. The beats themselves were steady throughout."""
+    stored = np.asarray(stored, float)
+    b = np.asarray(beats if beats is not None else track.get("beat_times") or (), float)
+    if b.size < 8:
+        return stored
+    try:
+        from core import bars as BARS
+        a = track.get("analysis") or {}
+        grid = np.asarray(BARS.regular_bars(b, a.get("downbeats") or [], int(a.get("beats_per_bar") or 4)), float)
+    except Exception:          # noqa: BLE001
+        return stored
+    if grid.size < 4:
+        return stored
+    bar = float(np.median(np.diff(grid)))
+    if bar <= 0:
+        return stored
+    tail = []
+    t = float(grid[-1]) + bar
+    while t < float(duration) - 0.5 * bar:              # the beats stop before the track does: the grid carries on
+        tail.append(t)
+        t += bar
+    head = []
+    t = float(grid[0]) - bar
+    while t > 0.5 * bar:                                # … and starts before the first beat that was found
+        head.insert(0, t)
+        t -= bar
+    grid = np.concatenate([head, grid, tail])
+    grid = grid[(grid > 0.5 * bar) & (grid < float(duration) - 0.25 * bar)]
+    return np.concatenate([[0.0], grid])
+
+
 def bar_levels(track: dict, beats=None) -> dict:
     """{"bars": bar starts (from 0), "duration", "levels": {layer: one 0–1 value per bar}, "change": novelty at each
     bar line or None}. Layers the analysis doesn't have are left out; loudness is always there."""
     drv = AD.drivers(track, beats)
-    bars, rate, curves, duration = np.asarray(drv["bars"], float), drv["rate"], dict(drv["curves"]), drv["duration"]
+    rate, curves, duration = drv["rate"], dict(drv["curves"]), drv["duration"]
+    bars = steady_bars(track, drv["bars"], duration, beats)
     n = len(curves["loudness"])
     a = track.get("analysis") or {}
     a_rate = float(a.get("rate", rate))
@@ -189,9 +228,14 @@ def find_lines(bars, levels: dict, duration: float, change=None) -> list:
     # several bars either side smooths a single bar away, so it is looked for directly (this bar against BOTH its
     # neighbours) and gets a line on each side
     stop = {}
+    loud = lv.get("loudness")
     for k in range(1, n - 1):
         dip = np.sqrt(sum((WEIGHT[name] * max(0.0, min(v[k - 1], v[k + 1]) - v[k])) ** 2 for name, v in lv.items()))
-        if dip >= STRONG and float(duration) - bars[k + 1] >= 0.5:
+        # the BAND stops: the loudness itself falls away for that one bar — and it is one bar on its own, not a
+        # pattern that alternates bar by bar (Midnight Sun's bass line plays every other bar: 31 "breaks", 12 Nov)
+        alone = loud is None or (min(loud[k - 1], loud[k + 1]) - loud[k] >= BREAK_FALL
+                                 and all(loud[j] - loud[k] >= BREAK_FALL for j in (k - 2, k + 2) if 0 <= j < n))
+        if dip >= STRONG and alone and float(duration) - bars[k + 1] >= 0.5:
             stop[k], stop[k + 1] = ("⏸️ the band stops for a bar", dip), ("▶️ the band comes back in", dip)
     chosen = list(stop)
     for k in sorted(cand, key=lambda k: -size[k]):                  # strongest first, keeping their distance
@@ -301,6 +345,7 @@ def profile(secs: list, bars, levels: dict, hits=None) -> list:
 # ---------------------------------------------------------------------------
 BLOCK_MAX_BARS = 8         # no block is longer than this (a cut that would fall inside a sung phrase is kept then)
 BLOCK_MAX_SEC = 8.0        # the pace never asks for a block longer than this (4 bars at 90 BPM is 10.7 s → 2 bars)
+MIN_SLACK = 0.85           # "at least the shortest block" allows for a bar that runs a little short of four beats
 PHRASE_EDGE = 0.35         # a cut this close (in bars) to where a sung phrase starts or ends is not "inside" it
 
 
@@ -308,10 +353,12 @@ def _pace(prof: dict, bar_sec: float, min_sec: float) -> tuple:
     """(block length in bars, why) for a part with this profile."""
     on = prof.get("on") or []
     if "drums" in on:
-        if prof.get("busy_word") == "busy" and prof.get("level_word") == "loud":
-            length, why = (0.5, "busy loud drums") if bar_sec / 2 >= min_sec - 1e-6 else (1.0, "busy loud drums")
+        # by how LOUD the part is, not how busy its drums rank: on AURA two near-identical loud drum sections read
+        # 5.0 and 4.7 hits a second, fell either side of "busy", and were cut at one bar and at two (12 Nov)
+        if prof.get("level_word") == "loud":
+            length, why = (0.5, "loud drums") if bar_sec / 2 >= MIN_SLACK * min_sec else (1.0, "loud drums")
         else:
-            length, why = 2.0, f"{prof.get('busy_word') or 'steady'} drums, {prof.get('level_word')}"
+            length, why = 2.0, f"drums, {prof.get('level_word')}"
     elif on:
         lead = "voice" if "vocals" in on else "instruments" if "other" in on else "bass"
         length, why = (4.0, f"{lead} leading, quiet") if prof.get("level_word") == "quiet" else (2.0, f"{lead} leading")
@@ -319,7 +366,7 @@ def _pace(prof: dict, bar_sec: float, min_sec: float) -> tuple:
         length, why = 4.0, "hardly anything playing"
     while length * bar_sec > BLOCK_MAX_SEC and length > 1.0:
         length /= 2
-    while length * bar_sec < min_sec - 1e-6 and length < BLOCK_MAX_BARS:
+    while length * bar_sec < MIN_SLACK * min_sec and length < BLOCK_MAX_BARS:
         length *= 2
     return length, why
 
@@ -344,9 +391,34 @@ def _fill(n_bars: float, length_at) -> list:
     return out
 
 
-def blocks(secs: list, bars, duration: float, vocal_starts=(), vocal_ends=(), min_sec: float = None) -> list:
+def _merge_short(out: list, min_sec: float) -> list:
+    """No block under min_sec SECONDS, whatever the bar lines say (a track's bar grid can be uneven in places —
+    AURA, 12 Nov: "one-bar" blocks of 1.3 s and two of 0.6 / 0.7 s): a short block joins the next one of its
+    part, pairing up a run of them; the last of a part joins the one before it. A part that is itself shorter
+    stays one block — a line is always a cut."""
+    res = []
+    for b in out:
+        prev = res[-1] if res else None
+        if prev is not None and prev["section"] == b["section"] and prev["end"] - prev["start"] < MIN_SLACK * min_sec:
+            prev["end"], prev["bars"] = b["end"], round(prev["bars"] + b["bars"], 2)       # the short one before it
+        else:
+            res.append(dict(b))
+    for k in range(len(res) - 1, 0, -1):                 # a short one left at the end of its part
+        b, prev = res[k], res[k - 1]
+        if b["end"] - b["start"] < MIN_SLACK * min_sec and prev["section"] == b["section"]:
+            prev["end"], prev["bars"] = b["end"], round(prev["bars"] + b["bars"], 2)
+            del res[k]
+    for k, b in enumerate(res, 1):
+        b["n"] = k
+    return res
+
+
+def blocks(secs: list, bars, duration: float, vocal_starts=(), vocal_ends=(), min_sec: float = None,
+           beat: float = None) -> list:
     """The blocks of a track, in order: {"n", "start", "end", "bars", "section" (the part's label), "why"}.
-    secs: the sections with their profiles (profile()). min_sec: the shortest clip (default: the matcher's)."""
+    secs: the sections with their profiles (profile()). min_sec: the shortest block in seconds — default: the
+    matcher's ✂️ Shortest clip on Auto for this tempo (section_cuts.auto_min_clip: the shortest musical length of
+    at least 1.4 s — a bar at 90 BPM); beat: seconds between beats (default: a quarter of the typical bar)."""
     bars = np.asarray(bars, float)
     n = len(bars)
     if n < 2 or not secs:
@@ -355,7 +427,7 @@ def blocks(secs: list, bars, duration: float, vocal_starts=(), vocal_ends=(), mi
     bar_sec = float(np.median(ends - bars))
     if min_sec is None:
         import section_cuts as SCU
-        min_sec = SCU.MIN_CLIP_FLOOR
+        min_sec = SCU.auto_min_clip(beat if beat and beat > 0 else bar_sec / 4)
 
     def time_at(pos: float) -> float:                   # a position in bars (17.5 = half-way through bar 18) → s
         k = min(int(np.floor(pos + 1e-9)), n - 1)
@@ -371,7 +443,7 @@ def blocks(secs: list, bars, duration: float, vocal_starts=(), vocal_ends=(), mi
         prof = sc.get("profile") or {}
         base, why = _pace(prof, bar_sec, min_sec)
         trend = prof.get("trend") if b - a >= 4 else None
-        short = base / 2 if base / 2 >= 0.5 and (base / 2) * bar_sec >= min_sec - 1e-6 else base
+        short = base / 2 if base / 2 >= 0.5 and (base / 2) * bar_sec >= MIN_SLACK * min_sec else base
         longer = base * 2 if base * 2 <= (b - a) / 2 and base * 2 * bar_sec <= BLOCK_MAX_SEC else base
 
         def length_at(x, base=base, trend=trend, short=short, longer=longer):
@@ -389,9 +461,9 @@ def blocks(secs: list, bars, duration: float, vocal_starts=(), vocal_ends=(), mi
                 if mid_phrase(time_at(c)):
                     moved = next((c + d for d in (-1.0, 1.0, -0.5, 0.5)
                                   if last + 0.5 <= c + d <= nxt - 0.5 and abs((c + d) * 2 - round((c + d) * 2)) < 1e-6
-                                  and (c + d) * bar_sec - last * bar_sec >= min_sec - 1e-6
+                                  and (c + d) * bar_sec - last * bar_sec >= MIN_SLACK * min_sec
                                   and not mid_phrase(time_at(c + d))), None)
-                    if moved is None and nxt - last <= BLOCK_MAX_BARS:
+                    if moved is None and nxt - last <= BLOCK_MAX_BARS and (nxt - last) * bar_sec <= BLOCK_MAX_SEC:
                         continue                         # no clean bar nearby: one longer block
                     c = c if moved is None else moved
                 kept.append(c)
@@ -403,7 +475,24 @@ def blocks(secs: list, bars, duration: float, vocal_starts=(), vocal_ends=(), mi
         for x0, x1 in zip(marks[:-1], marks[1:]):
             out.append({"n": len(out) + 1, "start": round(time_at(x0), 3), "end": round(time_at(x1), 3),
                         "bars": round(x1 - x0, 2), "section": sc.get("label") or str(sc["n"]), "why": note})
-    return out
+    return _merge_short(out, float(min_sec))
+
+
+def _beat_sec(track: dict):
+    """Seconds between the track's beats (median), or None."""
+    b = np.asarray(track.get("beat_times") or (), float)
+    return float(np.median(np.diff(b))) if b.size > 2 else None
+
+
+def _uneven(bars, duration: float) -> list:
+    """Bar numbers (from 1) whose length is under 60 % or over 160 % of the typical bar — where this track's bar
+    lines don't sit on a steady grid (not the last bar: the track just ends there)."""
+    bars = np.asarray(bars, float)
+    if len(bars) < 4:
+        return []
+    d = np.diff(np.append(bars, float(duration)))
+    med = float(np.median(d))
+    return [int(k) + 1 for k in np.flatnonzero((d < 0.6 * med) | (d > 1.6 * med)) if k < len(bars) - 1 and k > 0]
 
 
 def for_track(track: dict, beats=None) -> dict:
@@ -418,7 +507,8 @@ def for_track(track: dict, beats=None) -> dict:
             "stems": list(bl["stems"]),
             "lines": lines, "sections": secs,
             "blocks": blocks(secs, bl["bars"], bl["duration"], (track.get("analysis") or {}).get("vocal_starts"),
-                             (track.get("analysis") or {}).get("vocal_ends"))}
+                             (track.get("analysis") or {}).get("vocal_ends"), beat=_beat_sec(track)),
+            "uneven_bars": _uneven(bl["bars"], bl["duration"])}
 
 
 def as_regions(found: dict, type_id: str = "rhythmic") -> list:

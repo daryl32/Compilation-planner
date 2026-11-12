@@ -208,15 +208,39 @@ def _render_lines(track: dict, play=None) -> None:
                    "out, it gets louder or quieter, the sound changes — always on a bar line. No types yet: this "
                    "only shows WHERE the song divides. Solid = a big change, dotted = a smaller one. It doesn't "
                    "touch the saved sections below. ▶ at the bottom plays the whole track over it.")
+        if st.session_state.get("sec_ln_mode") not in ("new", "old"):
+            st.session_state["sec_ln_mode"] = "new"
+        mode = st.segmented_control(
+            "Cuts", ["old", "new"], key="sec_ln_mode",
+            format_func={"old": "🅰 Old cuts (as on main, v1.59.0)", "new": "🅱 New cuts"}.get,
+            help="The same track cut two ways, to compare by ear. 🅰 Old: exactly as released in v1.59.0 — the "
+                 "stored bar lines, blocks counted in bars, drum parts paced by how busy the drums rank. 🅱 New: a "
+                 "steady bar grid from the beats, no block under the shortest clip for the tempo (short ones "
+                 "pair up), loud drum parts all cut at one bar, a pattern that alternates bar by bar no longer "
+                 "read as one-bar breaks. Section, bar and block numbers differ between the two.") or "new"
         try:
-            found = SB.for_track(track)
+            import section_bounds_old as SBO
+            both = {"new": SB.for_track(track), "old": SBO.for_track(track)}
+            found = both[mode]
         except Exception as e:          # noqa: BLE001
             st.caption(f"Couldn't read this track's layers: {e}")
             return
+
+        def _sum(f):
+            d = [b["end"] - b["start"] for b in f.get("blocks") or []]
+            return (f"{len(f['bars'])} bars · {f['sections'][-1]['main']} sections · {len(d)} blocks, "
+                    f"{min(d):.1f}–{max(d):.1f} s") if d else "no blocks"
+        st.caption(f"{'**🅰 Old**' if mode == 'old' else '🅰 Old'}: {_sum(both['old'])}  \n"
+                   f"{'**🅱 New**' if mode == 'new' else '🅱 New'}: {_sum(both['new'])}")
         if not found["lines"]:
             st.info("No lines found — this track may need the extra 🔬 analysis.")
             return
         st.plotly_chart(lines_figure(found), width="stretch", key="sec_ln_chart", config={"displayModeBar": False})
+        if found.get("uneven_bars"):
+            ub = found["uneven_bars"]
+            st.caption(f"⚠️ This track's bar lines are uneven at bar{'s' if len(ub) != 1 else ''} "
+                       f"{', '.join(map(str, ub[:12]))}{'…' if len(ub) > 12 else ''} (much shorter or longer than "
+                       "its usual bar) — blocks there are sized in seconds, so none comes out too short.")
         if found.get("stems"):
             st.caption("🎚️ Drums, bass and instruments are read from this track's real stems.")
         else:
@@ -241,10 +265,10 @@ def _render_lines(track: dict, play=None) -> None:
         st.caption("Profile = step 2: the layers playing · how loud within this track (quiet / medium / loud) · "
                    "how busy the drums are (hits a second) · rising or falling · “like N” = the same profile as "
                    "section N. A section type will be a named profile. Blocks: every line is a cut; inside a part "
-                   "the profile sets the length — busy loud drums 1 bar, other drum parts 2, voice / instruments "
+                   "the profile sets the length — loud drum parts 1 bar, other drum parts 2, voice / instruments "
                    "leading 2 or 4, hardly anything playing 4 — shorter towards the end of a rising part, longer "
                    "towards the end of a falling one, never inside a sung phrase where the voice leads, never "
-                   "under the shortest clip.")
+                   "under the shortest clip for the tempo (a bar at 90 BPM) — shorter ones are paired up.")
         st.caption("Key: each cell is one bar of one layer, 0–1 against that layer's own strongest moments in this "
                    "track (drums and hats: how hard the hits are; the rest: the average level). From 0.3 a layer "
                    "counts as playing, under 0.15 as off. Tap a cell for its number.")
@@ -265,7 +289,7 @@ def _render_lines(track: dict, play=None) -> None:
                     play(track, {"start": 0.0, "end": min(5.0, float(track["duration_sec"]))}, False,
                          f"sec_ln_dl_{track.get('track_id')}")
             else:
-                lines_player(clip, found, f"ln_{abs(hash(track.get('track_id'))) % 10 ** 8}")
+                lines_player(clip, found, f"ln_{mode}_{abs(hash(track.get('track_id'))) % 10 ** 8}")
 
 
 def _whole_track_clip(track: dict) -> tuple:

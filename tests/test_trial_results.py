@@ -1108,3 +1108,41 @@ def test_category_pass_on_the_page(bundle, clean_labels):
             TLB.VOCAB_FILE.unlink(missing_ok=True)
         else:
             TLB.VOCAB_FILE.write_bytes(backup)
+
+
+def test_review_progress_table(bundle, clean_labels):
+    """📊 Per video, per category: full labels count everywhere, a 🧹-finished category only in its own column."""
+    from tests.apptest_util import errors, page_app
+    TLB = clean_labels
+    vocab = [dict(r, group_required=False) for r in VOCAB]
+    ms = [{"video_id": "v", "t": 5.0, "scene_id": 0}, {"video_id": "v", "t": 9.0, "scene_id": 1}]
+    TLB.finish_category(ms[:1], "position", vocab)
+    vids = TR.with_saved_labels(
+        {"v": {"moments": [{"key": f"k{m['t']}", "t": m["t"], "mine": None, "teachers": {}} for m in ms]},
+         "w": {"moments": [{"key": "a", "t": 1.0, "mine": ["Cowgirl"], "teachers": {}},
+                           {"key": "b", "t": 2.0, "mine": None, "teachers": {}}]},
+         "empty": {"moments": []}}, TLB.load_labels())
+    tab = TR.progress_table(vids, ["position", "shot"])
+    rows = {r["video"]: r for r in tab["rows"]}
+    assert rows["v"] == {"video": "v", "frames": 2, "full": 0, "by": {"position": 1, "shot": 0}}
+    assert rows["w"]["full"] == 1 and rows["w"]["by"] == {"position": 1, "shot": 1}
+    assert [r["video"] for r in tab["rows"]] == ["v", "w", "empty"]                 # least reviewed first
+    assert tab["total"] == {"video": "All", "frames": 4, "full": 1, "by": {"position": 2, "shot": 1}}
+    assert TR.progress_table({}, ["x"]) == {"rows": [], "total": {"video": "All", "frames": 0, "full": 0, "by": {"x": 0}}}
+    # on the page: the table is there, follows the Videos choice, and a tapped row picks the video
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_sub"] = "🖼️ Compare tags"
+    at.session_state["tr_set"] = "train"
+    at.run()
+    assert not errors(at), errors(at)
+    assert any("Review progress" in e.label for e in at.expander)
+    assert any(c.value.startswith("Everything shown: **All ") and "in 2 videos" in c.value for c in at.caption)
+    import trial_view as TV
+    import streamlit as st
+    st.session_state["tr_prog_table"] = {"selection": {"rows": [1]}}
+    TV._pick_from_table(["vid_a", "vid_b"])
+    assert st.session_state["tr_vid"] == "vid_b" and st.session_state["tr_page"] == 1
+    st.session_state["tr_prog_table"] = {"selection": {"rows": []}}
+    TV._pick_from_table(["vid_a"])                                                   # nothing picked: nothing changes
+    assert st.session_state["tr_vid"] == "vid_b"
