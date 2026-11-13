@@ -151,6 +151,60 @@ def drive_slice(drv: dict, t0: float, t1: float) -> np.ndarray:
     return c[lo:hi]
 
 
+# 🎼 What the footage follows off the beat (13 Nov 2026). Bar by bar the driver above is one of four, and where no
+# drums, bass or voice reaches its level it is the loudness — a smooth curve nearly any movement correlates with.
+# The lead is chosen per stretch instead, from the layers that aren't drums: the voice, the instruments (the
+# "other" stem, where the laptop has measured the real stems) and the bass — whichever has the most shape there.
+LEADS = ("vocals", "other", "bass")
+LEAD_EMOJI = {"vocals": "🎤", "other": "🎹", "bass": "🎸"}
+LEAD_MIN_LEVEL = 0.12      # a layer quieter than this over the stretch (0–1 within the track) isn't leading anything
+LEAD_MIN_SHAPE = 0.04      # …and one flatter than this (its standard deviation) has no phrasing to follow
+STEM_ABSENT = 0.08         # a stem under this share of the strongest stem isn't in the song (section_bounds.ABSENT_SHARE)
+
+
+def lead_curves(track: dict, drv: dict) -> dict:
+    """{name: 0–1 curve on the drive curve's clock} for the layers a beatless passage can be led by: "vocals",
+    "other" (instruments — only with the real stems) and "bass" (the real bass stem where there is one, else the
+    low band)."""
+    curves, rate = drv["curves"], drv["rate"]
+    n = len(curves["loudness"])
+    out = {k: curves[k] for k in ("vocals", "bass") if k in curves}
+    a = track.get("analysis") or {}
+    stems = a.get("stem_curves") or {}
+    s_rate = float(stems.get("rate", a.get("rate", rate)))
+    for name in ("bass", "other"):
+        v = stems.get(name)
+        if v is None or not len(v):
+            continue
+        v = np.asarray(v, float)
+        if abs(s_rate - rate) > 1e-6 or len(v) != n:
+            v = np.interp(np.arange(n) / rate, np.arange(len(v)) / s_rate, v)
+        share = float((stems.get("share") or {}).get(name, 1.0))
+        if share >= STEM_ABSENT:
+            out[name] = _norm(v)
+        else:
+            out.pop(name, None)
+    return out
+
+
+def lead_slice(leads: dict, rate: float, t0: float, t1: float):
+    """(name, the lead's curve from t0 to t1) — the layer with the most shape in the stretch, or None when none
+    of them is both present and moving (the caller keeps the drive curve)."""
+    lo, hi = int(t0 * rate), max(int(t0 * rate) + 1, int(t1 * rate))
+    best = None
+    for name in LEADS:
+        c = (leads or {}).get(name)
+        if c is None:
+            continue
+        part = np.asarray(c[lo:hi], float)
+        if len(part) < 4 or float(part.mean()) < LEAD_MIN_LEVEL:
+            continue
+        shape = float(part.std())
+        if shape >= LEAD_MIN_SHAPE and (best is None or shape > best[2]):
+            best = (name, part, shape)
+    return None if best is None else (best[0], best[1])
+
+
 def driver_at(drv: dict, t: float) -> str:
     k = int(np.searchsorted(drv["bars"], t, side="right")) - 1
     return drv["driver"][min(max(k, 0), len(drv["driver"]) - 1)] if drv["driver"] else "loudness"

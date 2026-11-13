@@ -286,9 +286,15 @@ def _motion_curves(video_id: str) -> dict:
 def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, music_story: float = 0.5,
                  smooth_contrast: float = 0.5, excluded: set = None, max_videos: int = 0, progress=None,
                  movement_only: bool = False, min_clip: float = None, level_range: float = 0.0,
-                 bounce_speed: float = 0.0, cuts: str = "sections", vocal_rule: bool = True) -> dict:
+                 bounce_speed: float = 0.0, cuts: str = "sections", vocal_rule: bool = True,
+                 lab: dict = None) -> dict:
     """cuts: "sections" — the 🧩 section map at each 🍳 recipe's pace (as always); "lines" — the 📐 lines from the
-    music with their own blocks (section_bounds.py), every block kept as cut (no two joined into one clip)."""
+    music with their own blocks (section_bounds.py), every block kept as cut (no two joined into one clip).
+    lab: the 🧪 Movement lab's switches (LAB's keys → True / False; all off when left out): stem, phrase, flow, shot
+    (🎯 Movement only — see core/story_matcher.StoryOptions) and, for the 📐 lines, join (two blocks of one part may
+    become one longer clip when the footage holds) and min_lines (✂️ Shortest clip applies to them too)."""
+    lab = {k: bool((lab or {}).get(k)) for k in LAB}
+    lines_min = min_clip if lab["min_lines"] else None
     import core.story_matcher as SMX
     from planner.data import build_footage_queues, load_all_catalogues
     from render_preview import colab_to_local
@@ -298,7 +304,7 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     segments, cut_note = [], None
     if cuts == "lines":
         try:
-            segments = SCUT.line_segments(track, regions, vocal_rule)
+            segments = SCUT.line_segments(track, regions, vocal_rule, lines_min)
         except Exception as e:          # noqa: BLE001
             cut_note = f"✂️ The 📐 lines couldn't be read for this track ({e}) — cut from the 🧩 section map instead."
         if not segments and cut_note is None:
@@ -308,9 +314,13 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
         segments = SCUT.story_segments(track, regions, all_recipes, min_clip)
     queues = build_footage_queues(tuple(video_ids), (), LC.library_ranges())
     opts = SMX.StoryOptions(music_story=music_story, smooth_contrast=smooth_contrast, section_map=regions or None,
-                            max_videos=int(max_videos or 0), progress=progress, merge_blocks=cuts != "lines",
+                            max_videos=int(max_videos or 0), progress=progress,
+                            merge_blocks=cuts != "lines" or lab["join"],
+                            merge_limit_sec=_lines_join_limit() if cuts == "lines" and lab["join"] else 0.0,
                             movement_only=bool(movement_only), curves_of=_motion_curves,
-                            level_range=float(level_range or 0.0), bounce_speed=float(bounce_speed or 0.0))
+                            level_range=float(level_range or 0.0), bounce_speed=float(bounce_speed or 0.0),
+                            stem_follow=lab["stem"], phrase_scale=lab["phrase"], flow=lab["flow"],
+                            shot_level=lab["shot"])
     max_clips = 3 if split_screen else 1
     timeline, shortfall, unfilled = SMX.match_story(
         segments, queues, track, min_clips=1, max_clips=max_clips, ramp_start=0.5, ramp_end=0.9,
@@ -324,7 +334,8 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
         "track_id": track_id, "matching_mode": "Auto story", "track_source_path": colab_to_local(track["source_path"]),
         "track_duration_sec": track["duration_sec"], "bpm": track.get("bpm"),
         "segmentation": {"method": cuts, "section_map": regions, "paces": {t: r.get("pace") for t, r in all_recipes.items()},
-                         **({"vocal_rule": bool(vocal_rule)} if cuts == "lines" else {})},
+                         **({"vocal_rule": bool(vocal_rule), "join": lab["join"],
+                             "min_clip": lines_min if lab["min_lines"] else None} if cuts == "lines" else {})},
         "sequential_video_order": False, "globally_rejected_clips": [list(k) for k in (excluded or ())],
         "video_time_ranges": {k: list(v) for k, v in LC.library_ranges().items() if k in video_ids},
         "tag_filter": [], "selected_videos": list(video_ids), "split_screen_enabled": split_screen,
@@ -332,7 +343,7 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
         "vary_clip_count": False, "clip_count_seed": 0, "min_clip_len_sec": 1.0, "allow_same_video": False,
         "story": {"music_story": music_story, "smooth_contrast": smooth_contrast, "max_videos": int(max_videos or 0),
                   "movement_only": bool(movement_only), "level_range": float(level_range or 0.0),
-                  "bounce_speed": float(bounce_speed or 0.0)},
+                  "bounce_speed": float(bounce_speed or 0.0), "lab": dict(lab)},
         "timeline": timeline,
     }
     if cuts == "lines":
@@ -342,7 +353,46 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
             "shortfall": shortfall,
             "unfilled": unfilled, "summary": SMX.plan_summary(timeline), "track": track,
             "video_stats": dict(opts.video_stats), "alternatives": dict(opts.alternatives),
+            "lab_notes": dict(opts.lab_notes),
+            # 🧾 what this compile ran on — two "identical" runs that differ show here why
+            "used": {"cuts": cuts, "vocal_rule": bool(vocal_rule) if cuts == "lines" else None,
+                     "blocks": len(segments), "videos": len(video_ids), "rejected": len(excluded or ()),
+                     "movement_only": bool(movement_only), "punch": float(level_range or 0.0),
+                     "max_videos": int(max_videos or 0), "split_screen": bool(split_screen),
+                     "min_clip": min_clip if (cuts != "lines" or lab["min_lines"]) else None, "lab": dict(lab)},
             "made": time.strftime("%H:%M:%S")}
+
+
+LAB = {"stem": "🎼 Follow the lead", "phrase": "🌊 Phrase scale", "flow": "🪶 Flowing movement",
+       "shot": "🔍 Shot size", "join": "🔗 Join 📐 blocks", "min_lines": "✂️ Shortest clip on 📐"}
+
+
+def _lines_join_limit() -> float:
+    """The longest clip two 📐 blocks may become: the longest block the lines themselves ever cut."""
+    import section_bounds as SB
+    return float(SB.BLOCK_MAX_SEC)
+
+
+def used_line(used: dict) -> str:
+    """🧾 One line saying what a compile ran on (compile_plan's "used")."""
+    if not used:
+        return ""
+    lab = [LAB[k] for k in LAB if (used.get("lab") or {}).get(k)]
+    mc = used.get("min_clip")
+    parts = [("✂️ 📐 lines" + (f" (🎤 vocal rule {'on' if used.get('vocal_rule') else 'off'})" if used.get("vocal_rule") is not None else ""))
+             if used.get("cuts") == "lines" else "✂️ 🧩 section map",
+             f"{used.get('blocks', 0)} blocks cut", f"{used.get('videos', 0)} videos in play",
+             f"{used.get('rejected', 0)} clip{'s' if used.get('rejected', 0) != 1 else ''} rejected",
+             "🎯 Movement only" if used.get("movement_only") else "🍳 recipes",
+             f"💥 Punch {used.get('punch', 0):g}"]
+    if used.get("cuts") != "lines" or (used.get("lab") or {}).get("min_lines"):
+        parts.append("✂️ shortest clip " + ("Auto" if mc is None else f"{mc:g} s"))
+    if used.get("max_videos"):
+        parts.append(f"max {used['max_videos']} videos")
+    if used.get("split_screen"):
+        parts.append("🪟 split screen")
+    parts.append("🧪 " + (" + ".join(lab) if lab else "lab all off"))
+    return "🧾 This compile: " + " · ".join(parts)
 
 
 def rework_plan(res: dict, redo: set, force: dict = None, excluded: set = None) -> dict:
@@ -367,6 +417,10 @@ def rework_plan(res: dict, redo: set, force: dict = None, excluded: set = None) 
                             movement_only=bool(story.get("movement_only")), curves_of=_motion_curves,
                             level_range=float(story.get("level_range") or 0.0),
                             bounce_speed=float(story.get("bounce_speed") or 0.0),
+                            stem_follow=bool((story.get("lab") or {}).get("stem")),
+                            phrase_scale=bool((story.get("lab") or {}).get("phrase")),
+                            flow=bool((story.get("lab") or {}).get("flow")),
+                            shot_level=bool((story.get("lab") or {}).get("shot")),
                             keep={k: e for k, e in enumerate(timeline_old) if k not in redo},
                             force={int(k): v for k, v in (force or {}).items()})
     excluded = set(excluded if excluded is not None else (tuple(k) for k in plan.get("globally_rejected_clips") or ()))
@@ -473,6 +527,7 @@ def _do_pending_compile() -> None:
                            # 💥 Punch drives both: the track's range stretched, and bounce speed following the rhythm
                            level_range=float(st.session_state.get("compose_punch", 0.0)),
                            bounce_speed=float(st.session_state.get("compose_punch", 0.0)),
+                           lab=_lab(),
                            progress=lambda d, t: bar.progress(min(d / max(t, 1), 1.0), text=f"🤖 Compiling… block {d} of {t}"))
     except Exception as e:          # noqa: BLE001
         bar.empty()
@@ -494,6 +549,55 @@ def _min_clip():
 CUTS = {"sections": "🧩 Section map + recipes (as before)", "lines": "📐 Lines from the music (new)"}
 
 
+def _lab() -> dict:
+    """The 🧪 Movement lab's switches as set on the page (the four movement ones only with 🎯 Movement only on, the
+    two cut ones only with the 📐 lines)."""
+    only, lines = bool(st.session_state.get("compose_movement_only")), _cuts() == "lines"
+    on = lambda k: bool(st.session_state.get("compose_lab_" + k))          # noqa: E731
+    return {**{k: only and on(k) for k in ("stem", "phrase", "flow", "shot")},
+            **{k: lines and on(k) for k in ("join", "min_lines")}}
+
+
+def _lab_menu() -> None:
+    """🧪 Movement lab — test switches, each on its own, all off to start with."""
+    only, lines = bool(st.session_state.get("compose_movement_only")), _cuts() == "lines"
+    n_on = sum(1 for v in _lab().values() if v)
+    with st.expander(f"🧪 Movement lab — {n_on} switch{'es' if n_on != 1 else ''} on" if n_on else
+                     "🧪 Movement lab — test switches (all off)", expanded=False):
+        st.caption("Each switch works on its own, so one can be tried at a time against the same song and videos. "
+                   "All off = exactly the matcher as it was. 🧾 Every result says which were on.")
+        st.markdown("**Passages with little or no beat** — 🎯 Movement only")
+        a = st.columns(2)
+        a[0].toggle("🎼 Follow the lead instrument", key="compose_lab_stem", disabled=not only,
+                    help="Off the beat the movement is compared with the layer that leads there — the voice, the "
+                         "instruments or the bass, whichever has the most shape in that stretch — where today it is "
+                         "often just the loudness, a smooth curve nearly any movement fits. Instruments need the "
+                         "laptop's real stems (run_audio_analysis).")
+        a[1].toggle("🌊 Match at the scale of a phrase", key="compose_lab_phrase", disabled=not only,
+                    help="Off the beat, in blocks of 3 s or more: movement and music are compared as swells over "
+                         "about a second (not push by push), and the clip's start may move up to half a second "
+                         "(a quarter today) to land a swell on a swell.")
+        a[0].toggle("🪶 Prefer flowing movement", key="compose_lab_flow", disabled=not only,
+                    help="Off the beat, slow flowing movement beats quick restless movement. Today the matcher only "
+                         "asks that the footage isn't a regular bounce there. Counts for up to a fifth of the score "
+                         "where there is no beat at all, nothing on a full beat.")
+        a[1].toggle("🔍 Correct the level for shot size", key="compose_lab_shot", disabled=not only,
+                    help="Everywhere, not only off the beat. A close-up reads livelier than the same movement in a "
+                         "wide shot, so how lively footage is, is judged part-way within its own shot size (worked "
+                         "out from the videos in play; the result says by how much). The most experimental of the four.")
+        st.markdown("**📐 Lines from the music** — the new cuts")
+        b = st.columns(2)
+        b[0].toggle("🔗 Join two blocks when the footage holds", key="compose_lab_join", disabled=not lines,
+                    help="As the 🧩 cuts already do: two neighbouring blocks of the same part become one longer clip "
+                         "when one piece of footage fits the longer stretch as well as two fit the halves. Never "
+                         "across a line, never longer than 8 s.")
+        b[1].toggle("✂️ Shortest clip applies", key="compose_lab_min_lines", disabled=not lines,
+                    help="The 📐 blocks already have a minimum from the tempo — the same as ✂️ Shortest clip on Auto. "
+                         "On: the number in ✂️ Shortest clip (s) is used for them too, so a longer minimum can be tried.")
+        if not only:
+            st.caption("Turn 🎯 Movement only on for the first four.")
+
+
 def _cuts() -> str:
     """✂️ Where the blocks come from: "sections" (the section map at the recipes' pace) or "lines"."""
     v = st.session_state.get("compose_cuts")
@@ -509,7 +613,8 @@ def _options_row(ns: str) -> None:
              "at its recipe's clip length. 📐 New: the lines found straight from the music (🧩 Sections → 📐, 🅱 New "
              "cuts) — a cut wherever the music changes, and inside each part blocks of 1, 2 or 4 bars by how loud "
              "and busy it is. Every 📐 block is kept as cut (two are never joined into one clip), and ✂️ Shortest "
-             "clip doesn't apply — the 📐 blocks have their own minimum from the tempo. The recipes still read "
+             "clip doesn't apply — the 📐 blocks have their own minimum from the tempo — unless the 🧪 Movement lab's "
+             "two 📐 switches are on. The recipes still read "
              "each block's type from the section map, so for now 📐 is best judged with 🎯 Movement only.")
     if _cuts() == "lines":
         st.toggle("🎤 Vocal rule", value=True, key="compose_vocal_rule",
@@ -525,7 +630,8 @@ def _options_row(ns: str) -> None:
                 help="Left: the music fit decides. Right: the recipes' tags decide.")
     c[3].slider("Smooth ↔ Contrast", 0.0, 1.0, 0.5, 0.05, key="compose_smooth",
                 help="Left: shot sizes kept steady. Right: changes welcome at drops and section changes.")
-    st.number_input("✂️ Shortest clip (s)", 0.0, 10.0, 0.0, 0.5, key="compose_min_clip", disabled=_cuts() == "lines",
+    st.number_input("✂️ Shortest clip (s)", 0.0, 10.0, 0.0, 0.5, key="compose_min_clip",
+                    disabled=_cuts() == "lines" and not bool(st.session_state.get("compose_lab_min_lines")),
                     help="0 = Auto: the shortest musical length of at least 1.4 s — a bar at 90 BPM (2.7 s), a bar at "
                          "128 BPM (1.9 s). Or type your own; cuts stay on the beat, so it rounds up to whole beats. "
                          "0.5 = no minimum (the recipes' clip lengths alone). A section too short for two clips "
@@ -545,6 +651,7 @@ def _options_row(ns: str) -> None:
                    "music is. Bouncy up-and-down footage goes where the music has a beat, smooth footage where a "
                    "voice or pad carries it. Tags, scene tags and roles are ignored. The cuts still come from the "
                    "sections.")
+    _lab_menu()
 
 
 # ---------------------------------------------------------------------------
@@ -612,7 +719,8 @@ def _track_line(track_id: str) -> None:
     segs = []
     if _cuts() == "lines":
         try:
-            segs = SCUT.line_segments(track, regions, bool(st.session_state.get("compose_vocal_rule", True)))
+            segs = SCUT.line_segments(track, regions, bool(st.session_state.get("compose_vocal_rule", True)),
+                                      _min_clip() if _lab()["min_lines"] else None)
         except Exception:          # noqa: BLE001
             segs = []
     lines_used = bool(segs)
@@ -918,6 +1026,14 @@ def render_result(res: dict) -> None:
             f"{AD.EMOJI.get(k, '')} {k} {round(100 * v / tot)}%" for k, v in sorted(summary["drivers"].items(), key=lambda kv: -kv[1])))
     for n in res.get("notes") or []:
         st.caption("🤖 " + n)
+    if res.get("used"):
+        st.caption(used_line(res["used"]) + f" · made {res.get('made', '')}"
+                   + (f" · 🔁 {len(res['reworked'])} block(s) redone since" if res.get("reworked") else ""))
+    lu = (res.get("lab_notes") or {}).get("used") or {}
+    if any((res.get("used") or {}).get("lab", {}).get(k) for k in ("stem", "phrase", "flow")):
+        fol = " · ".join(f"{n_} follow the {k_ if k_ != 'other' else 'instruments'}" for k_, n_ in sorted((lu.get("follows") or {}).items()))
+        st.caption(f"🧪 {lu.get('off_beat', 0)} of {len(plan['timeline'])} blocks are off the beat"
+                   + (f" · {fol}" if fol else "") + (f" · {lu['phrase']} matched at phrase scale" if lu.get("phrase") else ""))
     _strip_chart(res)
     excluded = set(st.session_state.get("compose_excluded") or ())
     with st.expander(f"🎞️ Clips ({sum(len(e['scenes']) for e in plan['timeline'])})", expanded=False):
@@ -985,7 +1101,10 @@ def render_result(res: dict) -> None:
                       "the movement matching on real numbers."):
         try:
             import core.story_matcher as SMX
-            rep = SMX.sync_report(plan["timeline"], res["track"], video_stats=res.get("video_stats"))
+            rep = SMX.sync_report(plan["timeline"], res["track"], video_stats=res.get("video_stats"),
+                                  settings={**(plan.get("story") or {}), "segmentation": {
+                                      k: v for k, v in (plan.get("segmentation") or {}).items() if k not in ("section_map", "paces")},
+                                      "used": res.get("used"), "lab_notes": res.get("lab_notes")})
             st.download_button(f"⬇️ {plan['track_id']}_sync.json"
                                + (f" — as played {rep['sync_played_mean']:.0%}" if rep.get("sync_played_mean") is not None else ""),
                                data=json.dumps(rep, separators=(",", ":")), file_name=f"{plan['track_id']}_sync.json",

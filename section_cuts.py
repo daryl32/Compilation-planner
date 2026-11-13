@@ -196,16 +196,17 @@ def story_segments(track: dict, regions: list, recipes: dict, min_clip: float = 
     return out
 
 
-def line_segments(track: dict, regions: list = None, vocal_rule: bool = True) -> list:
+def line_segments(track: dict, regions: list = None, vocal_rule: bool = True, min_clip: float = None) -> list:
     """Blocks for the whole track from 📐 lines from the music (section_bounds.py, the 🅱 New cuts of the Sections
     page): a line wherever the music changes, each part cut at the pace its profile asks for — no section map and
     no recipe pace. Same shape as story_segments. section_type: the type the saved / suggested section map
     (regions) has at the block's middle, for the recipes — the lines themselves have no types yet. line_section:
-    the part's label on the 📐 page (2a, 2b). vocal_rule: the 🎤 switch of that page."""
+    the part's label on the 📐 page (2a, 2b). vocal_rule: the 🎤 switch of that page. min_clip: the shortest block
+    in seconds — None: the lines' own minimum from the tempo (auto_min_clip), as on the 📐 page."""
     import audio_drive as AD
     import section_bounds as SB
     duration = float(track["duration_sec"])
-    found = SB.for_track(track, vocal_rule=vocal_rule)
+    found = SB.for_track(track, vocal_rule=vocal_rule, min_sec=(float(min_clip) if min_clip else None))
     curve, rate = _energy_curve(track)
     try:
         drv = AD.drivers(track, _beats(track))

@@ -497,9 +497,10 @@ def _uneven(bars, duration: float) -> list:
     return [int(k) + 1 for k in np.flatnonzero((d < 0.6 * med) | (d > 1.6 * med)) if k < len(bars) - 1 and k > 0]
 
 
-def for_track(track: dict, beats=None, vocal_rule: bool = True) -> dict:
+def for_track(track: dict, beats=None, vocal_rule: bool = True, min_sec: float = None) -> dict:
     """Everything for one track: {"bars", "duration", "levels", "hits", "lines", "sections", "blocks"} — lists,
-    ready for JSON; every section (part) carries its profile. vocal_rule: see blocks()."""
+    ready for JSON; every section (part) carries its profile. vocal_rule, min_sec (the shortest block in seconds;
+    None: from the tempo): see blocks()."""
     bl = bar_levels(track, beats)
     lines = find_lines(bl["bars"], bl["levels"], bl["duration"], bl["change"])
     secs = profile(sections(bl["bars"], bl["levels"], bl["duration"], lines), bl["bars"], bl["levels"], bl["hits"])
@@ -509,8 +510,8 @@ def for_track(track: dict, beats=None, vocal_rule: bool = True) -> dict:
             "stems": list(bl["stems"]),
             "lines": lines, "sections": secs,
             "blocks": blocks(secs, bl["bars"], bl["duration"], (track.get("analysis") or {}).get("vocal_starts"),
-                             (track.get("analysis") or {}).get("vocal_ends"), beat=_beat_sec(track),
-                             vocal_rule=vocal_rule),
+                             (track.get("analysis") or {}).get("vocal_ends"), min_sec=min_sec,
+                             beat=_beat_sec(track), vocal_rule=vocal_rule),
             "uneven_bars": _uneven(bl["bars"], bl["duration"])}
 
 

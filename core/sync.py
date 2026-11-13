@@ -56,13 +56,14 @@ class Mover:
     """One video's full-rate movement, prepared once: gaps (nobody tracked) filled, smoothed, its running sums and
     its Fourier transform."""
 
-    def __init__(self, move_hi, rate: float):
+    def __init__(self, move_hi, rate: float, smooth_sec: float = SMOOTH_SEC):
         from scipy import fft as _fft
         raw = np.asarray(move_hi, np.float64)
         self.rate = float(rate or 15.0)
+        self.smooth_sec = float(smooth_sec)          # 🌊 a wider smoothing compares swells, not single pushes
         self.tracked = np.isfinite(raw).astype(np.float64)
         x = np.where(np.isfinite(raw), raw, 0.0)
-        self.x = smooth(x, self.rate)
+        self.x = smooth(x, self.rate, self.smooth_sec)
         self.n = len(self.x)
         self._c1 = np.concatenate([[0.0], np.cumsum(self.x)])
         self._c2 = np.concatenate([[0.0], np.cumsum(self.x * self.x)])
@@ -93,10 +94,10 @@ class Mover:
         return np.clip(ncc, -1.0, 1.0)
 
 
-def template(audio_curve, seconds: float, rate: float) -> np.ndarray:
+def template(audio_curve, seconds: float, rate: float, smooth_sec: float = SMOOTH_SEC) -> np.ndarray:
     """The music for a stretch, at the movement curve's rate, its hits widened to the size of a movement."""
     m = int(round(seconds * rate))
-    return smooth(pool(audio_curve, m), rate) if m >= 1 else np.zeros(0)
+    return smooth(pool(audio_curve, m), rate, smooth_sec) if m >= 1 else np.zeros(0)
 
 
 def sync_scores(mover: Mover, times, n: int, seconds: float, audio_curve, slide_sec: float = 0.25,
@@ -110,7 +111,7 @@ def sync_scores(mover: Mover, times, n: int, seconds: float, audio_curve, slide_
     W = T - n + 1
     if mover is None or mover.n == 0 or W <= 0 or audio_curve is None or len(audio_curve) < 2:
         return None
-    tpl = template(audio_curve, seconds, mover.rate)
+    tpl = template(audio_curve, seconds, mover.rate, getattr(mover, "smooth_sec", SMOOTH_SEC))
     m = len(tpl)
     if m < MIN_FRAMES or m > MAX_TEMPLATE or mover.n < m or float(np.std(tpl)) < 1e-9:
         return None
@@ -135,13 +136,13 @@ def sync_scores(mover: Mover, times, n: int, seconds: float, audio_curve, slide_
     return (corr + 1.0) / 2.0, slide
 
 
-def _corr_of(move_slice, audio_slice, rate: float) -> float | None:
+def _corr_of(move_slice, audio_slice, rate: float, smooth_sec: float = SMOOTH_SEC) -> float | None:
     """Correlation (−1…1) of one curve with its music as played, or None if it can't be said."""
     x = np.asarray(move_slice, np.float64)
     if len(x) < MIN_FRAMES or float(np.isfinite(x).mean()) < MIN_TRACKED:
         return None
-    x = smooth(np.where(np.isfinite(x), x, 0.0), rate)
-    a = smooth(pool(audio_slice, len(x)), rate)
+    x = smooth(np.where(np.isfinite(x), x, 0.0), rate, smooth_sec)
+    a = smooth(pool(audio_slice, len(x)), rate, smooth_sec)
     x, a = x - x.mean(), a - a.mean()
     sx, sa = float(np.sqrt((x * x).mean())), float(np.sqrt((a * a).mean()))
     if sx < 1e-6 or sa < 1e-9:
@@ -149,15 +150,16 @@ def _corr_of(move_slice, audio_slice, rate: float) -> float | None:
     return float(np.clip(float((x * a).mean()) / (sx * sa), -1.0, 1.0))
 
 
-def sync_of(move_slice, audio_slice, rate: float, seen_slice=None, seen_share: float = 0.5) -> float | None:
+def sync_of(move_slice, audio_slice, rate: float, seen_slice=None, seen_share: float = 0.5,
+            smooth_sec: float = SMOOTH_SEC) -> float | None:
     """One clip against its music, as played (no sliding): the same 0–1 measure the matcher picks on, or None if
     it can't be said. seen_slice: the clip's on-screen motion at the same rate — where the matcher used it
     (🎯 Movement only), the score is seen_share of its correlation and the rest the person curve's, as in
     sync_scores; with only one of the two curves usable, that one."""
     n = len(np.asarray(move_slice))
-    c = _corr_of(move_slice, audio_slice, rate)
+    c = _corr_of(move_slice, audio_slice, rate, smooth_sec)
     if seen_slice is not None and len(seen_slice) >= MIN_FRAMES:
-        c2 = _corr_of(seen_slice, audio_slice, rate)
+        c2 = _corr_of(seen_slice, audio_slice, rate, smooth_sec)
         if c2 is not None:
             if c is None:
                 c, n = c2, len(np.asarray(seen_slice))
@@ -237,6 +239,51 @@ def bounce(move_hi, rate: float, times) -> tuple:
     lag = lag + np.where(inner, np.clip(0.5 * (y0 - y2) / np.where(inner, curv, -1.0), -0.5, 0.5), 0.0)
     bpm = np.where(strength > 0.05, 60.0 * rate / lag, np.nan)
     return strength, bpm
+
+
+# ---------------------------------------------------------------------------
+# 🪶 Flow: is the movement slow and flowing, or quick and restless? (13 Nov 2026)
+# ---------------------------------------------------------------------------
+# Off the beat the matcher only asked for footage that is NOT a regular bounce — which irregular, restless movement
+# passes as easily as a slow sway does. Flow reads how quickly the movement curve itself changes: the typical
+# frequency of its ups and downs over a couple of seconds (for a pure wave, exactly its frequency). Slow swells
+# read 1, quick changes 0; footage that hardly moves counts as calm.
+
+FLOW_WIN_SEC = 2.0        # judged over this long around each point
+FLOW_HZ = (0.4, 1.6)      # ups and downs a second: at or under the first = flowing (1), at or over the second = restless (0)
+
+
+def flow(move_hi, rate: float, times) -> np.ndarray:
+    """0–1 at every time in `times`: 1 = slow, flowing movement (or hardly any), 0 = quick, restless movement.
+    0.5 where nobody is tracked or the curve is too short to say."""
+    raw = np.asarray(move_hi, np.float64)
+    times = np.asarray(times, np.float64)
+    T = len(times)
+    rate = float(rate or 15.0)
+    W = int(round(FLOW_WIN_SEC * rate))
+    if T == 0 or W < MIN_FRAMES or len(raw) < W + 1:
+        return np.full(T, 0.5)
+    tracked = np.isfinite(raw)
+    x = smooth(np.where(tracked, raw, 0.0), rate)
+    dx = np.diff(x, prepend=x[:1])
+    centre = np.clip(np.round(times * rate).astype(int), 0, len(x) - 1)
+    lo = np.clip(centre - W // 2, 0, len(x) - W)
+
+    def spread(v):                                       # the standard deviation over each window
+        c1 = np.concatenate([[0.0], np.cumsum(v)])
+        c2 = np.concatenate([[0.0], np.cumsum(v * v)])
+        mean = (c1[lo + W] - c1[lo]) / W
+        return np.sqrt(np.maximum((c2[lo + W] - c2[lo]) / W - mean * mean, 0.0))
+    sx, sd = spread(x), spread(dx)
+    ct = np.concatenate([[0.0], np.cumsum(tracked.astype(np.float64))])
+    seen = (ct[lo + W] - ct[lo]) / W
+    with np.errstate(divide="ignore", invalid="ignore"):
+        hz = np.where(sx > 1e-9, sd * rate / (2.0 * np.pi * sx), 0.0)
+    f = np.clip((FLOW_HZ[1] - hz) / (FLOW_HZ[1] - FLOW_HZ[0]), 0.0, 1.0)
+    usual = float(np.percentile(sx[seen >= MIN_TRACKED], 75)) if (seen >= MIN_TRACKED).any() else 0.0
+    moving = np.clip(sx / max(BOUNCE_QUIET * usual, 1e-9), 0.0, 1.0) if usual > 1e-9 else np.zeros(T)
+    f = f * moving + (1.0 - moving)                      # hardly moving: calm, whatever the jitter looks like
+    return np.where(seen >= MIN_TRACKED, f, 0.5)
 
 
 def beat_presence(drums, drum_level: float) -> float | None:
