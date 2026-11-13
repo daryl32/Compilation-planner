@@ -39,8 +39,7 @@ KEPT = {"compose_way": WAYS[0], "compose_cuts": "sections", "compose_vocal_rule"
         "compose_max_videos": 0, "compose_music_story": 0.5, "compose_smooth": 0.5, "compose_min_clip": 0.0,
         "compose_punch": 0.0, "compose_movement_only": False, "compose_quick": True, "compose_stream": True,
         "compose_render_name": "",
-        "compose_lab_power": 1,
-        **{"compose_lab_" + k: False for k in ("stem", "phrase", "shot", "join", "min_lines")}}
+        "compose_natural": False, "compose_lab_power": 1, "compose_lab_min_lines": False}
 # …and the filters and picks, which have no fixed default (their ranges come from the library): kept once set
 KEPT_IF_SET = tuple(ns + k for ns in ("cs_", "cv_") for k in ("actors", "tags", "hair", "gg", "new", "minlen", "exclude")) \
     + ("cs_q", "cs_bpm", "cs_len", "cs_energy", "cs_sort", "cs_mapped", "cs_track", "cv_start", "cv_track", "cv_songs_for")
@@ -321,15 +320,20 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
                  smooth_contrast: float = 0.5, excluded: set = None, max_videos: int = 0, progress=None,
                  movement_only: bool = False, min_clip: float = None, level_range: float = 0.0,
                  bounce_speed: float = 0.0, cuts: str = "sections", vocal_rule: bool = True,
-                 lab: dict = None) -> dict:
+                 natural: bool = False, lab: dict = None) -> dict:
     """cuts: "sections" — the 🧩 section map at each 🍳 recipe's pace (as always); "lines" — the 📐 lines from the
     music with their own blocks (section_bounds.py), every block kept as cut (no two joined into one clip).
-    lab: the 🧪 Movement lab's switches (LAB's keys → True / False; all off when left out): stem, phrase, shot
-    (🎯 Movement only — see core/story_matcher.StoryOptions) and, for the 📐 lines, join (two blocks of one part may
-    become one longer clip when the footage holds) and min_lines (✂️ Shortest clip applies to them too); plus
-    "power": ⚡ how hard Smooth ↔ Contrast pulls (1 = as always)."""
-    power = float(min(max(float((lab or {}).get("power") or 1.0), 1.0), 10.0))
-    lab = {k: bool((lab or {}).get(k)) for k in LAB}
+    🎯 Movement only always follows the lead layer and matches at the scale of a phrase off the beat (13 Nov: both
+    on by default after Daryl's tests). natural: 🌿 the level is judged within the shot size (🎯 Movement only) and
+    two 📐 blocks of one part may become one longer clip when the footage holds — a less rigid plan.
+    lab: {"min_lines": ✂️ Shortest clip applies to the 📐 blocks too, "power": ⚡ how hard Smooth ↔ Contrast pulls
+    (1 = as always)}; it may also set "stem" / "phrase" / "shot" / "join" outright (tests, and comparing with the
+    matcher as it was)."""
+    given = dict(lab or {})
+    power = float(min(max(float(given.get("power") or 1.0), 1.0), 10.0))
+    lab = {"stem": bool(given.get("stem", movement_only)), "phrase": bool(given.get("phrase", movement_only)),
+           "shot": bool(given.get("shot", natural)), "join": bool(given.get("join", natural)),
+           "min_lines": bool(given.get("min_lines"))}
     lines_min = min_clip if lab["min_lines"] else None
     import core.story_matcher as SMX
     from planner.data import build_footage_queues, load_all_catalogues
@@ -379,7 +383,8 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
         "vary_clip_count": False, "clip_count_seed": 0, "min_clip_len_sec": 1.0, "allow_same_video": False,
         "story": {"music_story": music_story, "smooth_contrast": smooth_contrast, "max_videos": int(max_videos or 0),
                   "movement_only": bool(movement_only), "level_range": float(level_range or 0.0),
-                  "bounce_speed": float(bounce_speed or 0.0), "lab": {**lab, "power": power}},
+                  "bounce_speed": float(bounce_speed or 0.0), "natural": bool(natural),
+                  "lab": {**lab, "power": power}},
         "timeline": timeline,
     }
     if cuts == "lines":
@@ -396,12 +401,14 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
                      "movement_only": bool(movement_only), "punch": float(level_range or 0.0),
                      "max_videos": int(max_videos or 0), "split_screen": bool(split_screen),
                      "min_clip": min_clip if (cuts != "lines" or lab["min_lines"]) else None,
-                     "smooth_contrast": float(smooth_contrast), "lab": {**lab, "power": power}},
+                     "smooth_contrast": float(smooth_contrast), "natural": bool(natural),
+                     "lab": {**lab, "power": power}},
             "made": time.strftime("%H:%M:%S")}
 
 
-LAB = {"stem": "🎼 Follow the lead", "phrase": "🌊 Phrase scale",
-       "shot": "🔍 Shot size", "join": "🔗 Join 📐 blocks", "min_lines": "✂️ Shortest clip on 📐"}
+LAB = {"stem": "🎼 Follow the lead", "phrase": "🌊 Phrase scale", "shot": "🔍 Shot size", "join": "🔗 Join 📐 blocks",
+       "min_lines": "✂️ Shortest clip on 📐"}
+NATURAL = "🌿 Natural"
 
 
 def _lines_join_limit() -> float:
@@ -414,7 +421,15 @@ def used_line(used: dict) -> str:
     """🧾 One line saying what a compile ran on (compile_plan's "used")."""
     if not used:
         return ""
-    lab = [LAB[k] for k in LAB if (used.get("lab") or {}).get(k)]
+    on = used.get("lab") or {}
+    only = bool(used.get("movement_only"))
+    # what is on beyond the usual: 🌿 Natural (or its two halves on their own), the lab's two, and — for a plan made
+    # the old way — the lead / phrase match being off
+    extra = [NATURAL] if used.get("natural") else [LAB[k] for k in ("shot", "join") if on.get(k)]
+    extra += [LAB["min_lines"]] if on.get("min_lines") else []
+    if "stem" in on:
+        extra += [LAB[k] + " off" for k in ("stem", "phrase") if only and not on.get(k)]
+        extra += [LAB[k] for k in ("stem", "phrase") if not only and on.get(k)]
     mc = used.get("min_clip")
     parts = [("✂️ 📐 lines" + (f" (🎤 vocal rule {'on' if used.get('vocal_rule') else 'off'})" if used.get("vocal_rule") is not None else ""))
              if used.get("cuts") == "lines" else "✂️ 🧩 section map",
@@ -428,12 +443,12 @@ def used_line(used: dict) -> str:
         parts.append(f"max {used['max_videos']} videos")
     if used.get("split_screen"):
         parts.append("🪟 split screen")
-    pw = float((used.get("lab") or {}).get("power") or 1.0)
+    pw = float(on.get("power") or 1.0)
     if pw > 1.0:
-        lab.append(f"⚡ Contrast power ×{pw:g}")
+        extra.append(f"⚡ Contrast power ×{pw:g}")
     if used.get("smooth_contrast") is not None and (pw > 1.0 or abs(used["smooth_contrast"] - 0.5) > 1e-6):
         parts.append(f"Smooth ↔ Contrast {used['smooth_contrast']:g}")
-    parts.append("🧪 " + (" + ".join(lab) if lab else "lab all off"))
+    parts += extra
     return "🧾 This compile: " + " · ".join(parts)
 
 
@@ -569,7 +584,7 @@ def _do_pending_compile() -> None:
                            # 💥 Punch drives both: the track's range stretched, and bounce speed following the rhythm
                            level_range=float(st.session_state.get("compose_punch", 0.0)),
                            bounce_speed=float(st.session_state.get("compose_punch", 0.0)),
-                           lab=_lab(),
+                           natural=bool(st.session_state.get("compose_natural")), lab=_lab(),
                            progress=lambda d, t: bar.progress(min(d / max(t, 1), 1.0), text=f"🤖 Compiling… block {d} of {t}"))
     except Exception as e:          # noqa: BLE001
         bar.empty()
@@ -592,48 +607,19 @@ CUTS = {"sections": "🧩 Section map + recipes (as before)", "lines": "📐 Lin
 
 
 def _lab() -> dict:
-    """The 🧪 Movement lab's switches as set on the page (the three movement ones only with 🎯 Movement only on, the
-    two cut ones only with the 📐 lines)."""
-    only, lines = bool(st.session_state.get("compose_movement_only")), _cuts() == "lines"
-    on = lambda k: bool(st.session_state.get("compose_lab_" + k))          # noqa: E731
-    return {**{k: only and on(k) for k in ("stem", "phrase", "shot")},
-            **{k: lines and on(k) for k in ("join", "min_lines")},
+    """The 🧪 lab's two settings as set on the page."""
+    return {"min_lines": _cuts() == "lines" and bool(st.session_state.get("compose_lab_min_lines")),
             "power": float(st.session_state.get("compose_lab_power") or 1)}
 
 
 def _lab_menu() -> None:
-    """🧪 Movement lab — test switches, each on its own, all off to start with."""
-    only, lines = bool(st.session_state.get("compose_movement_only")), _cuts() == "lines"
-    n_on = sum(1 for k, v in _lab().items() if (v > 1 if k == "power" else v))
-    with st.expander(f"🧪 Movement lab — {n_on} switch{'es' if n_on != 1 else ''} on" if n_on else
-                     "🧪 Movement lab — test switches (all off)", expanded=False):
-        st.caption("Each switch works on its own, so one can be tried at a time against the same song and videos. "
-                   "All off = exactly the matcher as it was. 🧾 Every result says which were on.")
-        st.markdown("**Passages with little or no beat** — 🎯 Movement only")
-        a = st.columns(2)
-        a[0].toggle("🎼 Follow the lead instrument", key="compose_lab_stem", disabled=not only,
-                    help="Off the beat the movement is compared with the layer that leads there — the voice, the "
-                         "instruments or the bass, whichever has the most shape in that stretch — where today it is "
-                         "often just the loudness, a smooth curve nearly any movement fits. Instruments need the "
-                         "laptop's real stems (run_audio_analysis).")
-        a[1].toggle("🌊 Match at the scale of a phrase", key="compose_lab_phrase", disabled=not only,
-                    help="Off the beat, in blocks of 3 s or more: movement and music are compared as swells over "
-                         "about a second (not push by push), and the clip's start may move up to half a second "
-                         "(a quarter today) to land a swell on a swell.")
-        a[0].toggle("🔍 Correct the level for shot size", key="compose_lab_shot", disabled=not only,
-                    help="Everywhere, not only off the beat. A close-up reads livelier than the same movement in a "
-                         "wide shot, so how lively footage is, is judged part-way within its own shot size (worked "
-                         "out from the videos in play; the result says by how much).")
-        st.markdown("**📐 Lines from the music** — the new cuts")
-        b = st.columns(2)
-        b[0].toggle("🔗 Join two blocks when the footage holds", key="compose_lab_join", disabled=not lines,
-                    help="As the 🧩 cuts already do: two neighbouring blocks of the same part become one longer clip "
-                         "when one piece of footage fits the longer stretch as well as two fit the halves. Never "
-                         "across a line, never longer than 8 s.")
-        b[1].toggle("✂️ Shortest clip applies", key="compose_lab_min_lines", disabled=not lines,
-                    help="The 📐 blocks already have a minimum from the tempo — the same as ✂️ Shortest clip on Auto. "
-                         "On: the number in ✂️ Shortest clip (s) is used for them too, so a longer minimum can be tried.")
-        st.markdown("**Shot sizes** — both modes")
+    """🧪 Lab — settings still being tested. (13 Nov: 🎼 lead + 🌊 phrase became part of 🎯 Movement only, 🔍 shot
+    size + 🔗 joins became 🌿 Natural, 🪶 flowing movement was scrapped.)"""
+    lines = _cuts() == "lines"
+    lab = _lab()
+    n_on = int(lab["min_lines"]) + int(lab["power"] > 1)
+    with st.expander(f"🧪 Lab — {n_on} on" if n_on else "🧪 Lab — settings being tested (all off)", expanded=False):
+        st.caption("Off / ×1 = the matcher as it is. 🧾 Every result says what was on.")
         st.select_slider("⚡ Smooth ↔ Contrast power", [1, 2, 3, 5, 8], key="compose_lab_power",
                          format_func=lambda v: "×1 (as always)" if v == 1 else f"×{v}",
                          help="How hard the Smooth ↔ Contrast slider pulls. At ×1 it only nudges: a jump in shot size "
@@ -642,8 +628,9 @@ def _lab_menu() -> None:
                               "of shot size at a section change earns much more — and a bigger jump (close-up → wide) "
                               "more than a small one. With the 📐 cuts, a new section of the lines counts as a change. "
                               "The slider at the middle does nothing towards Contrast at any power — move it right.")
-        if not only:
-            st.caption("Turn 🎯 Movement only on for the first three.")
+        st.toggle("✂️ Shortest clip applies to the 📐 cuts", key="compose_lab_min_lines", disabled=not lines,
+                  help="The 📐 blocks already have a minimum from the tempo — the same as ✂️ Shortest clip on Auto. "
+                       "On: the number in ✂️ Shortest clip (s) is used for them too, so a longer minimum can be tried.")
 
 
 def _cuts() -> str:
@@ -661,8 +648,8 @@ def _options_row(ns: str) -> None:
              "at its recipe's clip length. 📐 New: the lines found straight from the music (🧩 Sections → 📐, 🅱 New "
              "cuts) — a cut wherever the music changes, and inside each part blocks of 1, 2 or 4 bars by how loud "
              "and busy it is. Every 📐 block is kept as cut (two are never joined into one clip), and ✂️ Shortest "
-             "clip doesn't apply — the 📐 blocks have their own minimum from the tempo — unless the 🧪 Movement lab's "
-             "two 📐 switches are on. The recipes still read "
+             "clip doesn't apply — the 📐 blocks have their own minimum from the tempo — unless 🌿 Natural (joins) "
+             "or the 🧪 lab's ✂️ switch is on. The recipes still read "
              "each block's type from the section map, so for now 📐 is best judged with 🎯 Movement only.")
     if _cuts() == "lines":
         st.toggle("🎤 Vocal rule", value=True, key="compose_vocal_rule",
@@ -697,8 +684,18 @@ def _options_row(ns: str) -> None:
               help="No recipes: every clip is picked on how its movement follows the music (frame by frame, against "
                    "the drums, bass or voice — whichever carries the bar) and how lively it is against how loud the "
                    "music is. Bouncy up-and-down footage goes where the music has a beat, smooth footage where a "
-                   "voice or pad carries it. Tags, scene tags and roles are ignored. The cuts still come from the "
-                   "sections.")
+                   "voice or pad carries it — there the movement follows the layer that leads (voice, instruments "
+                   "or bass) and is matched as swells over a phrase, not push by push. Tags, scene tags and roles "
+                   "are ignored. The cuts still come from the sections.")
+    only_, lines_ = bool(st.session_state.get("compose_movement_only")), _cuts() == "lines"
+    st.toggle(NATURAL, key="compose_natural", disabled=not (only_ or lines_),
+              help="A less rigid, more natural plan — two things together. (1) 🎯 Movement only: how lively footage "
+                   "is, is judged part-way within its own shot size (a close-up reads livelier than the same "
+                   "movement further away), which changes the picks, mostly in the bouncy parts. (2) 📐 cuts: two "
+                   "neighbouring blocks of the same part become one longer clip when one piece of footage fits the "
+                   "longer stretch as well as two fit the halves — never across a line, never over 8 s. Best with "
+                   "both 🎯 Movement only and the 📐 cuts on; with only one of them, only that half applies. "
+                   "Good for a different result from the same song and videos.")
     _lab_menu()
 
 
@@ -1089,7 +1086,7 @@ def render_result(res: dict) -> None:
         st.caption(used_line(res["used"]) + f" · made {res.get('made', '')}"
                    + (f" · 🔁 {len(res['reworked'])} block(s) redone since" if res.get("reworked") else ""))
     lu = (res.get("lab_notes") or {}).get("used") or {}
-    if any((res.get("used") or {}).get("lab", {}).get(k) for k in ("stem", "phrase")):
+    if lu.get("follows") or lu.get("phrase"):
         fol = " · ".join(f"{n_} follow the {k_ if k_ != 'other' else 'instruments'}" for k_, n_ in sorted((lu.get("follows") or {}).items()))
         st.caption(f"🧪 {lu.get('off_beat', 0)} of {len(plan['timeline'])} blocks are off the beat"
                    + (f" · {fol}" if fol else "") + (f" · {lu['phrase']} matched at phrase scale" if lu.get("phrase") else ""))

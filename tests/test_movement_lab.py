@@ -1,7 +1,8 @@
 """🧪 Movement lab (13 Nov 2026): 🎼 follow the lead layer and 🌊 match at the scale of a phrase (passages with little
 or no beat), 🔍 judge the level within the shot size, ⚡ Smooth ↔ Contrast power, and two for the 📐 lines' blocks
-(🔗 join, ✂️ shortest clip). Each off unless asked for; off = the matcher exactly as it was. (🪶 Flowing movement was
-tried and scrapped the same day.)"""
+(🔗 join, ✂️ shortest clip). After Daryl's tests the same day: 🎼 + 🌊 are part of 🎯 Movement only (no switch), 🔍 + 🔗
+are one switch, 🌿 Natural, and 🪶 flowing movement was scrapped. With the four set off outright, the plan is the
+matcher exactly as it was."""
 from __future__ import annotations
 
 import shutil
@@ -196,21 +197,35 @@ def test_the_lab_through_a_compile_and_all_off_is_the_plan_as_it_was(monkeypatch
         import section_cuts as SCUT
         from tests.fixtures import load_track
         _full_rate_everywhere(out)
-        base = PC.compile_plan("song_full", VIDS, movement_only=True, cuts="lines")
-        off = PC.compile_plan("song_full", VIDS, movement_only=True, cuts="lines", lab={k: False for k in PC.LAB})
-        assert _sig(base["plan"]["timeline"]) == _sig(off["plan"]["timeline"])
-        assert [e["scenes"][0]["story"] for e in base["plan"]["timeline"]] == [e["scenes"][0]["story"] for e in off["plan"]["timeline"]]
-        assert base["plan"]["story"]["lab"] == {**{k: False for k in PC.LAB}, "power": 1.0} and "flow" not in PC.LAB
-        assert "lab all off" in PC.used_line(base["used"]) and "📐 lines" in PC.used_line(base["used"])
-        assert f"{len(VIDS)} videos in play" in PC.used_line(base["used"]) and "0 clips rejected" in PC.used_line(base["used"])
-        # every switch on: still a whole plan, the same cuts, nothing used twice — and it says so
-        lab = {"stem": True, "phrase": True, "shot": True}
-        res = PC.compile_plan("song_full", VIDS, movement_only=True, cuts="lines", lab=lab, excluded={("vid_a", "x")})
+        old = {"stem": False, "phrase": False, "shot": False, "join": False}          # the matcher as it was
+        base = PC.compile_plan("song_full", VIDS, movement_only=True, cuts="lines", lab=old)
+        assert base["plan"]["story"]["lab"] == {**old, "min_lines": False, "power": 1.0} and "flow" not in PC.LAB
+        line0 = PC.used_line(base["used"])
+        assert "📐 lines" in line0 and PC.LAB["stem"] + " off" in line0 and PC.LAB["phrase"] + " off" in line0
+        assert f"{len(VIDS)} videos in play" in line0 and "0 clips rejected" in line0
+        # 🎯 Movement only now follows the lead and matches at phrase scale by itself — nothing to switch on
+        now = PC.compile_plan("song_full", VIDS, movement_only=True, cuts="lines", excluded={("vid_a", "x")})
+        lab_now = now["plan"]["story"]["lab"]
+        assert lab_now["stem"] and lab_now["phrase"] and not lab_now["shot"] and not lab_now["join"]
+        assert not now["plan"]["story"]["natural"]
+        assert now["lab_notes"]["used"]["off_beat"] >= 1 and (now["lab_notes"]["used"]["follows"] or now["lab_notes"]["used"]["phrase"])
+        line = PC.used_line(now["used"])
+        assert "1 clip rejected" in line and " off" not in line and PC.NATURAL not in line and "🧪" not in line
+        assert [tuple(e["track_time"]) for e in now["plan"]["timeline"]] == [tuple(e["track_time"]) for e in base["plan"]["timeline"]]
+        # …and recipes mode has none of it
+        r0 = PC.compile_plan("song_full", VIDS, cuts="lines")
+        assert not any(r0["plan"]["story"]["lab"][k] for k in ("stem", "phrase", "shot", "join"))
+        assert _sig(r0["plan"]["timeline"]) == _sig(PC.compile_plan("song_full", VIDS, cuts="lines", lab=old)["plan"]["timeline"])
+        # 🌿 Natural = 🔍 shot size + 🔗 joins, one switch
+        res = PC.compile_plan("song_full", VIDS, movement_only=True, cuts="lines", natural=True)
         tl = res["plan"]["timeline"]
-        assert [tuple(e["track_time"]) for e in tl] == [tuple(e["track_time"]) for e in base["plan"]["timeline"]]
-        assert res["shortfall"] == 0 and res["plan"]["story"]["lab"]["phrase"] and not res["plan"]["story"]["lab"]["join"]
-        line = PC.used_line(res["used"])
-        assert all(PC.LAB[k] in line for k in lab) and "1 clip rejected" in line and "used" in res["lab_notes"]
+        assert res["plan"]["story"]["natural"] and res["plan"]["story"]["lab"] == {
+            "stem": True, "phrase": True, "shot": True, "join": True, "min_lines": False, "power": 1.0}
+        assert res["plan"]["segmentation"]["join"] is True and res["shortfall"] == 0
+        assert PC.NATURAL in PC.used_line(res["used"]) and PC.LAB["join"] not in PC.used_line(res["used"])
+        both = PC.compile_plan("song_full", VIDS, movement_only=True, cuts="lines", lab={"shot": True, "join": True})
+        assert _sig(both["plan"]["timeline"]) == _sig(tl)                          # the same thing as its two halves
+        assert PC.LAB["join"] in PC.used_line(both["used"]) and PC.NATURAL not in PC.used_line(both["used"])
         used = {}
         for e in tl:
             for s in e["scenes"]:
@@ -222,14 +237,10 @@ def test_the_lab_through_a_compile_and_all_off_is_the_plan_as_it_was(monkeypatch
         res["video_ids"] = VIDS
         again = PC.rework_plan(res, {1})
         assert again["plan"]["story"]["lab"] == res["plan"]["story"]["lab"] and len(again["plan"]["timeline"]) == len(tl)
-        # with recipes on the four movement switches do nothing
-        r0 = PC.compile_plan("song_full", VIDS, cuts="lines")
-        r1 = PC.compile_plan("song_full", VIDS, cuts="lines", lab=lab)
-        assert _sig(r0["plan"]["timeline"]) == _sig(r1["plan"]["timeline"])
         # 🔗 join: two blocks of ONE part may become one longer clip — never across a line, never over the limit
         tr = load_track(DATA, "song_full")
         segs = SCUT.line_segments(tr, PC._section_regions(tr))
-        joined = PC.compile_plan("song_full", VIDS, movement_only=True, cuts="lines", lab={"join": True})
+        joined = PC.compile_plan("song_full", VIDS, movement_only=True, cuts="lines", natural=True)
         got = [tuple(e["track_time"]) for e in joined["plan"]["timeline"]]
         assert joined["plan"]["segmentation"]["join"] is True and len(got) <= len(segs)
         part_edges = {round(a["end"], 2) for a, b in zip(segs, segs[1:]) if a["line_section"] != b["line_section"]}
@@ -256,7 +267,7 @@ def test_the_lab_through_a_compile_and_all_off_is_the_plan_as_it_was(monkeypatch
         shutil.rmtree(out, ignore_errors=True)
 
 
-def test_the_lab_menu_on_the_page(monkeypatch):
+def test_natural_and_the_lab_on_the_page(monkeypatch):
     from tests.test_story_matcher import _setup
     out = _setup(monkeypatch)
     try:
@@ -266,30 +277,28 @@ def test_the_lab_menu_on_the_page(monkeypatch):
         at.session_state["planner_mode"] = "🤖 New matcher"
         at.run()
         assert not errors(at), errors(at)
-        keys = ["compose_lab_" + k for k in PC.LAB]
-        assert not [t for t in at.toggle if t.key == "compose_lab_flow"]                          # scrapped
-        assert at.select_slider(key="compose_lab_power").value == 1
-        tog = {t.key: t for t in at.toggle if t.key in keys}
-        assert set(tog) == set(keys) and all(t.disabled and not t.value for t in tog.values())    # all off, all greyed
+        gone = {"compose_lab_" + k for k in ("stem", "phrase", "flow", "shot", "join")}
+        assert not [t for t in at.toggle if t.key in gone]                 # no switches for these any more
+        nat = at.toggle(key="compose_natural")
+        assert nat.label == PC.NATURAL and nat.disabled and not nat.value   # needs 🎯 Movement only or the 📐 cuts
+        assert at.select_slider(key="compose_lab_power").value == 1 and at.toggle(key="compose_lab_min_lines").disabled
         at.session_state["compose_movement_only"] = True
         at.session_state["compose_cuts"] = "lines"
         at.run()
         assert not errors(at), errors(at)
-        assert not any(t.disabled for t in at.toggle if t.key in keys)
-        assert at.number_input(key="compose_min_clip").disabled
-        at.toggle(key="compose_lab_stem").set_value(True)
+        assert not at.toggle(key="compose_natural").disabled and at.number_input(key="compose_min_clip").disabled
+        at.toggle(key="compose_natural").set_value(True)
         at.select_slider(key="compose_lab_power").set_value(5)
-        at.toggle(key="compose_lab_join").set_value(True)
         at.toggle(key="compose_lab_min_lines").set_value(True).run()
         assert not errors(at), errors(at)
         assert not at.number_input(key="compose_min_clip").disabled
-        assert any("4 switches on" in e.label for e in at.expander)
+        assert any("🧪 Lab — 2 on" in e.label for e in at.expander)
         at.button(key="cs_go").click().run()
         assert not errors(at), errors(at)
         res = at.session_state[PC.RESULT_KEY]
-        assert res["plan"]["story"]["lab"] == {"stem": True, "phrase": False, "shot": False,
-                                               "join": True, "min_lines": True, "power": 5.0}
-        assert any(c.value.startswith("🧾 This compile:") and PC.LAB["stem"] in c.value and "⚡ Contrast power ×5" in c.value
+        assert res["plan"]["story"]["natural"] and res["plan"]["story"]["lab"] == {
+            "stem": True, "phrase": True, "shot": True, "join": True, "min_lines": True, "power": 5.0}
+        assert any(c.value.startswith("🧾 This compile:") and PC.NATURAL in c.value and "⚡ Contrast power ×5" in c.value
                    for c in at.caption)
         at.toggle(key="compose_sync_data").set_value(True).run()
         assert not errors(at), errors(at)
@@ -343,5 +352,6 @@ def test_contrast_power_makes_the_slider_pull_harder(monkeypatch):
         assert count(up) >= count(base)
         assert "⚡ Contrast power ×8" in PC.used_line(up["used"]) and "Smooth ↔ Contrast 1" in PC.used_line(up["used"])
         assert "⚡" not in PC.used_line(base["used"])
+        assert up["plan"]["story"]["lab"]["stem"] and up["plan"]["story"]["lab"]["phrase"]
     finally:
         shutil.rmtree(out, ignore_errors=True)
