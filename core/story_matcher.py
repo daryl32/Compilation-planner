@@ -917,7 +917,9 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
                     if cache is None:
                         cache = v._cum.get(("fit", key))
                         if cache is None:
-                            cache = v._cum[("fit", key)] = _score_video_x(v, nn, recipe, aud, track_bpm, ms, dd,
+                            # (a block may bring its own tempo — ⏱️ Edge Mode's generated beat changes speed by phase)
+                            cache = v._cum[("fit", key)] = _score_video_x(v, nn, recipe, aud,
+                                                                          float(seg.get("bpm") or track_bpm), ms, dd,
                                                                           music_level(t0, t1), only, beat_,
                                                                           music_speed(t0, t1), phrase=phrase_,
                                                                           shot_fix=lab_shot)

@@ -364,8 +364,13 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
         while notices and notice:
             notice(notices.pop(0))
 
-    track_raw = get_track_raw_source(plan["track_id"])
-    all_raw = {track_raw}
+    edge = plan.get("edge")            # ⏱️ Edge Mode: a playlist (or none — a generated beat), an overlay, a voiceover
+    if edge:
+        import edge_render
+        track_raws = edge_render.playlist_raws(plan)
+    else:
+        track_raws = [get_track_raw_source(plan["track_id"])]
+    all_raw = set(track_raws)
     for entry in plan["timeline"]:
         all_raw |= segment_sources(entry)
     missing = sources.check(all_raw)
@@ -448,15 +453,21 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
         run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
              "-c", "copy", str(combined_video)])
 
-        # Mux in the track's audio
-        print("Muxing audio...")
-        with_fallback([track_raw], lambda: run([
-            "ffmpeg", "-y", "-i", str(combined_video), *sources.input_args(track_raw),
-            "-map", "0:v", "-map", "1:a:0",
-            "-c:v", "copy", "-c:a", "aac", "-shortest",
-            "-movflags", "+faststart",   # index at the front: plays/streams from Drive without a full download
-            output_path,
-        ]))
+        if edge:                       # ⏱️ the overlay on the picture + the mixed sound (edge_render.py)
+            if notice:
+                notice("⏱️ Adding the timer and mixing the sound…")
+            with_fallback(track_raws, lambda: edge_render.finish(plan, combined_video, output_path, sources,
+                                                                 tmp_dir, run, PREVIEW_HEIGHT))
+        else:
+            # Mux in the track's audio
+            print("Muxing audio...")
+            with_fallback(track_raws, lambda: run([
+                "ffmpeg", "-y", "-i", str(combined_video), *sources.input_args(track_raws[0]),
+                "-map", "0:v", "-map", "1:a:0",
+                "-c:v", "copy", "-c:a", "aac", "-shortest",
+                "-movflags", "+faststart",   # index at the front: plays/streams from Drive without a full download
+                output_path,
+            ]))
 
     print(f"\nDone: {output_path}")
     show_notices()

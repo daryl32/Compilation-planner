@@ -320,14 +320,16 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
                  smooth_contrast: float = 0.5, excluded: set = None, max_videos: int = 0, progress=None,
                  movement_only: bool = False, min_clip: float = None, level_range: float = 0.0,
                  bounce_speed: float = 0.0, cuts: str = "sections", vocal_rule: bool = True,
-                 natural: bool = False, lab: dict = None) -> dict:
+                 natural: bool = False, lab: dict = None, given_track: dict = None, given_segments: list = None) -> dict:
     """cuts: "sections" — the 🧩 section map at each 🍳 recipe's pace (as always); "lines" — the 📐 lines from the
     music with their own blocks (section_bounds.py), every block kept as cut (no two joined into one clip).
     🎯 Movement only always follows the lead layer and matches at the scale of a phrase off the beat (13 Nov: both
     on by default after Daryl's tests). natural: 🌿 the level is judged within the shot size (🎯 Movement only) and
     two 📐 blocks of one part may become one longer clip when the footage holds — a less rigid plan.
     lab: {"min_lines": ✂️ Shortest clip applies to the 📐 blocks too}; it may also set "stem" / "phrase" / "shot" / "join" outright (tests, and comparing with the
-    matcher as it was)."""
+    matcher as it was).
+    given_track + given_segments: a track that isn't in the audio catalogue, with its blocks already cut (⏱️ Edge
+    Mode's generated beat — edge_mode.beat_track / beat_segments); track_id is then only the plan's name."""
     given = dict(lab or {})
     lab = {"stem": bool(given.get("stem", movement_only)), "phrase": bool(given.get("phrase", movement_only)),
            "shot": bool(given.get("shot", natural)), "join": bool(given.get("join", natural)),
@@ -336,10 +338,14 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     import core.story_matcher as SMX
     from planner.data import build_footage_queues, load_all_catalogues
     from render_preview import colab_to_local
-    track = _load_track(track_id)
-    regions = _section_regions(track)
     all_recipes = RC.load_all()
     segments, cut_note = [], None
+    if given_track is not None:
+        track, segments, cuts = given_track, list(given_segments or []), "given"
+        regions = [{"start": 0.0, "end": float(track["duration_sec"]), "type": "rhythmic"}]
+    else:
+        track = _load_track(track_id)
+        regions = _section_regions(track)
     if cuts == "lines":
         try:
             segments = SCUT.line_segments(track, regions, vocal_rule, lines_min)
@@ -353,7 +359,7 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     queues = build_footage_queues(tuple(video_ids), (), LC.library_ranges())
     opts = SMX.StoryOptions(music_story=music_story, smooth_contrast=smooth_contrast, section_map=regions or None,
                             max_videos=int(max_videos or 0), progress=progress,
-                            merge_blocks=cuts != "lines" or lab["join"],
+                            merge_blocks=cuts not in ("lines", "given") or lab["join"],
                             merge_limit_sec=_lines_join_limit() if cuts == "lines" and lab["join"] else 0.0,
                             movement_only=bool(movement_only), curves_of=_motion_curves,
                             level_range=float(level_range or 0.0), bounce_speed=float(bounce_speed or 0.0),
@@ -369,7 +375,8 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
             for link in slot["chain"]:
                 link["source_path"] = colab_to_local(catalogues[link["video_id"]]["source_path"])
     plan = {
-        "track_id": track_id, "matching_mode": "Auto story", "track_source_path": colab_to_local(track["source_path"]),
+        "track_id": track_id, "matching_mode": "Auto story",
+        "track_source_path": colab_to_local(track["source_path"]) if track.get("source_path") else "",
         "track_duration_sec": track["duration_sec"], "bpm": track.get("bpm"),
         "segmentation": {"method": cuts, "section_map": regions, "paces": {t: r.get("pace") for t, r in all_recipes.items()},
                          **({"vocal_rule": bool(vocal_rule), "join": lab["join"],
