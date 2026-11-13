@@ -129,6 +129,10 @@ def test_the_panel_in_the_media_library(tmp_path, monkeypatch):
             assert not errors(at), errors(at)
             assert any("ready for the 🤖 new matcher" in m.value and "waiting for tag scores" in m.value for m in at.markdown)
             assert any("waiting video(s) need" in e.label for e in at.expander)
+        assert not any("vid_d" in c.value for c in at.caption)               # names only when asked for
+        at.toggle(key="av_names").set_value(True).run()
+        assert any("vid_d" in c.value for c in at.caption)
+        at.toggle(key="av_names").set_value(False).run()
         at.button(key="av_go").click().run()
         assert not errors(at), errors(at)
         assert started == [1]

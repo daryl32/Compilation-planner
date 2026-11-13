@@ -63,12 +63,14 @@ def render() -> None:
                 st.caption(n)
     if n_wait:
         with st.expander(f"What the {n_wait} waiting video(s) need", expanded=False):
+            names = st.toggle("Show which videos", key="av_names")
             for need in AV.NEEDS:
                 vids = waiting.get(need) or []
                 if not vids:
                     continue
                 st.markdown(f"**{len(vids)} — no {AV.NEED_LABEL[need]} yet** · next: {AV.NEED_WHERE[need]}")
-                st.caption(" · ".join(vids[:40]) + (f" … +{len(vids) - 40} more" if len(vids) > 40 else ""))
+                if names:                  # (not drawn until asked for: it can be a hundred names)
+                    st.caption(" · ".join(vids[:60]) + (f" … +{len(vids) - 60} more" if len(vids) > 60 else ""))
             st.caption("Each video is listed under the first thing it lacks. The order is: catalogue (laptop → "
                        "Drive), vision data (laptop → server), tag scores and timeline (➕ here).")
     if sm.get("no_preview"):
