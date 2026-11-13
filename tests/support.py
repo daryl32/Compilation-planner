@@ -39,6 +39,8 @@ def _install_config() -> None:
     cfg.DRIVE_WRITES = False
     cfg.WHITELISTED_EMAILS = ["tester@example.com"]
     cfg.CURVE_CACHE_DIR = DATA / ".curve_cache"
+    cfg.SIGNINS_FILE = DATA / ".signins.json"          # the server's record of sign-ins: fresh for every test run
+    cfg.SIGNINS_FILE.unlink(missing_ok=True)
     sys.modules["config"] = cfg
 
 

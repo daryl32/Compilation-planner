@@ -16,8 +16,18 @@ Does, in order:
 Pages keep only their own content. Fix sign-in / Drive behaviour here, once.
 """
 
+import hashlib
+import hmac
+import json
+import os
+import tempfile
+import threading
+import time
+from pathlib import Path
+
 import streamlit as st
 
+import config as _config
 from config import WHITELISTED_EMAILS
 from library_common import (
     IS_TEST, page_title, env_banner, render_sync_status, read_pending, push_pending, memory_check,
@@ -39,6 +49,9 @@ except Exception:
     token_expired = lambda token: False
     DRIVE_SESSION_KEY = "_drive_oauth_token"
     OAUTH_AVAILABLE = False
+
+
+IDLE_SIGNOUT_MIN = float(getattr(_config, "IDLE_SIGNOUT_MIN", 60) or 0)   # minutes without use; 0 = never
 
 
 def drive_token():
@@ -65,26 +78,161 @@ def _sign_in_screen(name: str) -> None:
     st.stop()
 
 
+def _allowed() -> bool:
+    """On the whitelist — with an address Google has verified (a sign-in that says outright that the address
+    isn't verified is refused; one that says nothing is taken as before)."""
+    email = (st.user.get("email") or "").strip().lower()
+    if not email or st.user.get("email_verified") is False:
+        return False
+    return email in {str(w).strip().lower() for w in WHITELISTED_EMAILS}
+
+
 def _access_denied() -> None:
     st.title("Access Denied")
-    st.error(f"**{st.user.email}** is not authorised to use this app.")
+    st.error(f"**{st.user.get('email') or 'This account'}** is not authorised to use this app.")
     st.caption("Contact the administrator to request access.")
     if st.button("Sign out"):
-        st.logout()
+        _sign_out()
     st.stop()
 
 
+# ---------------------------------------------------------------------------
+# 🔐 The server's own record of each sign-in
+# ---------------------------------------------------------------------------
+# Streamlit's sign-in cookie is good for 30 days and the browser alone decided when "an hour without use"
+# had passed — so opening the app after a break drew the whole page first, then the browser timer reloaded
+# it to sign out (the flicker), and a copy of the cookie stayed usable after Sign out. The server now keeps,
+# per sign-in (address + the time Google issued it), when it was last used and whether it was signed out:
+#   • a sign-in not used for IDLE_SIGNOUT_MIN is signed out the moment a page is opened, before anything of
+#     the app is drawn;
+#   • Sign out (the button, or the browser's idle timer) ends that sign-in on the server too.
+# The file lives in the system temp folder (never synced to Drive); it survives an app restart, so a deploy
+# doesn't sign anyone out.
+_SIGNINS_FILE = Path(getattr(_config, "SIGNINS_FILE", None)
+                     or Path(tempfile.gettempdir()) / f"mp_signins_{'test' if IS_TEST else 'live'}.json")
+_SIGNINS_LOCK = threading.Lock()
+_SEEN_EVERY_SEC = 30            # how often a sign-in's "last used" is written
+_SIGNIN_KEEP_SEC = 31 * 86400   # a day longer than the cookie lasts
+
+
+def _signin_key() -> str:
+    raw = f"{(st.user.get('email') or '').strip().lower()}|{st.user.get('iat') or ''}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+
+def _signins_read() -> dict:
+    try:
+        d = json.loads(_SIGNINS_FILE.read_text())
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _signins_write(d: dict) -> None:
+    now = time.time()
+    d = {k: v for k, v in d.items() if isinstance(v, dict)
+         and now - float(v.get("seen") or v.get("out") or 0) < _SIGNIN_KEEP_SEC}
+    try:
+        tmp = _SIGNINS_FILE.with_name(_SIGNINS_FILE.name + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(d))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, _SIGNINS_FILE)
+    except Exception:
+        pass    # can't keep the record: sign-in still works, as before
+
+
+def _sign_out() -> None:
+    """Sign out — and end this sign-in on the server, so a kept copy of its cookie is refused."""
+    try:
+        with _SIGNINS_LOCK:
+            d = _signins_read()
+            d[_signin_key()] = {"out": time.time()}
+            _signins_write(d)
+    except Exception:
+        pass
+    st.session_state.pop("_mp_signin_ok", None)
+    st.logout()
+
+
+def _signin_gate() -> None:
+    """Is this sign-in still good? Checked on the server before any of the app is drawn. Signs out a sign-in
+    that was ended, or — when a page is opened (a new browser session) — one not used for IDLE_SIGNOUT_MIN.
+    While a page stays open the browser's timer (below) does the timing, since it also sees a video playing."""
+    key, now = _signin_key(), time.time()
+    opened = st.session_state.get("_mp_signin_ok") != key        # first run of this browser session
+    ended = False
+    with _SIGNINS_LOCK:
+        d = _signins_read()
+        rec = d.get(key) or {}
+        if rec.get("out"):
+            ended = True
+        elif opened and IDLE_SIGNOUT_MIN > 0:
+            try:
+                last = max(float(st.user.get("iat") or 0), float(rec.get("seen") or 0))
+            except (TypeError, ValueError):
+                last = float(rec.get("seen") or 0)
+            ended = bool(last) and now - last > IDLE_SIGNOUT_MIN * 60
+        if ended:
+            d[key] = {"out": now}
+            _signins_write(d)
+        elif now - float(rec.get("seen") or 0) > _SEEN_EVERY_SEC:
+            d[key] = {"seen": now}
+            _signins_write(d)
+    if ended:
+        st.session_state.pop("_mp_signin_ok", None)
+        st.logout()
+        st.stop()
+    st.session_state["_mp_signin_ok"] = key
+
+
+_STATE_MAX_AGE_SEC = 15 * 60
+_STATE_FALLBACK_KEY = os.urandom(32)      # when the app has no cookie secret: good until the next restart
+
+
+def _state_secret() -> bytes:
+    try:
+        return str(st.secrets["auth"]["cookie_secret"]).encode()
+    except Exception:
+        return _STATE_FALLBACK_KEY
+
+
+def _drive_state(page: str, now: float = None) -> str:
+    """The `state` sent to Google with 🔗 Connect Google Drive: the page to come back to, the time, and a
+    signature tying it to this sign-in. Google hands it back unchanged — so an answer that wasn't asked for
+    from this sign-in in the last 15 minutes (a link somebody else made, to get their own Drive connected
+    to your session) is recognised and dropped."""
+    ts = str(int(now or time.time()))
+    sig = hmac.new(_state_secret(), f"{page}|{ts}|{_signin_key()}".encode(), hashlib.sha256).hexdigest()[:32]
+    return f"{page}|{ts}|{sig}"
+
+
+def _drive_state_page(state: str):
+    """The page a returned `state` asked for, or None when it isn't one of ours (see _drive_state)."""
+    try:
+        page, ts, sig = str(state).rsplit("|", 2)
+        if not 0 <= time.time() - int(ts) <= _STATE_MAX_AGE_SEC:
+            return None
+        good = hmac.new(_state_secret(), f"{page}|{ts}|{_signin_key()}".encode(), hashlib.sha256).hexdigest()[:32]
+        return page if hmac.compare_digest(sig, good) else None
+    except Exception:
+        return None
+
+
 def _handle_drive_callback(page_path: str) -> None:
-    """Google sends the user back with ?code=...&state=<page that asked>."""
+    """Google sends the user back with ?code=...&state=<what _drive_state made>."""
     if not OAUTH_AVAILABLE or DRIVE_SESSION_KEY in st.session_state:
         return
     qp = st.query_params.to_dict()
     if "code" not in qp:
         return
+    return_page = _drive_state_page(qp.get("state"))
+    if return_page is None:               # not an answer to our own Connect link: don't use the code
+        st.query_params.clear()
+        st.session_state["_drive_expired_note"] = True
+        st.rerun()
     token = exchange_code_for_token(qp["code"])
     if token:
         st.session_state[DRIVE_SESSION_KEY] = token
-    return_page = qp.get("state")
     st.query_params.clear()
     if return_page and return_page != page_path:
         st.switch_page(return_page)
@@ -108,7 +256,7 @@ def _account_box(mb) -> None:
         if st.session_state.pop("_drive_expired_note", False):
             box.warning("Your Google Drive connection expired — please connect again.")
         box.markdown("☁️ Google Drive: **:red[● Not connected]**")
-        box.markdown(f'<a href="{get_auth_url(state=_PAGE_PATH.get("p", ""))}" target="_self">'
+        box.markdown(f'<a href="{get_auth_url(state=_drive_state(_PAGE_PATH.get("p", "")))}" target="_self">'
                      f'🔗 Connect Google Drive</a>', unsafe_allow_html=True)
     try:
         render_sync_status(box)
@@ -136,7 +284,7 @@ def _account_box(mb) -> None:
             box.caption("Anything unsaved was kept and will be offered back in the planner.")
 
     if box.button("Sign out", key="signout_btn", width="stretch"):
-        st.logout()
+        _sign_out()
 
 
 _PAGE_PATH = {}   # this run's page, for the Connect link (set by page_setup)
@@ -149,9 +297,6 @@ _PAGE_PATH = {}   # this run's page, for the Connect link (set by page_setup)
 # every 20 s, and as soon as a sleeping tab wakes up. Past the limit it opens the page with
 # ?signed_out=idle, which page_setup() answers with st.logout(). Installed once into the page
 # (like the dropdown script), so Streamlit's reruns don't reset it; only real use does.
-import config as _config  # noqa: E402
-
-IDLE_SIGNOUT_MIN = float(getattr(_config, "IDLE_SIGNOUT_MIN", 60) or 0)   # minutes; 0 = never
 
 _IDLE_CODE = r"""
 (function () {
@@ -180,6 +325,10 @@ _IDLE_CODE = r"""
     }
     return false;
   }
+  // Sign out pressed: forget the last-use time, so the sign-in screen doesn't say "signed out after … minutes"
+  doc.addEventListener("click", (e) => {
+    if (e.target.closest && e.target.closest(".st-key-signout_btn")) { try { store().removeItem(KEY); } catch (err) {} }
+  }, true);
   // A tab reopened (or reloaded by the browser) after the limit signs out straight away;
   // otherwise opening the app counts as using it.
   if (check()) return;
@@ -216,9 +365,16 @@ _IDLE_NOTE_JS = """
 <div id="n" style="display:none;font-family:sans-serif;font-size:15px;color:#555;padding:4px 0">
   ⏱ You were signed out after __LIMIT__ minutes without using the app.</div>
 <script>
-try { if (window.parent.localStorage.getItem("mp_idle_out")) {
-  document.getElementById("n").style.display = "block"; window.parent.localStorage.removeItem("mp_idle_out"); } }
-catch (e) {}
+// Shown when the browser's timer signed you out — or when the server did, on opening the app after a break
+// (the last use this browser remembers is then older than the limit).
+try {
+  const ls = window.parent.localStorage, last = parseInt(ls.getItem("mp_last_active") || "0", 10);
+  const stale = __LIMIT__ > 0 && last > 0 && Date.now() - last > __LIMIT__ * 60000;
+  if (ls.getItem("mp_idle_out") || stale) {
+    document.getElementById("n").style.display = "block";
+    ls.removeItem("mp_idle_out"); ls.removeItem("mp_last_active");
+  }
+} catch (e) {}
 </script>
 """
 
@@ -227,7 +383,7 @@ def _idle_signout() -> None:
     """Install the browser-side idle timer, and sign out when it asks (?signed_out=idle)."""
     if st.query_params.get("signed_out") == "idle":
         st.query_params.clear()
-        st.logout()
+        _sign_out()
         st.stop()
     if IDLE_SIGNOUT_MIN <= 0:
         return
@@ -561,12 +717,15 @@ def page_setup(name: str, page_path: str, *, title: str = None, anchor: str = No
     title: heading shown on the page (default: name)
     anchor: HTML anchor for the heading (e.g. for a "Back to top" link)"""
     st.set_page_config(page_title=page_title(name), layout="wide")
+    # Who is this, and is the sign-in still good — settled before anything of the app is drawn.
+    if not st.user.is_logged_in:
+        env_banner()
+        _sign_in_screen(name)
+    if not _allowed():
+        _access_denied()
+    _signin_gate()
     env_banner()
     _lock_dropdown_typing()
-    if not st.user.is_logged_in:
-        _sign_in_screen(name)
-    if st.user.email not in WHITELISTED_EMAILS:
-        _access_denied()
     _idle_signout()
     _handle_drive_callback(page_path)
     st.title(title or name, anchor=anchor)

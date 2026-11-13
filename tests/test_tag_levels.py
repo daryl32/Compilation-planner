@@ -111,7 +111,7 @@ def test_reviewer_cast_and_nobody_suggestions():
         k = f"{stem}_none"
         at.button_group(key=f"vd_women_{k}").set_value(2).run()
         at.button_group(key=f"vd_men_{k}").set_value(0).run()
-        at.button(key=f"vd_cast_save_{stem}").click().run()
+        at.button(key=f"vd_save_{stem}").click().run()            # the page's one 💾 Save
         assert not errors(at), errors(at)
         assert LC.video_cast()[vid] == {"women": 2, "men": 0}
         assert any("up to **2** people" in c.value for c in at.caption)

@@ -885,11 +885,47 @@ def test_grid_bottom_picker_follows_the_top(bundle, clean_labels):
     at.session_state["tr_view"] = "grid"
     at.run()
     assert not errors(at), errors(at)
-    assert at.selectbox(key="tr_g_cat_b").value == at.selectbox(key="tr_g_cat").value
-    at.selectbox(key="tr_g_cat_b").set_value(TV.GRID_ALL).run()           # change it at the bottom …
+    assert at.selectbox(key="tr_g_cat_b_0").value == at.selectbox(key="tr_g_cat").value
+    at.selectbox(key="tr_g_cat_b_0").set_value(TV.GRID_ALL).run()         # change it at the bottom …
     assert not errors(at), errors(at)
     assert at.selectbox(key="tr_g_cat").value == TV.GRID_ALL             # … and the top follows
+    # tags: picked at the top show at the bottom, and a pick at the bottom is added to them
+    def pills(sfx):
+        return [g for g in at.button_group if (g.key or "").startswith("tr_g_pills_") and
+                (g.key.rsplit("_", 1)[0].endswith("_b") == bool(sfx))][0]
+    top = pills("")
+    a, b = top.options[0], top.options[1]
+    top.set_value([a]).run()
+    assert not errors(at), errors(at)
+    assert at.session_state["tr_g_chosen"] == [a] and list(pills("_b").value) == [a]
+    pills("_b").set_value([a, b]).run()
+    assert not errors(at), errors(at)
+    assert at.session_state["tr_g_chosen"] == [a, b] and list(pills("").value) == [a, b]
     assert "stElementToolbar" in TV.GRID_CSS and "repeat(5," in TV.GRID_CSS
+
+
+def test_grid_stale_copy_cannot_undo_a_pick(bundle, clean_labels):
+    """A quick second tap: the browser sends the other copy's OLD value along with it (it hasn't been told the
+    new one yet). That used to read as the other copy being changed back, and wiped the picked tags."""
+    from tests.apptest_util import errors, page_app
+    at = page_app("pages/6_Training_Labels.py")
+    at.session_state["tl_view"] = "🧪 Trial results"
+    at.session_state["tr_sub"] = "🖼️ Compare tags"
+    at.session_state["tr_view"] = "grid"
+    at.run()
+    def pills(bottom):
+        return [g for g in at.button_group if (g.key or "").startswith("tr_g_pills_") and
+                (g.key.rsplit("_", 1)[0].endswith("_b") == bottom)][0]
+    top, old_bottom_key = pills(False), pills(True).key
+    a, b = top.options[0], top.options[1]
+    top.set_value([a]).run()
+    assert at.session_state["tr_g_chosen"] == [a]
+    assert pills(True).key != old_bottom_key            # the bottom copy was made afresh, not pushed a value
+    # the second tap, arriving with the bottom copy's old (empty) value under its old key
+    at.session_state[old_bottom_key] = []
+    pills(False).set_value([a, b]).run()
+    assert not errors(at), errors(at)
+    assert at.session_state["tr_g_chosen"] == [a, b]
 
 
 def test_grid_thumbnails_are_small(tmp_path):

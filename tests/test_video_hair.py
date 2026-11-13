@@ -63,12 +63,12 @@ def test_reviewer_confirm_hair_and_find_flags():
         vid = CS.load_catalogue(stem)["video_id"]
         LC.set_hair_votes({vid: {"colours": ["Brunette"]}})
         at.run()
-        key = f"vd_hair_save_{stem}"
-        assert at.button(key=key).label == "✅ Confirm hair"
+        key = f"vd_save_{stem}"                                   # the page's one 💾 Save
+        assert any("confirms the vote" in c.value for c in at.caption)
         at.button(key=key).click().run()                          # vote right → one tap
         assert not errors(at), errors(at)
         assert LC.hair_of(vid)["source"] == "you" and LC.hair_of(vid)["colours"] == ["Brunette"]
-        assert at.button(key=key).label == "✅ Confirmed" and at.button(key=key).disabled
+        assert not any("confirms the vote" in c.value for c in at.caption)
         # 💇 Hair not confirmed no longer lists it; ❓ lists only unsure votes.
         at.multiselect(key="rev_find_flags").set_value(["💇 Hair not confirmed"]).run()
         assert not errors(at), errors(at)
@@ -215,7 +215,7 @@ def test_reviewer_vote_button_then_confirm():
         assert all(LC.hair_of(v)["colours"] == ["Brunette"] for v in vids)
         assert not [b for b in at.button if b.key == "rev_hair_vote"]     # notice gone once voted
         stem = at.session_state["rev_video"]
-        at.button(key=f"vd_hair_save_{stem}").click().run()          # ✅ the vote in one tap
+        at.button(key=f"vd_save_{stem}").click().run()               # 💾 confirms the vote in one tap
         assert LC.hair_of(CS.load_catalogue(stem)["video_id"])["source"] == "you"
     finally:
         shutil.rmtree(folder, ignore_errors=True)

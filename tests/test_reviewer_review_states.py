@@ -131,3 +131,50 @@ def test_quick_marking_exclude_counts_as_role_marked(restore_catalogues):
     at.run()
     assert not errors(at), errors(at)
     assert not [w for w in at.multiselect if w.key == f"tags_vid_f_{sid}"]
+
+
+def test_one_save_for_video_details_and_role_marks(restore_catalogues):
+    """Hair, cast, actors and 🎭 quick role marks are all written by a single 💾 — from the quick grid's Save,
+    and from the Save in 🎬 Video details."""
+    import catalogue_store as CS
+    import library_common as LC
+    from tests.apptest_util import errors
+    before = LC.load_library_meta()
+    try:
+        vid = CS.load_catalogue("vid_a")["video_id"]
+        LC.set_hair_votes({vid: {"colours": ["Brunette"]}})
+        at = _app("vid_a")
+        at.run()
+        at.session_state["rev_quick_roles"] = True
+        at.run()
+        assert not errors(at), errors(at)
+        vh = LC.hair_of(vid)
+        vc = LC.video_cast().get(vid)
+        ksig = f"{vc['women']}-{vc['men']}" if vc else "none"
+        at.button_group(key=f"vd_women_vid_a_{ksig}").set_value(2).run()
+        at.button_group(key=f"vd_men_vid_a_{ksig}").set_value(1).run()
+        at.multiselect(key="vd_actors_vid_a").set_value(["Test Actor"]).run()
+        btns = [g for g in at.button_group if (g.key or "").startswith("rev_qr_p_vid_a_")]
+        sid = int(btns[0].key[len("rev_qr_p_vid_a_"):].split("_")[0])
+        btns[0].set_value(["action"]).run()
+        assert not errors(at), errors(at)
+        assert vh["source"] != "you" and "video details" in at.button(key="rev_qr_save_bottom").label
+        at.button(key="rev_qr_save_bottom").click().run()            # ONE save
+        assert not errors(at), errors(at)
+        assert LC.hair_of(vid)["source"] == "you" and LC.hair_of(vid)["colours"] == ["Brunette"]
+        assert LC.video_cast()[vid] == {"women": 2, "men": 1}
+        assert LC.video_details()[vid]["actors"] == ["Test Actor"]
+        after = next(s for s in _scenes("vid_a") if s["scene_id"] == sid)
+        assert "action" in (after.get("roles") or []) and after.get("roles_reviewed") is True
+        # …and the other way round: the 💾 in Video details saves a pending role mark too
+        btns = [g for g in at.button_group if (g.key or "").startswith("rev_qr_p_vid_a_")]
+        sid2 = int(btns[1].key[len("rev_qr_p_vid_a_"):].split("_")[0])
+        btns[1].set_value(["slow"]).run()
+        at.multiselect(key="vd_actors_vid_a").set_value(["Test Actor", "Second"]).run()
+        at.button(key="vd_save_vid_a").click().run()
+        assert not errors(at), errors(at)
+        assert LC.video_details()[vid]["actors"] == ["Test Actor", "Second"]
+        after2 = next(s for s in _scenes("vid_a") if s["scene_id"] == sid2)
+        assert "slow" in (after2.get("roles") or []) and after2.get("roles_reviewed") is True
+    finally:
+        LC.save_library_meta(before)

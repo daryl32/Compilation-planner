@@ -586,6 +586,52 @@ def _vd_add_actor(key_actors: str, key_new: str) -> None:
     st.session_state[key_new] = ""
 
 
+def vd_pending() -> dict:
+    """What's unsaved in 🎬 Video details, as {what: a few words}. Hair counts as soon as colours are picked and
+    it isn't your answer yet (saving confirms the model's vote); cast once both numbers are picked."""
+    todo = {}
+    vh, vd, vc = hair_of(video_id), video_details().get(video_id) or {"actors": [], "tags": []}, video_cast().get(video_id)
+    kh = f"vd_hair_{selected}_{vh['source']}_{'-'.join(vh['colours'])}"
+    now_h = [c for c in HAIR_COLOURS if c in (st.session_state.get(kh, vh["colours"]) or [])]
+    if vh["source"] == "you":
+        if now_h != vh["colours"]:
+            todo["hair"] = f"💇 {hair_label(now_h)}" if now_h else "💇 hair answer cleared"
+    elif now_h:
+        todo["hair"] = f"💇 {hair_label(now_h)}" + (" (confirms the vote)" if now_h == vh["colours"] else "")
+    ksig = f"{vc['women']}-{vc['men']}" if vc else "none"
+    w = st.session_state.get(f"vd_women_{selected}_{ksig}", vc["women"] if vc and vc["women"] >= 1 else None)
+    m = st.session_state.get(f"vd_men_{selected}_{ksig}", vc["men"] if vc else None)
+    if w is not None and m is not None and (not vc or (w, m) != (vc["women"], vc["men"])):
+        todo["cast"] = "👥 " + cast_label({"women": w, "men": m})
+    now_a = list(st.session_state.get(f"vd_actors_{selected}", vd["actors"]) or [])
+    now_t = list(st.session_state.get(f"vd_tags_{selected}", vd["tags"]) or [])
+    if now_a != vd["actors"] or now_t != vd["tags"]:
+        todo["details"] = f"{len(now_a)} actor(s), {len(now_t)} video tag(s)"
+    return todo
+
+
+def vd_save() -> list:
+    """Save whatever vd_pending() lists; returns what was saved, in words."""
+    todo = vd_pending()
+    if not todo:
+        return []
+    vh, vd, vc = hair_of(video_id), video_details().get(video_id) or {"actors": [], "tags": []}, video_cast().get(video_id)
+    kh = f"vd_hair_{selected}_{vh['source']}_{'-'.join(vh['colours'])}"
+    ksig = f"{vc['women']}-{vc['men']}" if vc else "none"
+    if "hair" in todo:
+        set_video_hair(video_id, [c for c in HAIR_COLOURS if c in (st.session_state.get(kh, vh["colours"]) or [])])
+        st.session_state.pop(kh, None)
+    if "cast" in todo:
+        set_video_cast(video_id, st.session_state.get(f"vd_women_{selected}_{ksig}"),
+                       st.session_state.get(f"vd_men_{selected}_{ksig}"))
+    if "details" in todo:
+        set_video_details(video_id, actors=list(st.session_state.get(f"vd_actors_{selected}", vd["actors"]) or []),
+                          tags=list(st.session_state.get(f"vd_tags_{selected}", vd["tags"]) or []))
+        for k in (f"vd_actors_{selected}", f"vd_tags_{selected}"):
+            st.session_state.pop(k, None)
+    return list(todo.values())
+
+
 _vd = video_details().get(video_id) or {"actors": [], "tags": []}
 _vh = hair_of(video_id)
 _ka, _kt, _kn = f"vd_actors_{selected}", f"vd_tags_{selected}", f"vd_new_actor_{selected}"
@@ -600,28 +646,13 @@ with st.expander(f"🎬 Video details — {len(_vd['actors'])} actor(s), {len(_v
                  or not video_cast().get(video_id)):
     # 💇 Hair colour: one answer for the whole video (claude/hair-colour-plan.md) — the
     # same actress can look blonde / brunette / red from shot to shot, so it isn't tagged per clip.
-    hrow = st.columns([3, 1], vertical_alignment="bottom")
+    hrow = st.columns([1])
     with hrow[0]:
         _now_h = st.pills("💇 Hair colour", list(HAIR_COLOURS), selection_mode="multi", default=_vh["colours"],
                           key=_kh, format_func=lambda c: f"{HAIR_EMOJI[c]} {c}",
                           help="Everyone's hair in this video — pick two for two actresses. Used only for "
-                               "picking videos. Prefilled from the model's vote; your answer always wins.")
-    _now_h = [c for c in HAIR_COLOURS if c in (_now_h or [])]
-    _hair_done = _vh["source"] == "you" and _now_h == _vh["colours"]
-    _hair_clear = _vh["source"] == "you" and not _now_h
-    if _hair_clear:
-        _hb = hrow[1].button("🗑️ Clear answer", key=f"vd_hair_save_{selected}", width="stretch",
-                             help="Remove your answer — the model's vote shows again.")
-    else:
-        _hb = hrow[1].button("✅ Confirmed" if _hair_done else "✅ Confirm hair", key=f"vd_hair_save_{selected}",
-                             type="secondary" if _hair_done else "primary", disabled=_hair_done or not _now_h,
-                             width="stretch")
-    if _hb:
-        set_video_hair(video_id, _now_h)
-        st.session_state.pop(_kh, None)
-        st.session_state["rev_saved_msg"] = (f"Hair colour saved: {hair_label(_now_h)}." if _now_h
-                                             else "Hair colour answer cleared.")
-        st.rerun()
+                               "picking videos. Prefilled from the model's vote; your answer always wins. "
+                               "💾 Save confirms the colours shown.")
     if _vh["source"] == "you":
         _hc = "✅ Your answer."
         if _vh["vote"] and _vh["vote"] != _vh["colours"]:
@@ -632,28 +663,21 @@ with st.expander(f"🎬 Video details — {len(_vd['actors'])} actor(s), {len(_v
         _vs_txt = " · ".join(f"{c} {_vs[c]:.2f}" for c in HAIR_COLOURS if c in _vs)
         hrow[0].caption(f"🤖 The model's vote ({_vh.get('vote_model') or '?'}"
                         + (f": {_vs_txt} — 1.00 = at the cut-off" if _vs_txt else "") + ")"
-                        + (" — it couldn't decide, so check this one." if _vh["unsure"] else " — tap ✅ if it's right."))
+                        + (" — it couldn't decide, so check this one." if _vh["unsure"] else " — 💾 Save confirms it."))
     else:
-        hrow[0].caption("No vote yet — pick the colours and tap ✅.")
+        hrow[0].caption("No vote yet — pick the colours and 💾 Save.")
 
     # 👥 Cast: how many women and men are in the video (claude/tag-levels.md).
     _vc = video_cast().get(video_id)
     _ksig = f"{_vc['women']}-{_vc['men']}" if _vc else "none"
     _kw, _km = f"vd_women_{selected}_{_ksig}", f"vd_men_{selected}_{_ksig}"
     _fmt = lambda x: f"{x}+" if x == CAST_MAX else str(x)
-    crow = st.columns([2, 2, 1], vertical_alignment="bottom")
+    crow = st.columns(2, vertical_alignment="bottom")
     _w = crow[0].pills("👩 Women", [1, 2, 3, CAST_MAX], selection_mode="single", key=_kw,
                        default=_vc["women"] if _vc and _vc["women"] >= 1 else None, format_func=_fmt)
     _m = crow[1].pills("👨 Men", [0, 1, 2, 3, CAST_MAX], selection_mode="single", key=_km,
                        default=_vc["men"] if _vc else None, format_func=_fmt,
                        help="Count the cameraman in POV videos — he's in the video.")
-    _cast_same = bool(_vc) and (_w, _m) == (_vc["women"], _vc["men"])
-    if crow[2].button("✅ Saved" if _cast_same else "💾 Save cast", key=f"vd_cast_save_{selected}",
-                      type="secondary" if _cast_same else "primary",
-                      disabled=_cast_same or _w is None or _m is None, width="stretch"):
-        set_video_cast(video_id, _w, _m)
-        st.session_state["rev_saved_msg"] = f"Cast saved: {cast_label({'women': _w, 'men': _m})}."
-        st.rerun()
     _ppl = FP.people_hint(data["scenes"], *FP.load_people(video_id))
     st.caption(("👥 " + cast_label(_vc) + ". " if _vc else "")
                + (f"🤖 The model sees up to **{_ppl}** people on screen together (it can't tell women from men, "
@@ -681,19 +705,16 @@ with st.expander(f"🎬 Video details — {len(_vd['actors'])} actor(s), {len(_v
                            "inside the library range, excluded clips left out.")
         else:
             st.caption("No clip tag covers 10% of this video's footage yet.")
-    _now_a, _now_t = list(st.session_state.get(_ka) or []), list(st.session_state.get(_kt) or [])
-    _changed = (_now_a != _vd["actors"]) or (_now_t != _vd["tags"])
+    _vd_todo = vd_pending()
     sc = st.columns([1, 3])
-    if sc[0].button("💾 Save video details", key=f"vd_save_{selected}", type="primary" if _changed else "secondary",
-                    disabled=not _changed, width="stretch"):
-        set_video_details(video_id, actors=_now_a, tags=_now_t)
-        for k in (_ka, _kt):
-            st.session_state.pop(k, None)
-        st.session_state["rev_saved_msg"] = f"Video details saved: {len(_now_a)} actor(s), {len(_now_t)} video tag(s)."
-        st.rerun()
-    sc[1].caption("✏️ Unsaved changes" if _changed else "Saved with the library (synced to Google Drive like "
-                                                         "library ranges).")
-
+    # One save for the page: the video details here and the clip / role edits below (handled at the end of
+    # the page, once the clips are known — see save_all).
+    _save_all_top = sc[0].button("💾 Save", key=f"vd_save_{selected}", type="primary" if _vd_todo else "secondary",
+                                 width="stretch",
+                                 help="Saves everything on this page in one go: hair, cast, actors and video tags, "
+                                      "and any unsaved tag, exclude and role changes on the clips below.")
+    sc[1].caption(("✏️ To save: " + " · ".join(_vd_todo.values()) + " — plus any clip / role changes below.")
+                  if _vd_todo else "Video details are saved. 💾 Save also saves any clip / role changes below.")
 
 
 # ---------------------------------------------------------------------------
@@ -1461,6 +1482,21 @@ with rc_[1].popover("Roles…", width="stretch"):
 MARK_TAGGED, MARK_ROLES = "🏷️ Tagged", "🎭 Role marked"
 
 
+def save_all(mark_tagged_ids=(), mark_roles_ids=(), shown_n: int = 0) -> None:
+    """The page's one save: 🎬 video details (hair, cast, actors, video tags) and every unsaved clip edit — card
+    edits and 🎭 quick marking alike. Any 💾 on the page does this."""
+    said = vd_save()
+    changed = apply_pending(mark_tagged_ids, mark_roles_ids)
+    marks = [w for w, ids in (("tagged", mark_tagged_ids), ("role marked", mark_roles_ids)) if ids]
+    if changed or marks:
+        said.append(f"{changed} changed scene(s)" + (f"; all {shown_n} shown scenes marked {' and '.join(marks)}"
+                                                      if marks else ""))
+        write_catalogue("Saved: " + " · ".join(said) + ".")
+    st.session_state["rev_saved_msg"] = ("Saved: " + " · ".join(said) + "." if said
+                                         else "Nothing had changed — nothing to save.")
+    st.rerun()
+
+
 def save_row(where: str) -> bool:
     c = st.container(key=f"rev_wrap_save_{where}").columns([2, 3, 2], vertical_alignment="center")
     c[0].caption(f"{len(shown)} scene(s) shown")
@@ -1470,7 +1506,8 @@ def save_row(where: str) -> bool:
                     "change → 🎭 role marked). Pick one or both to mark every scene shown when you save "
                     "(you've checked them all).")
     return c[2].button("💾 Save changes", type="primary", width="stretch", key=f"rev_save_{where}",
-                       help="Saves the tag, exclude and role edits on this video. They're kept until you save — "
+                       help="Saves the tag, exclude and role edits on this video, and the 🎬 video details above. "
+                            "They're kept until you save — "
                             "changing the video or a filter discards them. Split, combine and ⭐ save straight away.")
 
 
@@ -1669,27 +1706,6 @@ def _qr_changed() -> list:
     return [s["scene_id"] for s in ordered_all if s["scene_id"] in ids]
 
 
-def _qr_save(changed: list) -> None:
-    """Writes the quick-marking choices. A role change marks the scene 🎭 role marked; an
-    Exclude change marks it 🏷️ tagged, as on the cards (and an excluded scene counts as
-    role marked anyway — it's never used)."""
-    for sid in changed:
-        sc = scene_by_id[sid]
-        roles = _qr_roles(sid)
-        if set(roles) != set(SR.scene_roles(sc)):
-            SR.set_scene_roles(sc, roles)
-            sc["roles_reviewed"] = True
-        x = _qr_excluded(sid)
-        if x != bool(sc.get("excluded")):
-            sc["excluded"] = x
-            if "corrected_tags" not in sc:
-                sc["corrected_tags"] = scene_tags(sc)
-            sc["reviewed"] = True
-    st.session_state.pop(_qr_key(), None)
-    st.session_state.pop(_qx_key(), None)
-    write_catalogue(f"Saved quick-marking changes for {len(changed)} scene(s).")
-
-
 @st.fragment
 def quick_role_grid(ids: list) -> None:
     """🎭 Quick role marking — every role as a button on each picture: tap to add or
@@ -1705,9 +1721,11 @@ def quick_role_grid(ids: list) -> None:
                    + "  ·  ".join(SR.label(r, _roles) for r in _roles)
                    + f"  \n✂️ split by hand · ⚡ auto split (scenes over {suggest_long_sec:g}s) · 🚫 exclude / include "
                      "again — all unsaved until 💾 Save, except splits, which save straight away")
-    if top[1].button(f"💾 Save {len(changed)} change(s)", type="primary", disabled=not changed,
-                     width="stretch", key="rev_qr_save"):
-        _qr_save(changed)
+    vd_todo = vd_pending()          # 🎬 video details not saved yet — the same 💾 saves them
+    if top[1].button(f"💾 Save {len(changed)} change(s)" + (" + video details" if vd_todo else ""), type="primary",
+                     disabled=not (changed or vd_todo), width="stretch", key="rev_qr_save",
+                     help="Saves these role / exclude choices and the 🎬 video details above in one go."):
+        save_all()
     top[2].button("↩️ Undo unsaved", disabled=not changed, width="stretch", key="rev_qr_discard",
                   on_click=_qr_discard)
 
@@ -1786,10 +1804,11 @@ def quick_role_grid(ids: list) -> None:
     st.divider()
     fb = st.columns([3, 2, 2, 2], vertical_alignment="center")
     fb[0].caption((f"✏️ {len(changed)} unsaved change(s)" if changed else "No unsaved changes")
+                  + ("  ·  + video details: " + " · ".join(vd_todo.values()) if vd_todo else "")
                   + (f"  ·  page {page} of {n_pages}" if n_pages > 1 else ""))
-    if fb[1].button(f"💾 Save {len(changed)} change(s)", type="primary", disabled=not changed,
-                    width="stretch", key="rev_qr_save_bottom"):
-        _qr_save(changed)
+    if fb[1].button(f"💾 Save {len(changed)} change(s)" + (" + video details" if vd_todo else ""), type="primary",
+                    disabled=not (changed or vd_todo), width="stretch", key="rev_qr_save_bottom"):
+        save_all()
     if n_pages > 1:
         fb[2].button("◀ Previous page", disabled=page <= 1, width="stretch", key="rev_qr_prev",
                      on_click=_qr_goto, args=(page - 1,))
@@ -1823,18 +1842,14 @@ else:
         st.divider()
     save_bottom = save_row("bottom")
 
-    if save_top or save_bottom:
+    if save_top or save_bottom or _save_all_top:
         marks = set(st.session_state.get("rev_mark_all_top") or []) | set(st.session_state.get("rev_mark_all_bottom") or [])
         shown_ids = [s["scene_id"] for s, _ in shown]
-        changed = apply_pending(shown_ids if MARK_TAGGED in marks else (),
-                                shown_ids if MARK_ROLES in marks else ())
-        if changed or marks:
-            what = " and ".join(w for w, m in (("tagged", MARK_TAGGED), ("role marked", MARK_ROLES)) if m in marks)
-            write_catalogue(f"Saved {changed} changed scene(s)"
-                            + (f"; all {len(shown)} shown scenes marked {what}." if marks else "."))
-        else:
-            st.session_state["rev_saved_msg"] = "Nothing had changed — nothing to save."
-            st.rerun()
+        save_all(shown_ids if MARK_TAGGED in marks else (), shown_ids if MARK_ROLES in marks else (), len(shown))
+
+# 💾 Save in 🎬 Video details when the clips above didn't handle it (🎭 quick marking, or no clips shown).
+if _save_all_top:
+    save_all()
 
 # Open a dialog asked for by a scene card (cards are fragments, so they ask the
 # page to open it on its next full run instead of opening it themselves).

@@ -94,7 +94,64 @@ GRID_JS = r"""
     if (g && g.active) lastDrag = Date.now();
     g = null;
   }, { passive: false });
+  // Mouse (laptop): hold the left button on a frame and drag across others — every frame from the first to the
+  // one under the pointer is ticked (or unticked, if the first one was ticked), in reading order, like
+  // highlighting text. Drag back and the ones you leave return to how they were. A plain click still ticks one.
+  let m = null, mTimer = null, lastMouseDrag = 0;
+  function mStop() {
+    if (mTimer) { clearInterval(mTimer); mTimer = null; }
+    if (m && m.active) { lastMouseDrag = Date.now(); document.body.classList.remove("mp-grid-drag"); }
+    m = null;
+  }
+  function mRange() {
+    const c = at(m.px, m.py);
+    const to = c ? m.all.indexOf(c) : -1;
+    if (to < 0) return;
+    const lo = Math.min(m.from, to), hi = Math.max(m.from, to);
+    m.all.forEach((card, i) => set(card, i >= lo && i <= hi ? m.on : m.orig[i]));
+  }
+  document.addEventListener("mousedown", (e) => {
+    mStop();
+    if (e.button !== 0 || Date.now() - lastTap < 700) return;       // not the mouse event a touch leaves behind
+    const c = at(e.clientX, e.clientY);
+    if (!c || (e.target.closest && e.target.closest("button, a"))) return;
+    m = { x: e.clientX, y: e.clientY, px: e.clientX, py: e.clientY, card: c, active: false };
+  }, true);
+  document.addEventListener("mousemove", (e) => {
+    if (!m) return;
+    if (!(e.buttons & 1)) { mStop(); return; }                      // the button was let go outside the window
+    m.px = e.clientX; m.py = e.clientY;
+    if (!m.active) {
+      if (Math.hypot(e.clientX - m.x, e.clientY - m.y) < 8) return;
+      m.active = true;
+      m.all = cards();
+      m.orig = m.all.map((c) => { const b = box(c); return !!(b && b.checked); });
+      const b = box(m.card);
+      m.on = !(b && b.checked);
+      m.from = m.all.indexOf(m.card);
+      m.sc = scroller(m.card);
+      document.body.classList.add("mp-grid-drag");
+      const sel = window.getSelection && window.getSelection();
+      if (sel && sel.removeAllRanges) sel.removeAllRanges();
+      mTimer = setInterval(() => {                                  // keep going past the top / bottom edge
+        if (!m || !m.active) return;
+        const H = window.innerHeight;
+        if (m.py > H - 60) m.sc.scrollBy(0, 18); else if (m.py < 80) m.sc.scrollBy(0, -18); else return;
+        mRange();
+      }, 30);
+    }
+    e.preventDefault();
+    mRange();
+  }, true);
+  document.addEventListener("mouseup", mStop, true);
+  window.addEventListener("blur", mStop);
+  document.addEventListener("dragstart", (e) => {                   // no ghost picture dragged along
+    if (e.target.closest && e.target.closest(CARD)) e.preventDefault();
+  }, true);
   document.addEventListener("click", (e) => {                       // a mouse click on a picture (laptop)
+    if (Date.now() - lastMouseDrag < 120 && e.target.closest && e.target.closest(CARD)) {
+      e.preventDefault(); e.stopPropagation(); return;              // the click that ends a drag ticks nothing
+    }
     const img = e.target.closest && e.target.closest(CARD + " [data-testid='stImage']");
     if (!img || e.target.closest("button") || Date.now() - lastDrag < 400 || Date.now() - lastTap < 700) return;
     const b = box(img.closest(CARD));
@@ -118,6 +175,9 @@ GRID_CSS = (
     "user-select:none;cursor:pointer}"
     # sideways swipes are ours (swipe-select), up / down still scrolls
     ".st-key-tr_grid [class*='st-key-tr_gcard_'] {touch-action:pan-y;-webkit-user-select:none;user-select:none}"
+    # while dragging with the mouse: no text gets highlighted, and the pointer says "selecting"
+    "body.mp-grid-drag, body.mp-grid-drag * {-webkit-user-select:none!important;user-select:none!important;"
+    "cursor:cell!important}"
     # a ticked frame stands out
     "[class*='st-key-tr_gcard_']:has(input:checked) img {outline:3px solid #ff4b4b;outline-offset:-3px}"
     # the ● / ✗ / ◆ marks: no negative markdown margin (it let the next row cover them), wrap, never cut
@@ -936,7 +996,9 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False, lock: st
         with ThreadPoolExecutor(3) as ex:
             list(ex.map(TR.frame_path, need))
     st.caption("👆 Tap a picture to tick it, or put your finger on one and swipe sideways to tick a whole run "
-               "(swipe down as you go to take in more rows) — like selecting in Photos.")
+               "(swipe down as you go to take in more rows) — like selecting in Photos.  \n"
+               "🖱️ With a mouse: click a picture to tick it, or hold the left button on one and drag across the "
+               "others — every frame from the first to the pointer is ticked, like highlighting text.")
     st.caption(f"Under each frame: {'every tag' if cat == GRID_ALL else 'the **' + cat + '** tags'} you or the model have there — ● you have it · ✗ you said it "
                "isn't there · ◆ only the model has it. Tick a frame and a picked tag it doesn't have yet shows as "
                "+ tag. "
@@ -962,34 +1024,64 @@ def _grid(moments: list, rows: list, tag: str, only_part: bool = False, lock: st
     # the tag picker and the page box again at the bottom, so a long page needs no scrolling back up
     _gpicker(groups, titles, "_b", lock)
     if pages > 1:
-        st.session_state["tr_gpage_b"] = page
-        st.number_input(f"Page (of {pages}) — {len(moments)} frames", 1, pages, key="tr_gpage_b",
-                        on_change=lambda: st.session_state.update(tr_gpage=st.session_state["tr_gpage_b"]))
+        gk = _fresh_key("tr_gpage_b", page)
+        st.number_input(f"Page (of {pages}) — {len(moments)} frames", 1, pages, page, key=gk,
+                        on_change=lambda: None if _stale(gk) else st.session_state.update(
+                            tr_gpage=st.session_state[gk]))
+
+
+def _fresh_key(base: str, want) -> str:
+    """The key for one copy of a control that exists twice (top and bottom of the grid). The copies never have
+    their value pushed from here: when a copy is out of date — the other copy, ✖ Clear tags or a filter changed
+    the choice — it is made afresh under a new key and starts on the current choice. Pushing a value into a
+    live copy is what made a quick second tap jump back: the browser hadn't been told the new value yet, sent
+    the old one along with the tap, and that read as you changing the other copy back."""
+    vk = base + "_v"
+    key = f"{base}_{st.session_state.get(vk, 0)}"
+    if key in st.session_state and st.session_state[key] != want:
+        st.session_state[vk] = st.session_state.get(vk, 0) + 1
+        key = f"{base}_{st.session_state[vk]}"
+    return key
+
+
+def _stale(key: str) -> bool:
+    """A change reported for a copy that has since been replaced (see _fresh_key): the browser was still
+    showing the old one when it sent the tap. Not something you did — ignore it."""
+    base = key.rsplit("_", 1)[0]
+    return key != f"{base}_{st.session_state.get(base + '_v', 0)}" or key not in st.session_state
 
 
 def _gpicker(groups: list, titles: list, sfx: str, lock: str = None) -> tuple:
     """The Category box and its tag pills (sfx "" at the top, "_b" the copy at the bottom). Both copies
     share one category (tr_g_cat) and one set of picked tags (tr_g_chosen). Returns (category, its tags)."""
-    if sfx:                                   # the bottom copy follows the top one
-        st.session_state["tr_g_cat" + sfx] = st.session_state["tr_g_cat"]
     chosen = list(st.session_state.get("tr_g_chosen") or [])
     with st.container(key=f"tl_wrap_tr_gpick{sfx}"):
         a, b = st.columns([2, 7])
-        cat = a.selectbox("Category", titles, key="tr_g_cat" + sfx, disabled=bool(lock),
-                          on_change=(lambda: st.session_state.update(tr_g_cat=st.session_state["tr_g_cat" + sfx]))
-                          if sfx else None,
-                          help=("Set by the Category filter at the top of the page. " if lock else "") + f"{GRID_ALL}: every category's tags under each frame — a final check that everything "
-                               "you've corrected is right.")
+        cat_help = (("Set by the Category filter at the top of the page. " if lock else "")
+                    + f"{GRID_ALL}: every category's tags under each frame — a final check that everything "
+                      "you've corrected is right.")
+        if sfx:                               # the bottom copy follows the top one
+            want_cat = st.session_state["tr_g_cat"]
+            ck = _fresh_key("tr_g_cat" + sfx, want_cat)
+            cat = a.selectbox("Category", titles, index=titles.index(want_cat), key=ck, disabled=bool(lock),
+                              on_change=lambda: None if _stale(ck) else st.session_state.update(
+                                  tr_g_cat=st.session_state[ck]),
+                              help=cat_help)
+        else:
+            cat = a.selectbox("Category", titles, key="tr_g_cat", disabled=bool(lock), help=cat_help)
         in_cat = (list(dict.fromkeys(t for g in groups for t in g[2])) if cat == GRID_ALL
                   else next(g[2] for g in groups if g[0] == cat))
-        pk = "tr_g_pills_" + hashlib.md5(cat.encode()).hexdigest()[:8] + sfx
-        st.session_state[pk] = [t for t in in_cat if t in chosen]
+        want = [t for t in in_cat if t in chosen]
+        pk = _fresh_key("tr_g_pills_" + hashlib.md5(cat.encode()).hexdigest()[:8] + sfx, want)
 
         def _pick():
+            if _stale(pk):
+                return
             now = list(st.session_state.get("tr_g_chosen") or [])
-            st.session_state["tr_g_chosen"] = [t for t in now if t not in in_cat] + list(st.session_state[pk] or [])
+            mine = set(st.session_state[pk] or [])
+            st.session_state["tr_g_chosen"] = [t for t in now if t not in in_cat] + [t for t in in_cat if t in mine]
         with b:
-            st.pills("Tags", in_cat, selection_mode="multi", key=pk, on_change=_pick,
+            st.pills("Tags", in_cat, selection_mode="multi", default=want, key=pk, on_change=_pick,
                      help="The tags ➕ Add / ➖ Remove apply. You can pick tags from more than one category.")
     return cat, in_cat
 
