@@ -241,51 +241,6 @@ def bounce(move_hi, rate: float, times) -> tuple:
     return strength, bpm
 
 
-# ---------------------------------------------------------------------------
-# 🪶 Flow: is the movement slow and flowing, or quick and restless? (13 Nov 2026)
-# ---------------------------------------------------------------------------
-# Off the beat the matcher only asked for footage that is NOT a regular bounce — which irregular, restless movement
-# passes as easily as a slow sway does. Flow reads how quickly the movement curve itself changes: the typical
-# frequency of its ups and downs over a couple of seconds (for a pure wave, exactly its frequency). Slow swells
-# read 1, quick changes 0; footage that hardly moves counts as calm.
-
-FLOW_WIN_SEC = 2.0        # judged over this long around each point
-FLOW_HZ = (0.4, 1.6)      # ups and downs a second: at or under the first = flowing (1), at or over the second = restless (0)
-
-
-def flow(move_hi, rate: float, times) -> np.ndarray:
-    """0–1 at every time in `times`: 1 = slow, flowing movement (or hardly any), 0 = quick, restless movement.
-    0.5 where nobody is tracked or the curve is too short to say."""
-    raw = np.asarray(move_hi, np.float64)
-    times = np.asarray(times, np.float64)
-    T = len(times)
-    rate = float(rate or 15.0)
-    W = int(round(FLOW_WIN_SEC * rate))
-    if T == 0 or W < MIN_FRAMES or len(raw) < W + 1:
-        return np.full(T, 0.5)
-    tracked = np.isfinite(raw)
-    x = smooth(np.where(tracked, raw, 0.0), rate)
-    dx = np.diff(x, prepend=x[:1])
-    centre = np.clip(np.round(times * rate).astype(int), 0, len(x) - 1)
-    lo = np.clip(centre - W // 2, 0, len(x) - W)
-
-    def spread(v):                                       # the standard deviation over each window
-        c1 = np.concatenate([[0.0], np.cumsum(v)])
-        c2 = np.concatenate([[0.0], np.cumsum(v * v)])
-        mean = (c1[lo + W] - c1[lo]) / W
-        return np.sqrt(np.maximum((c2[lo + W] - c2[lo]) / W - mean * mean, 0.0))
-    sx, sd = spread(x), spread(dx)
-    ct = np.concatenate([[0.0], np.cumsum(tracked.astype(np.float64))])
-    seen = (ct[lo + W] - ct[lo]) / W
-    with np.errstate(divide="ignore", invalid="ignore"):
-        hz = np.where(sx > 1e-9, sd * rate / (2.0 * np.pi * sx), 0.0)
-    f = np.clip((FLOW_HZ[1] - hz) / (FLOW_HZ[1] - FLOW_HZ[0]), 0.0, 1.0)
-    usual = float(np.percentile(sx[seen >= MIN_TRACKED], 75)) if (seen >= MIN_TRACKED).any() else 0.0
-    moving = np.clip(sx / max(BOUNCE_QUIET * usual, 1e-9), 0.0, 1.0) if usual > 1e-9 else np.zeros(T)
-    f = f * moving + (1.0 - moving)                      # hardly moving: calm, whatever the jitter looks like
-    return np.where(seen >= MIN_TRACKED, f, 0.5)
-
-
 def beat_presence(drums, drum_level: float) -> float | None:
     """0–1: is there a beat in this stretch of the drum curve (kick + snare, 0–1 within the track)? Judged on the
     hits (the 90th percentile — drums are spikes, a strong beat still has a low average). None without drums."""
