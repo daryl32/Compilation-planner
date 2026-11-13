@@ -2300,6 +2300,8 @@ else:
     with st.container(key="subnav_vid"):   # a sub menu — chips (menu_css)
         video_kind = st.radio("Videos", ["🎬 Videos", "🧭 Timeline"], horizontal=True, key="vid_kind",
                               label_visibility="collapsed")
+    import add_videos_view
+    add_videos_view.render()               # ➕ sync + scores + timelines in one go, and what each new video still needs
     if video_kind == "🧭 Timeline":
         import footage_timeline_view
         footage_timeline_view.render()

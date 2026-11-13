@@ -1665,14 +1665,35 @@ def people_at(vdir: Path, times: np.ndarray) -> np.ndarray | None:
     return out
 
 
-def export(name: str, dest: Path = None, root: Path = None) -> int:
+def export_todo(vdirs: list, dest: Path, name: str, missing_only: bool) -> tuple:
+    """(the video folders to score, the videos whose scores are kept as they are). missing_only: only videos with
+    no scores file yet — as long as the scores already there were made by this same model; a different model
+    means every video is scored again, so one export never mixes two models."""
+    if not missing_only:
+        return list(vdirs), []
+    try:
+        old = json.loads((Path(dest) / "index.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = {}
+    if old.get("model") != name:
+        return list(vdirs), []
+    have = {p.stem for p in Path(dest).glob("*.npz") if not p.name.endswith(".tmp.npz")}
+    todo = [d for d in vdirs if d.name not in have]
+    names = {d.name for d in vdirs}
+    kept = sorted(v for v in (old.get("videos") or []) if v in have and v in names and v not in {d.name for d in todo})
+    return todo, kept
+
+
+def export(name: str, dest: Path = None, root: Path = None, missing_only: bool = False) -> int:
     """Every half second of every downloaded video → the student's score per tag (0–100), one small
     file per video in the catalogue's student_scores folder on Drive (or `dest`):
         student_scores/<video_id>.npz   times (s, float32), scores (moments × tags, uint8), people (uint8,
                                         people on screen — when the video has pose detections)
         student_scores/index.json       model, created, tags, cut-offs (0–100), test-set videos, videos
     A score at or above the tag's cut-off means "visible here" (the moment meaning — see the new-matcher
-    design: scene tags are for choosing / filtering, these are for what's on screen)."""
+    design: scene tags are for choosing / filtering, these are for what's on screen).
+    missing_only (--missing): only the videos that have no scores yet (new videos) — the rest keep theirs; a video
+    without the tuned encoder's embeddings is then left out and named, not a reason to stop."""
     import torch
     models, meta = load_models(name)
     if not models:
@@ -1680,7 +1701,10 @@ def export(name: str, dest: Path = None, root: Path = None) -> int:
         return 1
     use_emb(meta.get("emb") or "")          # a model trained on a tuned encoder reads that encoder's embeddings
     lacking = emb_missing()
-    if lacking:
+    if lacking and missing_only:
+        print(f"{len(lacking)} video(s) have no {emb_file()} and are left out (e.g. {', '.join(lacking[:3])}) — run "
+              f"`siglip_tune embed --name {EMB_NAME}` on the laptop, then upload them again.")
+    elif lacking:
         print(f"{len(lacking)} video(s) have no {emb_file()} (e.g. {', '.join(lacking[:3])}) — run "
               f"`siglip_tune embed --name {EMB_NAME}` on the machine that has the encoder first.")
         return 1
@@ -1696,7 +1720,9 @@ def export(name: str, dest: Path = None, root: Path = None) -> int:
     dev = _device()
     ctx_models = load_ctx_models(name, meta)
     done, t0 = [], time.time()
-    vdirs = sorted(p for p in root.iterdir() if p.is_dir())
+    vdirs, kept = export_todo(sorted(p for p in root.iterdir() if p.is_dir()), dest, name, missing_only)
+    if missing_only:
+        print(f"{len(vdirs)} video(s) without scores to do; {len(kept)} keep theirs.", flush=True)
     for k, vdir in enumerate(vdirs, 1):
         pose_dim = int(meta.get("pose_dim") or 0)
         et, emb = video_features(vdir, bool(pose_dim))
@@ -1718,9 +1744,10 @@ def export(name: str, dest: Path = None, root: Path = None) -> int:
     index = {"model": name, "created": time.strftime("%Y-%m-%d %H:%M"), "tags": meta["tags"],
              "cutoffs": [int(round(x * 100)) for x in meta["thresholds"]], "step": STEP,
              "test_videos": meta.get("test_videos") or [], "scores": meta.get("scores", {}).get("plain"),
-             "videos": done}
+             "videos": sorted(set(kept) | set(done))}
     (dest / "index.json").write_text(json.dumps(index, indent=1), encoding="utf-8")
-    print(f"Exported the {name} scores for {len(done)} videos → {dest}")
+    print(f"Exported the {name} scores for {len(done)} videos → {dest}"
+          + (f" ({len(kept)} already had them)" if missing_only else ""))
     return 0
 
 
@@ -1972,6 +1999,7 @@ def main(argv=None) -> int:
     ap.add_argument("command", choices=["fetch", "train", "score", "export", "picks", "all", "rescore-all", "runs",
                                         "upload-local", "push-models"])
     ap.add_argument("--only", nargs="*", default=None, help="upload-local: just these video ids")
+    ap.add_argument("--missing", action="store_true", help="export: only the videos that have no scores yet")
     ap.add_argument("--n", type=int, default=300, help="picks: how many where the student is unsure (default 300)")
     ap.add_argument("--n-test", type=int, default=80, help="picks: how many random test-set moments (default 80)")
     ap.add_argument("--name", default="v1", help="model name (default v1)")
@@ -2023,7 +2051,7 @@ def main(argv=None) -> int:
             push_models([a.name])          # to the server, so every machine can rescore it
         return rc
     if a.command == "export":
-        rc = export(a.name)
+        rc = export(a.name, missing_only=a.missing)
         publish_runs()                     # ⭐ in use moves to this run
         return rc
     if a.command == "rescore-all":

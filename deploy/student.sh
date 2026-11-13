@@ -7,6 +7,7 @@
 #   deploy/student.sh rescore-all           every model (the server's + the ones the laptop sent) on today's test labels
 #   deploy/student.sh picks --name v13      🎓 Student's picks for 🎯 Training Labels
 #   deploy/student.sh export --name v13     scores for every half second → catalogue/student_scores
+#                                           (--missing: only the videos without scores yet — the app's ➕ button)
 #   deploy/student.sh timeline [--redo]     🧭 footage timeline per video (footage_timeline.py) from the
 #                                           vision data + the export — also a button in 📁 Media Library
 #
@@ -47,7 +48,7 @@ if [ "${1:-}" = "timeline" ]; then
 fi
 
 if [ $# -eq 0 ]; then
-  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 

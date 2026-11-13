@@ -52,7 +52,7 @@ def _status_row() -> None:
     if rep["ready"]:
         bits.append(f"{len(rep['ready'])} ready to build")
     if rep["no_scores"]:
-        bits.append(f"{len(rep['no_scores'])} without student scores (export)")
+        bits.append(f"{len(rep['no_scores'])} without student scores (➕ Add new videos, above)")
     if rep["no_vision"]:
         bits.append(f"{len(rep['no_vision'])} without vision data")
     if not rep["vision_root"]:
