@@ -1,6 +1,8 @@
 """
 ⏱️ Edge Mode in the rendered video (called by render_preview.render_plan_dict in place of its plain "add the
-track's audio" step, for a plan with an "edge" block): the countdown overlay goes on top of the picture, and the
+track's audio" step, for a plan with an "edge" block): the 👩 avatar pops up at her cues (a framed box in a
+corner, or the right half of a split screen), the countdown overlay goes on top of the picture, a 🎬 intro screen
+(the avatar beside the chosen settings and thumbnails) can come first, and the
 sound is mixed — the playlist's songs back to back (starting again until the time is filled, at half volume while
 the voiceover is on), the generated beat, and a voiceover cue at the start of every phase. One extra pass over the
 finished picture; nothing here chooses footage.
@@ -8,6 +10,8 @@ finished picture; nothing here chooses footage.
 
 from __future__ import annotations
 
+import json
+import subprocess
 from pathlib import Path
 
 import edge_mode as E
@@ -45,22 +49,146 @@ def _voice_track(cues: list, total: float, tmp_dir: Path, run) -> Path | None:
     return out
 
 
-def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, frame_height: int) -> None:
-    """combined_video (the plan's picture, no sound) → output_path with the overlay and the mixed sound.
-    sources: the renderer's SourceResolver (songs are read from this machine or streamed from Drive, like the
-    videos); run: its ffmpeg runner."""
+def probe(path) -> dict:
+    """{"seconds", "audio", "video"} of a media file (zeros / False when it can't be read)."""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type", "-of", "json",
+                              str(path)], capture_output=True, text=True, timeout=60)
+        info = json.loads(out.stdout or "{}")
+        kinds = {st.get("codec_type") for st in info.get("streams") or []}
+        return {"seconds": float((info.get("format") or {}).get("duration") or 0.0), "audio": "audio" in kinds,
+                "video": "video" in kinds}
+    except Exception:          # noqa: BLE001
+        return {"seconds": 0.0, "audio": False, "video": False}
+
+
+def _appearances(edge: dict, tmp_dir: Path, frame: tuple) -> list:
+    """The avatar's appearances, ready to draw: [{"time", "seconds", "profile", "input" (ffmpeg input args), "sound"
+    (the clip, when her voice is in it)}]. A cue without a clip gets the stand-in figure for a few seconds. An
+    appearance never runs into the next one."""
+    av = edge.get("avatar") or {}
+    if not av.get("on"):
+        return []
+    cues = sorted(av.get("cues") or [], key=lambda c: c["time"])
+    total = E.total_seconds(edge["schedule"])
+    w, h = frame
+    still = None
+    out = []
+    for k, cue in enumerate(cues):
+        room = (cues[k + 1]["time"] if k + 1 < len(cues) else total) - cue["time"]
+        clip = cue.get("clip")
+        info = probe(clip) if clip and Path(clip).exists() else None
+        if info and info["video"] and info["seconds"] > 0:
+            secs = min(info["seconds"], room)
+            out.append({"time": float(cue["time"]), "seconds": secs, "profile": cue["profile"],
+                        "input": ["-t", f"{secs:.3f}", "-i", str(clip)], "sound": str(clip) if info["audio"] else None})
+        else:
+            if still is None:
+                still = tmp_dir / "avatar_placeholder.png"
+                E.avatar_placeholder((int(h * 0.6) // 2 * 2, h)).save(still)
+            secs = min(E.PLACEHOLDER_CUE_SEC, room)
+            out.append({"time": float(cue["time"]), "seconds": secs, "profile": cue["profile"],
+                        "input": ["-loop", "1", "-framerate", "25", "-t", f"{secs:.3f}", "-i", str(still)], "sound": None})
+    return out
+
+
+def _sound_cues(edge: dict, shows: list) -> list:
+    """What is heard at each cue: the avatar's own clip where her voice is in it, else the voiceover clip for that
+    moment, else (None) the placeholder tone."""
+    voice = edge.get("voiceover") or {}
+    by_time = {round(float(c["time"]), 3): dict(c) for c in (voice.get("cues") or [])} if voice.get("on") else {}
+    for s in shows:
+        key = round(s["time"], 3)
+        if s["sound"]:
+            by_time[key] = {"time": s["time"], "profile": s["profile"], "file": s["sound"]}
+        elif key not in by_time:
+            by_time[key] = {"time": s["time"], "profile": s["profile"], "file": None}
+    return [by_time[k] for k in sorted(by_time)]
+
+
+def _intro(edge: dict, tmp_dir: Path, run, frame: tuple):
+    """The intro screen as a clip (picture + sound) → (path, seconds), or None when it is off. It lasts as long as
+    the avatar's intro clip; without one, the stand-in figure for PLACEHOLDER_INTRO_SEC."""
+    intro = edge.get("intro") or {}
+    if not intro.get("on"):
+        return None
+    w, h = frame
+    thumbs = []
+    try:
+        from planner.data import get_nearest_thumbnail, load_all_catalogues
+        cats = load_all_catalogues()
+        thumbs = [get_nearest_thumbnail(cats, vid, float(t)) for vid, t in intro.get("thumbs") or []]
+    except Exception:          # noqa: BLE001 — the intro still works without thumbnails
+        thumbs = []
+    clip = intro.get("clip")
+    info = probe(clip) if clip and Path(clip).exists() else None
+    real = bool(info and info["video"] and info["seconds"] > 0)
+    secs = info["seconds"] if real else E.PLACEHOLDER_INTRO_SEC
+    card = tmp_dir / "intro_card.png"
+    E.intro_card(frame, [tuple(x) for x in intro.get("stats") or []], thumbs, placeholder=not real).save(card)
+    out = tmp_dir / "intro.mp4"
+    inputs = ["-loop", "1", "-framerate", "25", "-t", f"{secs:.3f}", "-i", str(card)]
+    if real:
+        ax, ay, aw, ah = E.intro_layout(frame)["avatar"]
+        inputs += ["-t", f"{secs:.3f}", "-i", str(clip)]
+        vf = (f"[1:v]scale={aw}:{ah}:force_original_aspect_ratio=decrease,setsar=1[av];"
+              f"[0:v][av]overlay=x={ax}+({aw}-w)/2:y={ay}+({ah}-h)/2:eof_action=pass,fps=25,format=yuv420p[v]")
+    else:
+        vf = "[0:v]fps=25,format=yuv420p[v]"
+    if real and info["audio"]:
+        af = f"[1:a:0]{AUDIO_FMT}[a]"
+    else:
+        inputs += ["-f", "lavfi", "-t", f"{secs:.3f}", "-i", "anullsrc=r=44100:cl=stereo"]
+        af = f"[{2 if real else 1}:a:0]{AUDIO_FMT}[a]"
+    run(["ffmpeg", "-y", *inputs, "-filter_complex", vf + ";" + af, "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}",
+         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16", "-c:a", "aac", "-b:a", "192k", str(out)])
+    return out, secs
+
+
+def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, frame_height: int,
+           frame_width: int = 640) -> None:
+    """combined_video (the plan's picture, no sound) → output_path with the avatar, the timer overlay and the mixed
+    sound, after the intro screen when there is one. sources: the renderer's SourceResolver (songs are read from
+    this machine or streamed from Drive, like the videos); run: its ffmpeg runner."""
     from render_preview import get_track_raw_source
     edge = plan["edge"]
     sched = edge["schedule"]
     total = E.total_seconds(sched)
     tmp_dir = Path(tmp_dir)
-    lst, _size = E.write_overlay(sched, tmp_dir / "overlay", frame_height)
+    W, H = int(frame_width), int(frame_height)
+    lst, _size = E.write_overlay(sched, tmp_dir / "overlay", H)
     x, y = E.overlay_xy((edge.get("overlay") or {}).get("corner", "top-left"))
     inputs = ["-i", str(combined_video), "-f", "concat", "-safe", "0", "-i", str(lst)]
-    filters = [f"[1:v]format=rgba[ov]", f"[0:v][ov]overlay=x={x}:y={y}:eof_action=pass[v]"]
-    idx, layers = 2, []
+    filters, cur, idx, layers = [], "[0:v]", 2, []
+
+    # 👩 the avatar: in a framed box in a corner, or as the right half with the footage's middle on the left
+    av = edge.get("avatar") or {}
+    shows = _appearances(edge, tmp_dir, (W, H))
+    if shows:
+        split = av.get("mode") == "split"
+        when = lambda s: f"between(t,{s['time']:.3f},{s['time'] + s['seconds']:.3f})"      # noqa: E731
+        if split:
+            filters.append(f"{cur}split[m0][m1]")
+            filters.append(f"[m1]crop={W // 2}:{H}:{W // 4}:0,pad={W}:{H}:0:0:black[half]")
+            filters.append(f"[m0][half]overlay=0:0:enable='{'+'.join(when(s) for s in shows)}'[sp]")
+            cur = "[sp]"
+            shape = f"scale={W // 2}:{H}:force_original_aspect_ratio=increase,crop={W // 2}:{H}"
+            ax, ay = str(W // 2), "0"
+        else:
+            bh = int(H * E.AVATAR_CORNER_SHARE) // 2 * 2
+            shape = f"scale=-2:{bh},pad=iw+4:ih+4:2:2:white"
+            ax, ay = E.overlay_xy(av.get("corner", "bottom-right"))
+        for k, s in enumerate(shows):
+            inputs += s["input"]
+            filters.append(f"[{idx}:v]{shape},setsar=1,fps=25,setpts=PTS-STARTPTS+{s['time']:.3f}/TB[av{k}]")
+            filters.append(f"{cur}[av{k}]overlay=x={ax}:y={ay}:enable='{when(s)}':eof_action=pass[a{k}v]")
+            cur = f"[a{k}v]"
+            idx += 1
+    inputs_timer = 1
+    filters += [f"[{inputs_timer}:v]format=rgba[ov]", f"{cur}[ov]overlay=x={x}:y={y}:eof_action=pass,fps=25,format=yuv420p[mainv]"]
 
     voice = edge.get("voiceover") or {}
+    talking = bool(voice.get("on") or shows)
     parts = edge.get("playlist") or []
     if parts:
         for k, part in enumerate(parts):
@@ -68,7 +196,7 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
             # (":a:0" — an .m4a may carry its cover art as a second stream)
             filters.append(f"[{idx}:a:0]{AUDIO_FMT},atrim=0:{float(part['play']):.3f},asetpts=PTS-STARTPTS[p{k}]")
             idx += 1
-        vol = float(voice.get("music_volume", E.MUSIC_UNDER_VOICE)) if voice.get("on") else 1.0
+        vol = float(voice.get("music_volume", E.MUSIC_UNDER_VOICE)) if talking else 1.0
         filters.append("".join(f"[p{k}]" for k in range(len(parts)))
                        + f"concat=n={len(parts)}:v=0:a=1,volume={vol:.3f}[music]")
         layers.append("[music]")
@@ -79,8 +207,8 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
         filters.append(f"[{idx}:a:0]{AUDIO_FMT},volume={float(beat.get('volume', 1.0)):.3f}[beat]")
         layers.append("[beat]")
         idx += 1
-    if voice.get("on"):
-        vt = _voice_track(voice.get("cues") or [], total, tmp_dir, run)
+    if talking:
+        vt = _voice_track(_sound_cues(edge, shows), total, tmp_dir, run)
         if vt is not None:
             inputs += ["-i", str(vt)]
             filters.append(f"[{idx}:a:0]{AUDIO_FMT}[voice]")
@@ -88,11 +216,24 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
             idx += 1
     if not layers:                                         # nothing to hear (shouldn't happen: no songs → beat on)
         inputs += ["-f", "lavfi", "-t", f"{total:.3f}", "-i", "anullsrc=r=44100:cl=stereo"]
-        filters.append(f"[{idx}:a:0]anull[a]")
+        filters.append(f"[{idx}:a:0]{AUDIO_FMT}[maina]")
+        idx += 1
     elif len(layers) == 1:
-        filters.append(f"{layers[0]}alimiter=limit=0.95[a]")
+        filters.append(f"{layers[0]}alimiter=limit=0.95,apad,atrim=0:{total:.3f}[maina]")
     else:
-        filters.append("".join(layers) + f"amix=inputs={len(layers)}:normalize=0:duration=longest,alimiter=limit=0.95[a]")
+        filters.append("".join(layers) + f"amix=inputs={len(layers)}:normalize=0:duration=longest,alimiter=limit=0.95,"
+                                         f"apad,atrim=0:{total:.3f}[maina]")
+    length = total
+    intro = _intro(edge, tmp_dir, run, (W, H))
+    if intro:                                              # 🎬 the intro screen first, then the compilation
+        inputs += ["-i", str(intro[0])]
+        filters.append(f"[mainv]trim=0:{total:.3f},setpts=PTS-STARTPTS[mv]")
+        filters.append(f"[{idx}:v]fps=25,format=yuv420p,setsar=1[iv]")
+        filters.append(f"[{idx}:a:0]{AUDIO_FMT}[ia]")
+        filters.append("[iv][ia][mv][maina]concat=n=2:v=1:a=1[v][a]")
+        length += intro[1]
+    else:
+        filters += ["[mainv]null[v]", "[maina]anull[a]"]
     run(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]",
-         "-t", f"{total:.3f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+         "-t", f"{length:.3f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
          "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output_path])

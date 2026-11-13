@@ -242,3 +242,115 @@ def test_the_page_compiles_and_comes_back_to_its_setup(monkeypatch):
         assert not errors(at), errors(at)
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def _seconds(path):
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+                         capture_output=True, text=True, check=True)
+    return float(out.stdout)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_the_avatar_pops_up_and_the_intro_screen_comes_first(tmp_path, monkeypatch):
+    """👩 Her clip (picture + voice) in a corner box or as the right half of a split screen, the stand-in figure
+    where there is no clip yet, and the 🎬 intro screen (as long as her intro clip) before the compilation."""
+    import edge_mode as E
+    import render_preview as RP
+    proxies = tmp_path / "proxies"
+    proxies.mkdir()
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x003000:s=320x180:d=30:r=25",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(proxies / "vid_a.mp4")], check=True)
+    monkeypatch.setattr(RP, "PROXY_DIR", proxies)
+    monkeypatch.setattr(RP, "streaming_available", lambda: False)
+
+    def clip(name, colour, seconds, sound=True):                  # an "avatar" clip: a plain colour, portrait, a tone for her voice
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"color=c={colour}:s=180x320:d={seconds}:r=25"]
+        cmd += ["-f", "lavfi", "-i", f"sine=frequency=880:duration={seconds}", "-af", "volume=6"] if sound else []
+        subprocess.run(cmd + ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-shortest",
+                              str(tmp_path / name)], check=True)
+        return str(tmp_path / name)
+    talk, hello = clip("talk.mp4", "yellow", 4), clip("intro.mp4", "magenta", 5)
+    sched = [{"index": 0, "round": 1, "profile": "wait", "start": 0.0, "end": 20.0},
+             {"index": 1, "round": 1, "profile": "extra", "start": 20.0, "end": 40.0}]
+    timeline = [{"track_time": [k * 5.0, k * 5.0 + 5.0],
+                 "scenes": [{"chain": [{"video_id": "vid_a", "scene_id": 0, "clip_start_sec": 1.0 + k,
+                                        "clip_duration_sec": 5.0}]}]} for k in range(8)]
+
+    def plan(mode, intro):
+        return {"track_id": "edge_test", "selected_videos": ["vid_a"], "timeline": timeline, "track_duration_sec": 40.0,
+                "edge": {"difficulty": "chill", "rounds": 1, "schedule": sched, "playlist": [],
+                         "beat": {"on": True, "volume": 1.0}, "voiceover": {"on": False, "cues": []},
+                         "overlay": {"corner": "top-left"},
+                         "avatar": {"on": True, "mode": mode, "corner": "bottom-right",
+                                    "cues": [{"time": 0.0, "profile": "wait", "clip": talk},
+                                             {"time": 20.0, "profile": "extra", "clip": None}]},
+                         "intro": intro}}
+    yellow = lambda p: p[0] > 170 and p[1] > 170 and p[2] < 90          # noqa: E731
+    green = lambda p: max(p) < 90 and p[1] > p[0] + 20 and p[1] > p[2] + 20                                       # noqa: E731
+    # in a corner: her box bottom right while her clip runs, the footage back after it; her voice is heard
+    out = tmp_path / "corner.mp4"
+    RP.render_plan_dict(plan("corner", {"on": False}), str(out), quick=True)
+    assert abs(_seconds(out) - 40.0) < 0.3
+    bh = int(360 * E.AVATAR_CORNER_SHARE)
+    spot = (640 - int(360 * 0.035) - 30, 360 - int(360 * 0.035) - bh // 2)
+    assert yellow(_pixel(out, 2.0, *spot)) and green(_pixel(out, 6.0, *spot))
+    assert green(_pixel(out, 2.0, 320, 100))                             # the middle of the frame is still footage
+    assert _level(out, 1, 3.5) > 0.05 > _level(out, 6, 18)               # her tone during the clip, quiet Wait after
+    assert not green(_pixel(out, 21.0, *spot)) and green(_pixel(out, 25.0, *spot))      # the stand-in figure, 3 s
+    # split screen: she is the right half, the footage keeps the left
+    out = tmp_path / "split.mp4"
+    RP.render_plan_dict(plan("split", {"on": False}), str(out), quick=True)
+    assert yellow(_pixel(out, 2.0, 480, 300)) and yellow(_pixel(out, 2.0, 330, 40)) and green(_pixel(out, 2.0, 300, 300))
+    assert green(_pixel(out, 6.0, 480, 300))
+    assert _pixel(out, 1.0, int(360 * 0.035) + E.overlay_size(360)[0] // 2, int(360 * 0.035) + 4)[0] > 150      # the timer stays on top
+    # the intro screen: as long as her intro clip, she on the left, then the compilation with its timer from 0
+    intro = {"on": True, "clip": hello, "stats": [["Difficulty", "Chill"], ["Rounds", "1"], ["Time", "0:40"]], "thumbs": []}
+    out = tmp_path / "intro.mp4"
+    RP.render_plan_dict(plan("corner", intro), str(out), quick=True)
+    assert abs(_seconds(out) - 45.0) < 0.3
+    ax, ay, aw, ah = E.intro_layout((640, 360))["avatar"]
+    r, g, b = _pixel(out, 2.0, ax + aw // 2, ay + ah // 2)
+    assert r > 170 and b > 170 and g < 90                                # her (magenta) intro clip in her box
+    assert max(_pixel(out, 2.0, 630, 350)) < 60 and _level(out, 1, 4) > 0.05           # the dark card, her voice
+    assert yellow(_pixel(out, 7.0, *spot)) and _pixel(out, 6.0, int(360 * 0.035) + E.overlay_size(360)[0] // 2, int(360 * 0.035) + 4)[0] > 150
+    # no intro clip yet: the stand-in for 8 s
+    out = tmp_path / "intro_stand_in.mp4"
+    RP.render_plan_dict(plan("corner", {**intro, "clip": None}), str(out), quick=True)
+    assert abs(_seconds(out) - 48.0) < 0.3 and _level(out, 1, 7) < 0.002
+
+
+def test_compile_carries_the_avatar_and_the_intro(monkeypatch, tmp_path):
+    out = _timelines(monkeypatch)
+    try:
+        import planner.edge as PE
+        monkeypatch.setattr(PE, "avatar_dir", lambda: tmp_path / "avatar")
+        for slot in ("intro", "fast"):
+            (tmp_path / "avatar" / slot).mkdir(parents=True)
+            (tmp_path / "avatar" / slot / f"{slot}_1.mp4").write_bytes(b"x")
+        res = PE.compile_edge([], VIDS, "chill", 3, avatar=True, avatar_mode="split", intro=True)
+        edge = res["plan"]["edge"]
+        assert edge["avatar"]["on"] and edge["avatar"]["mode"] == "split" and len(edge["avatar"]["cues"]) == 18
+        fast = [c for c in edge["avatar"]["cues"] if c["profile"] == "fast"]
+        assert all(c["clip"].endswith("fast_1.mp4") for c in fast) and edge["avatar"]["placeholders"] == ["wait", "slow", "medium", "extra", "stop"]
+        assert edge["intro"]["on"] and edge["intro"]["clip"].endswith("intro_1.mp4")
+        assert edge["intro"]["stats"] == [["Difficulty", "Chill"], ["Rounds", "3"], ["Time", "6:00"]]
+        assert 1 <= len(edge["intro"]["thumbs"]) <= 6 and {v for v, _ in edge["intro"]["thumbs"]} <= set(VIDS)
+        off = PE.compile_edge([], VIDS, "chill", 3)["plan"]["edge"]
+        assert not off["avatar"]["on"] and off["avatar"]["cues"] == [] and not off["intro"]["on"]
+        # the page: the avatar's options show and compile
+        from tests.apptest_util import errors, page_app
+        at = page_app("pages/1_Compilation_Planner.py", timeout=300)
+        at.session_state["planner_mode"] = "⏱️ Edge Mode"
+        at.run()
+        at.toggle(key="edge_avatar").set_value(True)
+        at.toggle(key="edge_intro").set_value(True)
+        at.run()
+        assert not errors(at), errors(at)
+        at.radio(key="edge_avatar_mode").set_value("split")
+        at.run()
+        at.button(key="edge_go").click().run()
+        assert not errors(at), errors(at)
+        e = at.session_state["edge_result"]["plan"]["edge"]
+        assert e["avatar"]["on"] and e["avatar"]["mode"] == "split" and e["intro"]["on"]
+    finally:
+        shutil.rmtree(out, ignore_errors=True)

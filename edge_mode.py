@@ -394,3 +394,97 @@ def describe(difficulty: str, rounds: int) -> str:
     return (f"{rounds} rounds × {int(r // 60)}:{int(r % 60):02d} = {int(tot // 60)}:{int(tot % 60):02d} · "
             + " → ".join(PROFILES[p]["label"].title() for p in (round_phases(difficulty) if difficulty != "hard" else
                                                                  ["wait"])) + (" → 12 at random → Extra → Stop" if difficulty == "hard" else ""))
+
+
+# ---------------------------------------------------------------------------
+# The avatar and the intro screen
+# ---------------------------------------------------------------------------
+
+VIDEO_EXT = (".mp4", ".mov", ".webm", ".m4v")
+AVATAR_MODES = {"corner": "🪟 In a corner", "split": "◧ Split screen"}
+AVATAR_SLOTS = ["intro"] + ORDER                   # <folder>/intro/ and one folder per phase
+AVATAR_CORNER_SHARE = 0.42                         # her box's height, as a share of the frame's
+PLACEHOLDER_CUE_SEC = 3.0                          # how long the stand-in figure shows at a cue
+PLACEHOLDER_INTRO_SEC = 8.0                        # the intro's length until her intro clip exists
+
+
+def clip_files(folder, slots=None, exts=VIDEO_EXT) -> dict:
+    """{slot: [files]} — <folder>/<slot>/* with one of the extensions (the avatar's clips: intro + one per phase)."""
+    folder = Path(folder)
+    out = {}
+    for p in (slots or AVATAR_SLOTS):
+        d = folder / p
+        out[p] = sorted(f for f in d.iterdir() if f.suffix.lower() in exts) if d.is_dir() else []
+    return out
+
+
+def avatar_cues(sched: list, files: dict, seed: int = 0) -> list:
+    """One appearance at the start of every phase: [{"time", "profile", "clip" (None = no clip yet → the stand-in
+    figure)}] — a phase's clips take turns, like the voiceover's. (Daryl's own cue list replaces this rule.)"""
+    return [{"time": c["time"], "profile": c["profile"], "clip": c["file"]}
+            for c in voice_cues(sched, files, seed + 101)]
+
+
+def avatar_placeholder(size: tuple, label: str = "AVATAR"):
+    """A stand-in for the avatar until her clips exist: a plain figure on a dark card, with a label."""
+    from PIL import Image, ImageDraw
+    w, h = size
+    img = Image.new("RGB", (w, h), (38, 34, 48))
+    d = ImageDraw.Draw(img)
+    r = int(min(w, h) * 0.17)
+    cx, cy = w // 2, int(h * 0.36)
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(150, 140, 170))
+    d.pieslice((cx - int(r * 2.1), cy + int(r * 1.25), cx + int(r * 2.1), cy + int(r * 5.4)), 180, 360, fill=(150, 140, 170))
+    f = _font(max(10, int(min(w, h) * 0.09)), bold=True)
+    box = d.textbbox((0, 0), label, font=f)
+    d.text((cx - (box[2] + box[0]) / 2, h - (box[3] - box[1]) - int(h * 0.07)), label, font=f, fill=(235, 230, 245))
+    d.rectangle((0, 0, w - 1, h - 1), outline=(235, 230, 245), width=max(1, w // 120))
+    return img
+
+
+def intro_layout(size: tuple) -> dict:
+    """Where things sit on the intro screen: the avatar's box on the left, the settings and thumbnails on the right."""
+    w, h = size
+    m = int(h * 0.07)
+    box_w = int(w * 0.40) // 2 * 2
+    return {"avatar": (m, m, box_w, (h - 2 * m) // 2 * 2), "text_x": m + box_w + int(w * 0.05), "margin": m}
+
+
+def intro_card(size: tuple, stats: list, thumbs: list = (), title: str = "EDGE MODE", placeholder: bool = False):
+    """The intro screen without the avatar's video: a dark background, the title, the chosen settings
+    (stats: [(label, value)] — difficulty, rounds, total time) and a grid of thumbnails from the videos in the
+    compilation (thumbs: PIL images). placeholder: draw the stand-in figure where she will be."""
+    from PIL import Image, ImageDraw
+    w, h = size
+    lay = intro_layout(size)
+    img = Image.new("RGB", (w, h), (16, 14, 22))
+    d = ImageDraw.Draw(img)
+    ax, ay, aw, ah = lay["avatar"]
+    if placeholder:
+        img.paste(avatar_placeholder((aw, ah)), (ax, ay))
+    else:
+        d.rectangle((ax, ay, ax + aw - 1, ay + ah - 1), fill=(0, 0, 0))
+    x, y = lay["text_x"], lay["margin"]
+    ft = _font(int(h * 0.105), bold=True)
+    d.text((x, y), title, font=ft, fill=(255, 255, 255))
+    y += int(h * 0.135)
+    d.rectangle((x, y, x + int(w * 0.12), y + max(2, h // 120)), fill=RING)
+    y += int(h * 0.045)
+    fl, fv = _font(int(h * 0.045)), _font(int(h * 0.075), bold=True)
+    col = (w - x - lay["margin"]) // max(len(stats), 1)
+    for k, (label, value) in enumerate(stats):
+        d.text((x + k * col, y), str(label).upper(), font=fl, fill=(170, 165, 185))
+        d.text((x + k * col, y + int(h * 0.06)), str(value), font=fv, fill=RING)
+    y += int(h * 0.19)
+    thumbs = [t for t in thumbs if t is not None][:6]
+    if thumbs:
+        gap = max(2, int(w * 0.008))
+        tw = (w - x - lay["margin"] - 2 * gap) // 3
+        th = min(int(tw * 9 / 16), (h - lay["margin"] - y - gap) // 2)
+        for k, t in enumerate(thumbs):
+            t = t.convert("RGB")
+            s = max(tw / t.width, th / t.height)
+            t = t.resize((max(tw, int(t.width * s)), max(th, int(t.height * s))))
+            lx, ty = (t.width - tw) // 2, (t.height - th) // 2
+            img.paste(t.crop((lx, ty, lx + tw, ty + th)), (x + (k % 3) * (tw + gap), y + (k // 3) * (th + gap)))
+    return img

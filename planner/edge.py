@@ -28,13 +28,19 @@ from library_common import format_mmss
 
 RESULT_KEY = "edge_result"
 KEPT = {"edge_playlist": [], "edge_rounds": 3, "edge_difficulty": "chill", "edge_voice": False, "edge_beat": False,
-        "edge_corner": "top-left", "edge_max_videos": 0, "edge_quick": True, "edge_stream": True, "edge_render_name": ""}
+        "edge_corner": "top-left", "edge_max_videos": 0, "edge_avatar": False, "edge_avatar_mode": "corner",
+        "edge_avatar_corner": "bottom-right", "edge_intro": False, "edge_quick": True, "edge_stream": True, "edge_render_name": ""}
 KEPT_IF_SET = tuple("ce_" + k for k in ("actors", "tags", "hair", "gg", "new", "minlen", "exclude"))
 
 
 def voice_dir() -> Path:
     """Where the voiceover clips live: <data>/edge_voiceover/<phase>/ — beside the catalogue, on this machine."""
     return Path(CATALOGUE_DIR).parent / "edge_voiceover"
+
+
+def avatar_dir() -> Path:
+    """Where the avatar's clips live: <data>/edge_avatar/intro/ and <data>/edge_avatar/<phase>/."""
+    return Path(CATALOGUE_DIR).parent / "edge_avatar"
 
 
 # ---------------------------------------------------------------------------
@@ -79,11 +85,15 @@ def _place(timeline: list, offset: float, play: float, part: int, track_id: str)
 
 def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int, *, voiceover: bool = False,
                  beat: bool = False, seed: int = 0, corner: str = "top-left", max_videos: int = 0,
-                 progress=None) -> dict:
+                 avatar: bool = False, avatar_mode: str = "corner", avatar_corner: str = "bottom-right",
+                 intro: bool = False, progress=None) -> dict:
     """The Edge plan. track_ids: the playlist in playing order ([] = no song: the generated beat is the track, and
     the beat sound is on whatever `beat` says). The footage is matched 🎯 Movement only — each song on the 📐 lines
     from its music; a song's later plays (and later songs) leave out the clips already used, as long as the library
-    can still fill the time without them. progress(done, total, text)."""
+    can still fill the time without them. avatar: she appears at the start of every phase (her clip for that phase,
+    voice included; the stand-in figure until there is one) — in a corner or as half a split screen. intro: the
+    intro screen before the compilation (her intro clip beside the settings and thumbnails). progress(done, total,
+    text)."""
     import core.story_matcher as SMX
     sched = E.schedule(difficulty, rounds, seed)
     total = E.total_seconds(sched)
@@ -140,6 +150,17 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     files = E.voice_files(voice_dir()) if voiceover else {}
     cues = E.voice_cues(sched, files, seed) if voiceover else []
     missing_voice = sorted({c["profile"] for c in cues if not c["file"]}, key=E.ORDER.index)
+    av_files = E.clip_files(avatar_dir()) if (avatar or intro) else {}
+    av_cues = E.avatar_cues(sched, av_files, seed) if avatar else []
+    missing_avatar = sorted({c["profile"] for c in av_cues if not c["clip"]}, key=E.ORDER.index)
+    intro_clips = av_files.get("intro") or []
+    seen, thumbs = {}, []
+    for e in timeline:                                    # the intro's thumbnails: the six most used videos
+        for s_ in e["scenes"]:
+            for link in s_["chain"]:
+                first = seen.setdefault(link["video_id"], [0.0, float(link["clip_start_sec"])])
+                first[0] += float(link["clip_duration_sec"])
+    thumbs = [[vid, t] for vid, (_secs, t) in sorted(seen.items(), key=lambda kv: -kv[1][0])[:6]]
     name = f"edge_{difficulty}_{len(sched) and sched[-1]['round']}r" + ("_" + track_ids[0] if track_ids else "_beat")
     plan = {
         **base["plan"],
@@ -158,11 +179,18 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             "voiceover": {"on": bool(voiceover), "music_volume": E.MUSIC_UNDER_VOICE, "cues": cues,
                           "placeholders": missing_voice},
             "overlay": {"corner": corner, "fps": E.OVERLAY_FPS},
+            "avatar": {"on": bool(avatar), "mode": avatar_mode if avatar_mode in E.AVATAR_MODES else "corner",
+                       "corner": avatar_corner, "cues": av_cues, "placeholders": missing_avatar},
+            "intro": {"on": bool(intro), "clip": str(random.Random(seed).choice(intro_clips)) if intro_clips else None,
+                      "stats": [["Difficulty", E.DIFFICULTIES[difficulty].split(" ", 1)[-1]],
+                                ["Rounds", str(int(sched[-1]["round"]) if sched else 0)],
+                                ["Time", format_mmss(total)]],
+                      "thumbs": thumbs},
         },
     }
     return {"plan": plan, "summary": SMX.plan_summary(timeline), "notes": notes, "shortfall": shortfall,
             "schedule": sched, "parts": parts, "video_ids": list(video_ids), "track_ids": track_ids,
-            "missing_voice": missing_voice, "made": time.strftime("%H:%M:%S")}
+            "missing_voice": missing_voice, "missing_avatar": missing_avatar, "made": time.strftime("%H:%M:%S")}
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +217,8 @@ def _do_pending_compile() -> None:
                            int(ss.get("edge_rounds", 3)), voiceover=bool(ss.get("edge_voice")),
                            beat=bool(ss.get("edge_beat")), seed=int(ss.get("edge_seed", 0)),
                            corner=ss.get("edge_corner", "top-left"), max_videos=int(ss.get("edge_max_videos", 0) or 0),
+                           avatar=bool(ss.get("edge_avatar")), avatar_mode=ss.get("edge_avatar_mode", "corner"),
+                           avatar_corner=ss.get("edge_avatar_corner", "bottom-right"), intro=bool(ss.get("edge_intro")),
                            progress=lambda d, t, txt: bar.progress(min(d / max(t, 1), 1.0), text=f"⏱️ Compiling… {txt}"))
     except Exception as e:          # noqa: BLE001
         bar.empty()
@@ -199,31 +229,42 @@ def _do_pending_compile() -> None:
     ss.pop("edge_render", None)
 
 
-def _voice_manager() -> None:
-    files = E.voice_files(voice_dir())
+def _clip_manager(kind: str) -> None:
+    """Add / remove the clips of the 🎙️ voiceover (kind "voice") or the 👩 avatar (kind "avatar")."""
+    if kind == "voice":
+        folder, slots, exts, files = voice_dir(), E.ORDER, E.VOICE_EXT, E.voice_files(voice_dir())
+        title, empty = "🎙️ Voiceover clips", "placeholder tone"
+        tip = ("A clip plays at the start of each phase, picked from that phase's clips in turn. A phase with no clip "
+               "yet gets a short placeholder tone, so the timing can be checked now.")
+    else:
+        folder, slots, exts, files = avatar_dir(), E.AVATAR_SLOTS, E.VIDEO_EXT, E.clip_files(avatar_dir())
+        title, empty = "👩 Avatar clips", "stand-in figure"
+        tip = ("Her videos, voice included: Intro for the intro screen, and one or more for each phase (she appears at "
+               "the start of the phase, the clips taking turns). Until a clip is added a stand-in figure shows where "
+               "and when she will be.")
     have = sum(len(v) for v in files.values())
-    with st.expander(f"🎙️ Voiceover clips — {have} added" + ("" if have else " (placeholder tones until you add yours)")):
-        st.caption("A clip plays at the start of each phase, picked from that phase's clips in turn. A phase with no "
-                   "clip yet gets a short placeholder tone, so the timing can be checked now.")
+    name = lambda p: "Intro" if p == "intro" else E.PROFILES[p]["label"].title()      # noqa: E731
+    with st.expander(f"{title} — {have} added" + ("" if have else " (placeholders until you add yours)")):
+        st.caption(tip)
         c = st.columns([1.3, 3, 1])
-        prof = c[0].selectbox("Phase", E.ORDER, format_func=lambda p: E.PROFILES[p]["label"].title(), key="edge_voice_phase")
-        up = c[1].file_uploader("Add clips for this phase", type=[x.strip(".") for x in E.VOICE_EXT],
-                                accept_multiple_files=True, key=f"edge_voice_up_{st.session_state.get('edge_voice_n', 0)}")
-        if c[2].button("➕ Add", key="edge_voice_add", width="stretch", disabled=not up):
-            d = voice_dir() / prof
+        slot = c[0].selectbox("For", slots, format_func=name, key=f"edge_{kind}_slot")
+        n = st.session_state.get(f"edge_{kind}_n", 0)
+        up = c[1].file_uploader("Add clips", type=[x.strip(".") for x in exts], accept_multiple_files=True,
+                                key=f"edge_{kind}_up_{n}")
+        if c[2].button("➕ Add", key=f"edge_{kind}_add", width="stretch", disabled=not up):
+            d = folder / slot
             d.mkdir(parents=True, exist_ok=True)
             for f in up:
                 (d / Path(f.name).name).write_bytes(f.getvalue())
-            st.session_state["edge_voice_n"] = st.session_state.get("edge_voice_n", 0) + 1
+            st.session_state[f"edge_{kind}_n"] = n + 1
             st.rerun()
-        for p in E.ORDER:
+        for p in slots:
             names = files[p]
-            st.markdown(f"**{E.PROFILES[p]['label'].title()}** — " + (f"{len(names)} clip{'s' if len(names) != 1 else ''}"
-                                                                       if names else "placeholder tone"))
+            st.markdown(f"**{name(p)}** — " + (f"{len(names)} clip{'s' if len(names) != 1 else ''}" if names else empty))
             for f in names:
                 r = st.columns([5, 1])
                 r[0].caption(f.name)
-                if r[1].button("🗑️", key=f"edge_voice_del_{p}_{f.name}", help="Remove this clip"):
+                if r[1].button("🗑️", key=f"edge_{kind}_del_{p}_{f.name}", help="Remove this clip"):
                     f.unlink(missing_ok=True)
                     st.rerun()
 
@@ -265,7 +306,28 @@ def _setup(rows: dict, have_tl: set) -> None:
     t[1].toggle("🎙️ Voiceover", key="edge_voice",
                 help="A voiceover clip at the start of every phase. The songs play at half volume so it is heard.")
     if st.session_state.get("edge_voice"):
-        _voice_manager()
+        _clip_manager("voice")
+    a = st.columns(2)
+    a[0].toggle("👩 Avatar", key="edge_avatar",
+                help="She pops onto the screen at the start of every phase and reads her line — her voice comes from "
+                     "her clip, and the songs play at half volume. (Your own list of cues and timings will replace "
+                     "'the start of every phase'.)")
+    a[1].toggle("🎬 Intro screen", key="edge_intro",
+                help="Before the compilation: the avatar giving her intro, beside the difficulty, rounds, total time "
+                     "and thumbnails of the videos used. It lasts as long as her intro clip (8 s with the stand-in).")
+    if st.session_state.get("edge_avatar"):
+        m = st.columns(2)
+        mode = m[0].radio("She appears", list(E.AVATAR_MODES), key="edge_avatar_mode", horizontal=True,
+                          format_func=lambda k: E.AVATAR_MODES[k],
+                          help="In a corner: a framed box over the footage. Split screen: she takes the right half, "
+                               "the footage's middle the left, for as long as her clip runs.")
+        if mode == "corner":
+            m[1].selectbox("Her corner", [k for k in E.CORNERS if k != "centre"], key="edge_avatar_corner",
+                           format_func=lambda k: E.CORNERS[k])
+            if st.session_state.get("edge_avatar_corner") == st.session_state.get("edge_corner"):
+                st.warning("The avatar and the timer are set to the same corner — she will sit under the timer.")
+    if st.session_state.get("edge_avatar") or st.session_state.get("edge_intro"):
+        _clip_manager("avatar")
     vids = PC._video_filters("ce_", rows, have_tl,
                              f"🎬 Videos / tags — optional (the best fit from all {len(have_tl)} unless you narrow it)")
     ranges = LC.library_ranges()
@@ -407,6 +469,13 @@ def _used_line(res: dict) -> str:
     if e["voiceover"]["on"]:
         bits.append("🎙️ voiceover" + (" (placeholder tones: " + ", ".join(E.PROFILES[p]["label"].title() for p in res["missing_voice"]) + ")"
                                       if res["missing_voice"] else ""))
+    av = e.get("avatar") or {}
+    if av.get("on"):
+        bits.append(f"👩 avatar ({'split screen' if av['mode'] == 'split' else av['corner'].replace('-', ' ')})"
+                    + (" — stand-in figure for: " + ", ".join(E.PROFILES[p]["label"].title() for p in av["placeholders"])
+                       if av.get("placeholders") else ""))
+    if (e.get("intro") or {}).get("on"):
+        bits.append("🎬 intro screen" + ("" if e["intro"].get("clip") else " (stand-in figure, 8 s)"))
     return " · ".join(bits)
 
 

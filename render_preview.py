@@ -457,7 +457,7 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
             if notice:
                 notice("⏱️ Adding the timer and mixing the sound…")
             with_fallback(track_raws, lambda: edge_render.finish(plan, combined_video, output_path, sources,
-                                                                 tmp_dir, run, PREVIEW_HEIGHT))
+                                                                 tmp_dir, run, PREVIEW_HEIGHT, PREVIEW_WIDTH))
         else:
             # Mux in the track's audio
             print("Muxing audio...")
