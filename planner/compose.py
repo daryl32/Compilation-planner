@@ -25,11 +25,41 @@ import library_common as LC
 import recipes as RC
 import section_cuts as SCUT
 import section_types as ST
+import settings_store as SSTORE
 from config import AUDIO_DIR, PLANS_DIR, PREVIEW_DIR
 from library_common import format_mmss
 
 RESULT_KEY = "compose_result"
 WAYS = ["🎵 By song", "🎬 By video", "✍️ By text"]
+
+# ⚙️ The new matcher's settings, kept while their widgets aren't drawn (the result page shows none of them, and
+# Streamlit forgets a widget's value on any run it isn't drawn — "← Change" came back to everything reset, 13 Nov).
+# settings_store.keep hands them back at the top of every run.
+KEPT = {"compose_way": WAYS[0], "compose_cuts": "sections", "compose_vocal_rule": True, "compose_split": False,
+        "compose_max_videos": 0, "compose_music_story": 0.5, "compose_smooth": 0.5, "compose_min_clip": 0.0,
+        "compose_punch": 0.0, "compose_movement_only": False, "compose_quick": True, "compose_stream": True,
+        "compose_render_name": "",
+        **{"compose_lab_" + k: False for k in ("stem", "phrase", "flow", "shot", "join", "min_lines")}}
+# …and the filters and picks, which have no fixed default (their ranges come from the library): kept once set
+KEPT_IF_SET = tuple(ns + k for ns in ("cs_", "cv_") for k in ("actors", "tags", "hair", "gg", "new", "minlen", "exclude")) \
+    + ("cs_q", "cs_bpm", "cs_len", "cs_energy", "cs_sort", "cs_mapped", "cs_track", "cv_start", "cv_track", "cv_songs_for")
+
+
+def _still_there(key: str, options) -> None:
+    """Before a multiselect is drawn: a kept pick that is no longer on offer (a video filtered out, a tag gone)
+    is dropped, so the widget never sees a value outside its options."""
+    v = st.session_state.get(key)
+    if v:
+        options = set(options)
+        st.session_state[key] = [x for x in v if x in options]
+
+
+def _in_range(key: str, lo, hi) -> None:
+    """Before a range slider is drawn: a kept range is brought inside today's limits (the library grew or shrank)."""
+    v = st.session_state.get(key)
+    if isinstance(v, (tuple, list)) and len(v) == 2:
+        a, b = min(max(v[0], lo), hi), min(max(v[1], lo), hi)
+        st.session_state[key] = (min(a, b), max(a, b))
 ENERGY_BANDS = {"Any": None, "Calm": (0.0, 0.33), "Medium": (0.33, 0.66), "Dynamic": (0.66, 1.01)}
 
 
@@ -99,6 +129,9 @@ def _video_filters(ns: str, rows: dict, have_tl: set, label: str) -> list:
     cast = LC.video_cast()
     actors = LC.all_actors()
     tags = sorted({t for v in rows.values() for t in _video_tags(v)}, key=str.lower)
+    _still_there(ns + "actors", actors)
+    _still_there(ns + "tags", tags)
+    _still_there(ns + "exclude", rows)
     with st.expander(label, expanded=False):
         c = st.columns([2, 2, 1.2, 1.2])
         pick_actors = c[0].multiselect("👤 Actors", actors, key=ns + "actors")
@@ -667,9 +700,11 @@ def _track_finder(ns: str, summaries: dict) -> str | None:
         q = c[0].text_input("Find a track", placeholder="part of a name", key=ns + "q")
         bpms = [s["bpm"] for s in summaries.values() if s["bpm"]]
         lo_b, hi_b = (int(min(bpms)) - 1, int(max(bpms)) + 1) if bpms else (60, 200)
+        _in_range(ns + "bpm", lo_b, hi_b)
         bpm_rng = c[1].slider("Tempo (BPM)", lo_b, hi_b, (lo_b, hi_b), key=ns + "bpm")
         durs = [s["duration"] for s in summaries.values()]
         hi_m = int(max(durs) // 60) + 1 if durs else 10
+        _in_range(ns + "len", 0, hi_m)
         len_rng = c[2].slider("Length (min)", 0, hi_m, (0, hi_m), key=ns + "len")
         energy = c[3].selectbox("Energy", list(ENERGY_BANDS), key=ns + "energy",
                                 help="How much the track's loudness moves — calm, medium or dynamic within your library.")
@@ -703,6 +738,7 @@ def _track_finder(ns: str, summaries: dict) -> str | None:
         return (f"{'🧩 ' if tid in saved else ''}{tid} · {format_mmss(s['duration'])}"
                 + (f" · {s['bpm']:.0f} BPM" if s["bpm"] else "") + (f" · {s['key']}" if s.get("key") else ""))
     d[2].caption(f"{len(rows)} track{'s' if len(rows) != 1 else ''} match")
+    SSTORE.choose(ns + "track", [s["track_id"] for s in rows])
     return st.selectbox("Track", [s["track_id"] for s in rows], key=ns + "track", format_func=fmt)
 
 
@@ -754,6 +790,7 @@ def render_by_song(rows: dict, have_tl: set) -> None:
 def render_by_video(rows: dict, have_tl: set) -> None:
     ns = "cv_"
     vids = _video_filters(ns, rows, have_tl, "🔎 Narrow the list first (optional)")
+    _still_there(ns + "start", vids)
     start = st.multiselect("Start from these videos", vids, key=ns + "start",
                            help="One or more. Songs and other videos are suggested to go with them.")
     if not start:
@@ -782,6 +819,7 @@ def render_by_video(rows: dict, have_tl: set) -> None:
     if not tracks:
         st.warning("No song could be scored — the chosen videos need a 🧭 timeline and the tracks their sections.")
         return
+    SSTORE.choose(ns + "track", [t["track_id"] for t in tracks])
     tid = st.radio("Song", [t["track_id"] for t in tracks], key=ns + "track", label_visibility="collapsed",
                    format_func=lambda t: f"{t} · fit {next(x['fit'] for x in tracks if x['track_id'] == t):.2f}  —  "
                                          + ", ".join(f"{ST.label(k)} {v:.2f}" for k, v in sorted(
@@ -946,9 +984,15 @@ def _do_pending_render(res: dict) -> None:
         bar.progress(last[0], text=f"Rendering segment {d}/{t}{eta}")
 
     try:
+        label = " ".join(str(st.session_state.get("compose_render_name") or "").split())[:80]
         stats = render_plan_dict(plan, str(out), progress_callback=_prog, stream=stream, quick=quick,
                                  notice=lambda txt: bar.progress(last[0], text=txt), app_version=APP_VERSION,
-                                 extra_meta={"project_name": f"🤖 {plan['track_id']}"}) or {}
+                                 extra_meta={"project_name": f"🤖 {plan['track_id']}",
+                                             # 🧾 what the compile ran on — so a render says which switches made it
+                                             "compile_note": used_line(res.get("used") or {})}) or {}
+        if label:                      # 🏷️ the name is kept with the render's rating and notes (before the Drive upload)
+            from renders import update_user_fields
+            update_user_fields(out, name=label)
         secs = time.time() - t0
         how = [f"{stats[k]} {w}" for k, w in (("quick", "from the 480p copies"), ("streamed", "streamed from Drive"),
                                              ("downloaded", "downloaded"),
@@ -1076,6 +1120,11 @@ def render_result(res: dict) -> None:
                        "stays exactly where it is. ↻ Recompile builds the whole plan again.",
                   on_click=_queue_rework, args=(marked, {}))
     b = st.columns([1.6, 0.5, 1.4, 1.4, 1.4, 1.6])
+    st.text_input("🏷️ Name the next render (optional)", key="compose_render_name", max_chars=80,
+                  placeholder="e.g. Bad Times — lead + phrase on",
+                  help="Shown with the render in 📁 Media Library → Renders (and searchable there), where it can be "
+                       "changed later. Stays filled in for the next render until you change it. The file keeps its "
+                       "numbered name.")
     b[0].button("🎬 Render preview", key="compose_render_btn", type="primary", width="stretch", on_click=_queue_render)
     with b[1].popover("⚙️", width="stretch", help="Render options"):
         st.toggle("⚡ Quick preview — use the 480p copies on the server", value=True, key="compose_quick",
@@ -1126,6 +1175,7 @@ def render_result(res: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def render() -> None:
+    SSTORE.keep(KEPT, KEPT_IF_SET)
     msg = st.session_state.pop("compose_msg", None)
     if msg:
         getattr(st, msg[0])(msg[1])

@@ -1269,7 +1269,7 @@ def render_renders():
     # Find + sort in the page (filters apply straight away); the rest in "More filters".
     with st.container(border=True, key="ml_wrap_rfind"):
         fc = st.columns([3, 2.4, 1.6], vertical_alignment="bottom")
-        name_query = fc[0].text_input("Find a render", placeholder="part of a track name", key="ren_name")
+        name_query = fc[0].text_input("Find a render", placeholder="part of a track name or a render's 🏷️ name", key="ren_name")
         sort_by = fc[1].selectbox("Sort by", list(sorts), key="ren_sort")
         _n_more = int(bool(st.session_state.get("ren_videos"))) + int(st.session_state.get("ren_rating", "–") != "–") \
             + int(bool(st.session_state.get("ren_kept")))
@@ -1286,7 +1286,7 @@ def render_renders():
     wanted_rating = STARS.index(min_rating)
     for r in renders:
         tid = (r.get("track") or {}).get("track_id") or ""
-        if name_query and name_query.lower() not in tid.lower():
+        if name_query and name_query.lower() not in (tid + " " + str((r.get("user") or {}).get("name") or "")).lower():
             continue
         if video_filter and not {v["video_id"] for v in r.get("videos") or []} & set(video_filter):
             continue
@@ -1360,7 +1360,8 @@ def render_renders():
                 if thumb:
                     safe_image(str(thumb), width=220)
             with cols[1]:
-                st.markdown(f"**{track.get('track_id') or 'Unknown track'}**"
+                st.markdown((f"**🏷️ {user['name']}** · " if user.get("name") else "")
+                            + f"**{track.get('track_id') or 'Unknown track'}**"
                             + (f"  {STARS[user['rating']]}" if user["rating"] else ""))
                 info = [f"🗓 {_when(r.get('created'))}", f"⏱ {format_mmss(r.get('duration_sec') or 0)}",
                         format_size(r.get("size_bytes"))]
@@ -1733,8 +1734,12 @@ def _render_render_detail(r: dict, update_user_fields) -> None:
                        help="Kept renders can't be deleted, and Clean up skips them.")
     notes = c[2].text_input("Notes", value=user["notes"], key=f"ren_notes_{name}",
                             placeholder="e.g. good energy in the drop, slow intro")
-    new = {"rating": STARS.index(rating), "keep": keep, "notes": notes.strip()}
-    if new != {"rating": user["rating"], "keep": user["keep"], "notes": user["notes"]}:
+    label = st.text_input("🏷️ Name", value=user.get("name") or "", key=f"ren_label_{name}", max_chars=80,
+                          placeholder="a name of your own for this render (the file keeps its numbered name)")
+    if r.get("compile_note"):
+        st.caption(r["compile_note"])
+    new = {"rating": STARS.index(rating), "keep": keep, "notes": notes.strip(), "name": " ".join(label.split())}
+    if new != {"rating": user["rating"], "keep": user["keep"], "notes": user["notes"], "name": user.get("name") or ""}:
         update_user_fields(path, **new)
         from renders import on_drive, sync_sidecar
         if on_drive(r):

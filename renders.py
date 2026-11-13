@@ -139,7 +139,8 @@ def summarise_plan(plan: dict) -> dict:
 
 def _user_fields(old: dict) -> dict:
     u = (old or {}).get("user") or {}
-    return {"rating": int(u.get("rating") or 0), "notes": u.get("notes") or "", "keep": bool(u.get("keep"))}
+    return {"rating": int(u.get("rating") or 0), "notes": u.get("notes") or "", "keep": bool(u.get("keep")),
+            "name": str(u.get("name") or "")}       # 🏷️ the user's own name for the render (the file keeps its name)
 
 
 def write_render_metadata(output_path, plan: dict, render_seconds: float = None,
@@ -245,12 +246,12 @@ def _save_meta(mp4: Path, meta: dict) -> None:
 
 
 def update_user_fields(mp4: Path, **fields) -> None:
-    """Set rating / notes / keep on a render's sidecar."""
+    """Set rating / notes / keep / name on a render's sidecar."""
     meta = load_render(mp4)
     if meta is None:
         return
     user = _user_fields(meta)
-    user.update({k: v for k, v in fields.items() if k in ("rating", "notes", "keep")})
+    user.update({k: v for k, v in fields.items() if k in ("rating", "notes", "keep", "name")})
     meta["user"] = user
     _save_meta(mp4, meta)
 
