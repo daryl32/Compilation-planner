@@ -1,7 +1,7 @@
 """🧪 Movement lab (13 Nov 2026): 🎼 follow the lead layer and 🌊 match at the scale of a phrase (passages with little
-or no beat), 🔍 judge the level within the shot size, ⚡ Smooth ↔ Contrast power, and two for the 📐 lines' blocks
+or no beat), 🔍 judge the level within the shot size, ⚡ contrast in the quiet passages, and two for the 📐 lines' blocks
 (🔗 join, ✂️ shortest clip). After Daryl's tests the same day: 🎼 + 🌊 are part of 🎯 Movement only (no switch), 🔍 + 🔗
-are one switch, 🌿 Natural, and 🪶 flowing movement was scrapped. With the four set off outright, the plan is the
+are one switch, 🌿 Natural, ⚡ is baked into the Smooth ↔ Contrast slider, and 🪶 flowing movement was scrapped. With the four set off outright, the plan is the
 matcher exactly as it was."""
 from __future__ import annotations
 
@@ -199,7 +199,7 @@ def test_the_lab_through_a_compile_and_all_off_is_the_plan_as_it_was(monkeypatch
         _full_rate_everywhere(out)
         old = {"stem": False, "phrase": False, "shot": False, "join": False}          # the matcher as it was
         base = PC.compile_plan("song_full", VIDS, movement_only=True, cuts="lines", lab=old)
-        assert base["plan"]["story"]["lab"] == {**old, "min_lines": False, "power": 1.0} and "flow" not in PC.LAB
+        assert base["plan"]["story"]["lab"] == {**old, "min_lines": False} and "flow" not in PC.LAB
         line0 = PC.used_line(base["used"])
         assert "📐 lines" in line0 and PC.LAB["stem"] + " off" in line0 and PC.LAB["phrase"] + " off" in line0
         assert f"{len(VIDS)} videos in play" in line0 and "0 clips rejected" in line0
@@ -220,7 +220,7 @@ def test_the_lab_through_a_compile_and_all_off_is_the_plan_as_it_was(monkeypatch
         res = PC.compile_plan("song_full", VIDS, movement_only=True, cuts="lines", natural=True)
         tl = res["plan"]["timeline"]
         assert res["plan"]["story"]["natural"] and res["plan"]["story"]["lab"] == {
-            "stem": True, "phrase": True, "shot": True, "join": True, "min_lines": False, "power": 1.0}
+            "stem": True, "phrase": True, "shot": True, "join": True, "min_lines": False}
         assert res["plan"]["segmentation"]["join"] is True and res["shortfall"] == 0
         assert PC.NATURAL in PC.used_line(res["used"]) and PC.LAB["join"] not in PC.used_line(res["used"])
         both = PC.compile_plan("song_full", VIDS, movement_only=True, cuts="lines", lab={"shot": True, "join": True})
@@ -281,24 +281,25 @@ def test_natural_and_the_lab_on_the_page(monkeypatch):
         assert not [t for t in at.toggle if t.key in gone]                 # no switches for these any more
         nat = at.toggle(key="compose_natural")
         assert nat.label == PC.NATURAL and nat.disabled and not nat.value   # needs 🎯 Movement only or the 📐 cuts
-        assert at.select_slider(key="compose_lab_power").value == 1 and at.toggle(key="compose_lab_min_lines").disabled
+        assert not [w for w in at.select_slider if w.key == "compose_lab_power"]      # baked into the slider
+        assert at.toggle(key="compose_lab_min_lines").disabled
         at.session_state["compose_movement_only"] = True
         at.session_state["compose_cuts"] = "lines"
         at.run()
         assert not errors(at), errors(at)
         assert not at.toggle(key="compose_natural").disabled and at.number_input(key="compose_min_clip").disabled
         at.toggle(key="compose_natural").set_value(True)
-        at.select_slider(key="compose_lab_power").set_value(5)
+        at.slider(key="compose_smooth").set_value(0.85)
         at.toggle(key="compose_lab_min_lines").set_value(True).run()
         assert not errors(at), errors(at)
         assert not at.number_input(key="compose_min_clip").disabled
-        assert any("🧪 Lab — 2 on" in e.label for e in at.expander)
+        assert any("🧪 Lab — 1 on" in e.label for e in at.expander)
         at.button(key="cs_go").click().run()
         assert not errors(at), errors(at)
         res = at.session_state[PC.RESULT_KEY]
         assert res["plan"]["story"]["natural"] and res["plan"]["story"]["lab"] == {
-            "stem": True, "phrase": True, "shot": True, "join": True, "min_lines": True, "power": 5.0}
-        assert any(c.value.startswith("🧾 This compile:") and PC.NATURAL in c.value and "⚡ Contrast power ×5" in c.value
+            "stem": True, "phrase": True, "shot": True, "join": True, "min_lines": True}
+        assert any(c.value.startswith("🧾 This compile:") and PC.NATURAL in c.value and "Smooth ↔ Contrast 0.85" in c.value
                    for c in at.caption)
         at.toggle(key="compose_sync_data").set_value(True).run()
         assert not errors(at), errors(at)
@@ -306,52 +307,54 @@ def test_natural_and_the_lab_on_the_page(monkeypatch):
         shutil.rmtree(out, ignore_errors=True)
 
 
-def test_contrast_power_makes_the_slider_pull_harder(monkeypatch):
-    """⚡ One video is all wide shots, the others all close-ups, and nothing else tells them apart. With the slider
-    at Contrast, power ×1 gives a change of shot size at a section change a nudge the fit outweighs; ×8 makes the
-    wide video win there. Towards Smooth, more power holds the shot size. At ×1 nothing changes at all."""
+def test_contrast_welcomes_a_change_of_shot_in_the_quiet_passages_only(monkeypatch):
+    """⚡ Baked into Smooth ↔ Contrast (13 Nov). One video is all wide shots that read nearly still, as wide shots
+    do; the rest are close-ups. 🎯 Movement only, the slider at Contrast: the wide video comes in where the music has
+    no beat and never where the drums play; at the slider's middle the plan is what it always was."""
     from tests.test_story_matcher import _plan_inputs, _setup
     out = _setup(monkeypatch)
     try:
+        import audio_drive as AD
         import core.story_matcher as SMX
         import footage_timeline as FT
+        from core import sync as S
+        from tests.test_movement_lab import _beatless_track, _full_rate_everywhere
 
         def wide(vid):
             with np.load(out / f"{vid}.npz") as z:
                 arrays = {k: z[k] for k in z.files}
             arrays["shot"] = np.full(len(arrays["times"]), 3.0, np.float16)
-            arrays["move"] = np.full(len(arrays["times"]), 0.05, np.float16)       # reads nearly still, as wide shots do
+            arrays["move"] = np.full(len(arrays["times"]), 0.05, np.float16)
             FT._write_video(out, vid, arrays)
+        _full_rate_everywhere(out)
         wide("vid_c")
-        types = ["rhythmic", "rhythmic", "action", "action", "rhythmic", "rhythmic", "action", "action"] * 2
+        track, t0, t1 = _beatless_track()
+        drv = AD.drivers(track, None)
+        beat = lambda a, b: S.beat_presence(drv["curves"]["drums"][int(a * drv["rate"]):int(b * drv["rate"])], AD.DRUM_LEVEL)   # noqa: E731
+        types = ["rhythmic"] * 16
 
-        def run(contrast, power):
-            track, queues, segments, regions = _plan_inputs(types)
-            opts = SMX.StoryOptions(section_map=regions, movement_only=True, smooth_contrast=contrast, shot_power=power)
+        def run(contrast):
+            _, queues, segments, regions = _plan_inputs(types)
+            opts = SMX.StoryOptions(section_map=regions, movement_only=True, smooth_contrast=contrast)
             tl, _, _ = SMX.match_story(segments, queues, track, options=opts)
-            return [e["scenes"][0]["video_id"] for e in tl], [e["scenes"][0]["story"].get("shot") for e in tl]
-        plain, _ = run(1.0, 1.0)
-        assert run(1.0, 1.0)[0] == plain                                            # the same twice
-        strong, shots = run(1.0, 8.0)
-        assert strong.count("vid_c") > plain.count("vid_c") and 3.0 in shots         # wide shots now make it in
-        changes = {k for k in range(1, len(types)) if types[k] != types[k - 1]}
-        assert {k for k, v in enumerate(strong) if v == "vid_c"} - {k for k, v in enumerate(plain) if v == "vid_c"} <= \
-            changes | {k + 1 for k in changes}                                       # …at the changes (and back again)
-        held, held_shots = run(0.0, 8.0)                                             # Smooth: the shot size is held
-        jumps = lambda xs: sum(1 for a, b in zip(xs, xs[1:]) if a is not None and b is not None and abs(a - b) >= 1)   # noqa: E731
-        assert jumps(held_shots) <= jumps(shots)
-        assert SMX._line_number("2b") == "2" and SMX._line_number("12") == "12" and SMX._line_number("a") == "a"
-        # with the 📐 lines, a new section of the lines is a change point when the power is up — not a part of one
+            return tl
+        mid, full = run(0.5), run(1.0)
+        on_wide = lambda tl: [e for e in tl if e["scenes"][0]["video_id"] == "vid_c" and beat(*e["track_time"]) >= 0.99]   # noqa: E731
+        off_wide = lambda tl: [e for e in tl if e["scenes"][0]["video_id"] == "vid_c" and beat(*e["track_time"]) < SMX.OFF_BEAT]   # noqa: E731
+        assert len(off_wide(full)) > len(off_wide(mid)) and len(off_wide(full)) >= 1        # welcome in the quiet passage
+        assert len(on_wide(full)) <= len(on_wide(mid))                                      # …and not pushed onto a full beat
+        gained = [e for e in full if e["scenes"][0]["video_id"] == "vid_c"
+                  and tuple(e["track_time"]) not in {tuple(x["track_time"]) for x in mid if x["scenes"][0]["video_id"] == "vid_c"}]
+        assert gained and all(beat(*e["track_time"]) < 1.0 for e in gained)
+        # the slider is all there is: no power option any more
+        assert not hasattr(SMX.StoryOptions(), "shot_power") and 0.05 <= SMX.CONTRAST_QUIET <= 0.2
         import planner.compose as PC
-        base = PC.compile_plan("song_full", ["vid_a", "vid_b", "vid_c", "vid_f"], movement_only=True, cuts="lines",
-                               smooth_contrast=1.0)
-        up = PC.compile_plan("song_full", ["vid_a", "vid_b", "vid_c", "vid_f"], movement_only=True, cuts="lines",
-                             smooth_contrast=1.0, lab={"power": 8})
-        assert up["plan"]["story"]["lab"]["power"] == 8.0 and base["plan"]["story"]["lab"]["power"] == 1.0
-        count = lambda r: sum(1 for e in r["plan"]["timeline"] if e["scenes"][0]["video_id"] == "vid_c")     # noqa: E731
-        assert count(up) >= count(base)
-        assert "⚡ Contrast power ×8" in PC.used_line(up["used"]) and "Smooth ↔ Contrast 1" in PC.used_line(up["used"])
-        assert "⚡" not in PC.used_line(base["used"])
-        assert up["plan"]["story"]["lab"]["stem"] and up["plan"]["story"]["lab"]["phrase"]
+        r = PC.compile_plan("song_full", ["vid_a", "vid_b", "vid_c", "vid_f"], movement_only=True, cuts="lines", smooth_contrast=0.85)
+        assert "Smooth ↔ Contrast 0.85" in PC.used_line(r["used"]) and "power" not in r["plan"]["story"]["lab"]
+        assert "Smooth ↔ Contrast" not in PC.used_line(PC.compile_plan("song_full", ["vid_a", "vid_b"], movement_only=True)["used"])
+        # recipes mode: the slider's old rule, untouched (a change is welcome at a section change, beat or not)
+        t_r, q_r, s_r, reg_r = _plan_inputs(["rhythmic", "action"] * 8)
+        a, _, _ = SMX.match_story(s_r, q_r, t_r, options=SMX.StoryOptions(section_map=reg_r, smooth_contrast=1.0))
+        assert len(a) == 16
     finally:
         shutil.rmtree(out, ignore_errors=True)

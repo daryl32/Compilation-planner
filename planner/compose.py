@@ -39,7 +39,7 @@ KEPT = {"compose_way": WAYS[0], "compose_cuts": "sections", "compose_vocal_rule"
         "compose_max_videos": 0, "compose_music_story": 0.5, "compose_smooth": 0.5, "compose_min_clip": 0.0,
         "compose_punch": 0.0, "compose_movement_only": False, "compose_quick": True, "compose_stream": True,
         "compose_render_name": "",
-        "compose_natural": False, "compose_lab_power": 1, "compose_lab_min_lines": False}
+        "compose_natural": False, "compose_lab_min_lines": False}
 # …and the filters and picks, which have no fixed default (their ranges come from the library): kept once set
 KEPT_IF_SET = tuple(ns + k for ns in ("cs_", "cv_") for k in ("actors", "tags", "hair", "gg", "new", "minlen", "exclude")) \
     + ("cs_q", "cs_bpm", "cs_len", "cs_energy", "cs_sort", "cs_mapped", "cs_track", "cv_start", "cv_track", "cv_songs_for")
@@ -326,11 +326,9 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     🎯 Movement only always follows the lead layer and matches at the scale of a phrase off the beat (13 Nov: both
     on by default after Daryl's tests). natural: 🌿 the level is judged within the shot size (🎯 Movement only) and
     two 📐 blocks of one part may become one longer clip when the footage holds — a less rigid plan.
-    lab: {"min_lines": ✂️ Shortest clip applies to the 📐 blocks too, "power": ⚡ how hard Smooth ↔ Contrast pulls
-    (1 = as always)}; it may also set "stem" / "phrase" / "shot" / "join" outright (tests, and comparing with the
+    lab: {"min_lines": ✂️ Shortest clip applies to the 📐 blocks too}; it may also set "stem" / "phrase" / "shot" / "join" outright (tests, and comparing with the
     matcher as it was)."""
     given = dict(lab or {})
-    power = float(min(max(float(given.get("power") or 1.0), 1.0), 10.0))
     lab = {"stem": bool(given.get("stem", movement_only)), "phrase": bool(given.get("phrase", movement_only)),
            "shot": bool(given.get("shot", natural)), "join": bool(given.get("join", natural)),
            "min_lines": bool(given.get("min_lines"))}
@@ -360,7 +358,7 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
                             movement_only=bool(movement_only), curves_of=_motion_curves,
                             level_range=float(level_range or 0.0), bounce_speed=float(bounce_speed or 0.0),
                             stem_follow=lab["stem"], phrase_scale=lab["phrase"],
-                            shot_level=lab["shot"], shot_power=power)
+                            shot_level=lab["shot"])
     max_clips = 3 if split_screen else 1
     timeline, shortfall, unfilled = SMX.match_story(
         segments, queues, track, min_clips=1, max_clips=max_clips, ramp_start=0.5, ramp_end=0.9,
@@ -384,7 +382,7 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
         "story": {"music_story": music_story, "smooth_contrast": smooth_contrast, "max_videos": int(max_videos or 0),
                   "movement_only": bool(movement_only), "level_range": float(level_range or 0.0),
                   "bounce_speed": float(bounce_speed or 0.0), "natural": bool(natural),
-                  "lab": {**lab, "power": power}},
+                  "lab": dict(lab)},
         "timeline": timeline,
     }
     if cuts == "lines":
@@ -402,7 +400,7 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
                      "max_videos": int(max_videos or 0), "split_screen": bool(split_screen),
                      "min_clip": min_clip if (cuts != "lines" or lab["min_lines"]) else None,
                      "smooth_contrast": float(smooth_contrast), "natural": bool(natural),
-                     "lab": {**lab, "power": power}},
+                     "lab": dict(lab)},
             "made": time.strftime("%H:%M:%S")}
 
 
@@ -443,10 +441,7 @@ def used_line(used: dict) -> str:
         parts.append(f"max {used['max_videos']} videos")
     if used.get("split_screen"):
         parts.append("🪟 split screen")
-    pw = float(on.get("power") or 1.0)
-    if pw > 1.0:
-        extra.append(f"⚡ Contrast power ×{pw:g}")
-    if used.get("smooth_contrast") is not None and (pw > 1.0 or abs(used["smooth_contrast"] - 0.5) > 1e-6):
+    if used.get("smooth_contrast") is not None and abs(used["smooth_contrast"] - 0.5) > 1e-6:
         parts.append(f"Smooth ↔ Contrast {used['smooth_contrast']:g}")
     parts += extra
     return "🧾 This compile: " + " · ".join(parts)
@@ -476,7 +471,6 @@ def rework_plan(res: dict, redo: set, force: dict = None, excluded: set = None) 
                             bounce_speed=float(story.get("bounce_speed") or 0.0),
                             stem_follow=bool((story.get("lab") or {}).get("stem")),
                             phrase_scale=bool((story.get("lab") or {}).get("phrase")),
-                            shot_power=float((story.get("lab") or {}).get("power") or 1.0),
                             shot_level=bool((story.get("lab") or {}).get("shot")),
                             keep={k: e for k, e in enumerate(timeline_old) if k not in redo},
                             force={int(k): v for k, v in (force or {}).items()})
@@ -607,27 +601,17 @@ CUTS = {"sections": "🧩 Section map + recipes (as before)", "lines": "📐 Lin
 
 
 def _lab() -> dict:
-    """The 🧪 lab's two settings as set on the page."""
-    return {"min_lines": _cuts() == "lines" and bool(st.session_state.get("compose_lab_min_lines")),
-            "power": float(st.session_state.get("compose_lab_power") or 1)}
+    """The 🧪 lab's setting as set on the page."""
+    return {"min_lines": _cuts() == "lines" and bool(st.session_state.get("compose_lab_min_lines"))}
 
 
 def _lab_menu() -> None:
-    """🧪 Lab — settings still being tested. (13 Nov: 🎼 lead + 🌊 phrase became part of 🎯 Movement only, 🔍 shot
-    size + 🔗 joins became 🌿 Natural, 🪶 flowing movement was scrapped.)"""
+    """🧪 Lab — what is still being tested. (13 Nov: 🎼 lead + 🌊 phrase became part of 🎯 Movement only, 🔍 shot
+    size + 🔗 joins became 🌿 Natural, ⚡ contrast power was baked into the Smooth ↔ Contrast slider, 🪶 flowing
+    movement was scrapped.)"""
     lines = _cuts() == "lines"
-    lab = _lab()
-    n_on = int(lab["min_lines"]) + int(lab["power"] > 1)
-    with st.expander(f"🧪 Lab — {n_on} on" if n_on else "🧪 Lab — settings being tested (all off)", expanded=False):
-        st.caption("Off / ×1 = the matcher as it is. 🧾 Every result says what was on.")
-        st.select_slider("⚡ Smooth ↔ Contrast power", [1, 2, 3, 5, 8], key="compose_lab_power",
-                         format_func=lambda v: "×1 (as always)" if v == 1 else f"×{v}",
-                         help="How hard the Smooth ↔ Contrast slider pulls. At ×1 it only nudges: a jump in shot size "
-                              "costs or earns a few hundredths of the score, which the movement fit easily outweighs. "
-                              "Higher: towards Smooth, shot sizes are held much more firmly; towards Contrast, a change "
-                              "of shot size at a section change earns much more — and a bigger jump (close-up → wide) "
-                              "more than a small one. With the 📐 cuts, a new section of the lines counts as a change. "
-                              "The slider at the middle does nothing towards Contrast at any power — move it right.")
+    with st.expander("🧪 Lab — 1 on" if _lab()["min_lines"] else "🧪 Lab — settings being tested (all off)", expanded=False):
+        st.caption("Off = the matcher as it is. 🧾 Every result says what was on.")
         st.toggle("✂️ Shortest clip applies to the 📐 cuts", key="compose_lab_min_lines", disabled=not lines,
                   help="The 📐 blocks already have a minimum from the tempo — the same as ✂️ Shortest clip on Auto. "
                        "On: the number in ✂️ Shortest clip (s) is used for them too, so a longer minimum can be tried.")
@@ -664,7 +648,12 @@ def _options_row(ns: str) -> None:
     c[2].slider("Music ↔ Story", 0.0, 1.0, 0.5, 0.05, key="compose_music_story", disabled=only,
                 help="Left: the music fit decides. Right: the recipes' tags decide.")
     c[3].slider("Smooth ↔ Contrast", 0.0, 1.0, 0.5, 0.05, key="compose_smooth",
-                help="Left: shot sizes kept steady. Right: changes welcome at drops and section changes.")
+                help="Left: shot sizes kept steady from clip to clip. Right: changes of shot size are welcome. "
+                     "With 🎯 Movement only that means the passages with no beat: there a different shot size from "
+                     "the clip before — a wide shot above all — earns more the further right the slider is, and "
+                     "nothing where the drums play (wide shots don't suit the bouncy parts). About 0.75–0.85 brings "
+                     "a few wide shots into the quiet passages of a track; fully right brings more, at some cost to "
+                     "how well they fit. With recipes: changes welcome at drops and section changes, as before.")
     st.number_input("✂️ Shortest clip (s)", 0.0, 10.0, 0.0, 0.5, key="compose_min_clip",
                     disabled=_cuts() == "lines" and not bool(st.session_state.get("compose_lab_min_lines")),
                     help="0 = Auto: the shortest musical length of at least 1.4 s — a bar at 90 BPM (2.7 s), a bar at "

@@ -48,7 +48,7 @@ def test_change_comes_back_to_the_settings_as_they_were_and_a_render_takes_its_n
         at.selectbox(key="cs_track").set_value(at.selectbox(key="cs_track").options[-1]).run()
         assert not errors(at), errors(at)
         want = {"compose_movement_only": True, "compose_cuts": "lines", "compose_smooth": 0.8, "compose_max_videos": 5,
-                "compose_punch": 0.5, "compose_vocal_rule": False, "compose_natural": True, "compose_lab_power": 1,
+                "compose_punch": 0.5, "compose_vocal_rule": False, "compose_natural": True, "compose_lab_min_lines": False,
                 "cs_minlen": 1, "cs_q": "song", "cs_track": at.session_state["cs_track"]}
         assert tracks and all(at.session_state[k] == v for k, v in want.items())
         at.button(key="cs_go").click().run()

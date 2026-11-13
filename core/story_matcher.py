@@ -105,6 +105,12 @@ SHOT_PENALTY = 0.05         # per shot-size step jumped against the previous cli
 POV_PENALTY = 0.06          # POV ↔ non-POV flip against the previous clip
 PANE_PENALTY = 0.04         # per step away from the anchor pane in a split-screen block
 CONTRAST_BONUS = 0.04       # where the recipe welcomes contrast and the slider leans that way
+CONTRAST_QUIET = 0.12       # 🎯 Movement only: with the slider fully at Contrast, what a change of shot size earns per
+#                             step (up to two: close-up → wide) in a block with no beat at all — and nothing on a full
+#                             beat. Found on Daryl's footage, 13 Nov (15 videos, 8 tracks): wide shots suit the quiet
+#                             passages, where they fit nearly as well as the winner (fits 0.80–0.94), and not the
+#                             beat, where they are the worst picks of a plan (fits ≈ 0.55). 0.06–0.08 already brings
+#                             1–5 wide clips a track; from 0.2 the picks get worse (off-beat fit −0.03 to −0.05).
 
 
 @dataclass
@@ -132,10 +138,6 @@ class StoryOptions:
                                         # curves smoothed over a second, the start free to move half a second)
     shot_level: bool = False            # 🔍 🎯 Movement only: how lively footage is, is judged within its shot size
                                         # (a close-up reads livelier than the same movement in a wide shot)
-    shot_power: float = 1.0             # ⚡ how hard Smooth ↔ Contrast pulls (1 = as always). Above 1 the slider's
-                                        # penalties and its contrast bonus are multiplied by it, a bigger jump in
-                                        # shot size earns a bigger bonus (up to two steps: close-up → wide), and with
-                                        # the 📐 lines a new section of the lines counts as a change as well
     merge_limit_sec: float = 0.0        # merge_blocks: the longest clip two blocks may become (0: the recipe's pace)
     lab_notes: dict = field(default_factory=dict)        # filled in: what the 🧪 switches did (for the 📥 sync data)
     curves_of: object = None            # curves_of(video_id) → {scene_id: {"fps", "values"}}: the catalogue's on-screen
@@ -604,16 +606,6 @@ def _slot_chain(picks: list, info: dict) -> dict:
             "offset_into_scene_sec": first["offset_into_scene_sec"], "clip_start_sec": first["clip_start_sec"], "story": info}
 
 
-def _line_number(label) -> str:
-    """The section a 📐 block belongs to: "2a" and "2b" are parts of section 2."""
-    digits = ""
-    for ch in str(label):
-        if not ch.isdigit():
-            break
-        digits += ch
-    return digits or str(label)
-
-
 def _shot_gains(videos: dict) -> dict:
     """🔍 {shot size 0–3: what its level is multiplied by} over the videos in play, and each video's shot_gain set
     from it. The movement measures read a close-up livelier than the same movement in a wide shot (person curve,
@@ -723,7 +715,6 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
     # 🧪 Movement lab — these three are 🎯 Movement only
     lab_stem, lab_phrase = only and bool(options.stem_follow), only and bool(options.phrase_scale)
     lab_shot = only and bool(options.shot_level)
-    power = float(min(max(options.shot_power or 1.0, 1.0), 10.0))      # ⚡ Smooth ↔ Contrast power (both modes)
     leads = {}
     if lab_stem and drv is not None:
         try:
@@ -830,7 +821,6 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
     shortfall, unfilled_total = 0, 0.0
     uses = {}                      # video_id → times used so far
     prev_shot, prev_pov, prev_type = float("nan"), None, None
-    prev_line = None               # the 📐 section (its number) of the block before
     last_block = []                # the picks of the block before (for the neighbour-repeat rule)
     merged_away = set()            # blocks taken into the one before them
 
@@ -872,14 +862,7 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
         prev_videos = {p["video_id"] for p in last_block}
         shot_rule = recipe.get("shot_change", "allow")
         change_ok = shot_rule == "change" or (t_id != prev_type and shot_rule == "allow")
-        new_line = False
-        if power > 1.0 and seg.get("line_section") is not None:
-            # ⚡ with the 📐 lines the music's own sections are the change points: a new section of the lines (2 → 3;
-            # 2a → 2b is a part of the same one) is where a shot change is welcome, whatever the section map says
-            new_line = prev_line is not None and _line_number(seg.get("line_section")) != prev_line
-            change_ok = change_ok or (new_line and shot_rule != "hold")
-        shot_w = (SHOT_PENALTY * power * smooth * {"hold": 1.0, "allow": 0.5, "change": 0.0}[shot_rule]
-                  * (0.5 if (t_id != prev_type or new_line) else 1.0))
+        shot_w = SHOT_PENALTY * smooth * {"hold": 1.0, "allow": 0.5, "change": 0.0}[shot_rule] * (0.5 if t_id != prev_type else 1.0)
 
         req = [] if only else [str(t).lower() for t in recipe.get("scene_require") or []]
         pref = [] if only else [str(t).lower() for t in recipe.get("scene_prefer") or []]
@@ -963,11 +946,16 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
                         if not math.isnan(prev_shot) and not math.isnan(start_shot):
                             jump = abs(start_shot - prev_shot)
                             total -= shot_w * jump
-                            if change_ok and jump >= 1.0:
-                                total += (CONTRAST_BONUS * power * max(0.0, 1.0 - smooth - 0.5) * 2
-                                          * (min(jump, 2.0) if power > 1.0 else 1.0))
+                            lean_ = max(0.0, 1.0 - smooth - 0.5) * 2          # 0 at the slider's middle, 1 fully at Contrast
+                            if beat_ is not None:
+                                # 🎯 Movement only: a change of shot size is welcome where the music has no beat — at
+                                # a change point or in any beatless block — and worth more the bigger the jump
+                                if (change_ok or off_) and jump >= 1.0:
+                                    total += CONTRAST_QUIET * lean_ * (1.0 - beat_) * min(jump, 2.0)
+                            elif change_ok and jump >= 1.0:
+                                total += CONTRAST_BONUS * lean_
                         if prev_pov is not None and smooth > 0 and bool(v.pov[s_]) != prev_pov:
-                            total -= POV_PENALTY * power * smooth * (0.5 if change_ok else 1.0)
+                            total -= POV_PENALTY * smooth * (0.5 if change_ok else 1.0)
                         out.append({"total": total, "fit": float(fit[s_]), "base": float(base[s_]), "story": float(story[s_]),
                                     "sync": float(sync[s_]), "slide": round(ws - float(v.times[s_]), 3),
                                     "video_id": vid_, "pieces": pieces, "shot": start_shot,
@@ -1164,8 +1152,6 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
             shortfall += n_picks - len(slots)
         last_block = [c for s in slots for c in s["chain"]]
         prev_type = t_id
-        if seg.get("line_section") is not None:
-            prev_line = _line_number(seg.get("line_section"))
         # window scores are kept per stretch of music; drop the ones this block has passed
         for v in videos.values():
             for key_ in [k_ for k_ in v._cum if isinstance(k_, tuple) and len(k_) == 2 and k_[0] == "fit"
