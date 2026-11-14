@@ -452,12 +452,14 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
         combined_video = tmp_dir / "combined.mp4"
         run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
              "-c", "copy", str(combined_video)])
+        stages = {"segments": round(time.time() - started, 1)}      # seconds per step, kept in the render's record
 
         if edge:                       # ⏱️ the overlay on the picture + the mixed sound (edge_render.py)
             if notice:
                 notice("⏱️ Adding the timer and mixing the sound…")
-            with_fallback(track_raws, lambda: edge_render.finish(plan, combined_video, output_path, sources,
-                                                                 tmp_dir, run, PREVIEW_HEIGHT, PREVIEW_WIDTH))
+            said = (lambda f: notice(f"⏱️ Adding the timer and mixing the sound… {int(f * 100)} %")) if notice else None
+            stages.update(edge_render.finish(plan, combined_video, output_path, sources, tmp_dir, run,
+                                             PREVIEW_HEIGHT, PREVIEW_WIDTH, progress=said) or {})
         else:
             # Mux in the track's audio
             print("Muxing audio...")
@@ -478,9 +480,11 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
     try:
         from renders import write_render_metadata
         write_render_metadata(output_path, plan, render_seconds=time.time() - started,
-                              source_stats=stats, app_version=app_version, extra=extra_meta)
+                              source_stats=stats, app_version=app_version,
+                              extra={**(extra_meta or {}), "stage_seconds": stages})
     except Exception as e:   # metadata is a nice-to-have — never fail a finished render over it
         print(f"Couldn't write render metadata: {e}", file=sys.stderr)
+    stats["stages"] = stages
     return stats
 
 
