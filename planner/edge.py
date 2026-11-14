@@ -606,9 +606,11 @@ def _do_pending_render(res: dict) -> None:
             note = (note[0], note[1] + " Source files: " + ", ".join(how) + ".")
         stg = stats.get("stages") or {}
         steps = [f"{w} {int(stg[k] // 60)}:{int(stg[k] % 60):02d}" for k, w in (("segments", "clips"), ("edge_sound", "sound"),
-                 ("edge_screens", "intro / outro"), ("edge_picture", "timer and avatar")) if stg.get(k)]
+                 ("edge_screens", "intro / outro"), ("edge_picture", "timer and avatar"), ("edge_join", "joining")) if stg.get(k)]
         if steps:
             note = (note[0], note[1] + " Time: " + ", ".join(steps) + ".")
+        if stg.get("edge_check") not in (None, "ok"):      # the picture or the sound isn't as long as the plan
+            note = ("warning", note[1] + f" ⚠️ Length check: {stg['edge_check']}.")
         bar.empty()
         st.session_state["edge_msg"] = note
         st.session_state["edge_render"] = out.name
@@ -683,6 +685,10 @@ def _result(res: dict) -> None:
                 st.markdown("**Clashes** — two lines wanted the same moment; they never overlap, so one gave way:")
                 for c in clashes:
                     st.caption(f"⚠️ {c['line']} ({c['where']}) met {c['with']} → {c['result']}")
+            av_on = (plan["edge"].get("avatar") or {}).get("on")
+            if av_on and res.get("missing_avatar"):       # 👩 the lines in this compilation she has no clip for yet
+                st.caption(f"👩 No avatar clip on Google Drive yet for {len(res['missing_avatar'])} of this compilation's lines "
+                           f"(stand-in figure, the line's own recording is heard): " + ", ".join(res["missing_avatar"]))
             unused, no_cue = res.get("lines_unused") or [], res.get("lines_no_cue") or []
             if unused or no_cue:
                 st.caption(f"🔇 Not heard in this compilation: {len(unused)} line(s) whose cue is for a round it doesn't have"

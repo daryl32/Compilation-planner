@@ -192,7 +192,7 @@ def test_the_render_carries_the_timer_and_the_mixed_sound(tmp_path, monkeypatch)
                 "track_duration_sec": 40.0,
                 "edge": {"difficulty": "chill", "rounds": 1, "schedule": sched, "playlist": playlist,
                          "beat": {"on": beat, "volume": 1.0},
-                         "voiceover": {"on": voice, "music_volume": 0.5, "cues": E.voice_cues(sched, {}) if voice else []},
+                         "voiceover": {"on": voice, "music_volume": 0.25, "cues": E.voice_cues(sched, {}) if voice else []},
                          "overlay": {"corner": corner}}}
     # no song: the beat is the sound — silent in Wait, beating in Extra; the timer sits top left
     out = tmp_path / "beat.mp4"
@@ -211,14 +211,14 @@ def test_the_render_carries_the_timer_and_the_mixed_sound(tmp_path, monkeypatch)
     r, g, b = _pixel(out, 5.0, cx - int(w * 0.3), label_y)             # Wait's blue one
     assert b > 140 and r < 120
     assert max(_pixel(out, 10.0, 600, 300)) < 80                       # the footage is untouched away from the timer
-    # a song, started again when it ends, at half volume under the voiceover; the timer where it was asked for
+    # a song, started again when it ends, at a quarter volume under the voiceover; the timer where it was asked for
     parts = [{"track_id": "song_full", "offset": 0.0, "play": 25.0, "pass": 1},
              {"track_id": "song_full", "offset": 25.0, "play": 15.0, "pass": 2}]
     full, half = tmp_path / "song.mp4", tmp_path / "song_voice.mp4"
     RP.render_plan_dict(plan(parts, False, False, "bottom-right"), str(full), quick=True)
     RP.render_plan_dict(plan(parts, False, True, "bottom-right"), str(half), quick=True)
     assert _level(full, 30, 38) > 0.1                                   # the song plays on after its first end
-    assert _level(half, 25, 35) == pytest.approx(0.5 * _level(full, 25, 35), rel=0.15)        # half under the voiceover…
+    assert _level(half, 25, 35) == pytest.approx(0.25 * _level(full, 25, 35), rel=0.15)       # a quarter under the voiceover…
     assert _level(full, 5, 15) == pytest.approx(0.25 * _level(full, 25, 35), rel=0.15)        # …and a quarter during Wait
     assert _level(half, 5, 15) == pytest.approx(_level(full, 5, 15), rel=0.15)                # (a quarter either way)
     assert _level(full, 20.6, 21.0) > 3 * _level(full, 19.0, 19.4)                            # back up as Extra starts
@@ -573,7 +573,77 @@ def test_songs_are_read_from_this_machine_never_streamed_and_sit_at_a_quarter_un
     loud = R._mix(edge, [], src, tmp_path, run)
     assert src.downloaded == ["raw/s"]                     # fetched once, then read as a file
     loud = loud.rename(tmp_path / "loud.wav")
-    edge["voiceover"] = {"on": True, "cues": [{"time": 15.0, "profile": "slow", "file": None}]}     # no stored volume: today's default
+    edge["voiceover"] = {"on": True, "music_volume": 0.5, "cues": [{"time": 15.0, "profile": "slow", "file": None}]}     # an older plan's 0.5
     quiet = R._mix(edge, [], src, tmp_path, run)
     assert E.MUSIC_UNDER_VOICE == 0.25
     assert _level(quiet, 2, 12) == pytest.approx(0.25 * _level(loud, 2, 12), rel=0.1)
+
+
+def test_with_the_avatar_her_clips_sound_is_heard_at_the_lines_loudness(tmp_path):
+    import edge_render as R
+    ff = lambda *a: subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *a], check=True)      # noqa: E731
+    mp3, clip = tmp_path / "line.wav", tmp_path / "her.mp4"
+    ff("-f", "lavfi", "-i", "sine=frequency=700:duration=2", "-af", "volume=6", str(mp3))        # the line: loud
+    ff("-f", "lavfi", "-i", "color=c=yellow:s=90x160:d=3:r=25", "-f", "lavfi", "-i", "sine=frequency=700:duration=3",
+       "-af", "volume=0.5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", str(clip))    # her clip: much quieter
+    edge = {"voiceover": {"on": True, "cues": [{"time": 5.0, "profile": "slow", "file": str(mp3)},
+                                               {"time": 30.0, "profile": "slow", "file": None},
+                                               {"time": 40.0, "profile": "slow", "file": str(mp3)}]}}
+    shows = [{"time": 5.0, "seconds": 3.0, "profile": "slow", "clip": str(clip), "still": None, "sound": str(clip)},
+             {"time": 30.0, "seconds": 3.0, "profile": "slow", "clip": str(clip), "still": None, "sound": str(clip)},
+             {"time": 40.0, "seconds": 3.0, "profile": "slow", "clip": None, "still": "x.png", "sound": None}]
+    cues = R._sound_cues(edge, shows)
+    assert [c["file"] for c in cues] == [str(clip), str(clip), str(mp3)]      # her clip where she has one, the line otherwise
+    assert cues[0]["match"] == str(mp3) and not cues[1].get("match")
+    assert 18 < R._match_gain(str(clip), str(mp3)) <= 20 and R._match_gain(str(clip), None) == 0.0
+
+    def run(cmd):
+        subprocess.run(cmd, capture_output=True, check=True)
+    track = R._voice_track(cues, 50.0, tmp_path, run)
+    assert _level(track, 5.2, 6.8) == pytest.approx(_level(track, 40.2, 41.8), rel=0.25)      # as loud as the line itself
+    assert _level(track, 30.2, 31.8) < 0.3 * _level(track, 5.2, 6.8)                          # nothing to match: as it is
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_the_picture_is_made_phase_by_phase_and_stays_in_step(tmp_path, monkeypatch):
+    """Three phases with an avatar clip that runs across a phase boundary: every second of the footage is there once,
+    in order, the timer restarts with each phase, and the picture and the sound are as long as the plan."""
+    import sys
+    import types
+    import edge_mode as E
+    import edge_render as R
+    monkeypatch.setitem(sys.modules, "render_preview", types.SimpleNamespace(get_track_raw_source=lambda t: t))
+    ff = lambda *a: subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *a], check=True)      # noqa: E731
+    comb = tmp_path / "comb.mp4"                           # the footage's grey level is its own second
+    ff("-f", "lavfi", "-i", "color=black:s=16x16:r=25:d=60", "-vf",
+       "geq=lum='40+3*floor(N/25)':cb=128:cr=128,scale=640:360:flags=neighbor,setsar=1", "-c:v", "libx264", "-preset",
+       "ultrafast", "-crf", "12", "-pix_fmt", "yuv420p", str(comb))
+    clip = tmp_path / "her.mp4"
+    ff("-f", "lavfi", "-i", "color=c=yellow:s=180x320:d=6:r=25", "-f", "lavfi", "-i", "sine=frequency=880:duration=6",
+       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", str(clip))
+    sched = [{"index": k, "round": 1, "profile": p, "start": 20.0 * k, "end": 20.0 * k + 20.0}
+             for k, p in enumerate(("wait", "slow", "medium"))]
+    edge = {"schedule": sched, "playlist": [], "beat": {"on": True, "volume": 1.0}, "voiceover": {"on": False, "cues": []},
+            "overlay": {"corner": "top-left"},
+            "avatar": {"on": True, "mode": "corner", "corner": "bottom-right",
+                       "cues": [{"time": 17.0, "profile": "wait", "clip": str(clip)}]},      # 17 → 23 s: over the join
+            "intro": {"on": False}, "outro": {"on": False}}
+
+    def run(cmd):
+        subprocess.run(cmd, capture_output=True, check=True)
+    out = tmp_path / "out.mp4"
+    seen = []
+    took = R.finish({"edge": edge}, comb, str(out), types.SimpleNamespace(input_args=lambda raw: ["-i", raw]), tmp_path / "w",
+                    run, 360, 640, progress=seen.append)
+    assert took["edge_check"] == "ok" and seen[-1] == 1.0 and len(seen) == 3
+    assert abs(_seconds(out) - 60.0) < 0.1
+    grey = [_pixel(out, t + 0.5, 320, 60)[0] for t in range(60)]
+    steps = [b - a for a, b in zip(grey, grey[1:])]
+    assert all(2 <= d <= 5 for d in steps), steps          # one second after another, nothing skipped or repeated
+    bh = int(360 * E.AVATAR_CORNER_SHARE)
+    spot = (640 - int(360 * 0.035) - 30, 360 - int(360 * 0.035) - bh // 2)
+    yellow = lambda p: p[0] > 170 and p[1] > 170 and p[2] < 90          # noqa: E731
+    assert [yellow(_pixel(out, t, *spot)) for t in (16.5, 18.0, 19.9, 20.1, 22.5, 23.5)] == [False, True, True, True, True, False]
+    w, _h = E.overlay_size(360)
+    cx, top = int(360 * 0.035) + w // 2, int(360 * 0.035)
+    assert _pixel(out, 20.5, cx, top + 4)[0] > 150 and _pixel(out, 40.5, cx, top + 4)[0] > 150      # a full ring as each phase starts
