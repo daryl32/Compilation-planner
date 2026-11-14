@@ -59,6 +59,47 @@ def playlist_raws(plan: dict) -> list:
     return list(dict.fromkeys(get_track_raw_source(p["track_id"]) for p in (plan.get("edge") or {}).get("playlist") or []))
 
 
+_PEAKS = {}
+
+
+def _peak_db(path) -> float | None:
+    """How loud a file's sound is WHILE IT SPEAKS, in dB below full scale (None when it can't be read): the level of
+    its 50 ms stretches, leaving the silent ones out (her clips for short lines end in silence) — not the single
+    loudest sample, which a compressed file's first instant can overshoot. Remembered per file."""
+    try:
+        st_ = os.stat(path)
+        key = (str(path), st_.st_mtime_ns, st_.st_size)
+    except OSError:
+        return None
+    if key not in _PEAKS:
+        _PEAKS[key] = None
+        try:
+            import numpy as np
+            r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0", "-ac", "1", "-ar", "16000",
+                                "-f", "s16le", "-"], capture_output=True, timeout=60)
+            x = np.frombuffer(r.stdout, dtype=np.int16).astype(np.float64) / 32768.0
+            n = len(x) // 800
+            if n:
+                rms = np.sqrt((x[:n * 800].reshape(n, 800) ** 2).mean(axis=1))
+                said = rms[rms > max(rms.max() * 0.1, 1e-4)]
+                if len(said):
+                    _PEAKS[key] = float(20 * np.log10(np.sqrt((said ** 2).mean())))
+        except Exception:          # noqa: BLE001
+            pass
+    return _PEAKS[key]
+
+
+def _match_gain(sound, like) -> float:
+    """dB to add to `sound` so it is as loud as `like` (her clips come out of the lip-sync model much quieter
+    than the lines they were made from). 0 when there is nothing to compare; never more than −6 … +20."""
+    if not like or not sound or str(like) == str(sound) or not Path(like).exists():
+        return 0.0
+    a, b = _peak_db(sound), _peak_db(like)
+    if a is None or b is None:
+        return 0.0
+    return max(-6.0, min(20.0, b - a))
+
+
 def _voice_track(cues: list, total: float, tmp_dir: Path, run, name: str = "voice.wav") -> Path | None:
     """Every cue laid at its time on one silent track of the compilation's length. A cue without a clip (or whose
     clip has gone) gets its phase's placeholder tone."""
@@ -74,7 +115,8 @@ def _voice_track(cues: list, total: float, tmp_dir: Path, run, name: str = "voic
             f = placeholders[p]
         inputs += ["-i", str(f)]
         ms = int(round(float(cue["time"]) * 1000))
-        parts.append(f"[{k}:a:0]{AUDIO_FMT},adelay={ms}:all=1[c{k}]")
+        gain = _match_gain(f, cue.get("match"))
+        parts.append(f"[{k}:a:0]{AUDIO_FMT}," + (f"volume={gain:.1f}dB," if abs(gain) >= 0.5 else "") + f"adelay={ms}:all=1[c{k}]")
     out = tmp_dir / name
     mix = "".join(f"[c{k}]" for k in range(len(cues)))
     run(["ffmpeg", "-y", *inputs, "-filter_complex",
@@ -192,17 +234,16 @@ def _appearances(edge: dict, tmp_dir: Path, frame: tuple) -> list:
 
 
 def _sound_cues(edge: dict, shows: list) -> list:
-    """What is heard at each cue: the line's own recording (the MP3 her clip was made from — clean, and the same
-    timing); her clip's sound only where there is no recording; else (None) the placeholder tone."""
+    """What is heard at each cue: with the avatar on, HER CLIP's sound where her voice is in it (Daryl, 14 Nov) —
+    brought to the loudness of the line's own recording ("match") when there is one; else the voiceover recording
+    for that moment; else (None) the placeholder tone."""
     voice = edge.get("voiceover") or {}
     by_time = {round(float(c["time"]), 3): dict(c) for c in (voice.get("cues") or [])} if voice.get("on") else {}
     for s in shows:
         key = round(s["time"], 3)
-        have = by_time.get(key)
-        if have and have.get("file") and Path(have["file"]).exists():
-            continue
         if s["sound"]:
-            by_time[key] = {"time": s["time"], "profile": s["profile"], "file": s["sound"]}
+            by_time[key] = {"time": s["time"], "profile": s["profile"], "file": s["sound"],
+                            "match": (by_time.get(key) or {}).get("file")}
         elif key not in by_time:
             by_time[key] = {"time": s["time"], "profile": s["profile"], "file": None}
     return [by_time[k] for k in sorted(by_time)]
@@ -238,7 +279,7 @@ def _card(spec: dict, tmp_dir: Path, run, frame: tuple, name: str):
         ci = probe(c) if c and Path(c).exists() else None
         has_clip = bool(ci and ci["video"] and ci["seconds"] > 0)
         secs = (ci["seconds"] if has_clip else (probe(f)["seconds"] if f and Path(f).exists() else 0.0)) or float(ln.get("seconds") or 2.0)
-        cues.append({"time": t, "profile": "wait", "file": f if f and Path(f).exists() else (c if has_clip and ci["audio"] else f)})
+        cues.append({"time": t, "profile": "wait", "file": c if has_clip and ci["audio"] else f, "match": f})
         if has_clip:
             shows.append({"time": t, "seconds": secs, "clip": c})
         t += secs + E.LINE_GAP
@@ -306,7 +347,8 @@ def _mix(edge: dict, shows: list, sources, tmp_dir: Path, run) -> Path:
             # (":a:0" — an .m4a may carry its cover art as a second stream)
             filters.append(f"[{idx}:a:0]{AUDIO_FMT},atrim=0:{float(part['play']):.3f},asetpts=PTS-STARTPTS[p{k}]")
             idx += 1
-        vol = float(voice.get("music_volume", E.MUSIC_UNDER_VOICE)) if talking else 1.0
+        # (never above today's level: a plan compiled earlier stored 0.5, which also brought the Wait / Stop dip back)
+        vol = min(float(voice.get("music_volume", E.MUSIC_UNDER_VOICE)), E.MUSIC_UNDER_VOICE) if talking else 1.0
         # 🔉 down to a quarter during Wait and Stop (a short fade each way) when it is louder than that elsewhere
         quiet = float((edge.get("music") or {}).get("still_volume", E.MUSIC_IN_STILL))
         spans = E.still_spans(sched) if quiet < vol else []

@@ -685,6 +685,10 @@ def _result(res: dict) -> None:
                 st.markdown("**Clashes** — two lines wanted the same moment; they never overlap, so one gave way:")
                 for c in clashes:
                     st.caption(f"⚠️ {c['line']} ({c['where']}) met {c['with']} → {c['result']}")
+            av_on = (plan["edge"].get("avatar") or {}).get("on")
+            if av_on and res.get("missing_avatar"):       # 👩 the lines in this compilation she has no clip for yet
+                st.caption(f"👩 No avatar clip on Google Drive yet for {len(res['missing_avatar'])} of this compilation's lines "
+                           f"(stand-in figure, the line's own recording is heard): " + ", ".join(res["missing_avatar"]))
             unused, no_cue = res.get("lines_unused") or [], res.get("lines_no_cue") or []
             if unused or no_cue:
                 st.caption(f"🔇 Not heard in this compilation: {len(unused)} line(s) whose cue is for a round it doesn't have"
