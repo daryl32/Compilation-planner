@@ -218,8 +218,11 @@ def test_the_render_carries_the_timer_and_the_mixed_sound(tmp_path, monkeypatch)
     RP.render_plan_dict(plan(parts, False, False, "bottom-right"), str(full), quick=True)
     RP.render_plan_dict(plan(parts, False, True, "bottom-right"), str(half), quick=True)
     assert _level(full, 30, 38) > 0.1                                   # the song plays on after its first end
-    assert _level(half, 5, 15) == pytest.approx(0.5 * _level(full, 5, 15), rel=0.15)
-    assert _level(half, 0.0, 0.3) > _level(half, 5, 5.3) * 1.02         # the cue (a placeholder tone) at the phase start
+    assert _level(half, 25, 35) == pytest.approx(0.5 * _level(full, 25, 35), rel=0.15)        # half under the voiceover…
+    assert _level(full, 5, 15) == pytest.approx(0.25 * _level(full, 25, 35), rel=0.15)        # …and a quarter during Wait
+    assert _level(half, 5, 15) == pytest.approx(_level(full, 5, 15), rel=0.15)                # (a quarter either way)
+    assert _level(full, 20.6, 21.0) > 3 * _level(full, 19.0, 19.4)                            # back up as Extra starts
+    assert _level(half, 0.05, 0.3) > _level(half, 5, 5.3) * 1.02        # the cue (a placeholder tone) at the phase start
     assert max(_pixel(full, 10.0, cx, top + 4)) < 80                    # nothing top left now…
     r, g, b = _pixel(full, 30.0, 640 - top - w + int(w * 0.2), 360 - top - int(w * 0.15) - 1)
     assert r > 170 and g < 90 and b < 90                                # …Extra's label sits bottom right
@@ -369,6 +372,7 @@ def test_the_cue_map_gives_every_line_its_moment_and_never_two_at_once():
     import edge_mode as E
     cm = E.load_cue_map()
     assert len(cm["lines"]) == 45 and sum(1 for ln in cm["lines"] if ln["cues"]) == 32
+    assert E.PROFILES["extra"]["bpm"] == 200                                       # a little faster than at first (180)
     for diff in E.DIFFICULTIES:
         for rounds in (3, 4, 5, 6):
             for seed in range(1 if diff != "hard" else 12):
@@ -389,13 +393,22 @@ def test_the_cue_map_gives_every_line_its_moment_and_never_two_at_once():
     assert 3 * 120 + 100 <= p["time"] and p["time"] + p["seconds"] <= 3 * 120 + 120       # somewhere during Stop
     last = at[("Did you cum", 6)]
     assert abs(last["time"] + last["seconds"] - 720.0) < 1e-6 and last["moved"] < 0       # finishes as the compilation ends
-    # the every-round line gives way to a round's own line at the same moment — and that is reported
-    assert ("You can survive", 1) not in at and at[("You can survive", 5)]["time"] == 4 * 120 + 20.0
-    assert any(c["line"] == "You can survive" and c["with"] == "Get hard for me" and c["result"] == "left out" for c in got["clashes"])
-    assert at[("You can survive", 2)]["moved"] > 0
-    # "last" means the final round whatever its number; a line set for a difficulty stays out of the others
-    three = {(p["line"], p["round"]) for p in E.resolve_lines(E.schedule("chill", 3), cm, "chill")["plays"]}
-    assert ("Did you cum", 3) in three and ("show me how much - now stop", 3) in three
+    # "You can survive" is round 5's line only (every round was a slip); "Keep going" is a filler, once a round
+    assert [r for (n, r) in at if n == "You can survive"] == [5] and at[("You can survive", 5)]["time"] == 4 * 120 + 20.0
+    assert sorted(r for (n, r) in at if n == "Keep going") == [1, 2, 3, 4, 5, 6]
+    assert all(at[("Keep going", r)]["profile"] in ("medium", "fast") for r in range(1, 7))
+    # two lines at one moment: the later one waits its turn — and that is reported
+    assert at[("Slow", 3)]["moved"] > 0 and any(c["line"] == "Slow" and c["with"] == "Ok stroke again" for c in got["clashes"])
+    # "last" means the final round whatever its number — and there its lines replace that round's own
+    for rounds in (3, 4, 5):
+        g = E.resolve_lines(E.schedule("chill", rounds), cm, "chill")
+        names = {p["line"] for p in g["plays"] if p["round"] == rounds}
+        assert {"Did you cum", "show me how much - now stop", "Just stroke", "Now Stroke"} <= names
+        assert not names & {"Slow", "Stroke faster", "relax-fingertips", "How stroke even more", "Balls bursting", "Now stop (2)",
+                            "And dont cum", "Just sit there", "I know you can do it", "You can survive"}
+        assert not [c for c in g["clashes"] if c["round"] == rounds and c["result"].startswith("left out")]
+    six = {p["line"] for p in got["plays"] if p["round"] == 5}
+    assert {"Balls bursting", "Now stop (2)", "And dont cum"} <= six                # round 5 keeps its own when it isn't the last
     only_hard = {"lines": [{"name": "x", "file": "x.mp3", "seconds": 2.0, "cues": [
         {"type": "phase", "phases": ["fast"], "at": "start", "offset": 0, "roundList": [], "diffs": ["hard"]}]}]}
     assert E.resolve_lines(E.schedule("chill", 3), only_hard, "chill")["plays"] == []
@@ -452,8 +465,52 @@ def test_lines_on_the_intro_and_outro_screens(tmp_path, monkeypatch):
     assert max(_pixel(out, 2.0, 630, 350)) < 60                                      # on the dark intro screen
     assert _level(out, intro + 2, intro + 8) < 0.01 < _level(out, intro + 10.2, intro + 11.8)       # Wait is silent but for the mid line
     assert _level(out, intro + 20 + 0.6, intro + 20 + 4.2) > 0.05 and max(_pixel(out, intro + 22, 630, 350)) < 60
+    # a line with the avatar's clip: she is in her box while she reads it (her voice from the clip), and holds after
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=magenta:s=180x320:d=3:r=25",
+                    "-f", "lavfi", "-i", "sine=frequency=880:duration=3", "-af", "volume=6", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p", "-shortest", str(tmp_path / "b.mp4")], check=True)
+    plan["edge"]["intro"]["lines"][1]["clip"] = str(tmp_path / "b.mp4")
+    out = tmp_path / "cards_clip.mp4"
+    RP.render_plan_dict(plan, str(out), quick=True)
+    ax, ay, aw, ah = E.intro_layout((640, 360))["avatar"]
+    mid = (ax + aw // 2, ay + ah // 2)
+    r, g, bl = _pixel(out, 4.0, *mid)
+    assert r > 170 and bl > 170 and g < 90 and abs(_seconds(out) - (intro + 20 + outro)) < 0.6
+    assert not (_pixel(out, 1.2, *mid)[0] > 170 and _pixel(out, 1.2, *mid)[1] < 90)           # the stand-in while line a is read
 
 
 def E_CARD_LEAD():
     import edge_render
     return edge_render.CARD_LEAD
+
+
+def test_the_intro_card_takes_thumbnails_as_pictures_or_bytes():
+    """The planner hands thumbnails over as JPEG bytes — the intro screen failed on them ("bytes object has no
+    attribute convert", 14 Nov)."""
+    import io
+    import edge_mode as E
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (160, 90), (200, 30, 30)).save(buf, format="JPEG")
+    img = E.intro_card((640, 360), [("Rounds", "3")], [buf.getvalue(), Image.new("RGB", (160, 90), (30, 30, 200)), None, b"not a picture"])
+    px = np.asarray(img)
+    assert (px[..., 0] > 150).sum() > 2000 and (px[..., 2] > 150).sum() > 2000          # both thumbnails are drawn
+
+
+def test_the_avatar_follows_the_cue_map(monkeypatch, tmp_path):
+    out = _timelines(monkeypatch)
+    try:
+        import planner.edge as PE
+        monkeypatch.setattr(PE, "avatar_dir", lambda: tmp_path / "avatar")
+        (tmp_path / "avatar" / "lines").mkdir(parents=True)
+        for n in ("Now stop", "Welcome"):
+            (tmp_path / "avatar" / "lines" / f"{n}.mp4").write_bytes(b"x")
+        res = PE.compile_edge([], VIDS, "chill", 3, voiceover=True, avatar=True)
+        edge = res["plan"]["edge"]
+        av, vo = edge["avatar"]["cues"], edge["voiceover"]["cues"]
+        assert [(c["time"], c["line"]) for c in av] == [(c["time"], c["line"]) for c in vo]      # she appears with every line
+        assert {c["line"] for c in av if c["clip"]} == {"Now stop"} and "Get hard for me" in edge["avatar"]["placeholders"]
+        assert [x.get("clip") is not None for x in edge["intro"]["lines"]] == [True, False]      # Welcome has her clip
+        assert edge["music"]["still_volume"] == 0.25
+    finally:
+        shutil.rmtree(out, ignore_errors=True)

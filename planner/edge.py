@@ -49,21 +49,32 @@ def line_file(line: dict) -> Path | None:
     return f if f.exists() and f.stat().st_size > 0 else None
 
 
-def line_durations(cue_map: dict) -> dict:
-    """{line name: measured seconds} for the lines whose files are here (the rest keep the map's estimate)."""
+def avatar_line_clip(line: dict) -> Path | None:
+    """The avatar's video for a line (her voice in it), on this machine: <data>/edge_avatar/lines/<line>.mp4."""
+    f = avatar_dir() / "lines" / (Path(str(line.get("file") or line["name"])).stem + ".mp4")
+    return f if f.exists() and f.stat().st_size > 0 else None
+
+
+def line_durations(cue_map: dict, with_avatar: bool = False) -> dict:
+    """{line name: measured seconds} for the lines whose files are here (the rest keep the map's estimate).
+    with_avatar: a line with an avatar clip lasts as long as the clip (it is often a little longer than the MP3)."""
     from edge_render import probe
     out = {}
     for line in cue_map.get("lines") or []:
         f = line_file(line)
-        if f is not None:
-            secs = probe(f)["seconds"]
-            if secs > 0:
-                out[line["name"]] = secs
+        secs = probe(f)["seconds"] if f is not None else 0.0
+        c = avatar_line_clip(line) if with_avatar else None
+        if c is not None:
+            secs = max(secs, probe(c)["seconds"])
+        if secs > 0:
+            out[line["name"]] = secs
     return out
 
 
-def fetch_lines(cue_map: dict, progress=None) -> list:
-    """Download the cue map's lines from Google Drive (its "drive_folder") to lines_dir(). Returns error strings."""
+def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing: bool = False) -> list:
+    """Download the cue map's lines from Google Drive (its "drive_folder") to lines_dir(), and — avatar — her clips
+    from its avatar_clips folder (same names, .mp4) to <data>/edge_avatar/lines/. only_missing: leave what is here
+    alone. Returns error strings."""
     try:
         from drive_sync import credentials_available, download_source_video
         if not credentials_available():
@@ -75,11 +86,30 @@ def fetch_lines(cue_map: dict, progress=None) -> list:
     errors = []
     for k, line in enumerate(lines, 1):
         name = str(line.get("file") or (line["name"] + ".mp3"))
+        if only_missing and line_file(line) is not None:
+            continue
         if progress:
             progress(k, len(lines), name)
         err = download_source_video(f"{folder}/{name}", lines_dir() / name)
         if err:
             errors.append(f"{name}: {err}")
+    if avatar:                                             # 👩 her clips: whichever of the lines have one on Drive so far
+        from drive_sync import list_drive_folder
+        files, err = list_drive_folder(f"{folder}/avatar_clips")
+        if err:
+            errors.append(f"avatar_clips: {err}")
+        want = {Path(str(ln.get("file") or ln["name"])).stem.lower(): ln for ln in lines}
+        have = [f for f in files if Path(f["name"]).suffix.lower() in E.VIDEO_EXT and Path(f["name"]).stem.lower() in want]
+        for k, f in enumerate(have, 1):
+            ln = want[Path(f["name"]).stem.lower()]
+            if only_missing and avatar_line_clip(ln) is not None:
+                continue
+            if progress:
+                progress(k, len(have), f["name"])
+            dest = avatar_dir() / "lines" / (Path(str(ln.get("file") or ln["name"])).stem + ".mp4")
+            err = download_source_video(f"{folder}/avatar_clips/{f['name']}", dest)
+            if err:
+                errors.append(f"{f['name']}: {err}")
     return errors
 
 
@@ -196,9 +226,10 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     # map, a clip from each phase's folder at the start of every phase, as at first
     cue_map = E.load_cue_map() if voiceover else {"lines": []}
     lines_used, clashes, intro_lines, outro_lines, lines_missing = bool(cue_map.get("lines")), [], [], [], []
+    line_avatar = None
     if lines_used:
         by_name = {ln["name"]: ln for ln in cue_map["lines"]}
-        durations = line_durations(cue_map)
+        durations = line_durations(cue_map, with_avatar=bool(avatar))
         got = E.resolve_lines(sched, cue_map, difficulty, seed, durations)
         path = lambda n: (str(line_file(by_name[n])) if line_file(by_name[n]) else None)        # noqa: E731
         cues = [{"time": p["time"], "profile": p["profile"], "file": path(p["line"]), "line": p["line"],
@@ -206,6 +237,12 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
         clashes = got["clashes"]
         named = lambda ns: [{"line": n, "file": path(n), "seconds": float(durations.get(n) or by_name[n].get("seconds") or 2.0)} for n in ns]   # noqa: E731
         intro_lines, outro_lines = named(got["intro"]), named(got["outro"])
+        if avatar:                                         # 👩 she reads the lines: her clip where there is one
+            vid = lambda n: (str(avatar_line_clip(by_name[n])) if avatar_line_clip(by_name[n]) else None)       # noqa: E731
+            for x in intro_lines + outro_lines:
+                x["clip"] = vid(x["line"])
+            line_avatar = [{"time": c["time"], "profile": c["profile"], "clip": vid(c["line"]), "line": c["line"],
+                            "seconds": c["seconds"]} for c in cues]
         lines_missing = sorted({c["line"] for c in cues + intro_lines + outro_lines if not c["file"]}, key=str.lower)
         missing_voice = []
     else:
@@ -213,8 +250,12 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
         cues = E.voice_cues(sched, files, seed) if voiceover else []
         missing_voice = sorted({c["profile"] for c in cues if not c["file"]}, key=E.ORDER.index)
     av_files = E.clip_files(avatar_dir()) if (avatar or intro) else {}
-    av_cues = E.avatar_cues(sched, av_files, seed) if avatar else []
-    missing_avatar = sorted({c["profile"] for c in av_cues if not c["clip"]}, key=E.ORDER.index)
+    if avatar and line_avatar is not None:                 # with the cue map she appears with every line
+        av_cues = line_avatar
+        missing_avatar = sorted({c["line"] for c in av_cues if not c["clip"]}, key=str.lower)
+    else:
+        av_cues = E.avatar_cues(sched, av_files, seed) if avatar else []
+        missing_avatar = sorted({c["profile"] for c in av_cues if not c["clip"]}, key=E.ORDER.index)
     intro_clips = av_files.get("intro") or []
     seen, thumbs = {}, []
     for e in timeline:                                    # the intro's thumbnails: the six most used videos
@@ -242,6 +283,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                           "placeholders": missing_voice, "cue_map": lines_used, "clashes": clashes,
                           "lines_missing": lines_missing},
             "overlay": {"corner": corner, "fps": E.OVERLAY_FPS},
+            "music": {"still_volume": E.MUSIC_IN_STILL, "fade": E.MUSIC_FADE_SEC},        # the songs drop in Wait and Stop
             "avatar": {"on": bool(avatar), "mode": avatar_mode if avatar_mode in E.AVATAR_MODES else "corner",
                        "corner": avatar_corner, "cues": av_cues, "placeholders": missing_avatar},
             # (a line mapped to the intro or the outro needs its screen: it comes on with the voiceover)
@@ -280,6 +322,16 @@ def _do_pending_compile() -> None:
         return
     ss = st.session_state
     bar = st.progress(0.0, text="⏱️ Compiling…")
+    fetch_note = None
+    if ss.get("edge_voice"):                               # the lines (and her clips) not here yet are fetched first
+        cm = E.load_cue_map()
+        want_av = bool(ss.get("edge_avatar"))
+        if cm.get("lines") and (any(line_file(ln) is None for ln in cm["lines"]) or want_av):
+            errs = fetch_lines(cm, lambda k, n, name: bar.progress(min(k / max(n, 1), 1.0), text=f"⬇️ Fetching {name}…"),
+                               avatar=want_av, only_missing=True)
+            if errs:
+                fetch_note = (f"{len(errs)} file(s) couldn't be fetched from Google Drive — those lines play as placeholders. "
+                              + " · ".join(errs[:3]))
     try:
         res = compile_edge(list(ss.get("edge_playlist") or []), job["video_ids"], ss.get("edge_difficulty", "chill"),
                            int(ss.get("edge_rounds", 3)), voiceover=bool(ss.get("edge_voice")),
@@ -293,6 +345,8 @@ def _do_pending_compile() -> None:
         st.session_state["edge_msg"] = ("error", f"Couldn't compile: {e}")
         return
     bar.empty()
+    if fetch_note:
+        res["notes"] = [fetch_note] + list(res.get("notes") or [])
     ss[RESULT_KEY] = res
     ss.pop("edge_render", None)
 
@@ -305,7 +359,8 @@ def _lines_panel(cue_map: dict) -> None:
     with st.expander(f"🎙️ Voiceover lines — {mapped} of {len(lines)} have a cue · {here} of {len(lines)} are on the server",
                      expanded=here < len(lines)):
         st.caption("Which line plays when comes from your cue map; no two lines ever play at once. A line whose file "
-                   "isn't here yet plays as a placeholder tone.")
+                   "isn't here yet plays as a placeholder tone. The button also brings the avatar's clips made so far "
+                   f"({sum(1 for ln in lines if avatar_line_clip(ln) is not None)} here); Compile fetches whatever is missing by itself.")
         if st.button("⬇️ Get the lines from Google Drive", key="edge_lines_fetch", type="primary" if here < len(lines) else "secondary"):
             bar = st.progress(0.0, text="Fetching the lines…")
             errs = fetch_lines(cue_map, lambda k, n, name: bar.progress(k / max(n, 1), text=f"Fetching {name} ({k}/{n})…"))
@@ -405,9 +460,9 @@ def _setup(rows: dict, have_tl: set) -> None:
             _clip_manager("voice")
     a = st.columns(2)
     a[0].toggle("👩 Avatar", key="edge_avatar",
-                help="She pops onto the screen at the start of every phase and reads her line — her voice comes from "
-                     "her clip, and the songs play at half volume. (Your own list of cues and timings will replace "
-                     "'the start of every phase'.)")
+                help="With the voiceover on she appears with every line of your cue map — her clip where one has "
+                     "been made (her voice comes from it), a stand-in figure for the rest. The songs play at half "
+                     "volume, and at a quarter during Wait and Stop.")
     a[1].toggle("🎬 Intro screen", key="edge_intro",
                 help="Before the compilation: the avatar giving her intro, beside the difficulty, rounds, total time "
                      "and thumbnails of the videos used. It lasts as long as her intro clip (8 s with the stand-in).")
@@ -571,7 +626,9 @@ def _used_line(res: dict) -> str:
     av = e.get("avatar") or {}
     if av.get("on"):
         bits.append(f"👩 avatar ({'split screen' if av['mode'] == 'split' else av['corner'].replace('-', ' ')})"
-                    + (" — stand-in figure for: " + ", ".join(E.PROFILES[p]["label"].title() for p in av["placeholders"])
+                    + ((f" — her clip for {len(av['cues']) - sum(1 for c in av['cues'] if not c.get('clip'))} of {len(av['cues'])} lines, stand-in for the rest"
+                        if e["voiceover"].get("cue_map") and e["voiceover"].get("on")
+                        else " — stand-in figure for: " + ", ".join(E.PROFILES[p]["label"].title() if p in E.PROFILES else p for p in av["placeholders"]))
                        if av.get("placeholders") else ""))
     if (e.get("intro") or {}).get("on"):
         bits.append("🎬 intro screen" + ("" if e["intro"].get("clip") or e["intro"].get("lines") else " (stand-in figure, 8 s)"))

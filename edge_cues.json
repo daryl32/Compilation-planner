@@ -1,6 +1,6 @@
 {
  "version": 1,
- "source": "Edge Mode Cue Map (claude.ai artifact), as saved 14 Nov 2026 02:05",
+ "source": "Edge Mode Cue Map (claude.ai artifact), as saved 14 Nov 2026 02:05; 14 Nov 02:39: You can survive \u2192 round 5 only, Keep going \u2192 filler",
  "drive_folder": "scene-labeling/Edge_voiceover",
  "note": "seconds are estimated from the MP3 size at 192 kbps; the app measures the real file when it has it",
  "lines": [
@@ -250,9 +250,11 @@
      ],
      "at": "start",
      "offset": 0,
-     "roundList": [],
+     "roundList": [
+      "5"
+     ],
      "diffs": [],
-     "note": ""
+     "note": "14 Nov: every round was a mistake; round 5 is the one round whose start of Slow was free (Daryl to confirm)"
     }
    ]
   },
@@ -329,15 +331,16 @@
    "seconds": 1.57,
    "cues": [
     {
-     "type": "interval",
-     "every": 60,
-     "startAfter": 0,
+     "type": "random",
+     "times": 1,
+     "per": "round",
      "phases": [
-      "medium"
+      "medium",
+      "fast"
      ],
      "roundList": [],
      "diffs": [],
-     "note": ""
+     "note": "filler: once a round, in a silence during Medium or Fast"
     }
    ]
   },

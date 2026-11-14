@@ -27,7 +27,7 @@ PROFILES = {
     "slow":   {"label": "SLOW",   "seconds": PHASE_SEC, "bpm": 60,  "level": 0.35, "colour": (40, 160, 90)},
     "medium": {"label": "MEDIUM", "seconds": PHASE_SEC, "bpm": 100, "level": 0.55, "colour": (225, 150, 20)},
     "fast":   {"label": "FAST",   "seconds": PHASE_SEC, "bpm": 140, "level": 0.78, "colour": (235, 95, 20)},
-    "extra":  {"label": "EXTRA",  "seconds": PHASE_SEC, "bpm": 180, "level": 1.00, "colour": (230, 20, 25)},
+    "extra":  {"label": "EXTRA",  "seconds": PHASE_SEC, "bpm": 200, "level": 1.00, "colour": (230, 20, 25)},
     "stop":   {"label": "STOP",   "seconds": PHASE_SEC, "bpm": 0,   "level": 0.05, "colour": (60, 60, 65)},
 }
 ORDER = ["wait", "slow", "medium", "fast", "extra", "stop"]
@@ -37,6 +37,9 @@ HARD_RANDOM = 12                                   # Wait + 12 drawn + Extra + S
 HARD_WEIGHTS = {"slow": 1.0, "medium": 2.0, "fast": 2.0, "extra": 2.0}
 MIN_ROUNDS, MAX_ROUNDS = 3, 6
 MUSIC_UNDER_VOICE = 0.5                            # the songs' volume while the voiceover is on
+MUSIC_IN_STILL = 0.25                              # the songs' volume during Wait and Stop
+STILL = ("wait", "stop")
+MUSIC_FADE_SEC = 0.5                               # how long the songs take to drop to / come back from that
 BEAT_UNDER_SONG = 0.6                              # the generated beat's volume when songs play too
 AUDIO_RATE = 44100
 TRACK_ID = "edge_beat"                             # the generated beat's name where a track id is wanted
@@ -381,6 +384,18 @@ def write_overlay(sched: list, folder, frame_height: int) -> tuple:
     return lst, size
 
 
+def still_spans(sched: list) -> list:
+    """[(start, end)] of the Wait / Stop stretches, neighbours joined (a round's Stop runs into the next Wait)."""
+    out = []
+    for ph in sched:
+        if ph["profile"] in STILL:
+            if out and abs(out[-1][1] - ph["start"]) < 1e-6:
+                out[-1] = (out[-1][0], ph["end"])
+            else:
+                out.append((ph["start"], ph["end"]))
+    return out
+
+
 def overlay_xy(corner: str, margin_share: float = 0.035) -> tuple:
     """ffmpeg overlay positions (x, y expressions) for a corner of the frame."""
     m = f"(H*{margin_share})"
@@ -476,7 +491,17 @@ def intro_card(size: tuple, stats: list, thumbs: list = (), title: str = "EDGE M
         d.text((x + k * col, y), str(label).upper(), font=fl, fill=(170, 165, 185))
         d.text((x + k * col, y + int(h * 0.06)), str(value), font=fv, fill=RING)
     y += int(h * 0.19)
-    thumbs = [t for t in thumbs if t is not None][:6]
+    got = []
+    for t in thumbs:                                       # a thumbnail may come as a picture or as its JPEG bytes
+        try:
+            if isinstance(t, (bytes, bytearray)):
+                import io
+                t = Image.open(io.BytesIO(t))
+            if t is not None:
+                got.append(t.convert("RGB"))
+        except Exception:          # noqa: BLE001 — a thumbnail that can't be read is left out
+            continue
+    thumbs = got[:6]
     if thumbs:
         gap = max(2, int(w * 0.008))
         tw = (w - x - lay["margin"] - 2 * gap) // 3
@@ -509,9 +534,18 @@ def load_cue_map(path=None) -> dict:
         return {"lines": []}
 
 
-def _cue_in_round(cue: dict, r: int, n_rounds: int) -> bool:
+def _cue_in_round(cue: dict, r: int, n_rounds: int, last_replaces: bool = False) -> bool:
+    """Does the cue play in round r of n? No rounds picked = every round. "last" = the final round whatever its
+    number. last_replaces: in the final round the "last" lines stand in for that round number's own — a cue set
+    for round 3 (and not for "last") stays out when round 3 is the last."""
     want = [str(x) for x in cue.get("roundList") or []]
-    return not want or str(r) in want or ("last" in want and r == n_rounds)
+    if not want:
+        return True
+    if r == n_rounds and "last" in want:
+        return True
+    if r == n_rounds and last_replaces:
+        return False
+    return str(r) in want
 
 
 def _free_spans(a: float, b: float, busy: list) -> list:
@@ -534,7 +568,8 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
     - a timer-phase cue set for a round plays once in that round: "start" and "during" at the phase's FIRST turn
       in the round, "end" at its LAST (Medium and Hard run a phase more than once a round). "End" starts the line
       `offset` seconds before the phase ends — at 0, as the next phase begins.
-    - rounds: none picked = every round; a number = that round; "last" = the final round, whatever its number.
+    - rounds: none picked = every round; a number = that round; "last" = the final round, whatever its number —
+      and when the map has "last" lines, they replace the final round's own numbered lines (Daryl, 14 Nov).
     - "during", "at random" and "every so often" lines are placed after the fixed ones, in whatever silence is left.
     - two lines wanting the same moment: the one set for fewer rounds keeps it; the other starts straight after if
       that is within MAX_DELAY seconds, and is left out otherwise. Either way it is listed in "clashes".
@@ -547,6 +582,9 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
     for ph in sched:
         by_round.setdefault(ph["round"], []).append(ph)
     fixed, flex, intro, outro, seen_cue = [], [], [], [], {}
+    has_last = any("last" in [str(x) for x in c.get("roundList") or []]
+                   for ln in cue_map.get("lines") or [] for c in ln.get("cues") or [])
+    in_round = lambda c, r: _cue_in_round(c, r, n_rounds, has_last)          # noqa: E731
 
     def secs(line):
         return float(durations.get(line["name"]) or line.get("seconds") or 2.0)
@@ -568,7 +606,7 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
             elif t == "phase":
                 at, off = cue.get("at") or "start", float(cue.get("offset") or 0)
                 for r, phases in by_round.items():
-                    if not _cue_in_round(cue, r, n_rounds):
+                    if not in_round(cue, r):
                         continue
                     for p in (cue.get("phases") or ORDER):
                         occ = [ph for ph in phases if ph["profile"] == p]
@@ -604,7 +642,7 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
                 starts = [(r, phs[0]["start"]) for r, phs in by_round.items()] if cue.get("from") == "round" else [(None, 0.0)]
                 for r, t0 in starts:
                     ph = phase_at(sched, t0 + clock)
-                    if t0 + clock < total and ph and _cue_in_round(cue, ph["round"], n_rounds) and (r is None or ph["round"] == r):
+                    if t0 + clock < total and ph and in_round(cue, ph["round"]) and (r is None or ph["round"] == r):
                         fixed.append({**base, "round": ph["round"], "profile": ph["profile"], "time": t0 + clock,
                                       "why": f"at {cue.get('clock')}" + (" into the round" if r else "")})
             elif t == "interval":
@@ -612,13 +650,13 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
                 tt = float(cue.get("startAfter") or 0) + every
                 while tt < total:
                     ph = phase_at(sched, tt)
-                    if ph and _cue_in_round(cue, ph["round"], n_rounds) and (not cue.get("phases") or ph["profile"] in cue["phases"]):
+                    if ph and in_round(cue, ph["round"]) and (not cue.get("phases") or ph["profile"] in cue["phases"]):
                         fixed.append({**base, "round": ph["round"], "profile": ph["profile"], "time": tt, "breadth": 200,
                                       "why": f"every {every:g} s"})
                     tt += every
             elif t == "random":
                 times, per = max(int(cue.get("times") or 1), 1), cue.get("per") or "round"
-                ok = [ph for ph in sched if _cue_in_round(cue, ph["round"], n_rounds)
+                ok = [ph for ph in sched if in_round(cue, ph["round"])
                       and (not cue.get("phases") or ph["profile"] in cue["phases"])]
                 groups = ([[ph] for ph in ok] if per == "phase" else [ok] if per == "compilation"
                           else [[ph for ph in ok if ph["round"] == r] for r in by_round])
