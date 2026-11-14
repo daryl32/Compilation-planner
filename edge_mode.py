@@ -36,7 +36,7 @@ DIFFICULTIES = {"chill": "😌 Chill", "medium": "🔥 Medium", "hard": "💀 Ha
 HARD_RANDOM = 12                                   # Wait + 12 drawn + Extra + Stop = 15 phases = 300 s
 HARD_WEIGHTS = {"slow": 1.0, "medium": 2.0, "fast": 2.0, "extra": 2.0}
 MIN_ROUNDS, MAX_ROUNDS = 3, 6
-MUSIC_UNDER_VOICE = 0.5                            # the songs' volume while the voiceover is on
+MUSIC_UNDER_VOICE = 0.25                           # the songs' volume while the voiceover or the avatar is on (Daryl, 14 Nov: background)
 MUSIC_IN_STILL = 0.25                              # the songs' volume during Wait and Stop
 STILL = ("wait", "stop")
 MUSIC_FADE_SEC = 0.5                               # how long the songs take to drop to / come back from that

@@ -142,7 +142,7 @@ def test_compile_without_a_song_and_with_a_playlist(monkeypatch):
         res3 = PE.compile_edge(["song_full"], VIDS, "medium", 4, beat=True, voiceover=True)
         assert res3["plan"]["track_duration_sec"] == 720.0 and res3["plan"]["edge"]["beat"] == {
             **res3["plan"]["edge"]["beat"], "on": True, "volume": 0.6}
-        assert res3["plan"]["edge"]["voiceover"]["music_volume"] == 0.5
+        assert res3["plan"]["edge"]["voiceover"]["music_volume"] == 0.25
     finally:
         shutil.rmtree(out, ignore_errors=True)
 
@@ -514,3 +514,66 @@ def test_the_avatar_follows_the_cue_map(monkeypatch, tmp_path):
         assert edge["music"]["still_volume"] == 0.25
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_a_stuck_picture_pass_is_stopped_and_says_so(tmp_path):
+    import os
+    import time
+    import edge_render as R
+    fifo = tmp_path / "never.wav"                         # an input nobody ever writes to: ffmpeg waits on it for ever
+    os.mkfifo(fifo)
+    keep = os.open(fifo, os.O_RDWR)                       # (held open, so ffmpeg's own open returns and its read hangs)
+    try:
+        t0 = time.time()
+        with pytest.raises(RuntimeError, match="stood still"):
+            R.run_watched(["ffmpeg", "-y", "-f", "wav", "-i", str(fifo), str(tmp_path / "out.wav")], 10.0, stall=3)
+        assert time.time() - t0 < 30
+    finally:
+        os.close(keep)
+    seen = []                                              # a pass that works reports how far it is, up to the end
+    R.run_watched(["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=60", "-c:v", "libx264", "-preset",
+                   "ultrafast", str(tmp_path / "ok.mp4")], 60.0, progress=seen.append)
+    assert all(0 < f <= 1 for f in seen) and seen == sorted(seen)
+    with pytest.raises(RuntimeError, match="ffmpeg failed"):
+        R.run_watched(["ffmpeg", "-y", "-i", str(tmp_path / "not_there.mp4"), str(tmp_path / "x.mp4")], 5.0)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_songs_are_read_from_this_machine_never_streamed_and_sit_at_a_quarter_under_the_voice(tmp_path, monkeypatch):
+    import sys
+    import types
+    import edge_mode as E
+    import edge_render as R
+    monkeypatch.setitem(sys.modules, "render_preview", types.SimpleNamespace(get_track_raw_source=lambda t: f"raw/{t}"))
+    song = tmp_path / "song.wav"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=30", "-af", "volume=4",
+                    str(song)], check=True)
+
+    class Sources:                                         # a song that isn't here yet: only a stream on offer
+        here, downloaded = False, []
+
+        def is_local(self, raw):
+            return self.here
+
+        def download(self, raws):
+            self.downloaded += list(raws)
+            self.here = True
+            return []
+
+        def input_args(self, raw):
+            return ["-i", str(song)] if self.here else ["-i", "https://example.invalid/stream"]
+
+    def run(cmd):
+        subprocess.run(cmd, capture_output=True, check=True)
+    sched = [{"index": 0, "round": 1, "profile": "slow", "start": 0.0, "end": 20.0}]
+    edge = {"schedule": sched, "playlist": [{"track_id": "s", "offset": 0.0, "play": 20.0, "pass": 1}], "beat": {"on": False},
+            "voiceover": {"on": False, "cues": []}}
+    src = Sources()
+    loud = R._mix(edge, [], src, tmp_path, run)
+    assert src.downloaded == ["raw/s"]                     # fetched once, then read as a file
+    loud = loud.rename(tmp_path / "loud.wav")
+    edge["voiceover"] = {"on": True, "cues": [{"time": 15.0, "profile": "slow", "file": None}]}     # no stored volume: today's default
+    quiet = R._mix(edge, [], src, tmp_path, run)
+    assert E.MUSIC_UNDER_VOICE == 0.25
+    assert _level(quiet, 2, 12) == pytest.approx(0.25 * _level(loud, 2, 12), rel=0.1)

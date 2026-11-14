@@ -6,7 +6,7 @@ best fit from every video otherwise) · difficulty (Chill / Medium / Hard) · �
 
 The footage is matched by the 🤖 new matcher, 🎯 Movement only: to each song as usual, or — with no song — to a
 generated beat whose speed follows the timer's phases. The rendered video carries the countdown overlay, the
-voiceover (the songs at half volume under it) and the beat; the plan's "edge" block carries the same for Blender.
+voiceover (the songs at a quarter volume under it) and the beat; the plan's "edge" block carries the same for Blender.
 The rules (phases, rounds, beat, overlay) are in edge_mode.py; the render step in edge_render.py.
 """
 
@@ -226,6 +226,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     # map, a clip from each phase's folder at the start of every phase, as at first
     cue_map = E.load_cue_map() if voiceover else {"lines": []}
     lines_used, clashes, intro_lines, outro_lines, lines_missing = bool(cue_map.get("lines")), [], [], [], []
+    lines_unused, lines_no_cue = [], []
     line_avatar = None
     if lines_used:
         by_name = {ln["name"]: ln for ln in cue_map["lines"]}
@@ -235,6 +236,8 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
         cues = [{"time": p["time"], "profile": p["profile"], "file": path(p["line"]), "line": p["line"],
                  "seconds": p["seconds"], "round": p["round"], "why": p["why"], "moved": p["moved"]} for p in got["plays"]]
         clashes = got["clashes"]
+        lines_unused = list(got.get("unused") or [])       # a cue, but for a round / difficulty this compilation doesn't have
+        lines_no_cue = sorted((ln["name"] for ln in cue_map["lines"] if not ln.get("cues")), key=str.lower)
         named = lambda ns: [{"line": n, "file": path(n), "seconds": float(durations.get(n) or by_name[n].get("seconds") or 2.0)} for n in ns]   # noqa: E731
         intro_lines, outro_lines = named(got["intro"]), named(got["outro"])
         if avatar:                                         # 👩 she reads the lines: her clip where there is one
@@ -300,7 +303,8 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     }
     return {"plan": plan, "summary": SMX.plan_summary(timeline), "notes": notes, "shortfall": shortfall,
             "schedule": sched, "parts": parts, "video_ids": list(video_ids), "track_ids": track_ids,
-            "missing_voice": missing_voice, "voice_clashes": clashes, "lines_missing": lines_missing, "missing_avatar": missing_avatar, "made": time.strftime("%H:%M:%S")}
+            "missing_voice": missing_voice, "voice_clashes": clashes, "lines_missing": lines_missing, "missing_avatar": missing_avatar,
+            "lines_unused": lines_unused, "lines_no_cue": lines_no_cue, "made": time.strftime("%H:%M:%S")}
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +455,7 @@ def _setup(rows: dict, have_tl: set) -> None:
                     help="No song picked, so the beat is the soundtrack: Slow 60, Medium 100, Fast 140, Extra 180 "
                          "beats a minute, silent in Wait and Stop. The footage is matched to it.")
     t[1].toggle("🎙️ Voiceover", key="edge_voice",
-                help="A voiceover clip at the start of every phase. The songs play at half volume so it is heard.")
+                help="A voiceover clip at the start of every phase. The songs drop to a quarter volume (background) so it is heard.")
     if st.session_state.get("edge_voice"):
         cue_map = E.load_cue_map()
         if cue_map.get("lines"):
@@ -600,6 +604,11 @@ def _do_pending_render(res: dict) -> None:
                                              ("downloaded", "downloaded"), ("local", "already on the server")) if stats.get(k)]
         if how:
             note = (note[0], note[1] + " Source files: " + ", ".join(how) + ".")
+        stg = stats.get("stages") or {}
+        steps = [f"{w} {int(stg[k] // 60)}:{int(stg[k] % 60):02d}" for k, w in (("segments", "clips"), ("edge_sound", "sound"),
+                 ("edge_screens", "intro / outro"), ("edge_picture", "timer and avatar")) if stg.get(k)]
+        if steps:
+            note = (note[0], note[1] + " Time: " + ", ".join(steps) + ".")
         bar.empty()
         st.session_state["edge_msg"] = note
         st.session_state["edge_render"] = out.name
@@ -674,6 +683,11 @@ def _result(res: dict) -> None:
                 st.markdown("**Clashes** — two lines wanted the same moment; they never overlap, so one gave way:")
                 for c in clashes:
                     st.caption(f"⚠️ {c['line']} ({c['where']}) met {c['with']} → {c['result']}")
+            unused, no_cue = res.get("lines_unused") or [], res.get("lines_no_cue") or []
+            if unused or no_cue:
+                st.caption(f"🔇 Not heard in this compilation: {len(unused)} line(s) whose cue is for a round it doesn't have"
+                           + (" (" + ", ".join(unused) + ")" if unused else "")
+                           + (f" · {len(no_cue)} with no cue yet (" + ", ".join(no_cue) + ")" if no_cue else ""))
             intro_l, outro_l = plan["edge"]["intro"].get("lines") or [], plan["edge"]["outro"].get("lines") or []
             if intro_l:
                 st.caption("🎬 Intro: " + " → ".join(x["line"] for x in intro_l))
