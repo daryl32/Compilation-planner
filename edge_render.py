@@ -432,7 +432,8 @@ def _piece_cmd(combined, ph: dict, timer_dir: Path, timer_xy: tuple, shows: list
             cur = f"[a{k}v]"
             idx += 1
     x, y = timer_xy
-    filters += ["[1:v]format=rgba[ov]", f"{cur}[ov]overlay=x={x}:y={y}:eof_action=repeat,format=yuv420p[v]"]
+    # (the timer's pictures brought to the footage's own frame rate first: a frame of it for every frame of footage)
+    filters += [f"[1:v]fps={FPS},format=rgba[ov]", f"{cur}[ov]overlay=x={x}:y={y}:eof_action=repeat:repeatlast=1,format=yuv420p[v]"]
     return ["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filters), "-map", "[v]", "-frames:v", str(frames),
             *_enc(), str(out)]
 
