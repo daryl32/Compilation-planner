@@ -7,11 +7,14 @@ sound is mixed — the playlist's songs back to back (starting again until the t
 while the voiceover or the avatar is on), the generated beat, and the voiceover lines at their cues. Nothing here
 chooses footage.
 
-How it is built (14 Nov 2026, second version — the first, one long ffmpeg pass with every avatar clip as its own
-time-shifted input, gave a jumping timer and sound out of step on the server):
+How it is built (14 Nov 2026, third version):
 1. the SOUND is mixed by itself, from files on this machine (a song that isn't here is downloaded once, never streamed);
-2. the PICTURE is made one phase (20 s) at a time, several at once, each a small job like the renderer's own
-   segments: that stretch of the footage + that phase's timer pictures + the avatar appearances that fall in it;
+2. the PICTURE is made one phase (20 s) at a time, several at once. The timer and the avatar are laid over the
+   footage HERE, IN PYTHON, frame by frame: ffmpeg only reads one file's frames out and writes one stream of frames
+   in — never a filter graph with several inputs. (Version 1, one long ffmpeg pass with every avatar clip as a
+   time-shifted input, hung or let the timer jump on the server; version 2, a small multi-input ffmpeg job per
+   phase, stalled there whenever an avatar clip or stand-in was among the inputs. Neither fault showed on ffmpeg
+   6.1 — so the layering no longer depends on how an ffmpeg build schedules several inputs.)
 3. the pieces (intro screen, phases, outro screen) are joined without encoding again and the sound is added.
 A check at the end compares the picture's and the sound's length with the plan's.
 """
@@ -31,8 +34,8 @@ STALL_SEC = 180                    # the picture pass is stopped when it hasn't 
 MIN_SHOW_SEC = 0.2                 # an avatar appearance shorter than this is left out
 PICTURE_PRESET = "ultrafast"       # the picture's encoder speed
 PIECE_TIMEOUT = 120                # seconds one phase's picture may take before it is stopped (it needs a few)
-KEY_COLOUR = "0x00B140"            # the avatar clips' backdrop (the Colab notebook's BACKGROUND), made see-through
-KEY = f"format=yuva420p,chromakey={KEY_COLOUR}:0.16:0.08"       # (no despill: it turns yellows and blondes orange)
+KEY_RGB = (0x00, 0xB1, 0x40)       # the avatar clips' backdrop (the Colab notebook's BACKGROUND), made see-through
+KEY_SIMILARITY, KEY_BLEND = 0.16, 0.08      # how close to that colour counts as backdrop, and how soft the edge is
 FPS = 25
 
 
@@ -51,6 +54,124 @@ def _run(cmd: list, timeout: float = PIECE_TIMEOUT) -> None:
         raise RuntimeError(f"A step of the Edge picture took over {int(timeout)} s and was stopped ({Path(cmd[-1]).name}).\n{tail}")
     if r.returncode != 0:
         raise RuntimeError(f"ffmpeg failed on the Edge picture ({Path(cmd[-1]).name}):\n{r.stderr[-1200:]}")
+
+
+# ---------------------------------------------------------------------------
+# Frames in, frames out (one input per ffmpeg; the layering is done here)
+# ---------------------------------------------------------------------------
+
+_DIMS = {}
+
+
+def _dims(path) -> tuple:
+    """(width, height) of a video's picture, (0, 0) when it can't be read. Remembered per file."""
+    key = str(path)
+    if key not in _DIMS:
+        try:
+            r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                                "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=60)
+            w, h = (int(x) for x in r.stdout.strip().split("\n")[0].split(",")[:2])
+            _DIMS[key] = (w, h)
+        except Exception:          # noqa: BLE001
+            return (0, 0)
+    return _DIMS[key]
+
+
+def _read_frames(path, skip: float, seconds: float, size: tuple, cover: bool = False):
+    """`seconds` of a video from `skip` s in, as an array of frames (n, height, width, 3) at FPS, scaled to `size`
+    (cover: scaled to fill it and cropped). An empty array when it can't be read."""
+    import numpy as np
+    w, h = size
+    vf = f"fps={FPS}," + (f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}" if cover else f"scale={w}:{h}")
+    try:
+        r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{max(skip, 0):.3f}", "-t", f"{seconds:.3f}", "-i", str(path),
+                            "-an", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, timeout=PIECE_TIMEOUT)
+        raw = r.stdout
+    except subprocess.TimeoutExpired:
+        raw = b""
+    n = len(raw) // (w * h * 3)
+    return np.frombuffer(raw[:n * w * h * 3], dtype=np.uint8).reshape(n, h, w, 3)
+
+
+def _key_alpha(frames):
+    """How solid each pixel is once the backdrop colour is cut out (n, h, w, 1), 0 = backdrop … 255 = her — the
+    same rule as ffmpeg's chromakey: the distance from the key colour in the two colour-difference channels."""
+    import numpy as np
+    f = frames.astype(np.float32)
+    r, g, b = f[..., 0], f[..., 1], f[..., 2]
+    cb = -0.168736 * r - 0.331264 * g + 0.5 * b
+    cr = 0.5 * r - 0.418688 * g - 0.081312 * b
+    kr, kg, kb = (float(x) for x in KEY_RGB)
+    kcb, kcr = -0.168736 * kr - 0.331264 * kg + 0.5 * kb, 0.5 * kr - 0.418688 * kg - 0.081312 * kb
+    d = np.sqrt(((cb - kcb) ** 2 + (cr - kcr) ** 2) / (255.0 ** 2 * 2.0))
+    a = np.clip((d - KEY_SIMILARITY) / max(KEY_BLEND, 1e-6), 0.0, 1.0)
+    return (a * 255.0 + 0.5).astype(np.uint16)[..., None]
+
+
+def _lay(frame, x: int, y: int, rgb, alpha=None) -> None:
+    """rgb (h, w, 3) laid on `frame` at (x, y), in place; alpha (h, w, 1) 0–255 when it is see-through in places.
+    What falls outside the frame is cut off."""
+    import numpy as np
+    H, W = frame.shape[:2]
+    h, w = rgb.shape[:2]
+    x0, y0, x1, y1 = max(x, 0), max(y, 0), min(x + w, W), min(y + h, H)
+    if x1 <= x0 or y1 <= y0:
+        return
+    src = rgb[y0 - y:y1 - y, x0 - x:x1 - x]
+    if alpha is None:
+        frame[y0:y1, x0:x1] = src
+        return
+    a = alpha[y0 - y:y1 - y, x0 - x:x1 - x]
+    under = frame[y0:y1, x0:x1].astype(np.uint16)
+    frame[y0:y1, x0:x1] = ((under * (255 - a) + src.astype(np.uint16) * a + 127) // 255).astype(np.uint8)
+
+
+def _corner_xy(corner: str, frame: tuple, size: tuple, margin_share: float = 0.035) -> tuple:
+    """Where a picture of `size` sits in a corner of the frame (the same places as edge_mode.overlay_xy)."""
+    W, H = frame
+    w, h = size
+    m = int(H * margin_share)
+    return {"top-left": (m, m), "top-right": (W - w - m, m), "bottom-left": (m, H - h - m),
+            "bottom-right": (W - w - m, H - h - m), "centre": ((W - w) // 2, (H - h) // 2)}.get(corner, (m, m))
+
+
+def _write_video(out: Path, frame: tuple, n_frames: int, make, feeders: list = None) -> None:
+    """A piece of the picture: make(i) → frame i (h, w, 3 uint8) for i in 0…n_frames−1, encoded with the shared
+    settings. RuntimeError with ffmpeg's message when the encoder fails or the piece takes over PIECE_TIMEOUT
+    (the encoder and any `feeders` — processes make() reads from — are stopped then, so nothing waits for ever)."""
+    import tempfile
+    import threading
+    W, H = frame
+    with tempfile.TemporaryFile() as err:
+        enc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
+                                "-r", str(FPS), "-i", "-", *_enc(), str(out)], stdin=subprocess.PIPE, stderr=err)
+        fired = []
+
+        def _stop():
+            fired.append(True)
+            for proc in [enc, *(feeders or [])]:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+        late = threading.Timer(PIECE_TIMEOUT, _stop)
+        late.start()
+        try:
+            for i in range(n_frames):
+                enc.stdin.write(make(i).tobytes())
+            enc.stdin.close()
+            code = enc.wait()
+        except (BrokenPipeError, OSError):
+            code = enc.wait() or 1
+        finally:
+            late.cancel()
+            if enc.poll() is None:
+                enc.kill()
+                enc.wait()
+        if code != 0 or fired:
+            err.seek(0)
+            why = f"took over {PIECE_TIMEOUT} s and was stopped" if fired else "failed"
+            raise RuntimeError(f"A step of the Edge picture {why} ({Path(out).name}).\n{err.read().decode('utf-8', 'replace')[-800:]}")
 
 
 def playlist_raws(plan: dict) -> list:
@@ -255,10 +376,11 @@ CARD_LEAD = 0.4                    # silence before the first line and after the
 def _card(spec: dict, tmp_dir: Path, run, frame: tuple, name: str):
     """An intro or outro screen → (its picture, its sound (a WAV), seconds), or None when it is off.
     spec: {"on", "clip" (the avatar's video, voice included), "lines" ([{"file", "seconds"}] — voiceover lines read
-    one after another), "stats", "thumbs", "title"}. Its length: the avatar's clip when there is one; else the
-    lines back to back; else the stand-in figure for PLACEHOLDER_INTRO_SEC, silent."""
+    one after another), "stats", "thumbs", "title", "figure" (draw the stand-in when she has no clip)}. Its length:
+    the avatar's clip when there is one; else the lines back to back; else PLACEHOLDER_INTRO_SEC, silent."""
     if not (spec or {}).get("on"):
         return None
+    import numpy as np
     thumbs = []
     try:
         from planner.data import get_nearest_thumbnail, load_all_catalogues
@@ -266,13 +388,11 @@ def _card(spec: dict, tmp_dir: Path, run, frame: tuple, name: str):
         thumbs = [get_nearest_thumbnail(cats, vid, float(t)) for vid, t in spec.get("thumbs") or []]
     except Exception:          # noqa: BLE001 — the screen still works without thumbnails
         thumbs = []
+    W, H = frame
     clip = spec.get("clip")
     info = probe(clip) if clip and Path(clip).exists() else None
     real = bool(info and info["video"] and info["seconds"] > 0)
     lines = [] if real and info["audio"] else list(spec.get("lines") or [])
-    ax, ay, aw, ah = E.intro_layout(frame)["avatar"]
-    fit = (f"scale={aw}:{ah}:force_original_aspect_ratio=decrease,setsar=1,fps=25,{KEY}")
-    spot = f"x={ax}+({aw}-w)/2:y={ay}+({ah}-h)/2"
     cues, shows, t = [], [], CARD_LEAD
     for ln in lines:                                       # the lines one after another; her clip for a line when there is one
         f, c = ln.get("file"), ln.get("clip")
@@ -286,39 +406,44 @@ def _card(spec: dict, tmp_dir: Path, run, frame: tuple, name: str):
     secs = info["seconds"] if real else (t - E.LINE_GAP + CARD_LEAD if cues else E.PLACEHOLDER_INTRO_SEC)
     frames = max(int(round(secs * FPS)), 1)
     secs = frames / FPS                                    # whole frames, so picture and sound stay the same length
-    card = tmp_dir / f"{name}_card.png"
-    E.intro_card(frame, [tuple(x) for x in spec.get("stats") or []], thumbs, title=spec.get("title") or "EDGE MODE",
-                 placeholder=bool(spec.get("figure", True)) and not real and len(shows) < max(len(lines), 1)).save(card)
-    out = tmp_dir / f"{name}.mp4"
-    inputs = ["-loop", "1", "-framerate", "25", "-t", f"{secs:.3f}", "-i", str(card)]
-    nxt = 1
     if real:
-        inputs += ["-t", f"{secs:.3f}", "-i", str(clip)]
-        vf = f"[1:v]{fit}[av];[0:v][av]overlay={spot}:eof_action=pass,fps=25,format=yuv420p[v]"
-        nxt = 2
-    elif shows:
-        parts, cur = [], "[0:v]"
-        for k, sh in enumerate(shows):                     # she holds her last frame until the next line starts
-            until = shows[k + 1]["time"] if k + 1 < len(shows) else secs
-            inputs += ["-t", f"{sh['seconds']:.3f}", "-i", str(sh["clip"])]
-            parts.append(f"[{nxt}:v]{fit},setpts=PTS-STARTPTS+{sh['time']:.3f}/TB[s{k}]")
-            parts.append(f"{cur}[s{k}]overlay={spot}:enable='between(t,{sh['time']:.3f},{until:.3f})'[c{k}]")
-            cur = f"[c{k}]"
-            nxt += 1
-        vf = ";".join(parts) + f";{cur}fps=25,format=yuv420p[v]"
-    else:
-        vf = "[0:v]fps=25,format=yuv420p[v]"
-    if real and info["audio"]:
-        af = f"[1:a:0]{AUDIO_FMT},apad,atrim=0:{secs:.3f}[a]"
-    elif cues:
-        inputs += ["-i", str(_voice_track(cues, secs, tmp_dir, run, f"{name}_voice.wav"))]
-        af = f"[{nxt}:a:0]{AUDIO_FMT},apad,atrim=0:{secs:.3f}[a]"
-    else:
-        inputs += ["-f", "lavfi", "-t", f"{secs:.3f}", "-i", "anullsrc=r=44100:cl=stereo"]
-        af = f"[{nxt}:a:0]{AUDIO_FMT}[a]"
+        shows = [{"time": 0.0, "seconds": secs, "clip": clip}]
+    card = E.intro_card(frame, [tuple(x) for x in spec.get("stats") or []], thumbs, title=spec.get("title") or "EDGE MODE",
+                        placeholder=bool(spec.get("figure", True)) and not real and len(shows) < max(len(lines), 1))
+    base = np.asarray(card.convert("RGB").resize((W, H)), dtype=np.uint8)
+    ax, ay, aw, ah = E.intro_layout(frame)["avatar"]
+    layers = []                                            # (first frame, last frame + 1, her frames, how solid, x, y)
+    for k, sh in enumerate(shows):                         # she holds her last frame until the next line starts
+        cw, ch = _dims(sh["clip"])
+        if not cw or not ch:
+            continue
+        f = min(aw / cw, ah / ch)
+        size = (max(int(cw * f) // 2 * 2, 2), max(int(ch * f) // 2 * 2, 2))
+        got = _read_frames(sh["clip"], 0.0, sh["seconds"], size)
+        if not len(got):
+            continue
+        until = shows[k + 1]["time"] if k + 1 < len(shows) else secs
+        layers.append((int(round(sh["time"] * FPS)), int(round(until * FPS)), got, _key_alpha(got),
+                       ax + (aw - size[0]) // 2, ay + (ah - size[1]) // 2))
+
+    def make(i):
+        on = next((ly for ly in layers if ly[0] <= i < ly[1]), None)
+        if on is None:
+            return base
+        pic = base.copy()
+        j = min(i - on[0], len(on[2]) - 1)
+        _lay(pic, on[4], on[5], on[2][j], on[3][j])
+        return pic
+    out = tmp_dir / f"{name}.mp4"
+    _write_video(out, frame, frames, make)
     sound = tmp_dir / f"{name}.wav"
-    _run(["ffmpeg", "-y", *inputs, "-filter_complex", vf + ";" + af, "-map", "[v]", "-frames:v", str(frames), *_enc(), str(out),
-          "-map", "[a]", "-t", f"{secs:.3f}", "-c:a", "pcm_s16le", str(sound)])
+    if real and info["audio"]:
+        src = ["-i", str(clip)]
+    elif cues:
+        src = ["-i", str(_voice_track(cues, secs, tmp_dir, run, f"{name}_voice.wav"))]
+    else:
+        src = ["-f", "lavfi", "-t", f"{secs:.3f}", "-i", "anullsrc=r=44100:cl=stereo"]
+    _run(["ffmpeg", "-y", *src, "-vn", "-af", f"{AUDIO_FMT},apad,atrim=0:{secs:.3f}", "-t", f"{secs:.3f}", "-c:a", "pcm_s16le", str(sound)])
     return out, sound, secs
 
 
@@ -390,56 +515,100 @@ def _mix(edge: dict, shows: list, sources, tmp_dir: Path, run) -> Path:
     return out
 
 
-def _piece_cmd(combined, ph: dict, timer_dir: Path, timer_xy: tuple, shows: list, av: dict, frame: tuple, out: Path,
-               footage: float = None) -> list:
-    """The ffmpeg job for one phase's picture: that stretch of the footage, the phase's timer pictures on top, and the
-    avatar appearances (or the parts of them) that fall inside it. Every time here counts from the phase's start."""
+def _timer_pictures(timer_dir: Path, sched: list) -> dict:
+    """{phase name: [(picture (h, w, 3), how solid (h, w, 1))] — one every 1 / OVERLAY_FPS s} from the pictures
+    edge_mode.write_overlay drew."""
+    import numpy as np
+    from PIL import Image
+    out = {}
+    for p in sorted({ph["profile"] for ph in sched}):
+        out[p] = []
+        for f in sorted(timer_dir.glob(f"{p}_*.png")):
+            a = np.asarray(Image.open(f).convert("RGBA"), dtype=np.uint8)
+            out[p].append((a[..., :3].copy(), a[..., 3:4].astype(np.uint16)))
+    return out
+
+
+def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av: dict, frame: tuple, out: Path,
+           footage: float = None) -> None:
+    """One phase's picture → out: that stretch of the footage, the avatar appearances (or the parts of them) that
+    fall inside it, the phase's timer on top. Read as frames, layered here, written as frames."""
+    import numpy as np
+    from PIL import Image
     W, H = frame
     a, b = float(ph["start"]), float(ph["end"])
-    frames = max(int(round((b - a) * FPS)), 1)
-    if footage is not None and a >= footage - 0.2:         # the footage has ended before this phase: black, never nothing
-        inputs = ["-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={FPS}:d={b - a:.3f}"]
-    else:
-        inputs = ["-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(combined)]
-    inputs += ["-framerate", str(E.OVERLAY_FPS), "-start_number", "0", "-i", str(timer_dir / f"{ph['profile']}_%04d.png")]
-    # (the footage holds its last frame if it runs short, so a piece is always its full length)
-    filters, cur, idx = [f"[0:v]fps={FPS},setsar=1,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=30[m]"], "[m]", 2
-    here = []
+    n_frames = max(int(round((b - a) * FPS)), 1)
+    size = W * H * 3
+    black = np.zeros((H, W, 3), dtype=np.uint8)
+
+    # 👩 what she does in this phase: (first frame, last frame + 1, her frames, how solid (None = a solid box), x, y)
+    split = av.get("mode") == "split"
+    layers = []
     for s in shows:
         t0, t1 = max(s["time"], a), min(s["time"] + s["seconds"], b)
-        if t1 - t0 >= 1.0 / FPS:
-            here.append((s, t0 - s["time"], t0 - a, t1 - t0))      # (appearance, seconds into it, start in the piece, length)
-    if here:
-        split = av.get("mode") == "split"
-        when = lambda x: f"between(t,{x[2]:.3f},{x[2] + x[3]:.3f})"                 # noqa: E731
+        if t1 - t0 < 1.0 / FPS:
+            continue
+        first, last = int(round((t0 - a) * FPS)), int(round((t1 - a) * FPS))
         if split:
-            filters.append(f"{cur}split[m0][m1]")
-            filters.append(f"[m1]crop={W // 2}:{H}:{W // 4}:0,pad={W}:{H}:0:0:black[half]")
-            filters.append(f"[m0][half]overlay=0:0:enable='{'+'.join(when(x) for x in here)}'[sp]")
-            cur = "[sp]"
-            shape = lambda clip: (f"scale={W // 2}:{H}:force_original_aspect_ratio=increase,crop={W // 2}:{H}"      # noqa: E731
-                                  + (f",{KEY}" if clip else ""))
-            ax, ay = str(W // 2), "0"
+            box = (W // 2, H)
         else:
             bh = int(H * E.AVATAR_CORNER_SHARE) // 2 * 2
-            # her clip: cut out of its backdrop, straight over the footage; the stand-in figure keeps its framed box
-            shape = lambda clip: f"scale=-2:{bh},{KEY}" if clip else f"scale=-2:{bh},pad=iw+4:ih+4:2:2:white"      # noqa: E731
-            ax, ay = E.overlay_xy(av.get("corner", "bottom-right"))
-        for k, x in enumerate(here):
-            s, skip, at, secs = x
-            if s["clip"]:
-                inputs += ["-an", "-ss", f"{skip:.3f}", "-t", f"{secs:.3f}", "-i", s["clip"]]
-            else:
-                inputs += ["-loop", "1", "-framerate", str(FPS), "-t", f"{secs:.3f}", "-i", s["still"]]
-            filters.append(f"[{idx}:v]{shape(bool(s['clip']))},setsar=1,fps={FPS},setpts=PTS-STARTPTS+{at:.3f}/TB[av{k}]")
-            filters.append(f"{cur}[av{k}]overlay=x={ax}:y={ay}:enable='{when(x)}':eof_action=pass[a{k}v]")
-            cur = f"[a{k}v]"
-            idx += 1
-    x, y = timer_xy
-    # (the timer's pictures brought to the footage's own frame rate first: a frame of it for every frame of footage)
-    filters += [f"[1:v]fps={FPS},format=rgba[ov]", f"{cur}[ov]overlay=x={x}:y={y}:eof_action=repeat:repeatlast=1,format=yuv420p[v]"]
-    return ["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filters), "-map", "[v]", "-frames:v", str(frames),
-            *_enc(), str(out)]
+            cw, ch = _dims(s["clip"]) if s["clip"] else Image.open(s["still"]).size
+            box = (max(int(cw * bh / max(ch, 1)) // 2 * 2, 2), bh)
+        if s["clip"]:
+            got = _read_frames(s["clip"], t0 - s["time"], t1 - t0, box, cover=split)
+            if not len(got):
+                continue
+            solid = _key_alpha(got)
+        else:                                              # the stand-in figure: a still, in a thin white frame in the corner
+            pic = np.asarray(Image.open(s["still"]).convert("RGB").resize(box), dtype=np.uint8)
+            if not split:
+                framed = np.full((box[1] + 4, box[0] + 4, 3), 255, dtype=np.uint8)
+                framed[2:-2, 2:-2] = pic
+                pic, box = framed, (box[0] + 4, box[1] + 4)
+            got, solid = pic[None], None
+        x, y = (W // 2, 0) if split else _corner_xy(av.get("corner", "bottom-right"), (W, H), box)
+        layers.append((first, last, got, solid, x, y))
+
+    pictures = timers.get(ph["profile"]) or []
+    tw, th = (pictures[0][0].shape[1], pictures[0][0].shape[0]) if pictures else (0, 0)
+    tx, ty = _corner_xy(timer_corner, (W, H), (tw, th))
+    per = FPS / float(E.OVERLAY_FPS)                       # footage frames per timer picture
+
+    dec = None
+    if footage is None or a < footage - 0.2:               # (after the footage's end: black, never nothing)
+        dec = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(combined), "-an",
+                                "-vf", f"fps={FPS},scale={W}:{H}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    held = [black]
+
+    def make(i):
+        buf = dec.stdout.read(size) if dec is not None else b""
+        if len(buf) == size:
+            pic = np.frombuffer(buf, dtype=np.uint8).reshape(H, W, 3).copy()
+            held[0] = pic
+        else:
+            pic = held[0].copy()                           # the footage ran short: its last frame is held
+        on = next((ly for ly in layers if ly[0] <= i < ly[1]), None)
+        if on is not None:
+            if split:                                      # the footage's middle on the left, she on the right
+                pic[:, :W // 2] = pic[:, W // 4:W // 4 + W // 2].copy()
+                pic[:, W // 2:] = 0
+            j = min(i - on[0], len(on[2]) - 1)
+            _lay(pic, on[4], on[5], on[2][j], None if on[3] is None else on[3][j])
+        if pictures:
+            rgb, solid = pictures[min(int(i / per), len(pictures) - 1)]
+            _lay(pic, tx, ty, rgb, solid)
+        return pic
+    try:
+        _write_video(out, frame, n_frames, make, [dec] if dec is not None else None)
+    finally:
+        if dec is not None:
+            try:
+                dec.kill()
+            except OSError:
+                pass
+            dec.wait()
 
 
 def _lengths(path) -> dict:
@@ -494,13 +663,14 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
     t0 = time.time()
     timer_dir = tmp_dir / "overlay"
     E.write_overlay(sched, timer_dir, H)
-    xy = E.overlay_xy((edge.get("overlay") or {}).get("corner", "top-left"))
+    timers = _timer_pictures(timer_dir, sched)
+    corner = (edge.get("overlay") or {}).get("corner", "top-left")
     av = edge.get("avatar") or {}
     pieces = [tmp_dir / f"phase_{k:03d}.mp4" for k in range(len(sched))]
     footage = probe(combined_video)["seconds"] or None
     n = max(1, min(int(workers or min(4, os.cpu_count() or 2)), len(sched) or 1))
     with ThreadPoolExecutor(max_workers=n) as pool:
-        jobs = [pool.submit(_run, _piece_cmd(combined_video, ph, timer_dir, xy, shows, av, (W, H), piece, footage))
+        jobs = [pool.submit(_piece, combined_video, ph, timers, corner, shows, av, (W, H), piece, footage)
                 for ph, piece in zip(sched, pieces)]
         try:
             for done, job in enumerate(as_completed(jobs), 1):
