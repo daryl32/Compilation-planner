@@ -577,3 +577,59 @@ def test_songs_are_read_from_this_machine_never_streamed_and_sit_at_a_quarter_un
     quiet = R._mix(edge, [], src, tmp_path, run)
     assert E.MUSIC_UNDER_VOICE == 0.25
     assert _level(quiet, 2, 12) == pytest.approx(0.25 * _level(loud, 2, 12), rel=0.1)
+
+
+def test_the_lines_own_recording_is_heard_rather_than_the_clips_sound(tmp_path):
+    import edge_render as R
+    mp3 = tmp_path / "line.mp3"
+    mp3.write_bytes(b"x")
+    edge = {"voiceover": {"on": True, "cues": [{"time": 5.0, "profile": "slow", "file": str(mp3)},
+                                               {"time": 30.0, "profile": "slow", "file": None}]}}
+    shows = [{"time": 5.0, "seconds": 3.0, "profile": "slow", "clip": "a.mp4", "still": None, "sound": "a.mp4"},
+             {"time": 30.0, "seconds": 3.0, "profile": "slow", "clip": "b.mp4", "still": None, "sound": "b.mp4"}]
+    assert [c["file"] for c in R._sound_cues(edge, shows)] == [str(mp3), "b.mp4"]      # no recording → her clip's sound
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_the_picture_is_made_phase_by_phase_and_stays_in_step(tmp_path, monkeypatch):
+    """Three phases with an avatar clip that runs across a phase boundary: every second of the footage is there once,
+    in order, the timer restarts with each phase, and the picture and the sound are as long as the plan."""
+    import sys
+    import types
+    import edge_mode as E
+    import edge_render as R
+    monkeypatch.setitem(sys.modules, "render_preview", types.SimpleNamespace(get_track_raw_source=lambda t: t))
+    ff = lambda *a: subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *a], check=True)      # noqa: E731
+    comb = tmp_path / "comb.mp4"                           # the footage's grey level is its own second
+    ff("-f", "lavfi", "-i", "color=black:s=16x16:r=25:d=60", "-vf",
+       "geq=lum='40+3*floor(N/25)':cb=128:cr=128,scale=640:360:flags=neighbor,setsar=1", "-c:v", "libx264", "-preset",
+       "ultrafast", "-crf", "12", "-pix_fmt", "yuv420p", str(comb))
+    clip = tmp_path / "her.mp4"
+    ff("-f", "lavfi", "-i", "color=c=yellow:s=180x320:d=6:r=25", "-f", "lavfi", "-i", "sine=frequency=880:duration=6",
+       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", str(clip))
+    sched = [{"index": k, "round": 1, "profile": p, "start": 20.0 * k, "end": 20.0 * k + 20.0}
+             for k, p in enumerate(("wait", "slow", "medium"))]
+    edge = {"schedule": sched, "playlist": [], "beat": {"on": True, "volume": 1.0}, "voiceover": {"on": False, "cues": []},
+            "overlay": {"corner": "top-left"},
+            "avatar": {"on": True, "mode": "corner", "corner": "bottom-right",
+                       "cues": [{"time": 17.0, "profile": "wait", "clip": str(clip)}]},      # 17 → 23 s: over the join
+            "intro": {"on": False}, "outro": {"on": False}}
+
+    def run(cmd):
+        subprocess.run(cmd, capture_output=True, check=True)
+    out = tmp_path / "out.mp4"
+    seen = []
+    took = R.finish({"edge": edge}, comb, str(out), types.SimpleNamespace(input_args=lambda raw: ["-i", raw]), tmp_path / "w",
+                    run, 360, 640, progress=seen.append)
+    assert took["edge_check"] == "ok" and seen[-1] == 1.0 and len(seen) == 3
+    assert abs(_seconds(out) - 60.0) < 0.1
+    grey = [_pixel(out, t + 0.5, 320, 60)[0] for t in range(60)]
+    steps = [b - a for a, b in zip(grey, grey[1:])]
+    assert all(2 <= d <= 5 for d in steps), steps          # one second after another, nothing skipped or repeated
+    bh = int(360 * E.AVATAR_CORNER_SHARE)
+    spot = (640 - int(360 * 0.035) - 30, 360 - int(360 * 0.035) - bh // 2)
+    yellow = lambda p: p[0] > 170 and p[1] > 170 and p[2] < 90          # noqa: E731
+    assert [yellow(_pixel(out, t, *spot)) for t in (16.5, 18.0, 19.9, 20.1, 22.5, 23.5)] == [False, True, True, True, True, False]
+    w, _h = E.overlay_size(360)
+    cx, top = int(360 * 0.035) + w // 2, int(360 * 0.035)
+    assert _pixel(out, 20.5, cx, top + 4)[0] > 150 and _pixel(out, 40.5, cx, top + 4)[0] > 150      # a full ring as each phase starts

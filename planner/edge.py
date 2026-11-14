@@ -606,9 +606,11 @@ def _do_pending_render(res: dict) -> None:
             note = (note[0], note[1] + " Source files: " + ", ".join(how) + ".")
         stg = stats.get("stages") or {}
         steps = [f"{w} {int(stg[k] // 60)}:{int(stg[k] % 60):02d}" for k, w in (("segments", "clips"), ("edge_sound", "sound"),
-                 ("edge_screens", "intro / outro"), ("edge_picture", "timer and avatar")) if stg.get(k)]
+                 ("edge_screens", "intro / outro"), ("edge_picture", "timer and avatar"), ("edge_join", "joining")) if stg.get(k)]
         if steps:
             note = (note[0], note[1] + " Time: " + ", ".join(steps) + ".")
+        if stg.get("edge_check") not in (None, "ok"):      # the picture or the sound isn't as long as the plan
+            note = ("warning", note[1] + f" ⚠️ Length check: {stg['edge_check']}.")
         bar.empty()
         st.session_state["edge_msg"] = note
         st.session_state["edge_render"] = out.name
