@@ -117,8 +117,17 @@ def test_compile_without_a_song_and_with_a_playlist(monkeypatch):
         assert plan["matching_mode"] == "Edge" and plan["track_duration_sec"] == 360.0 and seen
         _check_plan(plan, 360.0)
         assert edge["beat"]["on"] and edge["beat"]["volume"] == 1.0 and edge["playlist"] == []      # no song → the beat is on
-        assert len(edge["schedule"]) == 18 and len(edge["voiceover"]["cues"]) == 18
-        assert edge["voiceover"]["placeholders"] == ["wait", "slow", "medium", "fast", "extra", "stop"]
+        # the voiceover follows the cue map: named lines, never two at once; intro and outro lines bring their screens
+        vo = edge["voiceover"]
+        assert len(edge["schedule"]) == 18 and vo["cue_map"] and vo["cues"][0]["line"] == "Start-Round 1"
+        for x, y in zip(vo["cues"], vo["cues"][1:]):
+            assert y["time"] >= x["time"] + x["seconds"]
+        assert all(c["file"] is None for c in vo["cues"]) and "Now stop" in vo["lines_missing"]      # no files here: tones
+        assert edge["intro"]["on"] and [x["line"] for x in edge["intro"]["lines"]] == ["Welcome", "Intro to NNN"]
+        assert edge["outro"]["on"] and [x["line"] for x in edge["outro"]["lines"]] == ["I hope not"]
+        assert res["voice_clashes"] and {"line", "with", "round", "where", "result"} <= set(res["voice_clashes"][0])
+        quiet = PE.compile_edge([], VIDS, "chill", 3)["plan"]["edge"]
+        assert not quiet["intro"]["on"] and not quiet["outro"]["on"] and quiet["voiceover"]["cues"] == []
         filled = sum(1 for e in plan["timeline"] if e["scenes"])
         assert filled >= 0.6 * len(plan["timeline"])
         json.dumps(plan)                                                           # the plan is a file Blender can read
@@ -354,3 +363,97 @@ def test_compile_carries_the_avatar_and_the_intro(monkeypatch, tmp_path):
         assert e["avatar"]["on"] and e["avatar"]["mode"] == "split" and e["intro"]["on"]
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def test_the_cue_map_gives_every_line_its_moment_and_never_two_at_once():
+    import edge_mode as E
+    cm = E.load_cue_map()
+    assert len(cm["lines"]) == 45 and sum(1 for ln in cm["lines"] if ln["cues"]) == 32
+    for diff in E.DIFFICULTIES:
+        for rounds in (3, 4, 5, 6):
+            for seed in range(1 if diff != "hard" else 12):
+                sched = E.schedule(diff, rounds, seed)
+                got = E.resolve_lines(sched, cm, diff, seed)
+                pl = got["plays"]
+                assert pl and all(0 <= p["time"] and p["time"] + p["seconds"] <= E.total_seconds(sched) + 1e-6 for p in pl)
+                for a, b in zip(pl, pl[1:]):
+                    assert b["time"] >= a["time"] + a["seconds"] + E.LINE_GAP - 1e-3, (diff, rounds, a, b)
+                assert got["intro"] == ["Welcome", "Intro to NNN"] and got["outro"] == ["I hope not"]
+    got = E.resolve_lines(E.schedule("chill", 6), cm, "chill")
+    at = {(p["line"], p["round"]): p for p in got["plays"]}
+    assert at[("Start-Round 1", 1)]["time"] == 0.0 and at[("Now stop", 1)]["time"] == 100.0 and at[("Now stop", 2)]["time"] == 220.0
+    assert ("Now stop", 3) not in at                                               # set for rounds 1 and 2 only
+    assert at[("Now stop (2)", 5)]["time"] == 4 * 120 + 97.0                       # 3 s before Extra ends
+    assert at[("Stroke faster", 3)]["time"] == 2 * 120 + 60.0                      # as Medium ends
+    p = at[("I love edging you", 4)]
+    assert 3 * 120 + 100 <= p["time"] and p["time"] + p["seconds"] <= 3 * 120 + 120       # somewhere during Stop
+    last = at[("Did you cum", 6)]
+    assert abs(last["time"] + last["seconds"] - 720.0) < 1e-6 and last["moved"] < 0       # finishes as the compilation ends
+    # the every-round line gives way to a round's own line at the same moment — and that is reported
+    assert ("You can survive", 1) not in at and at[("You can survive", 5)]["time"] == 4 * 120 + 20.0
+    assert any(c["line"] == "You can survive" and c["with"] == "Get hard for me" and c["result"] == "left out" for c in got["clashes"])
+    assert at[("You can survive", 2)]["moved"] > 0
+    # "last" means the final round whatever its number; a line set for a difficulty stays out of the others
+    three = {(p["line"], p["round"]) for p in E.resolve_lines(E.schedule("chill", 3), cm, "chill")["plays"]}
+    assert ("Did you cum", 3) in three and ("show me how much - now stop", 3) in three
+    only_hard = {"lines": [{"name": "x", "file": "x.mp3", "seconds": 2.0, "cues": [
+        {"type": "phase", "phases": ["fast"], "at": "start", "offset": 0, "roundList": [], "diffs": ["hard"]}]}]}
+    assert E.resolve_lines(E.schedule("chill", 3), only_hard, "chill")["plays"] == []
+    assert len(E.resolve_lines(E.schedule("chill", 3), only_hard, "hard")["plays"]) == 3
+    rnd = {"lines": [{"name": "r", "file": "r.mp3", "seconds": 1.5, "cues": [
+        {"type": "random", "times": 2, "per": "round", "phases": ["fast", "extra"], "roundList": [], "diffs": []}]},
+        {"name": "i", "file": "i.mp3", "seconds": 1.0, "cues": [{"type": "interval", "every": 50, "startAfter": 0, "phases": [], "roundList": ["2"], "diffs": []}]},
+        {"name": "t", "file": "t.mp3", "seconds": 1.0, "cues": [{"type": "time", "clock": "0:30", "from": "round", "roundList": [], "diffs": []}]},
+        {"name": "e", "file": "e.mp3", "seconds": 3.0, "cues": [{"type": "round", "which": "last", "at": "end", "roundList": [], "diffs": []}]}]}
+    got = E.resolve_lines(E.schedule("chill", 3), rnd, "chill", seed=3)
+    by = {}
+    for p in got["plays"]:
+        by.setdefault(p["line"], []).append(p)
+    assert len(by["r"]) == 6 and all(p["profile"] in ("fast", "extra") for p in by["r"])
+    assert [p["time"] for p in by["t"]] == [30.0, 150.0, 270.0]
+    assert [p["time"] for p in by["i"]] == [151.35, 200.0]           # every 50 s in round 2; at 150 the set-time line has the moment
+    assert by["e"][0]["time"] == 357.0
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_lines_on_the_intro_and_outro_screens(tmp_path, monkeypatch):
+    """Voiceover lines mapped to the intro / outro are read on their screens, one after another; the screens last as
+    long as the lines."""
+    import edge_mode as E
+    import render_preview as RP
+    proxies = tmp_path / "proxies"
+    proxies.mkdir()
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x003000:s=320x180:d=30:r=25",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(proxies / "vid_a.mp4")], check=True)
+    monkeypatch.setattr(RP, "PROXY_DIR", proxies)
+    monkeypatch.setattr(RP, "streaming_available", lambda: False)
+
+    def tone(name, seconds):
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"sine=frequency=660:duration={seconds}",
+                        "-af", "volume=6", str(tmp_path / name)], check=True)
+        return str(tmp_path / name)
+    a, b, c, mid = tone("a.mp3", 2), tone("b.mp3", 3), tone("c.mp3", 4), tone("mid.mp3", 2)
+    sched = [{"index": 0, "round": 1, "profile": "wait", "start": 0.0, "end": 20.0}]
+    plan = {"track_id": "edge_test", "selected_videos": ["vid_a"], "track_duration_sec": 20.0,
+            "timeline": [{"track_time": [k * 5.0, k * 5.0 + 5.0], "scenes": [{"chain": [
+                {"video_id": "vid_a", "scene_id": 0, "clip_start_sec": 1.0 + k, "clip_duration_sec": 5.0}]}]} for k in range(4)],
+            "edge": {"difficulty": "chill", "rounds": 1, "schedule": sched, "playlist": [], "beat": {"on": True, "volume": 1.0},
+                     "voiceover": {"on": True, "cues": [{"time": 10.0, "profile": "wait", "file": mid, "line": "mid"}]},
+                     "overlay": {"corner": "top-left"}, "avatar": {"on": False, "cues": []},
+                     "intro": {"on": True, "clip": None, "stats": [["Rounds", "1"]], "thumbs": [],
+                               "lines": [{"line": "a", "file": a, "seconds": 2.0}, {"line": "b", "file": b, "seconds": 3.0}]},
+                     "outro": {"on": True, "stats": [["Rounds", "1"]], "thumbs": [], "lines": [{"line": "c", "file": c, "seconds": 4.0}]}}}
+    out = tmp_path / "cards.mp4"
+    RP.render_plan_dict(plan, str(out), quick=True)
+    intro = 2 * E_CARD_LEAD() + 2 + 3 + E.LINE_GAP
+    outro = 2 * E_CARD_LEAD() + 4
+    assert abs(_seconds(out) - (intro + 20 + outro)) < 0.5
+    assert _level(out, 0.6, 2.2) > 0.05 and _level(out, 3.0, 5.6) > 0.05             # the two intro lines
+    assert max(_pixel(out, 2.0, 630, 350)) < 60                                      # on the dark intro screen
+    assert _level(out, intro + 2, intro + 8) < 0.01 < _level(out, intro + 10.2, intro + 11.8)       # Wait is silent but for the mid line
+    assert _level(out, intro + 20 + 0.6, intro + 20 + 4.2) > 0.05 and max(_pixel(out, intro + 22, 630, 350)) < 60
+
+
+def E_CARD_LEAD():
+    import edge_render
+    return edge_render.CARD_LEAD

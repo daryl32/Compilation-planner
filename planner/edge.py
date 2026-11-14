@@ -38,6 +38,51 @@ def voice_dir() -> Path:
     return Path(CATALOGUE_DIR).parent / "edge_voiceover"
 
 
+def lines_dir() -> Path:
+    """Where the cue map's voiceover lines live on this machine: <data>/edge_voiceover/lines/<line>.mp3."""
+    return voice_dir() / "lines"
+
+
+def line_file(line: dict) -> Path | None:
+    """The line's audio on this machine, or None when it hasn't been fetched yet."""
+    f = lines_dir() / str(line.get("file") or (line["name"] + ".mp3"))
+    return f if f.exists() and f.stat().st_size > 0 else None
+
+
+def line_durations(cue_map: dict) -> dict:
+    """{line name: measured seconds} for the lines whose files are here (the rest keep the map's estimate)."""
+    from edge_render import probe
+    out = {}
+    for line in cue_map.get("lines") or []:
+        f = line_file(line)
+        if f is not None:
+            secs = probe(f)["seconds"]
+            if secs > 0:
+                out[line["name"]] = secs
+    return out
+
+
+def fetch_lines(cue_map: dict, progress=None) -> list:
+    """Download the cue map's lines from Google Drive (its "drive_folder") to lines_dir(). Returns error strings."""
+    try:
+        from drive_sync import credentials_available, download_source_video
+        if not credentials_available():
+            return ["Google Drive isn't set up on this machine."]
+    except ImportError:
+        return ["Google Drive isn't set up on this machine."]
+    folder = str(cue_map.get("drive_folder") or "scene-labeling/Edge_voiceover").strip("/")
+    lines = cue_map.get("lines") or []
+    errors = []
+    for k, line in enumerate(lines, 1):
+        name = str(line.get("file") or (line["name"] + ".mp3"))
+        if progress:
+            progress(k, len(lines), name)
+        err = download_source_video(f"{folder}/{name}", lines_dir() / name)
+        if err:
+            errors.append(f"{name}: {err}")
+    return errors
+
+
 def avatar_dir() -> Path:
     """Where the avatar's clips live: <data>/edge_avatar/intro/ and <data>/edge_avatar/<phase>/."""
     return Path(CATALOGUE_DIR).parent / "edge_avatar"
@@ -147,9 +192,26 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
         e["segment_index"] = k
         ph = E.phase_at(sched, (e["track_time"][0] + e["track_time"][1]) / 2)
         e["edge_profile"] = ph["profile"] if ph else None
-    files = E.voice_files(voice_dir()) if voiceover else {}
-    cues = E.voice_cues(sched, files, seed) if voiceover else []
-    missing_voice = sorted({c["profile"] for c in cues if not c["file"]}, key=E.ORDER.index)
+    # 🎙️ the voiceover: Daryl's cue map (edge_cues.json — which line plays when, never two at once); without a cue
+    # map, a clip from each phase's folder at the start of every phase, as at first
+    cue_map = E.load_cue_map() if voiceover else {"lines": []}
+    lines_used, clashes, intro_lines, outro_lines, lines_missing = bool(cue_map.get("lines")), [], [], [], []
+    if lines_used:
+        by_name = {ln["name"]: ln for ln in cue_map["lines"]}
+        durations = line_durations(cue_map)
+        got = E.resolve_lines(sched, cue_map, difficulty, seed, durations)
+        path = lambda n: (str(line_file(by_name[n])) if line_file(by_name[n]) else None)        # noqa: E731
+        cues = [{"time": p["time"], "profile": p["profile"], "file": path(p["line"]), "line": p["line"],
+                 "seconds": p["seconds"], "round": p["round"], "why": p["why"], "moved": p["moved"]} for p in got["plays"]]
+        clashes = got["clashes"]
+        named = lambda ns: [{"line": n, "file": path(n), "seconds": float(durations.get(n) or by_name[n].get("seconds") or 2.0)} for n in ns]   # noqa: E731
+        intro_lines, outro_lines = named(got["intro"]), named(got["outro"])
+        lines_missing = sorted({c["line"] for c in cues + intro_lines + outro_lines if not c["file"]}, key=str.lower)
+        missing_voice = []
+    else:
+        files = E.voice_files(voice_dir()) if voiceover else {}
+        cues = E.voice_cues(sched, files, seed) if voiceover else []
+        missing_voice = sorted({c["profile"] for c in cues if not c["file"]}, key=E.ORDER.index)
     av_files = E.clip_files(avatar_dir()) if (avatar or intro) else {}
     av_cues = E.avatar_cues(sched, av_files, seed) if avatar else []
     missing_avatar = sorted({c["profile"] for c in av_cues if not c["clip"]}, key=E.ORDER.index)
@@ -177,11 +239,17 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             "playlist": [{**p, "source_path": PC._load_track(p["track_id"]).get("source_path", "")} for p in parts],
             "beat": {"on": beat_on, "volume": E.BEAT_UNDER_SONG if track_ids else 1.0, "times": E.beat_times(sched)},
             "voiceover": {"on": bool(voiceover), "music_volume": E.MUSIC_UNDER_VOICE, "cues": cues,
-                          "placeholders": missing_voice},
+                          "placeholders": missing_voice, "cue_map": lines_used, "clashes": clashes,
+                          "lines_missing": lines_missing},
             "overlay": {"corner": corner, "fps": E.OVERLAY_FPS},
             "avatar": {"on": bool(avatar), "mode": avatar_mode if avatar_mode in E.AVATAR_MODES else "corner",
                        "corner": avatar_corner, "cues": av_cues, "placeholders": missing_avatar},
-            "intro": {"on": bool(intro), "clip": str(random.Random(seed).choice(intro_clips)) if intro_clips else None,
+            # (a line mapped to the intro or the outro needs its screen: it comes on with the voiceover)
+            "outro": {"on": bool(outro_lines), "lines": outro_lines, "title": "EDGE MODE",
+                      "stats": [["Difficulty", E.DIFFICULTIES[difficulty].split(" ", 1)[-1]],
+                                ["Rounds", str(int(sched[-1]["round"]) if sched else 0)], ["Time", format_mmss(total)]],
+                      "thumbs": thumbs},
+            "intro": {"on": bool(intro) or bool(intro_lines), "lines": intro_lines, "clip": str(random.Random(seed).choice(intro_clips)) if intro_clips else None,
                       "stats": [["Difficulty", E.DIFFICULTIES[difficulty].split(" ", 1)[-1]],
                                 ["Rounds", str(int(sched[-1]["round"]) if sched else 0)],
                                 ["Time", format_mmss(total)]],
@@ -190,7 +258,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     }
     return {"plan": plan, "summary": SMX.plan_summary(timeline), "notes": notes, "shortfall": shortfall,
             "schedule": sched, "parts": parts, "video_ids": list(video_ids), "track_ids": track_ids,
-            "missing_voice": missing_voice, "missing_avatar": missing_avatar, "made": time.strftime("%H:%M:%S")}
+            "missing_voice": missing_voice, "voice_clashes": clashes, "lines_missing": lines_missing, "missing_avatar": missing_avatar, "made": time.strftime("%H:%M:%S")}
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +295,30 @@ def _do_pending_compile() -> None:
     bar.empty()
     ss[RESULT_KEY] = res
     ss.pop("edge_render", None)
+
+
+def _lines_panel(cue_map: dict) -> None:
+    """🎙️ The cue map's lines: how many are on this machine, and a button to fetch them from Google Drive."""
+    lines = cue_map["lines"]
+    here = sum(1 for ln in lines if line_file(ln) is not None)
+    mapped = sum(1 for ln in lines if ln.get("cues"))
+    with st.expander(f"🎙️ Voiceover lines — {mapped} of {len(lines)} have a cue · {here} of {len(lines)} are on the server",
+                     expanded=here < len(lines)):
+        st.caption("Which line plays when comes from your cue map; no two lines ever play at once. A line whose file "
+                   "isn't here yet plays as a placeholder tone.")
+        if st.button("⬇️ Get the lines from Google Drive", key="edge_lines_fetch", type="primary" if here < len(lines) else "secondary"):
+            bar = st.progress(0.0, text="Fetching the lines…")
+            errs = fetch_lines(cue_map, lambda k, n, name: bar.progress(k / max(n, 1), text=f"Fetching {name} ({k}/{n})…"))
+            bar.empty()
+            if errs:
+                st.session_state["edge_msg"] = ("warning", f"{len(errs)} line(s) couldn't be fetched: " + " · ".join(errs[:4])
+                                                + (" …" if len(errs) > 4 else ""))
+            else:
+                st.session_state["edge_msg"] = ("success", f"All {len(lines)} lines are on the server.")
+            st.rerun()
+        missing = [ln["name"] for ln in lines if line_file(ln) is None]
+        if missing and here:
+            st.caption("Not here yet: " + " · ".join(missing))
 
 
 def _clip_manager(kind: str) -> None:
@@ -306,7 +398,11 @@ def _setup(rows: dict, have_tl: set) -> None:
     t[1].toggle("🎙️ Voiceover", key="edge_voice",
                 help="A voiceover clip at the start of every phase. The songs play at half volume so it is heard.")
     if st.session_state.get("edge_voice"):
-        _clip_manager("voice")
+        cue_map = E.load_cue_map()
+        if cue_map.get("lines"):
+            _lines_panel(cue_map)
+        else:
+            _clip_manager("voice")
     a = st.columns(2)
     a[0].toggle("👩 Avatar", key="edge_avatar",
                 help="She pops onto the screen at the start of every phase and reads her line — her voice comes from "
@@ -467,7 +563,10 @@ def _used_line(res: dict) -> str:
     if res["track_ids"] and e["beat"]["on"]:
         bits.append("🥁 beat over the songs")
     if e["voiceover"]["on"]:
-        bits.append("🎙️ voiceover" + (" (placeholder tones: " + ", ".join(E.PROFILES[p]["label"].title() for p in res["missing_voice"]) + ")"
+        n_lines = len(e["voiceover"]["cues"])
+        bits.append((f"🎙️ {n_lines} voiceover lines" + (f", {len(res.get('voice_clashes') or [])} clashes handled" if res.get("voice_clashes") else "")
+                     + (f", {len(res.get('lines_missing') or [])} as placeholder tones" if res.get("lines_missing") else ""))
+                    if e["voiceover"].get("cue_map") else "🎙️ voiceover" + (" (placeholder tones: " + ", ".join(E.PROFILES[p]["label"].title() for p in res["missing_voice"]) + ")"
                                       if res["missing_voice"] else ""))
     av = e.get("avatar") or {}
     if av.get("on"):
@@ -475,7 +574,9 @@ def _used_line(res: dict) -> str:
                     + (" — stand-in figure for: " + ", ".join(E.PROFILES[p]["label"].title() for p in av["placeholders"])
                        if av.get("placeholders") else ""))
     if (e.get("intro") or {}).get("on"):
-        bits.append("🎬 intro screen" + ("" if e["intro"].get("clip") else " (stand-in figure, 8 s)"))
+        bits.append("🎬 intro screen" + ("" if e["intro"].get("clip") or e["intro"].get("lines") else " (stand-in figure, 8 s)"))
+    if (e.get("outro") or {}).get("on"):
+        bits.append("🎬 outro screen")
     return " · ".join(bits)
 
 
@@ -507,6 +608,23 @@ def _result(res: dict) -> None:
     for n in res.get("notes") or []:
         st.caption("⏱️ " + n)
     _strip(res)
+    vo = plan["edge"]["voiceover"]
+    if vo.get("on") and vo.get("cue_map"):
+        clashes = res.get("voice_clashes") or []
+        with st.expander(f"🎙️ Voiceover — {len(vo['cues'])} lines" + (f" · {len(clashes)} clashes" if clashes else " · no clashes"),
+                         expanded=False):
+            if clashes:
+                st.markdown("**Clashes** — two lines wanted the same moment; they never overlap, so one gave way:")
+                for c in clashes:
+                    st.caption(f"⚠️ {c['line']} ({c['where']}) met {c['with']} → {c['result']}")
+            intro_l, outro_l = plan["edge"]["intro"].get("lines") or [], plan["edge"]["outro"].get("lines") or []
+            if intro_l:
+                st.caption("🎬 Intro: " + " → ".join(x["line"] for x in intro_l))
+            for c in vo["cues"]:
+                st.caption(f"{format_mmss(c['time'])} · round {c['round']} · {c['line']} ({c['seconds']:.1f} s) — {c['why']}"
+                           + (f" · moved {c['moved']:+.1f} s" if c.get("moved") else "") + ("" if c["file"] else " · placeholder tone"))
+            if outro_l:
+                st.caption("🎬 Outro: " + " → ".join(x["line"] for x in outro_l))
     st.text_input("🏷️ Name the next render (optional)", key="edge_render_name", max_chars=80)
     b = st.columns([1.8, 0.5, 1.4, 1.4, 1.6])
     b[0].button("🎬 Render", key="edge_render_btn", type="primary", width="stretch",

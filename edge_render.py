@@ -25,7 +25,7 @@ def playlist_raws(plan: dict) -> list:
     return list(dict.fromkeys(get_track_raw_source(p["track_id"]) for p in (plan.get("edge") or {}).get("playlist") or []))
 
 
-def _voice_track(cues: list, total: float, tmp_dir: Path, run) -> Path | None:
+def _voice_track(cues: list, total: float, tmp_dir: Path, run, name: str = "voice.wav") -> Path | None:
     """Every cue laid at its time on one silent track of the compilation's length. A cue without a clip (or whose
     clip has gone) gets its phase's placeholder tone."""
     if not cues:
@@ -41,7 +41,7 @@ def _voice_track(cues: list, total: float, tmp_dir: Path, run) -> Path | None:
         inputs += ["-i", str(f)]
         ms = int(round(float(cue["time"]) * 1000))
         parts.append(f"[{k}:a:0]{AUDIO_FMT},adelay={ms}:all=1[c{k}]")
-    out = tmp_dir / "voice.wav"
+    out = tmp_dir / name
     mix = "".join(f"[c{k}]" for k in range(len(cues)))
     run(["ffmpeg", "-y", *inputs, "-filter_complex",
          ";".join(parts) + f";{mix}amix=inputs={len(cues)}:normalize=0:duration=longest[a]",
@@ -106,27 +106,38 @@ def _sound_cues(edge: dict, shows: list) -> list:
     return [by_time[k] for k in sorted(by_time)]
 
 
-def _intro(edge: dict, tmp_dir: Path, run, frame: tuple):
-    """The intro screen as a clip (picture + sound) → (path, seconds), or None when it is off. It lasts as long as
-    the avatar's intro clip; without one, the stand-in figure for PLACEHOLDER_INTRO_SEC."""
-    intro = edge.get("intro") or {}
-    if not intro.get("on"):
+CARD_LEAD = 0.4                    # silence before the first line and after the last on the intro / outro screen
+
+
+def _card(spec: dict, tmp_dir: Path, run, frame: tuple, name: str):
+    """An intro or outro screen as a clip (picture + sound) → (path, seconds), or None when it is off.
+    spec: {"on", "clip" (the avatar's video, voice included), "lines" ([{"file", "seconds"}] — voiceover lines read
+    one after another), "stats", "thumbs", "title"}. Its length: the avatar's clip when there is one; else the
+    lines back to back; else the stand-in figure for PLACEHOLDER_INTRO_SEC, silent."""
+    if not (spec or {}).get("on"):
         return None
-    w, h = frame
     thumbs = []
     try:
         from planner.data import get_nearest_thumbnail, load_all_catalogues
         cats = load_all_catalogues()
-        thumbs = [get_nearest_thumbnail(cats, vid, float(t)) for vid, t in intro.get("thumbs") or []]
-    except Exception:          # noqa: BLE001 — the intro still works without thumbnails
+        thumbs = [get_nearest_thumbnail(cats, vid, float(t)) for vid, t in spec.get("thumbs") or []]
+    except Exception:          # noqa: BLE001 — the screen still works without thumbnails
         thumbs = []
-    clip = intro.get("clip")
+    clip = spec.get("clip")
     info = probe(clip) if clip and Path(clip).exists() else None
     real = bool(info and info["video"] and info["seconds"] > 0)
-    secs = info["seconds"] if real else E.PLACEHOLDER_INTRO_SEC
-    card = tmp_dir / "intro_card.png"
-    E.intro_card(frame, [tuple(x) for x in intro.get("stats") or []], thumbs, placeholder=not real).save(card)
-    out = tmp_dir / "intro.mp4"
+    lines = [] if real and info["audio"] else list(spec.get("lines") or [])
+    cues, t = [], CARD_LEAD
+    for ln in lines:                                       # the lines one after another
+        f = ln.get("file")
+        secs = (probe(f)["seconds"] if f and Path(f).exists() else 0.0) or float(ln.get("seconds") or 2.0)
+        cues.append({"time": t, "profile": "wait", "file": f})
+        t += secs + E.LINE_GAP
+    secs = info["seconds"] if real else (t - E.LINE_GAP + CARD_LEAD if cues else E.PLACEHOLDER_INTRO_SEC)
+    card = tmp_dir / f"{name}_card.png"
+    E.intro_card(frame, [tuple(x) for x in spec.get("stats") or []], thumbs, title=spec.get("title") or "EDGE MODE",
+                 placeholder=not real).save(card)
+    out = tmp_dir / f"{name}.mp4"
     inputs = ["-loop", "1", "-framerate", "25", "-t", f"{secs:.3f}", "-i", str(card)]
     if real:
         ax, ay, aw, ah = E.intro_layout(frame)["avatar"]
@@ -135,11 +146,15 @@ def _intro(edge: dict, tmp_dir: Path, run, frame: tuple):
               f"[0:v][av]overlay=x={ax}+({aw}-w)/2:y={ay}+({ah}-h)/2:eof_action=pass,fps=25,format=yuv420p[v]")
     else:
         vf = "[0:v]fps=25,format=yuv420p[v]"
+    nxt = 2 if real else 1
     if real and info["audio"]:
         af = f"[1:a:0]{AUDIO_FMT}[a]"
+    elif cues:
+        inputs += ["-i", str(_voice_track(cues, secs, tmp_dir, run, f"{name}_voice.wav"))]
+        af = f"[{nxt}:a:0]{AUDIO_FMT},apad,atrim=0:{secs:.3f}[a]"
     else:
         inputs += ["-f", "lavfi", "-t", f"{secs:.3f}", "-i", "anullsrc=r=44100:cl=stereo"]
-        af = f"[{2 if real else 1}:a:0]{AUDIO_FMT}[a]"
+        af = f"[{nxt}:a:0]{AUDIO_FMT}[a]"
     run(["ffmpeg", "-y", *inputs, "-filter_complex", vf + ";" + af, "-map", "[v]", "-map", "[a]", "-t", f"{secs:.3f}",
          "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16", "-c:a", "aac", "-b:a", "192k", str(out)])
     return out, secs
@@ -224,14 +239,22 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
         filters.append("".join(layers) + f"amix=inputs={len(layers)}:normalize=0:duration=longest,alimiter=limit=0.95,"
                                          f"apad,atrim=0:{total:.3f}[maina]")
     length = total
-    intro = _intro(edge, tmp_dir, run, (W, H))
-    if intro:                                              # 🎬 the intro screen first, then the compilation
-        inputs += ["-i", str(intro[0])]
+    intro = _card(edge.get("intro"), tmp_dir, run, (W, H), "intro")
+    outro = _card(edge.get("outro"), tmp_dir, run, (W, H), "outro")
+    if intro or outro:                                     # 🎬 the intro screen, the compilation, the outro screen
         filters.append(f"[mainv]trim=0:{total:.3f},setpts=PTS-STARTPTS[mv]")
-        filters.append(f"[{idx}:v]fps=25,format=yuv420p,setsar=1[iv]")
-        filters.append(f"[{idx}:a:0]{AUDIO_FMT}[ia]")
-        filters.append("[iv][ia][mv][maina]concat=n=2:v=1:a=1[v][a]")
-        length += intro[1]
+        parts_v = []
+        for tag, card in (("i", intro), ("m", None), ("o", outro)):
+            if tag == "m":
+                parts_v.append("[mv][maina]")
+            elif card:
+                inputs += ["-i", str(card[0])]
+                filters.append(f"[{idx}:v]fps=25,format=yuv420p,setsar=1[{tag}v]")
+                filters.append(f"[{idx}:a:0]{AUDIO_FMT}[{tag}a]")
+                parts_v.append(f"[{tag}v][{tag}a]")
+                idx += 1
+                length += card[1]
+        filters.append("".join(parts_v) + f"concat=n={len(parts_v)}:v=1:a=1[v][a]")
     else:
         filters += ["[mainv]null[v]", "[maina]anull[a]"]
     run(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]",

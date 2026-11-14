@@ -1,0 +1,709 @@
+{
+ "version": 1,
+ "source": "Edge Mode Cue Map (claude.ai artifact), as saved 14 Nov 2026 02:05",
+ "drive_folder": "scene-labeling/Edge_voiceover",
+ "note": "seconds are estimated from the MP3 size at 192 kbps; the app measures the real file when it has it",
+ "lines": [
+  {
+   "name": "I love edging you",
+   "file": "I love edging you.mp3",
+   "seconds": 2.74,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "stop"
+     ],
+     "at": "during",
+     "offset": 0,
+     "roundList": [
+      "4"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Dont you dare cum-whisper",
+   "file": "Dont you dare cum-whisper.mp3",
+   "seconds": 2.25,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "fast"
+     ],
+     "at": "end",
+     "offset": 3,
+     "roundList": [
+      "6",
+      "last"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Did you cum",
+   "file": "Did you cum.mp3",
+   "seconds": 2.17,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "stop"
+     ],
+     "at": "end",
+     "offset": 0,
+     "roundList": [
+      "6",
+      "last"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Control yourself",
+   "file": "Control yourself.mp3",
+   "seconds": 1.93,
+   "cues": []
+  },
+  {
+   "name": "Dont you dare cum",
+   "file": "Dont you dare cum.mp3",
+   "seconds": 1.86,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "stop"
+     ],
+     "at": "during",
+     "offset": 3,
+     "roundList": [
+      "3"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "you are so hard",
+   "file": "you are so hard.mp3",
+   "seconds": 2.35,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "slow"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "2"
+     ],
+     "diffs": [],
+     "note": "Start of wait"
+    }
+   ]
+  },
+  {
+   "name": "Moan",
+   "file": "Moan.mp3",
+   "seconds": 1.49,
+   "cues": []
+  },
+  {
+   "name": "Faster",
+   "file": "Faster.mp3",
+   "seconds": 1.65,
+   "cues": []
+  },
+  {
+   "name": "Just stroke",
+   "file": "Just stroke.mp3",
+   "seconds": 2.43,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "slow"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "6",
+      "last"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Relax for a sec",
+   "file": "Relax for a sec.mp3",
+   "seconds": 1.94,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "wait"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "2"
+     ],
+     "diffs": [],
+     "note": "Round 2"
+    }
+   ]
+  },
+  {
+   "name": "And dont cum",
+   "file": "And dont cum.mp3",
+   "seconds": 1.73,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "stop"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "5"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Stroke it",
+   "file": "Stroke it.mp3",
+   "seconds": 1.44,
+   "cues": []
+  },
+  {
+   "name": "Just sit there",
+   "file": "Just sit there.mp3",
+   "seconds": 1.7,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "wait"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "3"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Now stop",
+   "file": "Now stop.mp3",
+   "seconds": 1.57,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "stop"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "1",
+      "2"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Did i get you",
+   "file": "Did i get you.mp3",
+   "seconds": 1.73,
+   "cues": []
+  },
+  {
+   "name": "You can survive",
+   "file": "You can survive.mp3",
+   "seconds": 1.81,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "slow"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "showing me you can do this",
+   "file": "showing me you can do this.mp3",
+   "seconds": 2.96,
+   "cues": []
+  },
+  {
+   "name": "Now stop (2)",
+   "file": "Now stop (2).mp3",
+   "seconds": 1.31,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "extra"
+     ],
+     "at": "end",
+     "offset": 3,
+     "roundList": [
+      "5"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Keep stroking faster",
+   "file": "Keep stroking faster.mp3",
+   "seconds": 2.36,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "extra"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "3"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Keep stroking harder",
+   "file": "Keep stroking harder.mp3",
+   "seconds": 2.22,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "medium"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "6",
+      "last"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Keep going",
+   "file": "Keep going.mp3",
+   "seconds": 1.57,
+   "cues": [
+    {
+     "type": "interval",
+     "every": 60,
+     "startAfter": 0,
+     "phases": [
+      "medium"
+     ],
+     "roundList": [],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Ok stroke again",
+   "file": "Ok stroke again.mp3",
+   "seconds": 1.99,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "wait"
+     ],
+     "at": "end",
+     "offset": 0,
+     "roundList": [
+      "3"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Stop again",
+   "file": "Stop again.mp3",
+   "seconds": 1.44,
+   "cues": []
+  },
+  {
+   "name": "Harder-again",
+   "file": "Harder-again.mp3",
+   "seconds": 2.07,
+   "cues": []
+  },
+  {
+   "name": "Stroke again - faster",
+   "file": "Stroke again - faster.mp3",
+   "seconds": 2.15,
+   "cues": []
+  },
+  {
+   "name": "I know you can do it",
+   "file": "I know you can do it.mp3",
+   "seconds": 2.43,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "wait"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "4"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "You can survive 30 days",
+   "file": "You can survive 30 days.mp3",
+   "seconds": 3.77,
+   "cues": []
+  },
+  {
+   "name": "I hope not",
+   "file": "I hope not.mp3",
+   "seconds": 13.64,
+   "cues": [
+    {
+     "type": "outro",
+     "roundList": [],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "relax-fingertips",
+   "file": "relax-fingertips.mp3",
+   "seconds": 8.21,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "slow"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "4"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Its so much fun watching you shake",
+   "file": "Its so much fun watching you shake.mp3",
+   "seconds": 15.31,
+   "cues": []
+  },
+  {
+   "name": "Again - really hard and really fast - you need to show me",
+   "file": "Again - really hard and really fast - you need to show me.mp3",
+   "seconds": 11.65,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "fast"
+     ],
+     "at": "end",
+     "offset": 3,
+     "roundList": [
+      "5"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Balls bursting",
+   "file": "Balls bursting.mp3",
+   "seconds": 17.87,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "wait"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "5"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "How stroke even more",
+   "file": "How stroke even more.mp3",
+   "seconds": 3.61,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "medium"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "4"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "I want every last drop",
+   "file": "I want every last drop.mp3",
+   "seconds": 9.7,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "wait"
+     ],
+     "at": "during",
+     "offset": 0,
+     "roundList": [
+      "6",
+      "last"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Now Stroke",
+   "file": "Now Stroke.mp3",
+   "seconds": 7.03,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "medium"
+     ],
+     "at": "end",
+     "offset": 0,
+     "roundList": [
+      "last"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Do you want to see my tits again",
+   "file": "Do you want to see my tits again.mp3",
+   "seconds": 4.73,
+   "cues": []
+  },
+  {
+   "name": "show me how much - now stop",
+   "file": "show me how much - now stop.mp3",
+   "seconds": 6.67,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "extra"
+     ],
+     "at": "end",
+     "offset": 3,
+     "roundList": [
+      "last"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Stop - look at my tits",
+   "file": "Stop - look at my tits.mp3",
+   "seconds": 19.15,
+   "cues": []
+  },
+  {
+   "name": "Slow",
+   "file": "Slow.mp3",
+   "seconds": 10.56,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "slow"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "3"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Get hard for me",
+   "file": "Get hard for me.mp3",
+   "seconds": 16.75,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "slow"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "1"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Start-Round 1",
+   "file": "Start-Round 1.mp3",
+   "seconds": 19.86,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "wait"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "1"
+     ],
+     "diffs": [],
+     "note": "During wait"
+    }
+   ]
+  },
+  {
+   "name": "Intro to NNN",
+   "file": "Intro to NNN.mp3",
+   "seconds": 19.86,
+   "cues": [
+    {
+     "type": "intro",
+     "order": 2,
+     "roundList": [],
+     "diffs": [],
+     "note": "2nd audio of the video"
+    }
+   ]
+  },
+  {
+   "name": "Welcome",
+   "file": "Welcome.mp3",
+   "seconds": 3.19,
+   "cues": [
+    {
+     "type": "intro",
+     "order": 1,
+     "roundList": [],
+     "diffs": [],
+     "note": "1st audio of the video"
+    }
+   ]
+  },
+  {
+   "name": "Show me how bad",
+   "file": "Show me how bad.mp3",
+   "seconds": 5.41,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "extra"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "2"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Stroke faster",
+   "file": "Stroke faster.mp3",
+   "seconds": 16.7,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "medium"
+     ],
+     "at": "end",
+     "offset": 0,
+     "roundList": [
+      "3"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  }
+ ]
+}

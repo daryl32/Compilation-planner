@@ -488,3 +488,190 @@ def intro_card(size: tuple, stats: list, thumbs: list = (), title: str = "EDGE M
             lx, ty = (t.width - tw) // 2, (t.height - th) // 2
             img.paste(t.crop((lx, ty, lx + tw, ty + th)), (x + (k % 3) * (tw + gap), y + (k // 3) * (th + gap)))
     return img
+
+
+# ---------------------------------------------------------------------------
+# The cue map: which voiceover line plays when (Daryl's Edge Mode Cue Map → edge_cues.json)
+# ---------------------------------------------------------------------------
+
+LINE_GAP = 0.35                    # the shortest silence between two lines
+MAX_DELAY = 6.0                    # a line that finds its moment taken may start this much later; past that it is left out
+CUE_MAP_FILE = Path(__file__).resolve().parent / "edge_cues.json"
+
+
+def load_cue_map(path=None) -> dict:
+    """{"lines": [{"name", "file", "seconds", "cues": [...]}]} — empty when there is no file."""
+    import json
+    p = Path(path) if path else CUE_MAP_FILE
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"lines": []}
+
+
+def _cue_in_round(cue: dict, r: int, n_rounds: int) -> bool:
+    want = [str(x) for x in cue.get("roundList") or []]
+    return not want or str(r) in want or ("last" in want and r == n_rounds)
+
+
+def _free_spans(a: float, b: float, busy: list) -> list:
+    """What is left of [a, b] after the busy (start, end) stretches, each widened by LINE_GAP."""
+    spans = [(a, b)]
+    for s, e in sorted(busy):
+        s, e = s - LINE_GAP, e + LINE_GAP
+        spans = [x for lo, hi in spans for x in ((lo, min(hi, s)), (max(lo, e), hi)) if x[1] - x[0] > 1e-6]
+    return spans
+
+
+def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, durations: dict = None) -> dict:
+    """The cue map played against one compilation's phases → when every line is heard, with no two overlapping.
+
+    Returns {"plays": [{"time", "seconds", "line", "file", "profile", "round", "why", "moved"}] in time order,
+    "intro": [lines in order], "outro": [lines], "clashes": [{"line", "with", "round", "where", "result"}],
+    "unused": [line names with a cue that never came up in this compilation]}.
+
+    How the cues are read:
+    - a timer-phase cue set for a round plays once in that round: "start" and "during" at the phase's FIRST turn
+      in the round, "end" at its LAST (Medium and Hard run a phase more than once a round). "End" starts the line
+      `offset` seconds before the phase ends — at 0, as the next phase begins.
+    - rounds: none picked = every round; a number = that round; "last" = the final round, whatever its number.
+    - "during", "at random" and "every so often" lines are placed after the fixed ones, in whatever silence is left.
+    - two lines wanting the same moment: the one set for fewer rounds keeps it; the other starts straight after if
+      that is within MAX_DELAY seconds, and is left out otherwise. Either way it is listed in "clashes".
+    durations: {line name: real seconds} for the lines whose files have been measured (else the map's estimate)."""
+    rng = random.Random(seed + 4243)
+    durations = durations or {}
+    total = total_seconds(sched)
+    n_rounds = max((ph["round"] for ph in sched), default=0)
+    by_round = {}
+    for ph in sched:
+        by_round.setdefault(ph["round"], []).append(ph)
+    fixed, flex, intro, outro, seen_cue = [], [], [], [], {}
+
+    def secs(line):
+        return float(durations.get(line["name"]) or line.get("seconds") or 2.0)
+
+    for li, line in enumerate(cue_map.get("lines") or []):
+        d = secs(line)
+        for ci, cue in enumerate(line.get("cues") or []):
+            key = (line["name"], ci)
+            if cue.get("diffs") and difficulty not in cue["diffs"]:
+                continue
+            seen_cue.setdefault(key, False)
+            t = cue.get("type")
+            base = {"line": line["name"], "file": line.get("file"), "seconds": d, "key": key,
+                    "breadth": len(cue.get("roundList") or []) or 99}
+            if t == "intro":
+                intro.append((cue.get("order", 99), li, line["name"])); seen_cue[key] = True
+            elif t == "outro":
+                outro.append((cue.get("order", 99), li, line["name"])); seen_cue[key] = True
+            elif t == "phase":
+                at, off = cue.get("at") or "start", float(cue.get("offset") or 0)
+                for r, phases in by_round.items():
+                    if not _cue_in_round(cue, r, n_rounds):
+                        continue
+                    for p in (cue.get("phases") or ORDER):
+                        occ = [ph for ph in phases if ph["profile"] == p]
+                        if not occ:
+                            continue
+                        ph = occ[-1] if at == "end" else occ[0]
+                        where = {"round": r, "profile": p}
+                        if at == "during":
+                            flex.append({**base, **where, "lo": ph["start"] + max(off, 0.0), "hi": ph["end"],
+                                         "why": f"during {PROFILES[p]['label'].title()}"})
+                        elif at == "end":
+                            fixed.append({**base, **where, "time": ph["end"] - off,
+                                          "why": f"end of {PROFILES[p]['label'].title()}" + (f" −{off:g} s" if off else "")})
+                        else:
+                            fixed.append({**base, **where, "time": ph["start"] + off,
+                                          "why": f"start of {PROFILES[p]['label'].title()}" + (f" +{off:g} s" if off else "")})
+            elif t == "round":
+                which = cue.get("which") or "every"
+                for r, phases in by_round.items():
+                    if not {"every": True, "first": r == 1, "last": r == n_rounds,
+                            "number": r == int(cue.get("number") or 1)}.get(which, False):
+                        continue
+                    end = cue.get("at") == "end"
+                    fixed.append({**base, "round": r, "profile": phases[-1 if end else 0]["profile"],
+                                  "time": (phases[-1]["end"] - d) if end else phases[0]["start"],
+                                  "why": f"{'end' if end else 'start'} of round {r}"})
+            elif t == "time":
+                try:
+                    m, s_ = (str(cue.get("clock") or "0:00").split(":") + ["0"])[:2]
+                    clock = int(m) * 60 + float(s_)
+                except ValueError:
+                    continue
+                starts = [(r, phs[0]["start"]) for r, phs in by_round.items()] if cue.get("from") == "round" else [(None, 0.0)]
+                for r, t0 in starts:
+                    ph = phase_at(sched, t0 + clock)
+                    if t0 + clock < total and ph and _cue_in_round(cue, ph["round"], n_rounds) and (r is None or ph["round"] == r):
+                        fixed.append({**base, "round": ph["round"], "profile": ph["profile"], "time": t0 + clock,
+                                      "why": f"at {cue.get('clock')}" + (" into the round" if r else "")})
+            elif t == "interval":
+                every = max(float(cue.get("every") or 60), 1.0)
+                tt = float(cue.get("startAfter") or 0) + every
+                while tt < total:
+                    ph = phase_at(sched, tt)
+                    if ph and _cue_in_round(cue, ph["round"], n_rounds) and (not cue.get("phases") or ph["profile"] in cue["phases"]):
+                        fixed.append({**base, "round": ph["round"], "profile": ph["profile"], "time": tt, "breadth": 200,
+                                      "why": f"every {every:g} s"})
+                    tt += every
+            elif t == "random":
+                times, per = max(int(cue.get("times") or 1), 1), cue.get("per") or "round"
+                ok = [ph for ph in sched if _cue_in_round(cue, ph["round"], n_rounds)
+                      and (not cue.get("phases") or ph["profile"] in cue["phases"])]
+                groups = ([[ph] for ph in ok] if per == "phase" else [ok] if per == "compilation"
+                          else [[ph for ph in ok if ph["round"] == r] for r in by_round])
+                for g in groups:
+                    for ph in (rng.sample(g, min(times, len(g))) if g else []):
+                        flex.append({**base, "round": ph["round"], "profile": ph["profile"], "lo": ph["start"], "hi": ph["end"],
+                                     "why": f"at random in {PROFILES[ph['profile']]['label'].title()}"})
+    plays, clashes = [], []
+
+    def blocker(a, b):
+        return next((p for p in plays if a < p["time"] + p["seconds"] + LINE_GAP - 1e-6 and b > p["time"] - LINE_GAP + 1e-6), None)
+
+    def where(c):
+        return f"round {c['round']}, {c['why']}"
+
+    for c in sorted(fixed, key=lambda c: (c["time"], c["breadth"], c["line"])):
+        t = min(c["time"], total - c["seconds"])                     # a line never runs past the compilation's end
+        moved = round(t - c["time"], 2)
+        hit = blocker(t, t + c["seconds"])
+        tries = 0
+        while hit is not None and tries < 6:
+            first = hit
+            t2 = hit["time"] + hit["seconds"] + LINE_GAP
+            if t2 - c["time"] > MAX_DELAY or t2 + c["seconds"] > total:
+                clashes.append({"line": c["line"], "with": first["line"], "round": c["round"], "where": where(c), "result": "left out"})
+                t = None
+                break
+            t, tries = t2, tries + 1
+            hit = blocker(t, t + c["seconds"])
+            if hit is None:
+                clashes.append({"line": c["line"], "with": first["line"], "round": c["round"], "where": where(c),
+                                "result": f"starts {t - c['time']:.1f} s late"})
+                moved = round(t - c["time"], 2)
+        if t is None or hit is not None:
+            if t is not None:
+                clashes.append({"line": c["line"], "with": hit["line"], "round": c["round"], "where": where(c), "result": "left out"})
+            continue
+        plays.append({"time": round(t, 3), "seconds": round(c["seconds"], 3), "line": c["line"], "file": c["file"],
+                      "profile": c["profile"], "round": c["round"], "why": c["why"], "moved": moved})
+        seen_cue[c["key"]] = True
+    for c in flex:
+        spans = [(lo, hi - c["seconds"]) for lo, hi in _free_spans(c["lo"], min(c["hi"], total),
+                                                                   [(p["time"], p["time"] + p["seconds"]) for p in plays])
+                 if hi - lo >= c["seconds"]]
+        if not spans:
+            inside = [p["line"] for p in plays if p["time"] < c["hi"] and p["time"] + p["seconds"] > c["lo"]]
+            clashes.append({"line": c["line"], "with": ", ".join(inside) or "the phase's length", "round": c["round"],
+                            "where": where(c), "result": "left out — no silence long enough"})
+            continue
+        lo, hi = rng.choices(spans, [max(h - l, 0.05) for l, h in spans])[0]
+        plays.append({"time": round(rng.uniform(lo, hi), 3), "seconds": round(c["seconds"], 3), "line": c["line"],
+                      "file": c["file"], "profile": c["profile"], "round": c["round"], "why": c["why"], "moved": 0.0})
+        seen_cue[c["key"]] = True
+    plays.sort(key=lambda p: p["time"])
+    return {"plays": plays, "intro": [n for _, _, n in sorted(intro)], "outro": [n for _, _, n in sorted(outro)],
+            "clashes": clashes, "unused": sorted({k[0] for k, v in seen_cue.items() if not v})}
