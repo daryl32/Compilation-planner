@@ -117,17 +117,20 @@ def test_compile_without_a_song_and_with_a_playlist(monkeypatch):
         assert plan["matching_mode"] == "Edge" and plan["track_duration_sec"] == 360.0 and seen
         _check_plan(plan, 360.0)
         assert edge["beat"]["on"] and edge["beat"]["volume"] == 1.0 and edge["playlist"] == []      # no song → the beat is on
-        # the voiceover follows the cue map: named lines, never two at once; intro and outro lines bring their screens
+        # the voiceover follows the cue map: named lines, never two at once; outro lines bring their screen
         vo = edge["voiceover"]
         assert len(edge["schedule"]) == 18 and vo["cue_map"] and vo["cues"][0]["line"] == "Start-Round 1"
         for x, y in zip(vo["cues"], vo["cues"][1:]):
             assert y["time"] >= x["time"] + x["seconds"]
         assert all(c["file"] is None for c in vo["cues"]) and "Now stop" in vo["lines_missing"]      # no files here: tones
-        assert edge["intro"]["on"] and [x["line"] for x in edge["intro"]["lines"]] == ["Welcome", "Intro to NNN"]
+        assert not edge["intro"]["on"] and edge["intro"]["lines"] == []          # the intro screen only when switched on
+        shown = PE.compile_edge([], VIDS, "chill", 3, voiceover=True, intro=True)["plan"]["edge"]["intro"]
+        assert shown["on"] and [x["line"] for x in shown["lines"]] == ["Welcome", "Intro to NNN"]
         assert edge["outro"]["on"] and [x["line"] for x in edge["outro"]["lines"]] == ["I hope not"]
         assert res["voice_clashes"] and {"line", "with", "round", "where", "result"} <= set(res["voice_clashes"][0])
         quiet = PE.compile_edge([], VIDS, "chill", 3)["plan"]["edge"]
-        assert not quiet["intro"]["on"] and not quiet["outro"]["on"] and quiet["voiceover"]["cues"] == []
+        assert not quiet["intro"]["on"] and quiet["voiceover"]["cues"] == []
+        assert quiet["outro"]["on"] and quiet["outro"]["lines"] == [] and not quiet["outro"]["figure"]      # the outro closes every compilation
         filled = sum(1 for e in plan["timeline"] if e["scenes"])
         assert filled >= 0.6 * len(plan["timeline"])
         json.dumps(plan)                                                           # the plan is a file Blender can read
@@ -341,9 +344,10 @@ def test_compile_carries_the_avatar_and_the_intro(monkeypatch, tmp_path):
             (tmp_path / "avatar" / slot / f"{slot}_1.mp4").write_bytes(b"x")
         res = PE.compile_edge([], VIDS, "chill", 3, avatar=True, avatar_mode="split", intro=True)
         edge = res["plan"]["edge"]
-        assert edge["avatar"]["on"] and edge["avatar"]["mode"] == "split" and len(edge["avatar"]["cues"]) == 18
-        fast = [c for c in edge["avatar"]["cues"] if c["profile"] == "fast"]
-        assert all(c["clip"].endswith("fast_1.mp4") for c in fast) and edge["avatar"]["placeholders"] == ["wait", "slow", "medium", "extra", "stop"]
+        # the avatar brings the lines with her, voiceover switch or not: she appears with every line of the cue map
+        assert edge["avatar"]["on"] and edge["avatar"]["mode"] == "split" and edge["voiceover"]["on"]
+        assert [(c["time"], c["line"]) for c in edge["avatar"]["cues"]] == [(c["time"], c["line"]) for c in edge["voiceover"]["cues"]]
+        assert len(edge["avatar"]["cues"]) == 17 and "Start-Round 1" in edge["avatar"]["placeholders"]      # no clips here: stand-ins
         assert edge["intro"]["on"] and edge["intro"]["clip"].endswith("intro_1.mp4")
         assert edge["intro"]["stats"] == [["Difficulty", "Chill"], ["Rounds", "3"], ["Time", "6:00"]]
         assert 1 <= len(edge["intro"]["thumbs"]) <= 6 and {v for v, _ in edge["intro"]["thumbs"]} <= set(VIDS)
@@ -505,7 +509,7 @@ def test_the_avatar_follows_the_cue_map(monkeypatch, tmp_path):
         (tmp_path / "avatar" / "lines").mkdir(parents=True)
         for n in ("Now stop", "Welcome"):
             (tmp_path / "avatar" / "lines" / f"{n}.mp4").write_bytes(b"x")
-        res = PE.compile_edge([], VIDS, "chill", 3, voiceover=True, avatar=True)
+        res = PE.compile_edge([], VIDS, "chill", 3, voiceover=True, avatar=True, intro=True)
         edge = res["plan"]["edge"]
         av, vo = edge["avatar"]["cues"], edge["voiceover"]["cues"]
         assert [(c["time"], c["line"]) for c in av] == [(c["time"], c["line"]) for c in vo]      # she appears with every line
