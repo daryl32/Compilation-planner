@@ -170,6 +170,9 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     intro screen before the compilation (her intro clip beside the settings and thumbnails). progress(done, total,
     text)."""
     import core.story_matcher as SMX
+    # 👩 the avatar brings the lines with her: she follows the cue map (her clips, their own sound; the line's
+    # recording under a stand-in where she has no clip yet) whether or not the voiceover switch is on (Daryl, 14 Nov)
+    voiceover = bool(voiceover or avatar)
     sched = E.schedule(difficulty, rounds, seed)
     total = E.total_seconds(sched)
     track_ids = list(track_ids or [])
@@ -289,8 +292,8 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             "music": {"still_volume": E.MUSIC_IN_STILL, "fade": E.MUSIC_FADE_SEC},        # the songs drop in Wait and Stop
             "avatar": {"on": bool(avatar), "mode": avatar_mode if avatar_mode in E.AVATAR_MODES else "corner",
                        "corner": avatar_corner, "cues": av_cues, "placeholders": missing_avatar},
-            # (a line mapped to the intro or the outro needs its screen: it comes on with the voiceover)
-            "outro": {"on": bool(outro_lines), "lines": outro_lines, "title": "EDGE MODE",
+            # (the outro screen closes every compilation, whatever is switched on — Daryl, 14 Nov; its lines when there are any)
+            "outro": {"on": True, "lines": outro_lines, "title": "EDGE MODE", "figure": bool(avatar),
                       "stats": [["Difficulty", E.DIFFICULTIES[difficulty].split(" ", 1)[-1]],
                                 ["Rounds", str(int(sched[-1]["round"]) if sched else 0)], ["Time", format_mmss(total)]],
                       "thumbs": thumbs},
@@ -328,7 +331,7 @@ def _do_pending_compile() -> None:
     ss = st.session_state
     bar = st.progress(0.0, text="⏱️ Compiling…")
     fetch_note = None
-    if ss.get("edge_voice"):                               # the lines (and her clips) not here yet are fetched first
+    if ss.get("edge_voice") or ss.get("edge_avatar"):      # the lines (and her clips) not here yet are fetched first
         cm = E.load_cue_map()
         want_av = bool(ss.get("edge_avatar"))
         if cm.get("lines") and (any(line_file(ln) is None for ln in cm["lines"]) or want_av):
@@ -465,8 +468,9 @@ def _setup(rows: dict, have_tl: set) -> None:
             _clip_manager("voice")
     a = st.columns(2)
     a[0].toggle("👩 Avatar", key="edge_avatar",
-                help="With the voiceover on she appears with every line of your cue map — her clip where one has "
-                     "been made (her voice comes from it), a stand-in figure for the rest. The songs drop to a quarter "
+                help="She appears with every line of your cue map (with or without the voiceover switch) — her clip "
+                     "where one has been made (its own sound is heard), a stand-in figure and the line's recording "
+                     "for the rest. The songs drop to a quarter "
                      "volume.")
     a[1].toggle("🎬 Intro screen", key="edge_intro",
                 help="Before the compilation: the avatar giving her intro, beside the difficulty, rounds, total time "

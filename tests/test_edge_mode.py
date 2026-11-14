@@ -129,7 +129,8 @@ def test_compile_without_a_song_and_with_a_playlist(monkeypatch):
         assert edge["outro"]["on"] and [x["line"] for x in edge["outro"]["lines"]] == ["I hope not"]
         assert res["voice_clashes"] and {"line", "with", "round", "where", "result"} <= set(res["voice_clashes"][0])
         quiet = PE.compile_edge([], VIDS, "chill", 3)["plan"]["edge"]
-        assert not quiet["intro"]["on"] and not quiet["outro"]["on"] and quiet["voiceover"]["cues"] == []
+        assert not quiet["intro"]["on"] and quiet["voiceover"]["cues"] == []
+        assert quiet["outro"]["on"] and quiet["outro"]["lines"] == [] and not quiet["outro"]["figure"]      # the outro closes every compilation
         filled = sum(1 for e in plan["timeline"] if e["scenes"])
         assert filled >= 0.6 * len(plan["timeline"])
         json.dumps(plan)                                                           # the plan is a file Blender can read
@@ -343,9 +344,10 @@ def test_compile_carries_the_avatar_and_the_intro(monkeypatch, tmp_path):
             (tmp_path / "avatar" / slot / f"{slot}_1.mp4").write_bytes(b"x")
         res = PE.compile_edge([], VIDS, "chill", 3, avatar=True, avatar_mode="split", intro=True)
         edge = res["plan"]["edge"]
-        assert edge["avatar"]["on"] and edge["avatar"]["mode"] == "split" and len(edge["avatar"]["cues"]) == 18
-        fast = [c for c in edge["avatar"]["cues"] if c["profile"] == "fast"]
-        assert all(c["clip"].endswith("fast_1.mp4") for c in fast) and edge["avatar"]["placeholders"] == ["wait", "slow", "medium", "extra", "stop"]
+        # the avatar brings the lines with her, voiceover switch or not: she appears with every line of the cue map
+        assert edge["avatar"]["on"] and edge["avatar"]["mode"] == "split" and edge["voiceover"]["on"]
+        assert [(c["time"], c["line"]) for c in edge["avatar"]["cues"]] == [(c["time"], c["line"]) for c in edge["voiceover"]["cues"]]
+        assert len(edge["avatar"]["cues"]) == 17 and "Start-Round 1" in edge["avatar"]["placeholders"]      # no clips here: stand-ins
         assert edge["intro"]["on"] and edge["intro"]["clip"].endswith("intro_1.mp4")
         assert edge["intro"]["stats"] == [["Difficulty", "Chill"], ["Rounds", "3"], ["Time", "6:00"]]
         assert 1 <= len(edge["intro"]["thumbs"]) <= 6 and {v for v, _ in edge["intro"]["thumbs"]} <= set(VIDS)

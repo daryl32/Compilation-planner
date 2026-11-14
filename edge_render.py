@@ -30,7 +30,7 @@ AUDIO_FMT = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo"
 STALL_SEC = 180                    # the picture pass is stopped when it hasn't moved for this long
 MIN_SHOW_SEC = 0.2                 # an avatar appearance shorter than this is left out
 PICTURE_PRESET = "ultrafast"       # the picture's encoder speed
-PIECE_TIMEOUT = 300                # seconds one phase's picture may take before it is stopped
+PIECE_TIMEOUT = 120                # seconds one phase's picture may take before it is stopped (it needs a few)
 KEY_COLOUR = "0x00B140"            # the avatar clips' backdrop (the Colab notebook's BACKGROUND), made see-through
 KEY = f"format=yuva420p,chromakey={KEY_COLOUR}:0.16:0.08"       # (no despill: it turns yellows and blondes orange)
 FPS = 25
@@ -288,7 +288,7 @@ def _card(spec: dict, tmp_dir: Path, run, frame: tuple, name: str):
     secs = frames / FPS                                    # whole frames, so picture and sound stay the same length
     card = tmp_dir / f"{name}_card.png"
     E.intro_card(frame, [tuple(x) for x in spec.get("stats") or []], thumbs, title=spec.get("title") or "EDGE MODE",
-                 placeholder=not real and len(shows) < max(len(lines), 1)).save(card)
+                 placeholder=bool(spec.get("figure", True)) and not real and len(shows) < max(len(lines), 1)).save(card)
     out = tmp_dir / f"{name}.mp4"
     inputs = ["-loop", "1", "-framerate", "25", "-t", f"{secs:.3f}", "-i", str(card)]
     nxt = 1
@@ -390,14 +390,18 @@ def _mix(edge: dict, shows: list, sources, tmp_dir: Path, run) -> Path:
     return out
 
 
-def _piece_cmd(combined, ph: dict, timer_dir: Path, timer_xy: tuple, shows: list, av: dict, frame: tuple, out: Path) -> list:
+def _piece_cmd(combined, ph: dict, timer_dir: Path, timer_xy: tuple, shows: list, av: dict, frame: tuple, out: Path,
+               footage: float = None) -> list:
     """The ffmpeg job for one phase's picture: that stretch of the footage, the phase's timer pictures on top, and the
     avatar appearances (or the parts of them) that fall inside it. Every time here counts from the phase's start."""
     W, H = frame
     a, b = float(ph["start"]), float(ph["end"])
     frames = max(int(round((b - a) * FPS)), 1)
-    inputs = ["-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(combined),
-              "-framerate", str(E.OVERLAY_FPS), "-start_number", "0", "-i", str(timer_dir / f"{ph['profile']}_%04d.png")]
+    if footage is not None and a >= footage - 0.2:         # the footage has ended before this phase: black, never nothing
+        inputs = ["-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={FPS}:d={b - a:.3f}"]
+    else:
+        inputs = ["-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(combined)]
+    inputs += ["-framerate", str(E.OVERLAY_FPS), "-start_number", "0", "-i", str(timer_dir / f"{ph['profile']}_%04d.png")]
     # (the footage holds its last frame if it runs short, so a piece is always its full length)
     filters, cur, idx = [f"[0:v]fps={FPS},setsar=1,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=30[m]"], "[m]", 2
     here = []
@@ -472,6 +476,7 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
     total = E.total_seconds(sched)
     tmp_dir = Path(tmp_dir)
     W, H = int(frame_width), int(frame_height)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
     took, t0 = {"ffmpeg": ffmpeg_version()}, time.time()
     shows = _appearances(edge, tmp_dir, (W, H))
 
@@ -492,9 +497,10 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
     xy = E.overlay_xy((edge.get("overlay") or {}).get("corner", "top-left"))
     av = edge.get("avatar") or {}
     pieces = [tmp_dir / f"phase_{k:03d}.mp4" for k in range(len(sched))]
+    footage = probe(combined_video)["seconds"] or None
     n = max(1, min(int(workers or min(4, os.cpu_count() or 2)), len(sched) or 1))
     with ThreadPoolExecutor(max_workers=n) as pool:
-        jobs = [pool.submit(_run, _piece_cmd(combined_video, ph, timer_dir, xy, shows, av, (W, H), piece))
+        jobs = [pool.submit(_run, _piece_cmd(combined_video, ph, timer_dir, xy, shows, av, (W, H), piece, footage))
                 for ph, piece in zip(sched, pieces)]
         try:
             for done, job in enumerate(as_completed(jobs), 1):

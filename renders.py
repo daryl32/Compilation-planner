@@ -163,6 +163,7 @@ def write_render_metadata(output_path, plan: dict, render_seconds: float = None,
         "created": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
         "app_version": app_version,
         "render_seconds": round(render_seconds, 1) if render_seconds is not None else None,
+        "stage_seconds": (extra or {}).get("stage_seconds"),      # each step's time, the end check, ffmpeg's version
         "sources": source_stats or {},
         "track": {
             "track_id": plan.get("track_id"),
