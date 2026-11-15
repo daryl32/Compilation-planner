@@ -456,6 +456,27 @@ def _song_input(sources, raw: str) -> list:
     return list(sources.input_args(raw))
 
 
+def _line_spans(edge: dict, shows: list) -> list:
+    """[(start, end)] of every moment a line is heard — what the 🔉 songs dip under."""
+    spans = []
+    voice = edge.get("voiceover") or {}
+    for c in (voice.get("cues") or []) if voice.get("on") else []:
+        secs = float(c.get("seconds") or 0.0)
+        if not secs and c.get("file") and Path(c["file"]).exists():
+            secs = probe(c["file"])["seconds"]
+        spans.append((float(c["time"]), float(c["time"]) + (secs or 1.5)))
+    for s in shows:
+        spans.append((float(s["time"]), float(s["time"]) + float(s["seconds"])))
+    spans.sort()
+    out = []
+    for a, b in spans:                                     # the same line from the voice and from her clip: one dip
+        if out and a <= out[-1][1] + 1e-6:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
 def _mix(edge: dict, shows: list, sources, tmp_dir: Path, run) -> Path:
     """The compilation's whole sound as one file: the songs back to back (quieter under the voiceover / avatar and
     in Wait and Stop), the generated beat, the lines."""
@@ -472,19 +493,16 @@ def _mix(edge: dict, shows: list, sources, tmp_dir: Path, run) -> Path:
             # (":a:0" — an .m4a may carry its cover art as a second stream)
             filters.append(f"[{idx}:a:0]{AUDIO_FMT},atrim=0:{float(part['play']):.3f},asetpts=PTS-STARTPTS[p{k}]")
             idx += 1
-        # (never above today's level: a plan compiled earlier stored 0.5, which also brought the Wait / Stop dip back)
-        vol = min(float(voice.get("music_volume", E.MUSIC_UNDER_VOICE)), E.MUSIC_UNDER_VOICE) if talking else 1.0
-        # 🔉 down to a quarter during Wait and Stop (a short fade each way) when it is louder than that elsewhere
-        quiet = float((edge.get("music") or {}).get("still_volume", E.MUSIC_IN_STILL))
-        spans = E.still_spans(sched) if quiet < vol else []
-        if spans:
-            f = E.MUSIC_FADE_SEC
-            dip = "0"
-            for a, b in spans:
-                dip = f"max({dip},clip((t-{a:.3f})/{f},0,1)*clip(({b:.3f}-t)/{f},0,1))"
-            level = f"volume=volume='{vol:.3f}-{vol - quiet:.3f}*{dip}':eval=frame"
-        else:
-            level = f"volume={vol:.3f}"
+        music = edge.get("music") or {}
+        # 🌙 fade out in Stop / back in over Wait, 🔉 full volume dipping only under her lines — both on in plans
+        # compiled from 15 Nov; an older plan (no such keys) sounds as it did: a quarter under the voice, a quarter
+        # in Wait and Stop
+        spec = E.music_spec(sched, talking=talking, lines=_line_spans(edge, shows),
+                            fade_stop=bool(music.get("fade_stop", False)), duck=bool(music.get("duck", False)),
+                            still_volume=float(music.get("still_volume", E.MUSIC_IN_STILL)),
+                            # (never above a quarter: a plan compiled earlier stored 0.5)
+                            under_voice=min(float(voice.get("music_volume", E.MUSIC_UNDER_VOICE)), E.MUSIC_UNDER_VOICE))
+        level = f"volume=volume='{E.music_gain_expr(spec)}':eval=frame"
         filters.append("".join(f"[p{k}]" for k in range(len(parts))) + f"concat=n={len(parts)}:v=0:a=1,{level}[music]")
         layers.append("[music]")
     beat = edge.get("beat") or {}
@@ -493,6 +511,12 @@ def _mix(edge: dict, shows: list, sources, tmp_dir: Path, run) -> Path:
         inputs += ["-i", str(wav)]
         filters.append(f"[{idx}:a:0]{AUDIO_FMT},volume={float(beat.get('volume', 1.0)):.3f}[beat]")
         layers.append("[beat]")
+        idx += 1
+    if (edge.get("signals") or {}).get("sound") and len(sched) > 1:      # 🔔 a bell at every phase change
+        wav = E.write_chime_wav(sched, tmp_dir / "chime.wav")
+        inputs += ["-i", str(wav)]
+        filters.append(f"[{idx}:a:0]{AUDIO_FMT},volume={E.CHIME_VOLUME:.3f}[chime]")
+        layers.append("[chime]")
         idx += 1
     if talking:
         vt = _voice_track(_sound_cues(edge, shows), total, tmp_dir, run)
@@ -529,10 +553,21 @@ def _timer_pictures(timer_dir: Path, sched: list) -> dict:
     return out
 
 
+def _badge_xy(corner: str, frame: tuple, timer: tuple, badge: tuple, margin_share: float = 0.035) -> tuple:
+    """▸ The round label's place: under the timer when it sits at the top (or the centre), over it at the bottom."""
+    tx, ty = _corner_xy(corner, frame, timer, margin_share)
+    gap = max(int(frame[1] * 0.012), 2)
+    x = tx + (timer[0] - badge[0]) // 2
+    return (x, ty - badge[1] - gap) if corner.startswith("bottom") else (x, ty + timer[1] + gap)
+
+
 def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av: dict, frame: tuple, out: Path,
-           footage: float = None) -> None:
+           footage: float = None, extras: dict = None) -> None:
     """One phase's picture → out: that stretch of the footage, the avatar appearances (or the parts of them) that
-    fall inside it, the phase's timer on top. Read as frames, layered here, written as frames."""
+    fall inside it, the phase's timer on top. Read as frames, layered here, written as frames.
+    extras: {"flash": 🔔 a quick flash of the phase's colour over its first frames (not the very first phase),
+    "badge": ▸ (picture, how solid, x, y) of the round label}."""
+    extras = extras or {}
     import numpy as np
     from PIL import Image
     W, H = frame
@@ -581,6 +616,9 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
                                 "-vf", f"fps={FPS},scale={W}:{H}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     held = [black]
+    flash_n = int(round(E.FLASH_SEC * FPS)) if extras.get("flash") and int(ph.get("index", 0)) > 0 else 0
+    tint = np.array(E.PROFILES[ph["profile"]]["ring"], dtype=np.float32)
+    badge = extras.get("badge")
 
     def make(i):
         buf = dec.stdout.read(size) if dec is not None else b""
@@ -589,6 +627,9 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
             held[0] = pic
         else:
             pic = held[0].copy()                           # the footage ran short: its last frame is held
+        if i < flash_n:                                    # 🔔 the phase's colour washes over, gone within FLASH_SEC
+            k = 0.55 * (1.0 - i / flash_n)
+            pic = (pic.astype(np.float32) * (1.0 - k) + tint * k).astype(np.uint8)
         on = next((ly for ly in layers if ly[0] <= i < ly[1]), None)
         if on is not None:
             if split:                                      # the footage's middle on the left, she on the right
@@ -599,6 +640,8 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
         if pictures:
             rgb, solid = pictures[min(int(i / per), len(pictures) - 1)]
             _lay(pic, tx, ty, rgb, solid)
+        if badge is not None:
+            _lay(pic, badge[2], badge[3], badge[0], badge[1])
         return pic
     try:
         _write_video(out, frame, n_frames, make, [dec] if dec is not None else None)
@@ -662,15 +705,26 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
     # 3 · the picture, a phase at a time
     t0 = time.time()
     timer_dir = tmp_dir / "overlay"
-    E.write_overlay(sched, timer_dir, H)
+    signals = edge.get("signals") or {}
+    E.write_overlay(sched, timer_dir, H, signals=bool(signals.get("timer")))
     timers = _timer_pictures(timer_dir, sched)
     corner = (edge.get("overlay") or {}).get("corner", "top-left")
     av = edge.get("avatar") or {}
     pieces = [tmp_dir / f"phase_{k:03d}.mp4" for k in range(len(sched))]
     footage = probe(combined_video)["seconds"] or None
+    badges = {}
+    if (edge.get("round_badge") or {}).get("on") and sched:          # ▸ "ROUND 2 / 3" by the timer
+        import numpy as np
+        tw, th = E.overlay_size(H)
+        n_rounds = max(ph["round"] for ph in sched)
+        for r in range(1, n_rounds + 1):
+            a = np.asarray(E.round_badge(r, n_rounds, tw).convert("RGBA"), dtype=np.uint8)
+            rgb, solid = a[..., :3].copy(), a[..., 3:4].astype(np.uint16)
+            badges[r] = (rgb, solid, *_badge_xy(corner, (W, H), (tw, th), (rgb.shape[1], rgb.shape[0])))
     n = max(1, min(int(workers or min(4, os.cpu_count() or 2)), len(sched) or 1))
     with ThreadPoolExecutor(max_workers=n) as pool:
-        jobs = [pool.submit(_piece, combined_video, ph, timers, corner, shows, av, (W, H), piece, footage)
+        jobs = [pool.submit(_piece, combined_video, ph, timers, corner, shows, av, (W, H), piece, footage,
+                            {"flash": bool(signals.get("flash")), "badge": badges.get(ph["round"])})
                 for ph, piece in zip(sched, pieces)]
         try:
             for done, job in enumerate(as_completed(jobs), 1):

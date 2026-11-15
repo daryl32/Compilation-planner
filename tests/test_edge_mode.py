@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import wave
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -651,3 +652,168 @@ def test_the_picture_is_made_phase_by_phase_and_stays_in_step(tmp_path, monkeypa
     w, _h = E.overlay_size(360)
     cx, top = int(360 * 0.035) + w // 2, int(360 * 0.035)
     assert _pixel(out, 20.5, cx, top + 4)[0] > 150 and _pixel(out, 40.5, cx, top + 4)[0] > 150      # a full ring as each phase starts
+
+
+# ---------------------------------------------------------------------------
+# 15 Nov: phase signals, round label, 🌙 / 🔉 music, a song per round, the beat round by round, takes, the cue map file
+# ---------------------------------------------------------------------------
+
+def test_a_new_song_each_round_and_the_beat_schedule_a_round_at_a_time():
+    import edge_mode as E
+    sched = E.schedule("chill", 4)                         # 4 × 120 s
+    parts = E.round_playlist_parts([("a", 200.0), ("b", 50.0), ("c", 90.0)], sched)
+    assert [(p["track_id"], p["offset"], p["play"], p["round"]) for p in parts] == [
+        ("a", 0.0, 120.0, 1), ("b", 120.0, 50.0, 2), ("b", 170.0, 50.0, 2), ("b", 220.0, 20.0, 2),
+        ("c", 240.0, 90.0, 3), ("c", 330.0, 30.0, 3), ("a", 360.0, 120.0, 4)]
+    assert parts[-1]["pass"] == 2 and parts[2]["loop"] == 2          # the list comes round again; b starts again
+    assert abs(sum(p["play"] for p in parts) - 480.0) < 1e-6
+    sub = E.shift_schedule([ph for ph in sched if ph["round"] == 3])
+    assert sub[0]["start"] == 0.0 and sub[-1]["end"] == 120.0 and [p["index"] for p in sub] == list(range(6))
+
+
+def test_the_music_fades_in_stop_comes_back_over_wait_and_dips_only_under_lines():
+    import edge_mode as E
+    sched = E.schedule("chill", 2)                         # wait 0–20 … stop 100–120, wait 120–140 …
+    spec = E.music_spec(sched, talking=True, lines=[(50.0, 53.0)])
+    g = lambda t: E.music_gain(spec, t)                    # noqa: E731
+    assert g(0.0) == 0.0 and g(10.0) == pytest.approx(0.5) and g(19.99) == pytest.approx(1.0, abs=1e-3)   # in over Wait
+    assert g(30.0) == 1.0                                  # full between lines (with the voiceover on)
+    assert g(51.0) == pytest.approx(E.DUCK_LEVEL) and g(49.0) == 1.0 and g(53.5) == 1.0
+    assert g(101.5) == pytest.approx(0.5) and g(104.0) == 0.0 and g(119.0) == 0.0     # out over Stop's first 3 s
+    assert g(130.0) == pytest.approx(0.5)                   # the next round's Wait brings it back
+    old = E.music_spec(sched, talking=True, fade_stop=False, duck=False)      # switched off: as before
+    assert E.music_gain(old, 30.0) == 0.25 and E.music_gain(old, 10.0) == 0.25
+    quiet = E.music_spec(sched, talking=False, fade_stop=False)
+    assert E.music_gain(quiet, 30.0) == 1.0 and E.music_gain(quiet, 10.0) == pytest.approx(0.25)
+    assert "gte(t" in E.music_gain_expr(spec) and "min(1," in E.music_gain_expr(spec)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_the_rendered_music_follows_the_rule_and_the_bell_rings_at_each_change(tmp_path, monkeypatch):
+    import sys
+    import types
+    import edge_mode as E
+    import edge_render as R
+    monkeypatch.setitem(sys.modules, "render_preview", types.SimpleNamespace(get_track_raw_source=lambda t: t))
+    song = tmp_path / "song.wav"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=90", "-af", "volume=3",
+                    str(song)], check=True)
+    sched = [{"index": k, "round": 1, "profile": p, "start": 20.0 * k, "end": 20.0 * k + 20.0}
+             for k, p in enumerate(("wait", "medium", "stop"))]
+    src = types.SimpleNamespace(input_args=lambda raw: ["-i", str(song)])
+
+    def run(cmd):
+        subprocess.run(cmd, capture_output=True, check=True)
+    edge = {"schedule": sched, "playlist": [{"track_id": "s", "offset": 0.0, "play": 60.0, "pass": 1}], "beat": {"on": False},
+            "voiceover": {"on": True, "cues": [{"time": 30.0, "profile": "medium", "file": None, "seconds": 3.0}]},
+            "music": {"fade_stop": True, "duck": True}, "signals": {"sound": False}}
+    out = R._mix(edge, [], src, tmp_path, run)
+    full = _level(out, 25.0, 28.0)
+    assert full > 0.1
+    assert _level(out, 0.0, 2.0) < 0.15 * full and _level(out, 17.5, 19.5) > 0.85 * full     # fades in over Wait
+    assert _level(out, 36.0, 39.0) == pytest.approx(full, rel=0.1)                            # full after the line
+    assert _level(out, 45.0, 59.0) < 0.02 * full                                              # silent once Stop has faded
+    edge["voiceover"]["cues"] = []
+    edge["voiceover"]["on"] = False
+    edge["music"] = {}
+    edge["playlist"] = []
+    edge["beat"] = {"on": False}
+    edge["signals"] = {"sound": True}
+    bells = R._mix(edge, [], src, tmp_path, run)
+    assert _level(bells, 20.0, 20.4) > 0.02 and _level(bells, 40.0, 40.4) > 0.02           # a bell at each change…
+    assert _level(bells, 0.0, 0.4) < 0.002 and _level(bells, 30.0, 35.0) < 0.002          # …and nothing else
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_phase_signals_colour_the_ring_flash_the_picture_and_the_round_label_shows(tmp_path, monkeypatch):
+    import sys
+    import types
+    import edge_mode as E
+    import edge_render as R
+    monkeypatch.setitem(sys.modules, "render_preview", types.SimpleNamespace(get_track_raw_source=lambda t: t))
+    comb = tmp_path / "comb.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x202020:s=640x360:r=25:d=40",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(comb)], check=True)
+    sched = [{"index": 0, "round": 1, "profile": "slow", "start": 0.0, "end": 20.0},
+             {"index": 1, "round": 2, "profile": "extra", "start": 20.0, "end": 40.0}]
+    edge = {"schedule": sched, "playlist": [], "beat": {"on": True, "volume": 1.0}, "voiceover": {"on": False, "cues": []},
+            "overlay": {"corner": "top-left"}, "avatar": {"on": False}, "intro": {"on": False}, "outro": {"on": False},
+            "signals": {"sound": True, "timer": True, "flash": True}, "round_badge": {"on": True}}
+
+    def run(cmd):
+        subprocess.run(cmd, capture_output=True, check=True)
+    out = tmp_path / "out.mp4"
+    took = R.finish({"edge": edge}, comb, str(out), types.SimpleNamespace(input_args=lambda raw: ["-i", raw]), tmp_path / "w",
+                    run, 360, 640)
+    assert took["edge_check"] == "ok"
+    w, h = E.overlay_size(360)
+    cx, top = int(360 * 0.035) + w // 2, int(360 * 0.035)
+    r, g, b = _pixel(out, 5.0, cx, top + 4)                 # Slow's green ring
+    assert g > 150 and r < 140
+    r, g, b = _pixel(out, 25.0, cx, top + 4)                # Extra's red one
+    assert r > 150 and r > g + 80
+    assert max(_pixel(out, 20.04, 600, 300)) > 70 > max(_pixel(out, 21.0, 600, 300))       # a flash as Extra starts
+    assert max(_pixel(out, 0.04, 600, 300)) < 70                                           # (not at the very start)
+    badge_y = top + h + int(360 * 0.012) + int(w * 0.17) // 2
+    assert max(_pixel(out, 5.0, cx, badge_y)) > 150         # the round label's white letters / its dark pill under the timer
+    assert _level(out, 20.0, 20.4) > 0.01
+
+
+def test_takes_are_found_by_name_and_take_turns():
+    import edge_mode as E
+    assert E.take_stem("Keep going take 2", "Keep going") == 2 and E.take_stem("keep going (3)", "Keep going") == 3
+    assert E.take_stem("Keep going_alt4", "Keep going") == 4 and E.take_stem("Keep going v2", "Keep going") == 2
+    assert E.take_stem("Keep going", "Keep going") is None and E.take_stem("Keep going faster", "Keep going") is None
+    assert E.take_stem("Keep going take 1", "Keep going") is None
+    plays = [{"line": "a"}] * 6 + [{"line": "b"}]
+    got = E.pick_takes(plays, {"a": ["a1", "a2", "a3"]}, seed=4)
+    assert sorted(got[:3]) == [0, 1, 2] and sorted(got[3:6]) == [0, 1, 2] and got[6] == 0
+
+
+def test_the_cue_map_file_and_the_takes_on_this_machine(tmp_path, monkeypatch):
+    import planner.edge as PE
+    import edge_mode as E
+    monkeypatch.setattr(PE, "voice_dir", lambda: tmp_path / "edge_voiceover")
+    monkeypatch.setattr(PE, "avatar_dir", lambda: tmp_path / "edge_avatar")
+    assert PE.cue_map_path() == E.CUE_MAP_FILE             # nothing uploaded: the app's own
+    assert PE.save_cue_map(b"not json") and PE.save_cue_map(b'{"lines": [{"x": 1}]}')
+    assert PE.save_cue_map(b'{"lines": [{"name": "Keep going", "file": "Keep going.mp3", "cues": []}]}') is None
+    assert PE.cue_map_path() == tmp_path / "edge_voiceover" / "edge_cues.json"
+    assert PE.load_cue_map()["lines"][0]["name"] == "Keep going"
+    lines, clips = tmp_path / "edge_voiceover" / "lines", tmp_path / "edge_avatar" / "lines"
+    lines.mkdir(parents=True)
+    clips.mkdir(parents=True)
+    for f in (lines / "Keep going.mp3", lines / "Keep going take 3.mp3", lines / "Keep going (2).mp3",
+              clips / "Keep going take 3.mp4", lines / "Other.mp3"):
+        f.write_bytes(b"x")
+    line = PE.load_cue_map()["lines"][0]
+    got = PE.line_takes(line, with_avatar=True)
+    assert [Path(t["file"]).name for t in got] == ["Keep going.mp3", "Keep going (2).mp3", "Keep going take 3.mp3"]
+    assert got[2]["clip"].endswith("Keep going take 3.mp4") and got[1]["clip"] is None
+    assert len(PE.line_takes(line)) == 3
+
+
+def test_compile_carries_the_new_switches_and_matches_the_beat_round_by_round(monkeypatch):
+    out = _timelines(monkeypatch)
+    try:
+        import planner.edge as PE
+        res = PE.compile_edge([], VIDS, "chill", 3)
+        edge = res["plan"]["edge"]
+        assert edge["signals"] == {"on": True, "sound": True, "timer": True, "flash": True} and edge["round_badge"]["on"]
+        assert edge["music"]["fade_stop"] and edge["music"]["duck"]
+        _check_plan(res["plan"], 360.0)
+        rounds = {}
+        for e in res["plan"]["timeline"]:
+            for s in e["scenes"]:
+                for link in s["chain"]:
+                    rounds.setdefault(e["edge_part"], set()).add((link["video_id"], link["scene_id"], link["clip_start_sec"]))
+        assert sorted(rounds) == [0, 1, 2]                 # matched a round at a time
+        off = PE.compile_edge(["song_full", "song_noanalysis"], VIDS, "chill", 3, signals=False, round_badge=False,
+                              music_fade=False, duck=False, song_per_round=True)["plan"]["edge"]
+        assert not off["signals"]["on"] and not off["round_badge"]["on"] and not off["music"]["fade_stop"]
+        assert off["music"]["song_per_round"]
+        assert [(p["track_id"], p["round"]) for p in off["playlist"] if p["loop"] == 1] == [
+            ("song_full", 1), ("song_noanalysis", 2), ("song_full", 3)]
+        assert all(p["offset"] in (0.0, 120.0, 240.0) for p in off["playlist"] if p["loop"] == 1)
+    finally:
+        shutil.rmtree(out, ignore_errors=True)

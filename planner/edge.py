@@ -29,7 +29,8 @@ from library_common import format_mmss
 RESULT_KEY = "edge_result"
 KEPT = {"edge_playlist": [], "edge_rounds": 3, "edge_difficulty": "chill", "edge_voice": False, "edge_beat": False,
         "edge_corner": "top-left", "edge_max_videos": 0, "edge_avatar": False, "edge_avatar_mode": "corner",
-        "edge_avatar_corner": "bottom-right", "edge_intro": False, "edge_quick": True, "edge_stream": True, "edge_render_name": ""}
+        "edge_avatar_corner": "bottom-right", "edge_intro": False, "edge_quick": True, "edge_stream": True, "edge_render_name": "",
+        "edge_signals": True, "edge_round_badge": True, "edge_fade": True, "edge_duck": True, "edge_song_per_round": False}
 KEPT_IF_SET = tuple("ce_" + k for k in ("actors", "tags", "hair", "gg", "new", "minlen", "exclude"))
 
 
@@ -49,6 +50,50 @@ def line_file(line: dict) -> Path | None:
     return f if f.exists() and f.stat().st_size > 0 else None
 
 
+def cue_map_path() -> Path:
+    """The cue map in use: <data>/edge_voiceover/edge_cues.json when one has been uploaded or fetched from Google
+    Drive (Edge_voiceover/edge_cues.json), else the copy that ships with the app."""
+    here = voice_dir() / "edge_cues.json"
+    return here if here.exists() and here.stat().st_size > 0 else E.CUE_MAP_FILE
+
+
+def load_cue_map() -> dict:
+    return E.load_cue_map(cue_map_path())
+
+
+def save_cue_map(raw: bytes) -> str | None:
+    """A cue map file (the Cue Map artifact's export) checked and kept as <data>/edge_voiceover/edge_cues.json.
+    Returns an error, or None."""
+    try:
+        got = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as e:
+        return f"That isn't a cue map file ({e})."
+    if not isinstance(got, dict) or not isinstance(got.get("lines"), list) or not all(
+            isinstance(ln, dict) and ln.get("name") for ln in got["lines"]):
+        return "That file has no list of lines with names — is it the cue map's export?"
+    voice_dir().mkdir(parents=True, exist_ok=True)
+    (voice_dir() / "edge_cues.json").write_text(json.dumps(got, indent=1), encoding="utf-8")
+    return None
+
+
+def line_takes(line: dict, with_avatar: bool = False) -> list:
+    """🎲 The line's takes on this machine: [{"file" (its MP3), "clip" (her video)}], the line's own first, then
+    "<line> take 2", "<line> (3)" … in number order (edge_mode.take_stem). A take counts when its MP3 is here, or —
+    with_avatar — her clip of it."""
+    stem = Path(str(line.get("file") or line["name"])).stem
+    own = {"file": str(line_file(line)) if line_file(line) else None,
+           "clip": str(avatar_line_clip(line)) if with_avatar and avatar_line_clip(line) else None}
+    found = {}
+    for folder, kind, exts in ((lines_dir(), "file", E.VOICE_EXT), (avatar_dir() / "lines", "clip", E.VIDEO_EXT)):
+        if kind == "clip" and not with_avatar or not folder.is_dir():
+            continue
+        for f in folder.iterdir():
+            n = E.take_stem(f.stem, stem) if f.suffix.lower() in exts and f.stat().st_size > 0 else None
+            if n:
+                found.setdefault(n, {"file": None, "clip": None})[kind] = str(f)
+    return [own] + [found[n] for n in sorted(found)]
+
+
 def avatar_line_clip(line: dict) -> Path | None:
     """The avatar's video for a line (her voice in it), on this machine: <data>/edge_avatar/lines/<line>.mp4."""
     f = avatar_dir() / "lines" / (Path(str(line.get("file") or line["name"])).stem + ".mp4")
@@ -61,11 +106,11 @@ def line_durations(cue_map: dict, with_avatar: bool = False) -> dict:
     from edge_render import probe
     out = {}
     for line in cue_map.get("lines") or []:
-        f = line_file(line)
-        secs = probe(f)["seconds"] if f is not None else 0.0
-        c = avatar_line_clip(line) if with_avatar else None
-        if c is not None:
-            secs = max(secs, probe(c)["seconds"])
+        secs = 0.0
+        for take in line_takes(line, with_avatar):         # 🎲 the longest take: whichever plays, it fits its moment
+            for f in (take["file"], take["clip"]):
+                if f:
+                    secs = max(secs, probe(f)["seconds"])
         if secs > 0:
             out[line["name"]] = secs
     return out
@@ -81,32 +126,46 @@ def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing:
             return ["Google Drive isn't set up on this machine."]
     except ImportError:
         return ["Google Drive isn't set up on this machine."]
+    from drive_sync import list_drive_folder
     folder = str(cue_map.get("drive_folder") or "scene-labeling/Edge_voiceover").strip("/")
     lines = cue_map.get("lines") or []
     errors = []
-    for k, line in enumerate(lines, 1):
-        name = str(line.get("file") or (line["name"] + ".mp3"))
-        if only_missing and line_file(line) is not None:
+    stems = [Path(str(ln.get("file") or ln["name"])).stem for ln in lines]
+
+    def is_take(name: str) -> bool:
+        return any(E.take_stem(Path(name).stem, st_) for st_ in stems)
+    on_drive, err = list_drive_folder(folder)
+    on_drive = [] if err else on_drive
+    if any(f["name"] == "edge_cues.json" for f in on_drive):          # 🗺️ a cue map exported to Drive replaces the app's copy
+        voice_dir().mkdir(parents=True, exist_ok=True)
+        err = download_source_video(f"{folder}/edge_cues.json", voice_dir() / "edge_cues.json")
+        if err:
+            errors.append(f"edge_cues.json: {err}")
+    takes = [f["name"] for f in on_drive if Path(f["name"]).suffix.lower() in E.VOICE_EXT and is_take(f["name"])]
+    names = [str(ln.get("file") or (ln["name"] + ".mp3")) for ln in lines]
+    for k, name in enumerate(names + takes, 1):            # the lines, then 🎲 their other takes
+        dest = lines_dir() / name
+        if only_missing and dest.exists() and dest.stat().st_size > 0:
             continue
         if progress:
-            progress(k, len(lines), name)
-        err = download_source_video(f"{folder}/{name}", lines_dir() / name)
+            progress(k, len(names) + len(takes), name)
+        err = download_source_video(f"{folder}/{name}", dest)
         if err:
             errors.append(f"{name}: {err}")
-    if avatar:                                             # 👩 her clips: whichever of the lines have one on Drive so far
-        from drive_sync import list_drive_folder
+    if avatar:                                             # 👩 her clips: whichever of the lines (and takes) have one on Drive so far
         files, err = list_drive_folder(f"{folder}/avatar_clips")
         if err:
             errors.append(f"avatar_clips: {err}")
-        want = {Path(str(ln.get("file") or ln["name"])).stem.lower(): ln for ln in lines}
-        have = [f for f in files if Path(f["name"]).suffix.lower() in E.VIDEO_EXT and Path(f["name"]).stem.lower() in want]
+        want = {st_.lower(): st_ for st_ in stems}
+        have = [f for f in files if Path(f["name"]).suffix.lower() in E.VIDEO_EXT
+                and (Path(f["name"]).stem.lower() in want or is_take(f["name"]))]
         for k, f in enumerate(have, 1):
-            ln = want[Path(f["name"]).stem.lower()]
-            if only_missing and avatar_line_clip(ln) is not None:
+            stem = Path(f["name"]).stem
+            dest = avatar_dir() / "lines" / (want.get(stem.lower(), stem) + ".mp4")      # named as the line's own file
+            if only_missing and dest.exists() and dest.stat().st_size > 0:
                 continue
             if progress:
                 progress(k, len(have), f["name"])
-            dest = avatar_dir() / "lines" / (Path(str(ln.get("file") or ln["name"])).stem + ".mp4")
             err = download_source_video(f"{folder}/avatar_clips/{f['name']}", dest)
             if err:
                 errors.append(f"{f['name']}: {err}")
@@ -161,14 +220,20 @@ def _place(timeline: list, offset: float, play: float, part: int, track_id: str)
 def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int, *, voiceover: bool = False,
                  beat: bool = False, seed: int = 0, corner: str = "top-left", max_videos: int = 0,
                  avatar: bool = False, avatar_mode: str = "corner", avatar_corner: str = "bottom-right",
-                 intro: bool = False, progress=None) -> dict:
+                 intro: bool = False, signals: bool = True, round_badge: bool = True, music_fade: bool = True,
+                 duck: bool = True, song_per_round: bool = False, progress=None) -> dict:
     """The Edge plan. track_ids: the playlist in playing order ([] = no song: the generated beat is the track, and
     the beat sound is on whatever `beat` says). The footage is matched 🎯 Movement only — each song on the 📐 lines
     from its music; a song's later plays (and later songs) leave out the clips already used, as long as the library
     can still fill the time without them. avatar: she appears at the start of every phase (her clip for that phase,
     voice included; the stand-in figure until there is one) — in a corner or as half a split screen. intro: the
-    intro screen before the compilation (her intro clip beside the settings and thumbnails). progress(done, total,
-    text)."""
+    intro screen before the compilation (her intro clip beside the settings and thumbnails).
+    signals: 🔔 a bell, a flash and the ring in the phase's colour at every phase change (the timer pulsing over
+    its last seconds); round_badge: ▸ "ROUND 2 / 3" by the timer; music_fade: 🌙 the songs fade out in Stop and back
+    in over Wait; duck: 🔉 with the voiceover / avatar, the songs at full volume, dipping only under a line;
+    song_per_round: 🎵 round r plays song r of the list (from its start), instead of the songs back to back.
+    Without a song the beat is matched round by round, each round leaving out the clips earlier rounds used
+    (while the library can still fill it). progress(done, total, text)."""
     import core.story_matcher as SMX
     # 👩 the avatar brings the lines with her: she follows the cue map (her clips, their own sound; the line's
     # recording under a stand-in where she has no clip yet) whether or not the voiceover switch is on (Daryl, 14 Nov)
@@ -181,7 +246,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     base = None
     if track_ids:
         durations = [(tid, float(PC._load_track(tid)["duration_sec"])) for tid in track_ids]
-        parts = E.playlist_parts(durations, total)
+        parts = E.round_playlist_parts(durations, sched) if song_per_round else E.playlist_parts(durations, total)
         used = set()
         for k, part in enumerate(parts):
             def prog(d, t, _k=k, _tid=part["track_id"]):
@@ -211,23 +276,40 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                 if "clip_duration_sec" in slot:
                     slot["clip_duration_sec"] = round(float(slot["clip_duration_sec"]) + gap, 3)
             last["track_time"] = [last["track_time"][0], round(total, 3)]
-    else:
-        track = E.beat_track(sched)
-        res = PC.compile_plan(E.TRACK_ID, video_ids, movement_only=True, max_videos=int(max_videos or 0),
-                              given_track=track, given_segments=E.beat_segments(sched),
-                              lab={"stem": False, "phrase": False},      # a beat has no lead layer or phrases to follow
-                              progress=(lambda d, t: progress(d / max(t, 1), 1, f"block {d} of {t}")) if progress else None)
-        base = res
-        timeline = [{**e, "edge_part": 0, "edge_track_id": None} for e in res["plan"]["timeline"]]
-        shortfall = int(res.get("shortfall") or 0)
-        notes += list(res.get("notes") or [])
+    else:                                                  # 🥁 the beat, a round at a time: no clip comes round again
+        rounds_ = sorted({ph["round"] for ph in sched})
+        used = set()
+        for k, r in enumerate(rounds_):
+            phases = [ph for ph in sched if ph["round"] == r]
+            sub = E.shift_schedule(phases)
+
+            def prog(d, t, _k=k):
+                if progress:
+                    progress(_k + d / max(t, 1), len(rounds_), f"round {_k + 1} of {len(rounds_)} · block {d} of {t}")
+            kw = dict(movement_only=True, max_videos=int(max_videos or 0), given_track=E.beat_track(sub),
+                      given_segments=E.beat_segments(sub), progress=prog,
+                      lab={"stem": False, "phrase": False})       # a beat has no lead layer or phrases to follow
+            res = PC.compile_plan(E.TRACK_ID, video_ids, excluded=set(used), **kw)
+            if used and (res.get("shortfall") or float(res.get("unfilled") or 0.0) > 0.5):
+                again = PC.compile_plan(E.TRACK_ID, video_ids, **kw)          # not enough fresh footage left
+                if float(again.get("unfilled") or 0.0) < float(res.get("unfilled") or 0.0) or (
+                        res.get("shortfall") and not again.get("shortfall")):
+                    res = again
+                    notes.append(f"Round {r}: not enough unused footage left — clips from earlier rounds may come round again.")
+            base = base or res
+            a, b = float(phases[0]["start"]), float(phases[-1]["end"])
+            placed = [{**e, "edge_track_id": None} for e in _place(res["plan"]["timeline"], a, b - a, k, None)]
+            timeline += placed
+            shortfall += int(res.get("shortfall") or 0)
+            used |= {(link["video_id"], link["scene_id"]) for e in placed for s in e["scenes"] for link in s["chain"]}
+            notes += [n for n in res.get("notes") or [] if n not in notes]
     for k, e in enumerate(timeline):
         e["segment_index"] = k
         ph = E.phase_at(sched, (e["track_time"][0] + e["track_time"][1]) / 2)
         e["edge_profile"] = ph["profile"] if ph else None
     # 🎙️ the voiceover: Daryl's cue map (edge_cues.json — which line plays when, never two at once); without a cue
     # map, a clip from each phase's folder at the start of every phase, as at first
-    cue_map = E.load_cue_map() if voiceover else {"lines": []}
+    cue_map = load_cue_map() if voiceover else {"lines": []}
     lines_used, clashes, intro_lines, outro_lines, lines_missing = bool(cue_map.get("lines")), [], [], [], []
     lines_unused, lines_no_cue = [], []
     line_avatar = None
@@ -236,8 +318,16 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
         durations = line_durations(cue_map, with_avatar=bool(avatar))
         got = E.resolve_lines(sched, cue_map, difficulty, seed, durations)
         path = lambda n: (str(line_file(by_name[n])) if line_file(by_name[n]) else None)        # noqa: E731
-        cues = [{"time": p["time"], "profile": p["profile"], "file": path(p["line"]), "line": p["line"],
-                 "seconds": p["seconds"], "round": p["round"], "why": p["why"], "moved": p["moved"]} for p in got["plays"]]
+        # 🎲 a line recorded more than once: its takes take turns (her clip of the same take, when there is one)
+        takes = {n: line_takes(ln, bool(avatar)) for n, ln in by_name.items()}
+        picks = E.pick_takes(got["plays"], {n: t for n, t in takes.items() if len(t) > 1}, seed)
+        take_of = lambda p, k: takes[p["line"]][k] if k < len(takes[p["line"]]) else takes[p["line"]][0]      # noqa: E731
+        cues = []
+        for p, k in zip(got["plays"], picks):
+            tk = take_of(p, k)
+            cues.append({"time": p["time"], "profile": p["profile"], "file": tk["file"] or (path(p["line"]) if k == 0 else None),
+                         "line": p["line"], "take": k + 1, "clip": tk["clip"], "seconds": p["seconds"], "round": p["round"],
+                         "why": p["why"], "moved": p["moved"]})
         clashes = got["clashes"]
         lines_unused = list(got.get("unused") or [])       # a cue, but for a round / difficulty this compilation doesn't have
         lines_no_cue = sorted((ln["name"] for ln in cue_map["lines"] if not ln.get("cues")), key=str.lower)
@@ -247,8 +337,9 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             vid = lambda n: (str(avatar_line_clip(by_name[n])) if avatar_line_clip(by_name[n]) else None)       # noqa: E731
             for x in intro_lines + outro_lines:
                 x["clip"] = vid(x["line"])
-            line_avatar = [{"time": c["time"], "profile": c["profile"], "clip": vid(c["line"]), "line": c["line"],
-                            "seconds": c["seconds"]} for c in cues]
+            line_avatar = [{"time": c["time"], "profile": c["profile"],
+                            "clip": c.get("clip") or (vid(c["line"]) if c.get("take", 1) == 1 else None),
+                            "line": c["line"], "seconds": c["seconds"]} for c in cues]
         lines_missing = sorted({c["line"] for c in cues + (intro_lines if intro else []) + outro_lines if not c["file"]}, key=str.lower)
         missing_voice = []
     else:
@@ -289,7 +380,12 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                           "placeholders": missing_voice, "cue_map": lines_used, "clashes": clashes,
                           "lines_missing": lines_missing},
             "overlay": {"corner": corner, "fps": E.OVERLAY_FPS},
-            "music": {"still_volume": E.MUSIC_IN_STILL, "fade": E.MUSIC_FADE_SEC},        # the songs drop in Wait and Stop
+            # 🌙 the songs fade out in Stop / back in over Wait; 🔉 full volume, dipping under each line
+            "music": {"still_volume": E.MUSIC_IN_STILL, "fade": E.MUSIC_FADE_SEC, "fade_stop": bool(music_fade),
+                      "stop_fade": E.STOP_FADE_SEC, "duck": bool(duck), "duck_level": E.DUCK_LEVEL,
+                      "song_per_round": bool(song_per_round and track_ids)},
+            "signals": {"on": bool(signals), "sound": bool(signals), "timer": bool(signals), "flash": bool(signals)},
+            "round_badge": {"on": bool(round_badge)},
             "avatar": {"on": bool(avatar), "mode": avatar_mode if avatar_mode in E.AVATAR_MODES else "corner",
                        "corner": avatar_corner, "cues": av_cues, "placeholders": missing_avatar},
             # (the outro screen closes every compilation, whatever is switched on — Daryl, 14 Nov; its lines when there are any)
@@ -332,9 +428,9 @@ def _do_pending_compile() -> None:
     bar = st.progress(0.0, text="⏱️ Compiling…")
     fetch_note = None
     if ss.get("edge_voice") or ss.get("edge_avatar"):      # the lines (and her clips) not here yet are fetched first
-        cm = E.load_cue_map()
+        cm = load_cue_map()
         want_av = bool(ss.get("edge_avatar"))
-        if cm.get("lines") and (any(line_file(ln) is None for ln in cm["lines"]) or want_av):
+        if cm.get("lines"):                                # (also brings a newer cue map and new takes from Drive)
             errs = fetch_lines(cm, lambda k, n, name: bar.progress(min(k / max(n, 1), 1.0), text=f"⬇️ Fetching {name}…"),
                                avatar=want_av, only_missing=True)
             if errs:
@@ -347,6 +443,9 @@ def _do_pending_compile() -> None:
                            corner=ss.get("edge_corner", "top-left"), max_videos=int(ss.get("edge_max_videos", 0) or 0),
                            avatar=bool(ss.get("edge_avatar")), avatar_mode=ss.get("edge_avatar_mode", "corner"),
                            avatar_corner=ss.get("edge_avatar_corner", "bottom-right"), intro=bool(ss.get("edge_intro")),
+                           signals=bool(ss.get("edge_signals", True)), round_badge=bool(ss.get("edge_round_badge", True)),
+                           music_fade=bool(ss.get("edge_fade", True)), duck=bool(ss.get("edge_duck", True)),
+                           song_per_round=bool(ss.get("edge_song_per_round", False)),
                            progress=lambda d, t, txt: bar.progress(min(d / max(t, 1), 1.0), text=f"⏱️ Compiling… {txt}"))
     except Exception as e:          # noqa: BLE001
         bar.empty()
@@ -382,6 +481,21 @@ def _lines_panel(cue_map: dict) -> None:
         missing = [ln["name"] for ln in lines if line_file(ln) is None]
         if missing and here:
             st.caption("Not here yet: " + " · ".join(missing))
+        extra = {ln["name"]: len(line_takes(ln, True)) - 1 for ln in lines}
+        if any(extra.values()):
+            st.caption("🎲 Other takes (they take turns): " + " · ".join(f"{n} +{k}" for n, k in extra.items() if k))
+        st.caption("🎲 More than one take of a line: name the file \"<line> take 2.mp3\" (or \"(2)\") beside it on "
+                   "Drive, her clip the same name in avatar_clips.")
+        st.caption(f"🗺️ Cue map in use: {'yours (uploaded / from Drive)' if cue_map_path() != E.CUE_MAP_FILE else 'the one in the app'}"
+                   " — export it from the Cue Map page and drop it here, or put edge_cues.json in the Edge_voiceover "
+                   "folder on Drive (Compile picks it up).")
+        n = st.session_state.get("edge_cue_up_n", 0)
+        up = st.file_uploader("🗺️ Replace the cue map", type=["json"], key=f"edge_cue_up_{n}")
+        if up is not None:
+            err = save_cue_map(up.getvalue())
+            st.session_state["edge_cue_up_n"] = n + 1
+            st.session_state["edge_msg"] = ("error", err) if err else ("success", "Cue map replaced — the next compile uses it.")
+            st.rerun()
 
 
 def _clip_manager(kind: str) -> None:
@@ -442,13 +556,34 @@ def _setup(rows: dict, have_tl: set) -> None:
     rounds = c[1].slider("Rounds", E.MIN_ROUNDS, E.MAX_ROUNDS, key="edge_rounds")
     c[2].selectbox("Timer position", list(E.CORNERS), key="edge_corner", format_func=lambda k: E.CORNERS[k])
     st.caption("⏱️ " + E.describe(diff, rounds))
+    g = st.columns(2)
+    g[0].toggle("🔔 Phase signals", key="edge_signals",
+                help="At every phase change: a short bell (higher the livelier the phase), a quick flash of the "
+                     "phase's colour, and the timer ring in that colour. Over a phase's last 3 seconds the timer pulses.")
+    g[1].toggle("▸ Round label", key="edge_round_badge", help='"ROUND 2 / 3" beside the timer.')
     total = E.round_seconds(diff) * rounds
     if songs:
-        parts = E.playlist_parts([(t, summaries[t]["duration"]) for t in songs], total)
-        passes = max(p["pass"] for p in parts) if parts else 1
-        st.caption(f"🎵 {len(parts)} play{'s' if len(parts) != 1 else ''} of {len(songs)} song{'s' if len(songs) != 1 else ''}"
-                   + (f" — the list comes round {passes} times" if passes > 1 else "")
-                   + f"; the last one stops at {format_mmss(total)}.")
+        mc = st.columns(2)
+        mc[0].toggle("🎵 New song each round", key="edge_song_per_round",
+                     help="Round 1 plays the first song, round 2 the second… (the list starts again when there are "
+                          "more rounds than songs). Each starts from its beginning and starts again if it ends before "
+                          "the round does. Off: the songs back to back, whatever the rounds.")
+        mc[1].toggle("🌙 Fade out in Stop, back in over Wait", key="edge_fade",
+                     help="The music fades to silence over the first 3 seconds of every Stop, then comes back up over "
+                          "the whole Wait — full again as the next phase starts. Off: it drops to a quarter in Wait and Stop.")
+        if st.session_state.get("edge_song_per_round"):
+            rp = E.round_playlist_parts([(t, summaries[t]["duration"]) for t in songs], E.schedule(diff, rounds))
+            per = {}
+            for p in rp:
+                per.setdefault(p["round"], p["track_id"])
+            st.caption("🎵 " + " · ".join(f"R{r}: {t}" for r, t in per.items())
+                       + (" — a song shorter than its round starts again" if any(p["loop"] > 1 for p in rp) else ""))
+        else:
+            parts = E.playlist_parts([(t, summaries[t]["duration"]) for t in songs], total)
+            passes = max(p["pass"] for p in parts) if parts else 1
+            st.caption(f"🎵 {len(parts)} play{'s' if len(parts) != 1 else ''} of {len(songs)} song{'s' if len(songs) != 1 else ''}"
+                       + (f" — the list comes round {passes} times" if passes > 1 else "")
+                       + f"; the last one stops at {format_mmss(total)}.")
     t = st.columns(2)
     if songs:
         t[0].toggle("🥁 Beat sound over the songs", key="edge_beat",
@@ -461,7 +596,7 @@ def _setup(rows: dict, have_tl: set) -> None:
     t[1].toggle("🎙️ Voiceover", key="edge_voice",
                 help="A voiceover clip at the start of every phase. The songs drop to a quarter volume (background) so it is heard.")
     if st.session_state.get("edge_voice"):
-        cue_map = E.load_cue_map()
+        cue_map = load_cue_map()
         if cue_map.get("lines"):
             _lines_panel(cue_map)
         else:
@@ -486,6 +621,10 @@ def _setup(rows: dict, have_tl: set) -> None:
                            format_func=lambda k: E.CORNERS[k])
             if st.session_state.get("edge_avatar_corner") == st.session_state.get("edge_corner"):
                 st.warning("The avatar and the timer are set to the same corner — she will sit under the timer.")
+    if songs and (st.session_state.get("edge_voice") or st.session_state.get("edge_avatar")):
+        st.toggle("🔉 Music dips only under her lines", key="edge_duck",
+                  help="The songs play at full volume and drop to a quarter while a line is heard (a short fade each "
+                       "way). Off: a quarter volume all the way through.")
     if st.session_state.get("edge_avatar") or st.session_state.get("edge_intro"):
         _clip_manager("avatar")
     vids = PC._video_filters("ce_", rows, have_tl,

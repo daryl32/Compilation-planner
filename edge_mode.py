@@ -22,13 +22,21 @@ PHASE_SEC = 20.0
 
 # bpm: the generated beat's speed (0 = silent). level: how lively the footage should be there (0–1).
 # colour: the label under the timer.
+# ring: the timer ring's colour in that phase (🔔 phase signals on; amber otherwise). chime: the pitch (Hz) of the
+# short sound at the phase's start — higher the livelier the phase.
 PROFILES = {
-    "wait":   {"label": "WAIT",   "seconds": PHASE_SEC, "bpm": 0,   "level": 0.10, "colour": (70, 120, 190)},
-    "slow":   {"label": "SLOW",   "seconds": PHASE_SEC, "bpm": 60,  "level": 0.35, "colour": (40, 160, 90)},
-    "medium": {"label": "MEDIUM", "seconds": PHASE_SEC, "bpm": 100, "level": 0.55, "colour": (225, 150, 20)},
-    "fast":   {"label": "FAST",   "seconds": PHASE_SEC, "bpm": 140, "level": 0.78, "colour": (235, 95, 20)},
-    "extra":  {"label": "EXTRA",  "seconds": PHASE_SEC, "bpm": 200, "level": 1.00, "colour": (230, 20, 25)},
-    "stop":   {"label": "STOP",   "seconds": PHASE_SEC, "bpm": 0,   "level": 0.05, "colour": (60, 60, 65)},
+    "wait":   {"label": "WAIT",   "seconds": PHASE_SEC, "bpm": 0,   "level": 0.10, "colour": (70, 120, 190),
+               "ring": (110, 165, 240), "chime": 392.0},
+    "slow":   {"label": "SLOW",   "seconds": PHASE_SEC, "bpm": 60,  "level": 0.35, "colour": (40, 160, 90),
+               "ring": (80, 210, 125), "chime": 523.3},
+    "medium": {"label": "MEDIUM", "seconds": PHASE_SEC, "bpm": 100, "level": 0.55, "colour": (225, 150, 20),
+               "ring": (250, 185, 50), "chime": 659.3},
+    "fast":   {"label": "FAST",   "seconds": PHASE_SEC, "bpm": 140, "level": 0.78, "colour": (235, 95, 20),
+               "ring": (255, 125, 45), "chime": 784.0},
+    "extra":  {"label": "EXTRA",  "seconds": PHASE_SEC, "bpm": 200, "level": 1.00, "colour": (230, 20, 25),
+               "ring": (245, 45, 50), "chime": 1046.5},
+    "stop":   {"label": "STOP",   "seconds": PHASE_SEC, "bpm": 0,   "level": 0.05, "colour": (60, 60, 65),
+               "ring": (175, 175, 185), "chime": 261.6},
 }
 ORDER = ["wait", "slow", "medium", "fast", "extra", "stop"]
 
@@ -40,7 +48,13 @@ MUSIC_UNDER_VOICE = 0.25                           # the songs' volume while the
 MUSIC_IN_STILL = 0.25                              # the songs' volume during Wait and Stop
 STILL = ("wait", "stop")
 MUSIC_FADE_SEC = 0.5                               # how long the songs take to drop to / come back from that
+STOP_FADE_SEC = 3.0                                # 🌙 the songs fade to silence over Stop's first seconds…
+                                                   # …and come back over the whole of the Wait that follows
+DUCK_LEVEL = 0.25                                  # 🔉 the songs while a line plays (full volume between lines)
+DUCK_FADE_SEC = 0.3                                # how long they take to dip / come back around a line
 BEAT_UNDER_SONG = 0.6                              # the generated beat's volume when songs play too
+CHIME_VOLUME = 0.35                                # 🔔 the phase-change sound
+FLASH_SEC = 0.16                                   # 🔔 the picture's flash as a phase starts
 AUDIO_RATE = 44100
 TRACK_ID = "edge_beat"                             # the generated beat's name where a track id is wanted
 CURVE_RATE = 30                                    # the generated beat's curves, values a second (as the audio analysis)
@@ -243,6 +257,133 @@ def playlist_parts(durations: list, total: float, min_part: float = 0.5) -> list
     return out
 
 
+def round_playlist_parts(durations: list, sched: list, min_part: float = 0.5) -> list:
+    """🎵 A new song each round: round r plays song r of the list (the list starting again when there are more
+    rounds than songs), from its beginning — started again when it ends before the round does. The change falls
+    between a round's Stop and the next round's Wait, where the 🌙 fade has the music silent.
+    Same shape as playlist_parts, plus "round"."""
+    durations = [(tid, float(d)) for tid, d in durations if float(d) > 0]
+    if not durations or not sched:
+        return []
+    out, rounds = [], {}
+    for ph in sched:
+        a, b = rounds.get(ph["round"], (ph["start"], ph["end"]))
+        rounds[ph["round"]] = (min(a, ph["start"]), max(b, ph["end"]))
+    for r in sorted(rounds):
+        a, b = rounds[r]
+        tid, d = durations[(r - 1) % len(durations)]
+        for p in playlist_parts([(tid, d)], b - a, min_part):
+            out.append({**p, "offset": round(a + p["offset"], 3), "pass": (r - 1) // len(durations) + 1, "round": r,
+                        "loop": p["pass"]})
+    return out
+
+
+def shift_schedule(phases: list) -> list:
+    """Some phases of a schedule moved to start at 0 (a round on its own, for matching the beat round by round)."""
+    if not phases:
+        return []
+    t0 = float(phases[0]["start"])
+    return [{**ph, "index": k, "start": round(ph["start"] - t0, 3), "end": round(ph["end"] - t0, 3)}
+            for k, ph in enumerate(phases)]
+
+
+# ---------------------------------------------------------------------------
+# 🌙 / 🔉 How loud the songs are, moment by moment
+# ---------------------------------------------------------------------------
+
+def music_spec(sched: list, *, talking: bool, lines: list = (), fade_stop: bool = True, duck: bool = True,
+               still_volume: float = MUSIC_IN_STILL, under_voice: float = MUSIC_UNDER_VOICE) -> dict:
+    """The rule for the songs' volume, as numbers (the render turns it into an ffmpeg expression; music_gain reads
+    it for one moment).
+    - level: the songs' volume where nothing else lowers them — full, or (talking without 🔉 dips) a quarter.
+    - 🌙 fade_stop: over the first STOP_FADE_SEC of every Stop the songs fade to silence, and over every Wait they
+      come back up, full as the next phase starts (the first Wait too: the compilation fades in). Off: they drop
+      to `still_volume` in Wait and Stop, as before.
+    - 🔉 duck (with the voiceover / avatar on): full volume, dipping to DUCK_LEVEL only while a line plays
+      (lines: [(start, end)]). Off: a quarter all the way through, as before."""
+    dips = [(float(a), float(b)) for a, b in lines] if (talking and duck) else []
+    level = 1.0 if (not talking or duck) else float(under_voice)
+    spec = {"level": level, "fades": [], "still": [], "dips": dips, "dip_level": DUCK_LEVEL, "dip_fade": DUCK_FADE_SEC,
+            "still_volume": float(still_volume), "still_fade": MUSIC_FADE_SEC}
+    if fade_stop:
+        spec["fades"] = [(ph["profile"], float(ph["start"]), float(ph["end"])) for ph in sched if ph["profile"] in STILL]
+    elif still_volume < level:
+        spec["still"] = still_spans(sched)
+    return spec
+
+
+def _fade_share(kind: str, a: float, b: float, t: float) -> float:
+    if not a <= t < b:
+        return 1.0
+    if kind == "stop":
+        return min(max(1.0 - (t - a) / STOP_FADE_SEC, 0.0), 1.0)
+    return min(max((t - a) / max(b - a, 1e-6), 0.0), 1.0)
+
+
+def music_gain(spec: dict, t: float) -> float:
+    """The songs' volume at time t under music_spec's rule (0–1)."""
+    g = spec["level"]
+    for kind, a, b in spec["fades"]:
+        g *= _fade_share(kind, a, b, t)
+    f = spec["still_fade"]
+    for a, b in spec["still"]:
+        g -= (g - spec["still_volume"]) * min(max((t - a) / f, 0.0), 1.0) * min(max((b - t) / f, 0.0), 1.0)
+    f = spec["dip_fade"]
+    w = sum(min(max((t - a + f) / f, 0.0), 1.0) * min(max((b + f - t) / f, 0.0), 1.0) for a, b in spec["dips"])
+    return g * (1.0 - (1.0 - spec["dip_level"]) * min(w, 1.0))
+
+
+def music_gain_expr(spec: dict) -> str:
+    """music_gain as an ffmpeg volume expression in t (flat sums, no deep nesting — a long compilation has many
+    lines). For volume=volume='…':eval=frame."""
+    parts = [f"{spec['level']:.4f}"]
+    for kind, a, b in spec["fades"]:
+        inside = f"gte(t,{a:.3f})*lt(t,{b:.3f})"
+        share = (f"clip(1-(t-{a:.3f})/{STOP_FADE_SEC},0,1)" if kind == "stop"
+                 else f"clip((t-{a:.3f})/{max(b - a, 1e-6):.3f},0,1)")
+        parts.append(f"(1-{inside}*(1-{share}))")
+    if spec["still"]:
+        f, lvl, q = spec["still_fade"], spec["level"], spec["still_volume"]
+        dip = "+".join(f"clip((t-{a:.3f})/{f},0,1)*clip(({b:.3f}-t)/{f},0,1)" for a, b in spec["still"])
+        parts.append(f"(1-{(lvl - q) / max(lvl, 1e-6):.4f}*min(1,{dip}))")
+    if spec["dips"]:
+        f = spec["dip_fade"]
+        w = "+".join(f"clip((t-{a - f:.3f})/{f},0,1)*clip(({b + f:.3f}-t)/{f},0,1)" for a, b in spec["dips"])
+        parts.append(f"(1-{1.0 - spec['dip_level']:.4f}*min(1,{w}))")
+    return "*".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# 🔔 The phase-change sound
+# ---------------------------------------------------------------------------
+
+def _chime(freq: float) -> np.ndarray:
+    """A short soft bell: the note and its octave, quick to start, dying away over about half a second."""
+    n = int(0.6 * AUDIO_RATE)
+    t = np.arange(n) / AUDIO_RATE
+    env = np.minimum(1.0, t / 0.004) * np.exp(-t * 7.0)
+    tone = np.sin(2 * np.pi * freq * t) + 0.35 * np.sin(2 * np.pi * 2 * freq * t) * np.exp(-t * 6.0)
+    return 0.5 * tone * env
+
+
+def chime_times(sched: list) -> list:
+    """(time, profile) of every phase change — each phase's start but the very first."""
+    return [(float(ph["start"]), ph["profile"]) for ph in sched[1:]]
+
+
+def write_chime_wav(sched: list, path) -> Path:
+    """🔔 The phase-change sounds on one track of the compilation's length: a bell at every phase's start (the
+    first phase's aside), pitched by the phase it starts."""
+    total = total_seconds(sched)
+    out = np.zeros(int(round(total * AUDIO_RATE)) + AUDIO_RATE)
+    bells = {}
+    for t, p in chime_times(sched):
+        hit = bells.setdefault(p, _chime(PROFILES[p]["chime"]))
+        i = int(round(t * AUDIO_RATE))
+        out[i:i + len(hit)] += hit[:len(out) - i]
+    return _write_wav(path, out[:int(round(total * AUDIO_RATE))])
+
+
 # ---------------------------------------------------------------------------
 # The voiceover
 # ---------------------------------------------------------------------------
@@ -322,9 +463,14 @@ def overlay_size(frame_height: int) -> tuple:
     return ring + 8, ring + int(ring * 0.30) // 2 * 2 + 8
 
 
-def overlay_image(profile: str, left: float, size: tuple):
+PULSE_SEC = 3.0                    # 🔔 the timer pulses over a phase's last seconds
+
+
+def overlay_image(profile: str, left: float, size: tuple, signals: bool = False):
     """The timer as a picture with a see-through background: a thin ring that empties as the phase runs out, the
-    seconds left in the middle (00:17), and the phase's name on a coloured label underneath. left: seconds left."""
+    seconds left in the middle (00:17), and the phase's name on a coloured label underneath. left: seconds left.
+    🔔 signals: the ring in the phase's own colour, wide and bright for the phase's first moment, and over the last
+    PULSE_SEC seconds the number takes the ring's colour and the ring swells at every second."""
     from PIL import Image, ImageDraw
     prof = PROFILES[profile]
     w, h = size
@@ -335,16 +481,26 @@ def overlay_image(profile: str, left: float, size: tuple):
     x0, y0, x1, y1 = 4 * s, 4 * s, (4 + ring) * s, (4 + ring) * s
     d.ellipse((x0, y0, x1, y1), fill=(0, 0, 0, 105))                       # darkens the footage behind the numbers
     width = max(2 * s, int(ring * 0.022 * s))
+    colour, number = RING, (255, 255, 255, 255)
+    if signals:
+        colour = tuple(prof["ring"])
+        since = float(prof["seconds"]) - left
+        if since < 0.4:                                    # the phase has just started: a wide, bright ring
+            width = int(width * 2.4)
+        elif 0 < left <= PULSE_SEC:                        # the last seconds: swells as each second starts
+            frac = left - math.floor(left - 1e-9)
+            width = int(width * (1.0 + 1.3 * max(frac - 0.4, 0.0) / 0.6))
+            number = colour + (255,)
     d.arc((x0, y0, x1, y1), 0, 360, fill=(255, 255, 255, 50), width=width)
     share = float(min(max(left / max(float(prof["seconds"]), 1e-6), 0.0), 1.0))
     if share > 0:
-        d.arc((x0, y0, x1, y1), -90, -90 + 360 * share, fill=RING + (255,), width=width)
+        d.arc((x0, y0, x1, y1), -90, -90 + 360 * share, fill=colour + (255,), width=width)
     secs = int(math.ceil(left - 1e-6))
     text = f"{secs // 60:02d}:{secs % 60:02d}"
     f = _font(int(ring * 0.27 * s))
     box = d.textbbox((0, 0), text, font=f)
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-    d.text((cx - (box[2] + box[0]) / 2, cy - (box[3] + box[1]) / 2), text, font=f, fill=(255, 255, 255, 255))
+    d.text((cx - (box[2] + box[0]) / 2, cy - (box[3] + box[1]) / 2), text, font=f, fill=number)
     lab_h = int(ring * 0.22) * s
     lx0, lx1 = int(w * 0.14) * s, int(w * 0.86) * s
     ly0 = y1 + int(ring * 0.05) * s
@@ -356,9 +512,27 @@ def overlay_image(profile: str, left: float, size: tuple):
     return img.resize((w, h), Image.LANCZOS)
 
 
-def write_overlay(sched: list, folder, frame_height: int) -> tuple:
+def round_badge(r: int, n: int, width: int):
+    """▸ "ROUND 2 / 3" on a small dark label as wide as the timer, with a see-through background."""
+    from PIL import Image, ImageDraw
+    s = 3
+    h = max(int(width * 0.17) // 2 * 2, 12)
+    img = Image.new("RGBA", (width * s, h * s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    pad = int(width * 0.10) * s
+    d.rounded_rectangle((pad, 0, width * s - pad, h * s - 1), radius=int(h * s * 0.45), fill=(0, 0, 0, 140))
+    f = _font(int(h * s * 0.58), bold=True)
+    text = f"ROUND {int(r)} / {int(n)}"
+    box = d.textbbox((0, 0), text, font=f)
+    d.text((width * s / 2 - (box[2] + box[0]) / 2, h * s / 2 - (box[3] + box[1]) / 2), text, font=f,
+           fill=(255, 255, 255, 235))
+    return img.resize((width, h), Image.LANCZOS)
+
+
+def write_overlay(sched: list, folder, frame_height: int, signals: bool = False) -> tuple:
     """Draws the overlay's pictures (one set per phase name in use — the same 20 seconds serve every phase of that
-    name) and writes the list ffmpeg plays them from. Returns (list file, (width, height))."""
+    name) and writes the list ffmpeg plays them from. Returns (list file, (width, height)). signals: 🔔 the
+    coloured ring, its flash and its pulse (overlay_image)."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     size = overlay_size(frame_height)
@@ -369,7 +543,7 @@ def write_overlay(sched: list, folder, frame_height: int) -> tuple:
         frames[p] = []
         for k in range(n):
             f = folder / f"{p}_{k:04d}.png"
-            overlay_image(p, PROFILES[p]["seconds"] - k * step, size).save(f)
+            overlay_image(p, PROFILES[p]["seconds"] - k * step, size, signals).save(f)
             frames[p].append(f)
     lines = ["ffconcat version 1.0"]
     last = None
@@ -532,6 +706,36 @@ def load_cue_map(path=None) -> dict:
         return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {"lines": []}
+
+
+def take_stem(stem: str, line_stem: str) -> int | None:
+    """🎲 Is the file stem another take of the line (its own stem + " take 2", "_take2", " (2)", " alt 3", " v2")?
+    → the take's number, else None. The line's own file is take 1."""
+    import re
+    m = re.fullmatch(re.escape(line_stem.lower()) + r"[\s_\-]*(?:\((\d+)\)|(?:take|alt|v)[\s_\-#]*(\d+))",
+                     stem.lower().strip())
+    if not m:
+        return None
+    n = int(m.group(1) or m.group(2))
+    return n if n >= 2 else None
+
+
+def pick_takes(plays: list, takes: dict, seed: int = 0) -> list:
+    """🎲 Every play of a line with more than one take gets one of them: they take turns in a shuffled order, so
+    no take repeats until all have played. takes: {line name: [files, the line's own first]}. Returns
+    [take index (0 = the line's own) per play]."""
+    rng = random.Random(seed + 3301)
+    bags, out = {}, []
+    for p in plays:
+        have = takes.get(p["line"]) or []
+        if len(have) < 2:
+            out.append(0)
+            continue
+        if not bags.get(p["line"]):
+            bags[p["line"]] = list(range(len(have)))
+            rng.shuffle(bags[p["line"]])
+        out.append(bags[p["line"]].pop())
+    return out
 
 
 def _cue_in_round(cue: dict, r: int, n_rounds: int, last_replaces: bool = False) -> bool:
