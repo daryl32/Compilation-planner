@@ -487,13 +487,21 @@ def _mix(edge: dict, shows: list, sources, tmp_dir: Path, run) -> Path:
     voice = edge.get("voiceover") or {}
     talking = bool(voice.get("on") or shows)
     parts = edge.get("playlist") or []
-    if parts:
+    music = edge.get("music") or {}
+    if parts and music.get("energy_mix"):                  # ⚡ sections crossfaded on the beat: mixed here, as one file
+        import edge_energy as EE
+        songs = {p["track_id"]: _song_input(sources, get_track_raw_source(p["track_id"])) for p in parts}
+        wav = EE.write_mix(parts, songs, total, tmp_dir / "sections.wav", float(music.get("xfade") or EE.XFADE))
+        inputs += ["-i", str(wav)]
+        filters.append(f"[{idx}:a:0]{AUDIO_FMT}[mixed]")
+        idx += 1
+    elif parts:
         for k, part in enumerate(parts):
             inputs += ["-t", f"{float(part['play']):.3f}", *_song_input(sources, get_track_raw_source(part["track_id"]))]
             # (":a:0" — an .m4a may carry its cover art as a second stream)
             filters.append(f"[{idx}:a:0]{AUDIO_FMT},atrim=0:{float(part['play']):.3f},asetpts=PTS-STARTPTS[p{k}]")
             idx += 1
-        music = edge.get("music") or {}
+    if parts:
         # 🌙 fade out in Stop / back in over Wait, 🔉 full volume dipping only under her lines — both on in plans
         # compiled from 15 Nov; an older plan (no such keys) sounds as it did: a quarter under the voice, a quarter
         # in Wait and Stop
@@ -503,7 +511,10 @@ def _mix(edge: dict, shows: list, sources, tmp_dir: Path, run) -> Path:
                             # (never above a quarter: a plan compiled earlier stored 0.5)
                             under_voice=min(float(voice.get("music_volume", E.MUSIC_UNDER_VOICE)), E.MUSIC_UNDER_VOICE))
         level = f"volume=volume='{E.music_gain_expr(spec)}':eval=frame"
-        filters.append("".join(f"[p{k}]" for k in range(len(parts))) + f"concat=n={len(parts)}:v=0:a=1,{level}[music]")
+        if music.get("energy_mix"):
+            filters.append(f"[mixed]{level}[music]")
+        else:
+            filters.append("".join(f"[p{k}]" for k in range(len(parts))) + f"concat=n={len(parts)}:v=0:a=1,{level}[music]")
         layers.append("[music]")
     beat = edge.get("beat") or {}
     if beat.get("on"):

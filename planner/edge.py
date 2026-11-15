@@ -30,7 +30,7 @@ RESULT_KEY = "edge_result"
 KEPT = {"edge_playlist": [], "edge_rounds": 3, "edge_difficulty": "chill", "edge_voice": False, "edge_beat": False,
         "edge_corner": "top-left", "edge_max_videos": 0, "edge_avatar": False, "edge_avatar_mode": "corner",
         "edge_avatar_corner": "bottom-right", "edge_intro": False, "edge_quick": True, "edge_stream": True, "edge_render_name": "",
-        "edge_duck": True, "edge_song_per_round": False}
+        "edge_duck": True, "edge_song_per_round": False, "edge_energy_mix": False}
 KEPT_IF_SET = tuple("ce_" + k for k in ("actors", "tags", "hair", "gg", "new", "minlen", "exclude"))
 
 
@@ -217,11 +217,48 @@ def _place(timeline: list, offset: float, play: float, part: int, track_id: str)
     return out
 
 
+def _slice(timeline: list, a: float, b: float, offset: float, part: int, track_id: str) -> list:
+    """⚡ The stretch [a, b) of one song's timeline, moved to start at `offset` in the compilation: entries cut at both
+    ends (the clips that run into the stretch start later in their footage)."""
+    out = []
+    for e in timeline:
+        ea, eb = float(e["track_time"][0]), float(e["track_time"][1])
+        if eb <= a + 1e-3 or ea >= b - 1e-3:
+            continue
+        cut = max(a - ea, 0.0)
+        scenes = []
+        for slot in e.get("scenes") or []:
+            left, chain = cut, []
+            for link in slot.get("chain") or []:
+                d = float(link["clip_duration_sec"])
+                if left >= d - 1e-3:
+                    left -= d
+                    continue
+                chain.append({**link, "clip_start_sec": round(float(link["clip_start_sec"]) + left, 3),
+                              "clip_duration_sec": round(d - left, 3)})
+                left = 0.0
+            if chain:
+                new = {**slot, "chain": chain}
+                if "clip_duration_sec" in slot:
+                    new["clip_duration_sec"] = round(max(float(slot["clip_duration_sec"]) - cut, 0.0), 3)
+                scenes.append(new)
+        moved = {**e, "scenes": scenes, "track_time": [round(max(ea, a) - a + offset, 3), round(eb - a + offset, 3)],
+                 "edge_part": part, "edge_track_id": track_id}
+        if eb > b + 1e-6:
+            moved = _trim_entry(moved, offset + (b - a))
+        out.append(moved)
+    if out:                                                # the stretch fills its phase exactly, edge to edge
+        out[0]["track_time"][0] = round(offset, 3)
+        if abs(out[-1]["track_time"][1] - (offset + b - a)) < 0.25:
+            out[-1]["track_time"][1] = round(offset + b - a, 3)
+    return out
+
+
 def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int, *, voiceover: bool = False,
                  beat: bool = False, seed: int = 0, corner: str = "top-left", max_videos: int = 0,
                  avatar: bool = False, avatar_mode: str = "corner", avatar_corner: str = "bottom-right",
                  intro: bool = False, signals: bool = True, round_badge: bool = True, music_fade: bool = True,
-                 duck: bool = True, song_per_round: bool = False, progress=None) -> dict:
+                 duck: bool = True, song_per_round: bool = False, energy_mix: bool = False, progress=None) -> dict:
     """The Edge plan. track_ids: the playlist in playing order ([] = no song: the generated beat is the track, and
     the beat sound is on whatever `beat` says). The footage is matched 🎯 Movement only — each song on the 📐 lines
     from its music; a song's later plays (and later songs) leave out the clips already used, as long as the library
@@ -232,6 +269,9 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     its last seconds); round_badge: ▸ "ROUND 2 / 3" by the timer; music_fade: 🌙 the songs fade out in Stop and back
     in over Wait; duck: 🔉 with the voiceover / avatar, the songs at full volume, dipping only under a line;
     song_per_round: 🎵 round r plays song r of the list (from its start), instead of the songs back to back.
+    energy_mix: ⚡ every phase gets the song section whose energy fits it best (edge_energy.py) — from the round's
+    own song with song_per_round, else from any song in the list — crossfaded on the beat at each phase change; the
+    footage follows each section.
     Without a song the beat is matched round by round, each round leaving out the clips earlier rounds used
     (while the library can still fill it). progress(done, total, text)."""
     import core.story_matcher as SMX
@@ -244,7 +284,38 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     beat_on = bool(beat) or not track_ids
     notes, timeline, parts, shortfall = [], [], [], 0
     base = None
-    if track_ids:
+    if track_ids and energy_mix:                           # ⚡ a section of a song for every phase
+        import edge_energy as EE
+        maps = {tid: EE.energy_map(PC._load_track(tid)) for tid in dict.fromkeys(track_ids)}
+        allowed = (lambda ph: [track_ids[(ph["round"] - 1) % len(track_ids)]]) if song_per_round else None
+        parts = EE.pick_sections(sched, maps, allowed)
+        order = list(dict.fromkeys(p["track_id"] for p in parts))
+        used, matched = set(), {}
+        for k, tid in enumerate(order):                    # each song matched once, later songs leaving out earlier clips
+            def prog(d, t, _k=k, _tid=tid):
+                if progress:
+                    progress(_k + d / max(t, 1), len(order), f"song {_k + 1} of {len(order)} · {_tid} · block {d} of {t}")
+            kw = dict(movement_only=True, cuts="lines", max_videos=int(max_videos or 0), progress=prog)
+            res = PC.compile_plan(tid, video_ids, excluded=set(used), **kw)
+            if used and (res.get("shortfall") or float(res.get("unfilled") or 0.0) > 0.5):
+                again = PC.compile_plan(tid, video_ids, **kw)
+                if float(again.get("unfilled") or 0.0) < float(res.get("unfilled") or 0.0):
+                    res = again
+            base = base or res
+            matched[tid] = res
+            shortfall += int(res.get("shortfall") or 0)
+            notes += [n for n in res.get("notes") or [] if n not in notes]
+            used |= {(link["video_id"], link["scene_id"]) for e in res["plan"]["timeline"] for s in e["scenes"]
+                     for link in s["chain"]}
+        for k, p in enumerate(parts):                      # the footage follows the section, phase for phase
+            ph = sched[p["phase"]]
+            timeline += _slice(matched[p["track_id"]]["plan"]["timeline"], p["bar"], p["bar"] + (ph["end"] - ph["start"]),
+                               ph["start"], k, p["track_id"])
+        fit = sum(abs(p["energy"] - p["target"]) for p in parts) / max(len(parts), 1)
+        joins = sum(1 for p in parts[1:] if not p["carry"])
+        notes.append(f"⚡ Energy mix: {len(parts)} sections from {len(order)} song{'s' if len(order) != 1 else ''}, "
+                     f"{joins} crossfades; energy off its phase's target by {fit:.2f} on average (0–1).")
+    elif track_ids:
         durations = [(tid, float(PC._load_track(tid)["duration_sec"])) for tid in track_ids]
         parts = E.round_playlist_parts(durations, sched) if song_per_round else E.playlist_parts(durations, total)
         used = set()
@@ -383,7 +454,8 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             # 🌙 the songs fade out in Stop / back in over Wait; 🔉 full volume, dipping under each line
             "music": {"still_volume": E.MUSIC_IN_STILL, "fade": E.MUSIC_FADE_SEC, "fade_stop": bool(music_fade),
                       "stop_fade": "whole phase", "duck": bool(duck), "duck_level": E.DUCK_LEVEL,
-                      "song_per_round": bool(song_per_round and track_ids)},
+                      "song_per_round": bool(song_per_round and track_ids),
+                      "energy_mix": bool(energy_mix and track_ids), "xfade": 1.5 if (energy_mix and track_ids) else 0.0},
             "signals": {"on": bool(signals), "sound": bool(signals), "timer": bool(signals), "flash": bool(signals)},
             "round_badge": {"on": bool(round_badge)},
             "avatar": {"on": bool(avatar), "mode": avatar_mode if avatar_mode in E.AVATAR_MODES else "corner",
@@ -445,6 +517,7 @@ def _do_pending_compile() -> None:
                            avatar_corner=ss.get("edge_avatar_corner", "bottom-right"), intro=bool(ss.get("edge_intro")),
                            duck=bool(ss.get("edge_duck", True)),         # (🔔 signals, ▸ round label, 🌙 fade: always on)
                            song_per_round=bool(ss.get("edge_song_per_round", False)),
+                           energy_mix=bool(ss.get("edge_energy_mix", False)),
                            progress=lambda d, t, txt: bar.progress(min(d / max(t, 1), 1.0), text=f"⏱️ Compiling… {txt}"))
     except Exception as e:          # noqa: BLE001
         bar.empty()
@@ -564,8 +637,17 @@ def _setup(rows: dict, have_tl: set) -> None:
                      help="Round 1 plays the first song, round 2 the second… (the list starts again when there are "
                           "more rounds than songs). Each starts from its beginning and starts again if it ends before "
                           "the round does. Off: the songs back to back, whatever the rounds.")
-        mc[1].caption("🌙 The music fades out slowly over each Stop and comes back up over the Wait that follows.")
-        if st.session_state.get("edge_song_per_round"):
+        mc[1].toggle("⚡ Match song sections to each phase", key="edge_energy_mix",
+                     help="Every phase gets the part of a song whose energy fits it — calm parts for Wait and Slow, "
+                          "the drop for Extra — crossfaded on the beat as each phase starts. With 🎵 New song each "
+                          "round on, the parts come from that round's song; otherwise from any song in the list. "
+                          "The footage follows each part.")
+        st.caption("🌙 The music fades out slowly over each Stop and comes back up over the Wait that follows.")
+        if st.session_state.get("edge_energy_mix"):
+            st.caption("⚡ " + ("Each round's parts come from its own song." if st.session_state.get("edge_song_per_round")
+                               else f"Parts picked from all {len(songs)} song{'s' if len(songs) != 1 else ''} to fit each phase.")
+                       + " Compile shows how close the fit is.")
+        elif st.session_state.get("edge_song_per_round"):
             rp = E.round_playlist_parts([(t, summaries[t]["duration"]) for t in songs], E.schedule(diff, rounds))
             per = {}
             for p in rp:
@@ -653,7 +735,11 @@ def _strip(res: dict) -> None:
         fig.add_trace(go.Bar(x=[p["play"]], base=[p["offset"]], y=["🎵 songs"], orientation="h", width=0.8,
                              marker=dict(color="rgba(120,120,220,.55)", line=dict(color="rgba(255,255,255,.7)", width=1)),
                              showlegend=False, hovertemplate=f"{p['track_id']} · from {format_mmss(p['offset'])} · "
-                                                             f"{format_mmss(p['play'])} played<extra></extra>"))
+                                                             f"{format_mmss(p['play'])} played"
+                                                             + (f"<br>⚡ its {format_mmss(p['bar'])} · energy {p['energy']:.2f} "
+                                                                f"for {p['profile'].title()} (aim {p['target']:.2f})"
+                                                                + (" · carries on" if p.get("carry") else "")
+                                                                if "energy" in p else "") + "<extra></extra>"))
     for e in res["plan"]["timeline"]:
         a, b = e["track_time"]
         label = " / ".join(s["video_id"] for s in e["scenes"]) or "—"

@@ -820,3 +820,123 @@ def test_compile_carries_the_new_switches_and_matches_the_beat_round_by_round(mo
         assert all(p["offset"] in (0.0, 120.0, 240.0) for p in off["playlist"] if p["loop"] == 1)
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# ⚡ the energy-matched mix (15 Nov)
+# ---------------------------------------------------------------------------
+
+def _emap(levels, bar=2.0):
+    import numpy as np
+    bars = np.arange(len(levels)) * bar
+    return {"bars": bars, "ends": bars + bar, "energy": np.asarray(levels, float), "duration": len(levels) * bar}
+
+
+def test_each_phase_gets_the_section_that_fits_its_energy():
+    import edge_energy as EE
+    import edge_mode as E
+    sched = E.schedule("chill", 3)                         # 18 phases of 20 s
+    calm = _emap([0.1] * 30 + [0.4] * 30)                  # 120 s: quiet, then gentle
+    loud = _emap([0.6] * 30 + [1.0] * 30)                  # 120 s: busy, then the peak
+    got = EE.pick_sections(sched, {"calm": calm, "loud": loud})
+    by = {(p["round"], p["profile"]): p for p in got}
+    assert by[(1, "wait")]["track_id"] == "calm" and abs(by[(1, "wait")]["energy"] - EE.TARGETS["wait"]) < 0.03
+    assert by[(1, "extra")]["track_id"] == "loud" and by[(1, "extra")]["bar"] >= 60
+    assert by[(1, "medium")]["track_id"] == "loud" and by[(1, "medium")]["bar"] < 60
+    assert by[(1, "extra")]["bar"] != by[(2, "extra")]["bar"] or by[(2, "extra")]["track_id"] != "loud"   # not the same stretch twice
+    # the pieces overlap by the crossfade, the first bar of each section on its phase's start
+    for p, q in zip(got, got[1:]):
+        assert abs(p["offset"] + p["play"] - (q["offset"] + EE.XFADE)) < 1e-3
+        assert abs(q["offset"] + EE.XFADE / 2 - sched[q["phase"]]["start"]) < 1e-3
+        assert abs(q["src_start"] + EE.XFADE / 2 - q["bar"]) < 1e-3
+    assert got[0]["offset"] == 0.0 and abs(got[-1]["offset"] + got[-1]["play"] - E.total_seconds(sched)) < 1e-3
+    # 🎵 with a song per round, each round's parts come from its own song
+    per = EE.pick_sections(sched, {"calm": calm, "loud": loud}, allowed=lambda ph: ["calm" if ph["round"] == 1 else "loud"])
+    assert {p["track_id"] for p in per if p["round"] == 1} == {"calm"} and {p["track_id"] for p in per if p["round"] == 2} == {"loud"}
+    # carrying straight on in the same song is preferred when it fits as well
+    flat = EE.pick_sections(E.schedule("chill", 3)[:3], {"flat": _emap([0.3] * 60)})
+    assert flat[1]["carry"] and flat[2]["carry"] and flat[2]["bar"] == flat[1]["bar"] + 20.0
+
+
+def test_the_energy_map_reads_the_sections_suggesters_bars():
+    import edge_energy as EE
+    import planner.compose as PC
+    m = EE.energy_map(PC._load_track("song_full"))
+    assert len(m["bars"]) == len(m["energy"]) > 10 and 0.0 <= m["energy"].min() and m["energy"].max() <= 1.0
+    assert m["energy"].max() - m["energy"].min() > 0.5
+    assert EE.window_energy(m, 0.0, 10.0) < EE.window_energy(m, 40.0, 60.0)    # the test song builds up
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_the_sections_are_crossfaded_without_a_dip_or_a_bump(tmp_path):
+    import edge_energy as EE
+    ff = lambda *a: subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *a], check=True)      # noqa: E731
+    a, b = tmp_path / "a.wav", tmp_path / "b.wav"
+    ff("-f", "lavfi", "-i", "sine=frequency=220:duration=60", str(a))
+    ff("-f", "lavfi", "-i", "sine=frequency=550:duration=60", str(b))
+    x = EE.XFADE
+    pieces = [{"track_id": "a", "src_start": 5.0, "offset": 0.0, "play": 20 + x / 2, "carry": False},
+              {"track_id": "b", "src_start": 10.0 - x / 2, "offset": 20 - x / 2, "play": 20 + x, "carry": False},
+              {"track_id": "b", "src_start": 30.0 - x / 2, "offset": 40 - x / 2, "play": 20 + x / 2, "carry": True}]
+    out = EE.write_mix(pieces, {"a": ["-i", str(a)], "b": ["-i", str(b)]}, 60.0, tmp_path / "mix.wav")
+    assert abs(_seconds(out) - 60.0) < 0.01
+    steady = _level(out, 5, 15)
+    for t in (19.5, 20.0, 20.5, 39.5, 40.0, 40.5):        # through each join the level holds
+        assert _level(out, t - 0.1, t + 0.1) == pytest.approx(steady, rel=0.2), t
+
+    def pitch(t0):
+        y = subprocess.run(["ffmpeg", "-loglevel", "error", "-ss", str(t0), "-t", "1", "-i", str(out), "-ac", "1", "-f", "s16le", "-"],
+                           capture_output=True, check=True).stdout
+        v = np.frombuffer(y, "<i2").astype(float)
+        return np.argmax(np.abs(np.fft.rfft(v))) * 44100 / len(v)
+    assert abs(pitch(10) - 220) < 5 and abs(pitch(30) - 550) < 5 and abs(pitch(50) - 550) < 5
+
+
+def test_compile_with_the_energy_mix_follows_each_section(monkeypatch):
+    out = _timelines(monkeypatch)
+    try:
+        import planner.edge as PE
+        res = PE.compile_edge(["song_full", "song_noanalysis"], VIDS, "chill", 3, energy_mix=True)
+        plan, edge = res["plan"], res["plan"]["edge"]
+        _check_plan(plan, 360.0)
+        assert edge["music"]["energy_mix"] and edge["music"]["xfade"] == 1.5
+        assert len(edge["playlist"]) == 18 and all("bar" in p and "source_path" in p for p in edge["playlist"])
+        assert any("Energy mix" in n for n in res["notes"])
+        for p in edge["playlist"]:                         # the footage of a phase comes from its section's song
+            ph = edge["schedule"][p["phase"]]
+            inside = [e for e in plan["timeline"] if ph["start"] - 1e-3 <= e["track_time"][0] < ph["end"] - 1e-3]
+            assert inside and {e["edge_track_id"] for e in inside} == {p["track_id"]}
+        tl = plan["timeline"]
+        for x, y in zip(tl, tl[1:]):                       # one after another, no gap, no overlap
+            assert abs(x["track_time"][1] - y["track_time"][0]) < 0.06
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_the_render_plays_the_energy_mix_under_the_fades(tmp_path, monkeypatch):
+    import sys
+    import types
+    import edge_render as R
+    monkeypatch.setitem(sys.modules, "render_preview", types.SimpleNamespace(get_track_raw_source=lambda t: t))
+    songs = {}
+    for tid, f in (("a", 220), ("b", 550)):
+        songs[tid] = tmp_path / f"{tid}.wav"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"sine=frequency={f}:duration=80",
+                        "-af", "volume=3", str(songs[tid])], check=True)
+    sched = [{"index": k, "round": 1, "profile": p, "start": 20.0 * k, "end": 20.0 * k + 20.0}
+             for k, p in enumerate(("wait", "extra", "stop"))]
+    x = 1.5
+    parts = [{"track_id": "a", "src_start": 0.0, "offset": 0.0, "play": 20 + x / 2, "bar": 0.0, "carry": False},
+             {"track_id": "b", "src_start": 20 - x / 2, "offset": 20 - x / 2, "play": 20 + x, "bar": 20.0, "carry": False},
+             {"track_id": "a", "src_start": 40 - x / 2, "offset": 40 - x / 2, "play": 20 + x / 2, "bar": 40.0, "carry": False}]
+    edge = {"schedule": sched, "playlist": parts, "beat": {"on": False}, "voiceover": {"on": False, "cues": []},
+            "music": {"fade_stop": True, "duck": True, "energy_mix": True, "xfade": x}, "signals": {"sound": False}}
+    src = types.SimpleNamespace(input_args=lambda raw: ["-i", str(songs[raw])], is_local=lambda raw: True)
+
+    def run(cmd):
+        subprocess.run(cmd, capture_output=True, check=True)
+    out = R._mix(edge, [], src, tmp_path, run)
+    assert abs(_seconds(out) - 60.0) < 0.05
+    full = _level(out, 25, 35)
+    assert full > 0.1 and _level(out, 0, 2) < 0.2 * full and _level(out, 56, 59.5) < 0.2 * full    # 🌙 still on top
