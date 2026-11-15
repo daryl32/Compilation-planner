@@ -911,12 +911,26 @@ def _used_line(res: dict) -> str:
     return " · ".join(bits)
 
 
+def _plain(x):
+    """For the plan's JSON: numpy numbers and flags as plain ones (anything else as text)."""
+    import numpy as np
+    if isinstance(x, np.bool_):
+        return bool(x)
+    if isinstance(x, np.integer):
+        return int(x)
+    if isinstance(x, np.floating):
+        return float(x)
+    if isinstance(x, np.ndarray):
+        return x.tolist()
+    return str(x)
+
+
 def _save(res: dict) -> None:
     from page_setup import DRIVE_SESSION_KEY, OAUTH_AVAILABLE, push_file_with_oauth
     plan = res["plan"]
     Path(PLANS_DIR).mkdir(parents=True, exist_ok=True)
     out = Path(PLANS_DIR) / f"{plan['track_id']}_plan.json"
-    out.write_text(json.dumps(plan, indent=2))
+    out.write_text(json.dumps(plan, indent=2, default=_plain))
     if OAUTH_AVAILABLE and st.session_state.get(DRIVE_SESSION_KEY):
         err = push_file_with_oauth(st.session_state[DRIVE_SESSION_KEY], out, "scene-labeling/compilation_plans")
         st.session_state["edge_msg"] = ("warning", f"Saved locally but Drive upload failed: {err}") if err else \
@@ -976,7 +990,7 @@ def _result(res: dict) -> None:
         st.caption(f"{len(missing)} source file{'s' if len(missing) != 1 else ''} not on the server yet"
                    if missing else "Every source file is on the server.")
     b[2].button("💾 Save plan", key="edge_save", width="stretch", on_click=_save, args=(res,))
-    b[3].download_button("⬇️ Download", data=json.dumps(plan, indent=2), file_name=f"{plan['track_id']}_plan.json",
+    b[3].download_button("⬇️ Download", data=json.dumps(plan, indent=2, default=_plain), file_name=f"{plan['track_id']}_plan.json",
                          mime="application/json", width="stretch", key="edge_dl")
     b[4].button("↻ Recompile", key="edge_again", width="stretch", on_click=_queue_compile, args=(res["video_ids"],),
                 help="Build it again with the current setup — Hard draws a new order of phases.")

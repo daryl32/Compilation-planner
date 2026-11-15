@@ -916,6 +916,8 @@ def test_compile_with_the_energy_mix_follows_each_section(monkeypatch):
         assert edge["music"]["energy_mix"]
         assert len(edge["playlist"]) == 9 and all("bar" in p and "source_path" in p for p in edge["playlist"])
         assert any("Energy mix" in n and "pairs" in n for n in res["notes"])
+        import json
+        json.dumps(plan)                                   # the plan downloads as JSON (no numpy values in it)
         for p in edge["playlist"]:                         # the footage of a pair comes from its stretch's song
             inside = [e for e in plan["timeline"] if p["offset"] - 1e-3 <= e["track_time"][0] < p["offset"] + p["play"] - 1e-3]
             assert inside and {e["edge_track_id"] for e in inside} == {p["track_id"]}

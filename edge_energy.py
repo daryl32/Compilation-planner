@@ -136,7 +136,7 @@ def pick_sections(sched: list, maps: dict, allowed=None, jump_fit=None) -> list:
                 en = float(np.mean([window_energy(m, bar + ph["start"] - a0, bar + ph["end"] - a0) for ph in judged]))
                 score = float(np.mean(errs))
                 score += REUSE_PENALTY * _overlap(bar, bar + length, used.get(tid, [])) / length
-                carry = follow is not None and abs(bar - follow) < 0.05
+                carry = bool(follow is not None and abs(bar - follow) < 0.05)      # (a plain bool: the plan is JSON)
                 if carry:
                     score -= CARRY_BONUS
                 elif not first and prev["track_id"] != tid:
@@ -151,6 +151,7 @@ def pick_sections(sched: list, maps: dict, allowed=None, jump_fit=None) -> list:
             raise ValueError(f"No song is long enough for {' + '.join(p['profile'].title() for p in phs)} "
                              f"({length:.0f} s) in round {phs[0]['round']}.")
         _, tid, bar, en, carry = best
+        bar, en, carry = float(bar), float(en), bool(carry)
         piece = {"group": gi, "phases": list(idx), "round": phs[0]["round"], "profile": phs[0]["profile"],
                  "profiles": [ph["profile"] for ph in phs], "track_id": tid, "bar": round(bar, 3),
                  "src_start": round(bar, 3), "offset": round(a0, 3), "play": round(length, 3),
