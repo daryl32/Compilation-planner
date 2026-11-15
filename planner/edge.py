@@ -30,7 +30,7 @@ RESULT_KEY = "edge_result"
 KEPT = {"edge_playlist": [], "edge_rounds": 3, "edge_difficulty": "chill", "edge_voice": False, "edge_beat": False,
         "edge_corner": "top-left", "edge_max_videos": 0, "edge_avatar": False, "edge_avatar_mode": "corner",
         "edge_avatar_corner": "bottom-right", "edge_intro": False, "edge_quick": True, "edge_stream": True, "edge_render_name": "",
-        "edge_signals": True, "edge_round_badge": True, "edge_fade": True, "edge_duck": True, "edge_song_per_round": False}
+        "edge_duck": True, "edge_song_per_round": False}
 KEPT_IF_SET = tuple("ce_" + k for k in ("actors", "tags", "hair", "gg", "new", "minlen", "exclude"))
 
 
@@ -382,7 +382,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             "overlay": {"corner": corner, "fps": E.OVERLAY_FPS},
             # 🌙 the songs fade out in Stop / back in over Wait; 🔉 full volume, dipping under each line
             "music": {"still_volume": E.MUSIC_IN_STILL, "fade": E.MUSIC_FADE_SEC, "fade_stop": bool(music_fade),
-                      "stop_fade": E.STOP_FADE_SEC, "duck": bool(duck), "duck_level": E.DUCK_LEVEL,
+                      "stop_fade": "whole phase", "duck": bool(duck), "duck_level": E.DUCK_LEVEL,
                       "song_per_round": bool(song_per_round and track_ids)},
             "signals": {"on": bool(signals), "sound": bool(signals), "timer": bool(signals), "flash": bool(signals)},
             "round_badge": {"on": bool(round_badge)},
@@ -443,8 +443,7 @@ def _do_pending_compile() -> None:
                            corner=ss.get("edge_corner", "top-left"), max_videos=int(ss.get("edge_max_videos", 0) or 0),
                            avatar=bool(ss.get("edge_avatar")), avatar_mode=ss.get("edge_avatar_mode", "corner"),
                            avatar_corner=ss.get("edge_avatar_corner", "bottom-right"), intro=bool(ss.get("edge_intro")),
-                           signals=bool(ss.get("edge_signals", True)), round_badge=bool(ss.get("edge_round_badge", True)),
-                           music_fade=bool(ss.get("edge_fade", True)), duck=bool(ss.get("edge_duck", True)),
+                           duck=bool(ss.get("edge_duck", True)),         # (🔔 signals, ▸ round label, 🌙 fade: always on)
                            song_per_round=bool(ss.get("edge_song_per_round", False)),
                            progress=lambda d, t, txt: bar.progress(min(d / max(t, 1), 1.0), text=f"⏱️ Compiling… {txt}"))
     except Exception as e:          # noqa: BLE001
@@ -556,11 +555,8 @@ def _setup(rows: dict, have_tl: set) -> None:
     rounds = c[1].slider("Rounds", E.MIN_ROUNDS, E.MAX_ROUNDS, key="edge_rounds")
     c[2].selectbox("Timer position", list(E.CORNERS), key="edge_corner", format_func=lambda k: E.CORNERS[k])
     st.caption("⏱️ " + E.describe(diff, rounds))
-    g = st.columns(2)
-    g[0].toggle("🔔 Phase signals", key="edge_signals",
-                help="At every phase change: a short bell (higher the livelier the phase), a quick flash of the "
-                     "phase's colour, and the timer ring in that colour. Over a phase's last 3 seconds the timer pulses.")
-    g[1].toggle("▸ Round label", key="edge_round_badge", help='"ROUND 2 / 3" beside the timer.')
+    st.caption("🔔 Every phase change brings a bell, a flash of the phase's colour and the ring in that colour; the "
+               "timer pulses over a phase's last 3 seconds. ▸ The round number sits by the timer.")
     total = E.round_seconds(diff) * rounds
     if songs:
         mc = st.columns(2)
@@ -568,9 +564,7 @@ def _setup(rows: dict, have_tl: set) -> None:
                      help="Round 1 plays the first song, round 2 the second… (the list starts again when there are "
                           "more rounds than songs). Each starts from its beginning and starts again if it ends before "
                           "the round does. Off: the songs back to back, whatever the rounds.")
-        mc[1].toggle("🌙 Fade out in Stop, back in over Wait", key="edge_fade",
-                     help="The music fades to silence over the first 3 seconds of every Stop, then comes back up over "
-                          "the whole Wait — full again as the next phase starts. Off: it drops to a quarter in Wait and Stop.")
+        mc[1].caption("🌙 The music fades out slowly over each Stop and comes back up over the Wait that follows.")
         if st.session_state.get("edge_song_per_round"):
             rp = E.round_playlist_parts([(t, summaries[t]["duration"]) for t in songs], E.schedule(diff, rounds))
             per = {}

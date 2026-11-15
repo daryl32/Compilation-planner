@@ -679,7 +679,7 @@ def test_the_music_fades_in_stop_comes_back_over_wait_and_dips_only_under_lines(
     assert g(0.0) == 0.0 and g(10.0) == pytest.approx(0.5) and g(19.99) == pytest.approx(1.0, abs=1e-3)   # in over Wait
     assert g(30.0) == 1.0                                  # full between lines (with the voiceover on)
     assert g(51.0) == pytest.approx(E.DUCK_LEVEL) and g(49.0) == 1.0 and g(53.5) == 1.0
-    assert g(101.5) == pytest.approx(0.5) and g(104.0) == 0.0 and g(119.0) == 0.0     # out over Stop's first 3 s
+    assert g(100.0) == 1.0 and g(110.0) == pytest.approx(0.5) and g(119.0) == pytest.approx(0.05)   # out slowly over the whole Stop
     assert g(130.0) == pytest.approx(0.5)                   # the next round's Wait brings it back
     old = E.music_spec(sched, talking=True, fade_stop=False, duck=False)      # switched off: as before
     assert E.music_gain(old, 30.0) == 0.25 and E.music_gain(old, 10.0) == 0.25
@@ -712,7 +712,10 @@ def test_the_rendered_music_follows_the_rule_and_the_bell_rings_at_each_change(t
     assert full > 0.1
     assert _level(out, 0.0, 2.0) < 0.15 * full and _level(out, 17.5, 19.5) > 0.85 * full     # fades in over Wait
     assert _level(out, 36.0, 39.0) == pytest.approx(full, rel=0.1)                            # full after the line
-    assert _level(out, 45.0, 59.0) < 0.02 * full                                              # silent once Stop has faded
+    assert _level(out, 41.0, 43.0) > 0.8 * full                                               # out slowly over Stop:
+    assert _level(out, 49.0, 51.0) == pytest.approx(0.5 * full, rel=0.12)                     # half way at its middle
+    assert _level(out, 57.0, 59.5) < 0.2 * full
+    assert _level(out, 59.6, 59.95) < 0.05 * full
     edge["voiceover"]["cues"] = []
     edge["voiceover"]["on"] = False
     edge["music"] = {}
