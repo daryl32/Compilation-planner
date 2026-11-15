@@ -254,6 +254,32 @@ def _slice(timeline: list, a: float, b: float, offset: float, part: int, track_i
     return out
 
 
+def _jump_fit(tracks: dict):
+    """⚡ jump_fit for the section picker: how alike the bars either side of a jump within a song sound — the
+    🎚️ Mix tab's bar features (timbre, harmony, loudness), where the song's audio is on this machine (else
+    unknown, and the picker goes by energy alone)."""
+    sims = {}
+
+    def fit(tid, end_t, start_t):
+        if tid not in sims:
+            sims[tid] = None
+            try:
+                import mixer
+                from core import mixing as MX
+                t = tracks[tid]
+                if mixer.local_path(t).exists():
+                    g = MX.grid(t)
+                    sims[tid] = (MX.bar_similarity(mixer.bar_features(t, g)), g)
+            except Exception:          # noqa: BLE001
+                sims[tid] = None
+        if sims[tid] is None:
+            return None
+        from core import mixing as MX
+        S, g = sims[tid]
+        return MX.join_quality(S, g, end_t, start_t)
+    return fit
+
+
 def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int, *, voiceover: bool = False,
                  beat: bool = False, seed: int = 0, corner: str = "top-left", max_videos: int = 0,
                  avatar: bool = False, avatar_mode: str = "corner", avatar_corner: str = "bottom-right",
@@ -269,9 +295,9 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     its last seconds); round_badge: ▸ "ROUND 2 / 3" by the timer; music_fade: 🌙 the songs fade out in Stop and back
     in over Wait; duck: 🔉 with the voiceover / avatar, the songs at full volume, dipping only under a line;
     song_per_round: 🎵 round r plays song r of the list (from its start), instead of the songs back to back.
-    energy_mix: ⚡ every phase gets the song section whose energy fits it best (edge_energy.py) — from the round's
-    own song with song_per_round, else from any song in the list — crossfaded on the beat at each phase change; the
-    footage follows each section.
+    energy_mix: ⚡ the phases in pairs (Wait + Slow, Medium + Fast, Extra + Stop) each get the stretch of a song whose
+    energy fits them best (edge_energy.py) — from the round's own song with song_per_round, else from any song in
+    the list — joined by the 🎚️ Mix engine (🧠 stem blends ending on the phase change); the footage follows.
     Without a song the beat is matched round by round, each round leaving out the clips earlier rounds used
     (while the library can still fill it). progress(done, total, text)."""
     import core.story_matcher as SMX
@@ -286,9 +312,10 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     base = None
     if track_ids and energy_mix:                           # ⚡ a section of a song for every phase
         import edge_energy as EE
-        maps = {tid: EE.energy_map(PC._load_track(tid)) for tid in dict.fromkeys(track_ids)}
+        tracks_ = {tid: PC._load_track(tid) for tid in dict.fromkeys(track_ids)}
+        maps = {tid: EE.energy_map(t) for tid, t in tracks_.items()}
         allowed = (lambda ph: [track_ids[(ph["round"] - 1) % len(track_ids)]]) if song_per_round else None
-        parts = EE.pick_sections(sched, maps, allowed)
+        parts = EE.pick_sections(sched, maps, allowed, jump_fit=_jump_fit(tracks_))
         order = list(dict.fromkeys(p["track_id"] for p in parts))
         used, matched = set(), {}
         for k, tid in enumerate(order):                    # each song matched once, later songs leaving out earlier clips
@@ -307,14 +334,19 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             notes += [n for n in res.get("notes") or [] if n not in notes]
             used |= {(link["video_id"], link["scene_id"]) for e in res["plan"]["timeline"] for s in e["scenes"]
                      for link in s["chain"]}
-        for k, p in enumerate(parts):                      # the footage follows the section, phase for phase
-            ph = sched[p["phase"]]
-            timeline += _slice(matched[p["track_id"]]["plan"]["timeline"], p["bar"], p["bar"] + (ph["end"] - ph["start"]),
-                               ph["start"], k, p["track_id"])
+        for k, p in enumerate(parts):                      # the footage follows the stretch, pair for pair
+            timeline += _slice(matched[p["track_id"]]["plan"]["timeline"], p["bar"], p["bar"] + p["play"],
+                               p["offset"], k, p["track_id"])
         fit = sum(abs(p["energy"] - p["target"]) for p in parts) / max(len(parts), 1)
-        joins = sum(1 for p in parts[1:] if not p["carry"])
-        notes.append(f"⚡ Energy mix: {len(parts)} sections from {len(order)} song{'s' if len(order) != 1 else ''}, "
-                     f"{joins} crossfades; energy off its phase's target by {fit:.2f} on average (0–1).")
+        joins = sum(1 for p in parts if not p["first"] and not p["carry"])
+        import mixer
+        neural = sum(1 for p in parts if not p["first"] and not p["carry"] and mixer.has_four_stems(tracks_[p["track_id"]]))
+        no_stems = sorted(tid for tid in order if not mixer.has_four_stems(tracks_[tid]))
+        notes.append(f"⚡ Energy mix: {len(parts)} stretches from {len(order)} song{'s' if len(order) != 1 else ''} "
+                     f"(phases in pairs), {joins} join{'s' if joins != 1 else ''} — {neural} 🧠 stem blend{'s' if neural != 1 else ''}"
+                     + (f", the rest crossfades with a bass swap (no drum / bass / other stems yet: {', '.join(no_stems)})"
+                        if no_stems and joins > neural else "")
+                     + f"; energy off its target by {fit:.2f} on average (0–1).")
     elif track_ids:
         durations = [(tid, float(PC._load_track(tid)["duration_sec"])) for tid in track_ids]
         parts = E.round_playlist_parts(durations, sched) if song_per_round else E.playlist_parts(durations, total)
@@ -455,7 +487,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             "music": {"still_volume": E.MUSIC_IN_STILL, "fade": E.MUSIC_FADE_SEC, "fade_stop": bool(music_fade),
                       "stop_fade": "whole phase", "duck": bool(duck), "duck_level": E.DUCK_LEVEL,
                       "song_per_round": bool(song_per_round and track_ids),
-                      "energy_mix": bool(energy_mix and track_ids), "xfade": 1.5 if (energy_mix and track_ids) else 0.0},
+                      "energy_mix": bool(energy_mix and track_ids)},
             "signals": {"on": bool(signals), "sound": bool(signals), "timer": bool(signals), "flash": bool(signals)},
             "round_badge": {"on": bool(round_badge)},
             "avatar": {"on": bool(avatar), "mode": avatar_mode if avatar_mode in E.AVATAR_MODES else "corner",
@@ -638,10 +670,13 @@ def _setup(rows: dict, have_tl: set) -> None:
                           "more rounds than songs). Each starts from its beginning and starts again if it ends before "
                           "the round does. Off: the songs back to back, whatever the rounds.")
         mc[1].toggle("⚡ Match song sections to each phase", key="edge_energy_mix",
-                     help="Every phase gets the part of a song whose energy fits it — calm parts for Wait and Slow, "
-                          "the drop for Extra — crossfaded on the beat as each phase starts. With 🎵 New song each "
-                          "round on, the parts come from that round's song; otherwise from any song in the list. "
-                          "The footage follows each part.")
+                     help="The phases play in pairs — Wait + Slow, Medium + Fast, Extra + Stop — each pair on the "
+                          "part of a song whose energy fits it (calm for Wait and Slow, the peak for Extra, Stop "
+                          "fading on it). The parts are joined by the 🎚️ Mix engine: a 🧠 stem blend of about 3–4 s "
+                          "ending on the phase change (drums first into Medium, a bass drop into Extra), or a "
+                          "crossfade with a bass swap for a song without its drum / bass / other stems. With 🎵 New "
+                          "song each round on, the parts come from that round's song (no tempo clash at the joins); "
+                          "otherwise from any song in the list, key and tempo weighed. The footage follows each part.")
         st.caption("🌙 The music fades out slowly over each Stop and comes back up over the Wait that follows.")
         if st.session_state.get("edge_energy_mix"):
             st.caption("⚡ " + ("Each round's parts come from its own song." if st.session_state.get("edge_song_per_round")
@@ -835,6 +870,8 @@ def _do_pending_render(res: dict) -> None:
                  ("edge_screens", "intro / outro"), ("edge_picture", "timer and avatar"), ("edge_join", "joining")) if stg.get(k)]
         if steps:
             note = (note[0], note[1] + " Time: " + ", ".join(steps) + ".")
+        if stg.get("edge_notes"):                          # ⚡ what the Mix engine had to say (e.g. no stems for a song)
+            note = (note[0], note[1] + " ⚡ " + " · ".join(stg["edge_notes"][:3]))
         if stg.get("edge_check") not in (None, "ok"):      # the picture or the sound isn't as long as the plan
             note = ("warning", note[1] + f" ⚠️ Length check: {stg['edge_check']}.")
         bar.empty()

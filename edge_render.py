@@ -477,7 +477,13 @@ def _line_spans(edge: dict, shows: list) -> list:
     return out
 
 
-def _mix(edge: dict, shows: list, sources, tmp_dir: Path, run) -> Path:
+def _song_tracks(parts: list) -> dict:
+    """{track_id: catalogue track} of the songs an energy mix plays."""
+    from planner.compose import _load_track
+    return {tid: _load_track(tid) for tid in dict.fromkeys(p["track_id"] for p in parts)}
+
+
+def _mix(edge: dict, shows: list, sources, tmp_dir: Path, run, notes: list = None) -> Path:
     """The compilation's whole sound as one file: the songs back to back (quieter under the voiceover / avatar and
     in Wait and Stop), the generated beat, the lines."""
     from render_preview import get_track_raw_source
@@ -488,13 +494,16 @@ def _mix(edge: dict, shows: list, sources, tmp_dir: Path, run) -> Path:
     talking = bool(voice.get("on") or shows)
     parts = edge.get("playlist") or []
     music = edge.get("music") or {}
-    if parts and music.get("energy_mix"):                  # ⚡ sections crossfaded on the beat: mixed here, as one file
+    if parts and music.get("energy_mix"):                  # ⚡ the stretches, joined by the 🎚️ Mix engine round by round
         import edge_energy as EE
-        songs = {p["track_id"]: _song_input(sources, get_track_raw_source(p["track_id"])) for p in parts}
-        wav = EE.write_mix(parts, songs, total, tmp_dir / "sections.wav", float(music.get("xfade") or EE.XFADE))
-        inputs += ["-i", str(wav)]
-        filters.append(f"[{idx}:a:0]{AUDIO_FMT}[mixed]")
-        idx += 1
+        files, warns = EE.render_rounds(parts, _song_tracks(parts), tmp_dir)
+        if notes is not None:
+            notes += warns
+        for k, (_r, f, secs) in enumerate(files):          # rounds meet in the silent Stop → Wait gap
+            inputs += ["-i", str(f)]
+            filters.append(f"[{idx}:a:0]{AUDIO_FMT},apad,atrim=0:{secs:.3f},asetpts=PTS-STARTPTS[r{k}]")
+            idx += 1
+        filters.append("".join(f"[r{k}]" for k in range(len(files))) + f"concat=n={len(files)}:v=0:a=1[mixed]")
     elif parts:
         for k, part in enumerate(parts):
             inputs += ["-t", f"{float(part['play']):.3f}", *_song_input(sources, get_track_raw_source(part["track_id"]))]
@@ -704,8 +713,11 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
     shows = _appearances(edge, tmp_dir, (W, H))
 
     # 1 · the sound, by itself (seconds; a problem with a song or a line shows here, not after the picture)
-    mix = _mix(edge, shows, sources, tmp_dir, run)
+    music_notes = []
+    mix = _mix(edge, shows, sources, tmp_dir, run, music_notes)
     took["edge_sound"] = round(time.time() - t0, 1)
+    if music_notes:
+        took["edge_notes"] = music_notes
 
     # 2 · the intro and outro screens
     t0 = time.time()
