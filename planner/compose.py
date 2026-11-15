@@ -320,7 +320,8 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
                  smooth_contrast: float = 0.5, excluded: set = None, max_videos: int = 0, progress=None,
                  movement_only: bool = False, min_clip: float = None, level_range: float = 0.0,
                  bounce_speed: float = 0.0, cuts: str = "sections", vocal_rule: bool = True,
-                 natural: bool = False, lab: dict = None, given_track: dict = None, given_segments: list = None) -> dict:
+                 natural: bool = False, lab: dict = None, given_track: dict = None, given_segments: list = None,
+                 block_role=None) -> dict:
     """cuts: "sections" — the 🧩 section map at each 🍳 recipe's pace (as always); "lines" — the 📐 lines from the
     music with their own blocks (section_bounds.py), every block kept as cut (no two joined into one clip).
     🎯 Movement only always follows the lead layer and matches at the scale of a phrase off the beat (13 Nov: both
@@ -329,7 +330,9 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     lab: {"min_lines": ✂️ Shortest clip applies to the 📐 blocks too}; it may also set "stem" / "phrase" / "shot" / "join" outright (tests, and comparing with the
     matcher as it was).
     given_track + given_segments: a track that isn't in the audio catalogue, with its blocks already cut (⏱️ Edge
-    Mode's generated beat — edge_mode.beat_track / beat_segments); track_id is then only the plan's name."""
+    Mode's generated beat — edge_mode.beat_track / beat_segments); track_id is then only the plan's name.
+    block_role(start, end) → a 🎭 scene role the block's footage should have (a bonus for clips marked with it — ⏱️
+    Edge Mode: intro clips in Wait, outro clips in Stop), or None."""
     given = dict(lab or {})
     lab = {"stem": bool(given.get("stem", movement_only)), "phrase": bool(given.get("phrase", movement_only)),
            "shot": bool(given.get("shot", natural)), "join": bool(given.get("join", natural)),
@@ -368,7 +371,8 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     max_clips = 3 if split_screen else 1
     timeline, shortfall, unfilled = SMX.match_story(
         segments, queues, track, min_clips=1, max_clips=max_clips, ramp_start=0.5, ramp_end=0.9,
-        global_excluded=set(excluded or ()), options=opts)
+        global_excluded=set(excluded or ()), options=opts,
+        block_roles=[block_role(float(sg["start"]), float(sg["end"])) for sg in segments] if block_role else None)
     catalogues = load_all_catalogues()
     for e in timeline:
         for slot in e["scenes"]:

@@ -18,9 +18,11 @@ a bass swap where not.
    song is cheaper where the bars either side sound alike (the Mix tab's bar similarity, when its features are on
    this machine).
 5. JOINS — built as a Mix recipe per round (rounds meet in the silent Stop → Wait gap, so each renders on its
-   own): every join a 🧠 neural blend of NEURAL_BARS bars that ends exactly on the phase change ("comes in early"),
-   its profile picked by what comes in (drums first into Medium / Fast, bass drop into Extra, smooth into the
-   calm phases).
+   own): every join a 🧠 neural blend of NEURAL_BARS bars that ends exactly on the phase change ("comes in early").
+   Into a livelier stretch it is the Bass drop profile — the incoming song's vocals / harmonics tease in, its drums
+   and bass swap in on the downbeat, which IS the phase change (Daryl, 15 Nov: the drop must hit exactly as the
+   phase changes); the picker also prefers starting those stretches on the song's own drops. Into a calmer one:
+   Smooth.
 """
 
 from __future__ import annotations
@@ -40,7 +42,8 @@ SWITCH_PENALTY = 0.12              # a change of song, times (1 − how well key
 JUMP_BONUS = 0.05                  # a jump within a song, times how alike the bars either side sound
 NEURAL_BARS = 2                    # 🧠 the blend's length (≈ 3–4 s — twice the first version's 1.5 s)
 MIN_BLEND_SEC = 3.0                # … at least this long (more bars for a fast song)
-JOIN_PROFILE = {"medium": "drums_first", "fast": "drums_first", "extra": "bass_drop"}       # else "smooth"
+DROP_BONUS = 0.08                  # a livelier stretch starting on one of the song's own drops (its analysis)
+RISE_BONUS = 0.05                  # … or where its energy jumps (times the jump, 0–1)
 
 
 def energy_map(track: dict) -> dict:
@@ -65,7 +68,8 @@ def energy_map(track: dict) -> dict:
     lo, hi = np.percentile(e, 5), np.percentile(e, 95)
     loud = lv["levels"].get("loudness")
     e = np.clip((e - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
-    return {"bars": bars, "ends": ends, "energy": e, "duration": duration,
+    drops = sorted(float(t) for t in ((track.get("analysis") or {}).get("drops") or []))
+    return {"bars": bars, "ends": ends, "energy": e, "duration": duration, "drops": drops,
             "info": {"track_id": track.get("track_id"), "bpm": track.get("bpm"), "key": track.get("key"),
                      "energy": float(np.mean(loud)) if loud is not None and len(loud) else 0.5}}
 
@@ -91,6 +95,19 @@ def groups(sched: list) -> list:
             out.append([k])
             k += 1
     return out
+
+
+def drop_score(emap: dict, bar: float) -> float:
+    """How much the song drops in at this bar (0–1): 1 on one of its analysed drops (within a quarter bar), else
+    its energy jump — the bar after against the two bars before."""
+    bars, e = emap["bars"], emap["energy"]
+    i = int(np.argmin(np.abs(bars - bar))) if len(bars) else 0
+    bar_len = float(np.median(np.diff(bars))) if len(bars) > 1 else 2.0
+    if any(abs(d - bar) < 0.25 * bar_len for d in emap.get("drops") or ()):
+        return 1.0
+    if i < 2 or i >= len(e):
+        return 0.0
+    return float(np.clip((e[i] - e[i - 2:i].mean()) / 0.5, 0.0, 0.99))      # (only a real drop counts as 1)
 
 
 def _overlap(a: float, b: float, used: list) -> float:
@@ -137,6 +154,9 @@ def pick_sections(sched: list, maps: dict, allowed=None, jump_fit=None) -> list:
                 score = float(np.mean(errs))
                 score += REUSE_PENALTY * _overlap(bar, bar + length, used.get(tid, [])) / length
                 carry = bool(follow is not None and abs(bar - follow) < 0.05)      # (a plain bool: the plan is JSON)
+                if not first and target > prev["target"] + 0.05 and not carry:      # 🥁 livelier: land on a drop
+                    q = drop_score(m, bar)
+                    score -= DROP_BONUS * q if q >= 1.0 else RISE_BONUS * q
                 if carry:
                     score -= CARRY_BONUS
                 elif not first and prev["track_id"] != tid:
@@ -177,18 +197,21 @@ def round_recipes(pieces: list, tracks: dict) -> list:
     out = []
     for r in sorted({p["round"] for p in pieces}):
         mine = [p for p in pieces if p["round"] == r]
-        rec_pieces = []
+        rec_pieces, prev_target = [], 0.0
         for p in mine:
             if rec_pieces and p["carry"] and rec_pieces[-1]["track"] == p["track_id"]:
                 rec_pieces[-1]["end"] = round(p["bar"] + p["play"], 3)          # carries on: one longer piece
+                prev_target = p.get("target", 0.5)
                 continue
             piece = {"track": p["track_id"], "start": p["bar"], "end": round(p["bar"] + p["play"], 3),
                      "part": "full", "uid": f"g{p['group']}", "label": " + ".join(x.title() for x in p["profiles"])}
             if rec_pieces:
-                piece["xfade"] = {"neural": {"profile": JOIN_PROFILE.get(p["profile"], "smooth"),
+                livelier = float(p.get("target", 0.5)) > float(prev_target) + 0.05
+                piece["xfade"] = {"neural": {"profile": "bass_drop" if livelier else "smooth",
                                              "bars": blend_bars(tracks.get(p["track_id"]) or {})},
                                   "bass_swap": True}
             rec_pieces.append(piece)
+            prev_target = p.get("target", 0.5)
         seconds = round(sum(p["play"] for p in mine), 3)
         out.append((r, {"id": f"edge_round_{r}", "name": f"Edge round {r}", "kind": "mashup", "pieces": rec_pieces,
                         "layers": [], "bpm": None, "xfade_same": 0.5, "xfade_other": 8, "fade_in": 0.0,

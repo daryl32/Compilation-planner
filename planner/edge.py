@@ -30,7 +30,7 @@ RESULT_KEY = "edge_result"
 KEPT = {"edge_playlist": [], "edge_rounds": 3, "edge_difficulty": "chill", "edge_voice": False, "edge_beat": False,
         "edge_corner": "top-left", "edge_max_videos": 0, "edge_avatar": False, "edge_avatar_mode": "corner",
         "edge_avatar_corner": "bottom-right", "edge_intro": False, "edge_quick": True, "edge_stream": True, "edge_render_name": "",
-        "edge_duck": True, "edge_song_per_round": False, "edge_energy_mix": False}
+        "edge_song_per_round": False, "edge_energy_mix": False}
 KEPT_IF_SET = tuple("ce_" + k for k in ("actors", "tags", "hair", "gg", "new", "minlen", "exclude"))
 
 
@@ -254,6 +254,16 @@ def _slice(timeline: list, a: float, b: float, offset: float, part: int, track_i
     return out
 
 
+PHASE_ROLES = {"wait": "intro", "stop": "outro"}       # 🎭 the footage Wait and Stop favour (Daryl, 15 Nov)
+
+
+def _phase_role(sched: list, t: float):
+    """🎭 The scene role the footage at compilation time t should have: intro clips in Wait, outro clips in Stop
+    (the music drives the rest)."""
+    ph = E.phase_at(sched, t)
+    return PHASE_ROLES.get(ph["profile"]) if ph else None
+
+
 def _jump_fit(tracks: dict):
     """⚡ jump_fit for the section picker: how alike the bars either side of a jump within a song sound — the
     🎚️ Mix tab's bar features (timbre, harmony, loudness), where the song's audio is on this machine (else
@@ -284,7 +294,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                  beat: bool = False, seed: int = 0, corner: str = "top-left", max_videos: int = 0,
                  avatar: bool = False, avatar_mode: str = "corner", avatar_corner: str = "bottom-right",
                  intro: bool = False, signals: bool = True, round_badge: bool = True, music_fade: bool = True,
-                 duck: bool = True, song_per_round: bool = False, energy_mix: bool = False, progress=None) -> dict:
+                 duck: bool = False, song_per_round: bool = False, energy_mix: bool = False, progress=None) -> dict:
     """The Edge plan. track_ids: the playlist in playing order ([] = no song: the generated beat is the track, and
     the beat sound is on whatever `beat` says). The footage is matched 🎯 Movement only — each song on the 📐 lines
     from its music; a song's later plays (and later songs) leave out the clips already used, as long as the library
@@ -293,7 +303,8 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     intro screen before the compilation (her intro clip beside the settings and thumbnails).
     signals: 🔔 a bell, a flash and the ring in the phase's colour at every phase change (the timer pulsing over
     its last seconds); round_badge: ▸ "ROUND 2 / 3" by the timer; music_fade: 🌙 the songs fade out in Stop and back
-    in over Wait; duck: 🔉 with the voiceover / avatar, the songs at full volume, dipping only under a line;
+    in over Wait; duck: 🔉 with the voiceover / avatar, the songs at full volume, dipping only under a line (off since
+    15 Nov — Daryl wants a steady background level under her: a quarter volume throughout);
     song_per_round: 🎵 round r plays song r of the list (from its start), instead of the songs back to back.
     energy_mix: ⚡ the phases in pairs (Wait + Slow, Medium + Fast, Extra + Stop) each get the stretch of a song whose
     energy fits them best (edge_energy.py) — from the round's own song with song_per_round, else from any song in
@@ -322,7 +333,13 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             def prog(d, t, _k=k, _tid=tid):
                 if progress:
                     progress(_k + d / max(t, 1), len(order), f"song {_k + 1} of {len(order)} · {_tid} · block {d} of {t}")
-            kw = dict(movement_only=True, cuts="lines", max_videos=int(max_videos or 0), progress=prog)
+            stretches = [(p["bar"], p["play"], p["offset"]) for p in parts if p["track_id"] == tid]
+
+            def role(a, b, _st=stretches):             # 🎭 song time → where it plays in the compilation → its phase
+                mid = (a + b) / 2
+                hit = next(((bar, off) for bar, play, off in _st if bar <= mid < bar + play), None)
+                return _phase_role(sched, hit[1] + mid - hit[0]) if hit else None
+            kw = dict(movement_only=True, cuts="lines", max_videos=int(max_videos or 0), progress=prog, block_role=role)
             res = PC.compile_plan(tid, video_ids, excluded=set(used), **kw)
             if used and (res.get("shortfall") or float(res.get("unfilled") or 0.0) > 0.5):
                 again = PC.compile_plan(tid, video_ids, **kw)
@@ -355,7 +372,9 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             def prog(d, t, _k=k, _tid=part["track_id"]):
                 if progress:
                     progress(_k + d / max(t, 1), len(parts), f"song {_k + 1} of {len(parts)} · {_tid} · block {d} of {t}")
-            kw = dict(movement_only=True, cuts="lines", max_videos=int(max_videos or 0), progress=prog)
+            kw = dict(movement_only=True, cuts="lines", max_videos=int(max_videos or 0), progress=prog,
+                      block_role=lambda a, b, _o=part["offset"], _p=part["play"]: (
+                          _phase_role(sched, _o + (a + b) / 2) if (a + b) / 2 < _p else None))
             res = PC.compile_plan(part["track_id"], video_ids, excluded=set(used), **kw)
             if used and (res.get("shortfall") or float(res.get("unfilled") or 0.0) > 0.5):
                 again = PC.compile_plan(part["track_id"], video_ids, **kw)        # not enough fresh footage left
@@ -391,6 +410,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                     progress(_k + d / max(t, 1), len(rounds_), f"round {_k + 1} of {len(rounds_)} · block {d} of {t}")
             kw = dict(movement_only=True, max_videos=int(max_videos or 0), given_track=E.beat_track(sub),
                       given_segments=E.beat_segments(sub), progress=prog,
+                      block_role=lambda a, b, _sub=sub: _phase_role(_sub, (a + b) / 2),
                       lab={"stem": False, "phrase": False})       # a beat has no lead layer or phrases to follow
             res = PC.compile_plan(E.TRACK_ID, video_ids, excluded=set(used), **kw)
             if used and (res.get("shortfall") or float(res.get("unfilled") or 0.0) > 0.5):
@@ -515,51 +535,110 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
 # Setup
 # ---------------------------------------------------------------------------
 
-def _queue_compile(video_ids: list, new_seed: bool = True) -> None:
-    if not video_ids:
+JOB_KEY = "edge:job"                  # ⏳ the compile / render running on the server (one at a time)
+
+
+def _settings() -> dict:
+    """The setup as it stands — what a background compile is made from."""
+    ss = st.session_state
+    return {"playlist": list(ss.get("edge_playlist") or []), "difficulty": ss.get("edge_difficulty", "chill"),
+            "rounds": int(ss.get("edge_rounds", 3)), "voiceover": bool(ss.get("edge_voice")), "beat": bool(ss.get("edge_beat")),
+            "corner": ss.get("edge_corner", "top-left"), "max_videos": int(ss.get("edge_max_videos", 0) or 0),
+            "avatar": bool(ss.get("edge_avatar")), "avatar_mode": ss.get("edge_avatar_mode", "corner"),
+            "avatar_corner": ss.get("edge_avatar_corner", "bottom-right"), "intro": bool(ss.get("edge_intro")),
+            "song_per_round": bool(ss.get("edge_song_per_round", False)), "energy_mix": bool(ss.get("edge_energy_mix", False)),
+            "stream": bool(ss.get("edge_stream", True)), "quick": bool(ss.get("edge_quick", True)),
+            "label": " ".join(str(ss.get("edge_render_name") or "").split())[:80]}
+
+
+def _job(job, settings: dict, video_ids: list, seed: int, render: bool, token, res: dict = None) -> dict:
+    """⏳ The background work: compile (unless `res` is given — a render of a plan already compiled), then render
+    when asked. Runs in a server thread (mix_jobs), so it finishes even when the phone leaves the page."""
+    out = {"notes_first": []}
+    if res is None:
+        job.progress(0.0, "getting the voiceover lines")
+        if settings["voiceover"] or settings["avatar"]:     # the lines (and her clips) not here yet are fetched first
+            cm = load_cue_map()
+            if cm.get("lines"):
+                errs = fetch_lines(cm, lambda k, n, name: job.progress(None, f"fetching {name}"),
+                                   avatar=settings["avatar"], only_missing=True)
+                if errs:
+                    out["notes_first"].append(f"{len(errs)} file(s) couldn't be fetched from Google Drive — those lines play as "
+                                              "placeholders. " + " · ".join(errs[:3]))
+        share = 0.4 if render else 1.0
+        res = compile_edge(settings["playlist"], video_ids, settings["difficulty"], settings["rounds"],
+                           voiceover=settings["voiceover"], beat=settings["beat"], seed=seed, corner=settings["corner"],
+                           max_videos=settings["max_videos"], avatar=settings["avatar"], avatar_mode=settings["avatar_mode"],
+                           avatar_corner=settings["avatar_corner"], intro=settings["intro"],
+                           song_per_round=settings["song_per_round"], energy_mix=settings["energy_mix"],
+                           progress=lambda d, t, txt: job.progress(share * min(d / max(t, 1), 1.0), f"compiling · {txt}"))
+        res["notes"] = out["notes_first"] + list(res.get("notes") or [])
+    out["res"] = res
+    if render:
+        base = job.frac
+        out["note"], out["render"] = _render(res, settings, token,
+                                             lambda f, txt: job.progress(base + (1 - base) * min(f, 1.0), txt))
+    return out
+
+
+def _start(video_ids: list, render: bool, new_seed: bool = True, res: dict = None) -> None:
+    """Start the compile / render on the server (on_click: the session is still at hand for the setup and the Drive
+    connection)."""
+    import mix_jobs as J
+    from page_setup import drive_token
+    if res is None and not video_ids:
         st.session_state["edge_msg"] = ("warning", "No videos to match — widen the video filters.")
         return
     if new_seed or "edge_seed" not in st.session_state:
         st.session_state["edge_seed"] = random.randrange(1, 10 ** 6)       # Hard draws a new order each compile
-    st.session_state["edge_pending"] = {"video_ids": list(video_ids)}
-
-
-def _do_pending_compile() -> None:
-    job = st.session_state.pop("edge_pending", None)
-    if not job:
+    running = J.get(JOB_KEY)
+    if running is not None and running.active:
+        st.session_state["edge_msg"] = ("warning", "A compile / render is already running — it is shown below.")
         return
+    J.forget(JOB_KEY)
+    label = "🎬 Rendering" if res is not None else ("⏱️ Compiling and rendering" if render else "⏱️ Compiling")
+    J.start(JOB_KEY, label, _job, _settings(), list(video_ids), int(st.session_state["edge_seed"]), render,
+            drive_token(), res)
+    st.session_state["edge_job_seen"] = None
+
+
+def _take_finished_job() -> bool:
+    """A finished background job's result into this session (once) — also in a new session after the page was
+    reloaded. True while one is still running."""
+    import mix_jobs as J
+    j = J.get(JOB_KEY)
+    if j is None:
+        return False
+    if j.active:
+        return True
     ss = st.session_state
-    bar = st.progress(0.0, text="⏱️ Compiling…")
-    fetch_note = None
-    if ss.get("edge_voice") or ss.get("edge_avatar"):      # the lines (and her clips) not here yet are fetched first
-        cm = load_cue_map()
-        want_av = bool(ss.get("edge_avatar"))
-        if cm.get("lines"):                                # (also brings a newer cue map and new takes from Drive)
-            errs = fetch_lines(cm, lambda k, n, name: bar.progress(min(k / max(n, 1), 1.0), text=f"⬇️ Fetching {name}…"),
-                               avatar=want_av, only_missing=True)
-            if errs:
-                fetch_note = (f"{len(errs)} file(s) couldn't be fetched from Google Drive — those lines play as placeholders. "
-                              + " · ".join(errs[:3]))
-    try:
-        res = compile_edge(list(ss.get("edge_playlist") or []), job["video_ids"], ss.get("edge_difficulty", "chill"),
-                           int(ss.get("edge_rounds", 3)), voiceover=bool(ss.get("edge_voice")),
-                           beat=bool(ss.get("edge_beat")), seed=int(ss.get("edge_seed", 0)),
-                           corner=ss.get("edge_corner", "top-left"), max_videos=int(ss.get("edge_max_videos", 0) or 0),
-                           avatar=bool(ss.get("edge_avatar")), avatar_mode=ss.get("edge_avatar_mode", "corner"),
-                           avatar_corner=ss.get("edge_avatar_corner", "bottom-right"), intro=bool(ss.get("edge_intro")),
-                           duck=bool(ss.get("edge_duck", True)),         # (🔔 signals, ▸ round label, 🌙 fade: always on)
-                           song_per_round=bool(ss.get("edge_song_per_round", False)),
-                           energy_mix=bool(ss.get("edge_energy_mix", False)),
-                           progress=lambda d, t, txt: bar.progress(min(d / max(t, 1), 1.0), text=f"⏱️ Compiling… {txt}"))
-    except Exception as e:          # noqa: BLE001
-        bar.empty()
-        st.session_state["edge_msg"] = ("error", f"Couldn't compile: {e}")
-        return
-    bar.empty()
-    if fetch_note:
-        res["notes"] = [fetch_note] + list(res.get("notes") or [])
-    ss[RESULT_KEY] = res
-    ss.pop("edge_render", None)
+    if ss.get("edge_job_seen") == j.started:
+        return False
+    ss["edge_job_seen"] = j.started
+    if j.state == "error":
+        ss["edge_msg"] = ("error", f"{j.label} failed: {j.error}")
+        return False
+    got = j.result or {}
+    if got.get("res") is not None:
+        ss[RESULT_KEY] = got["res"]
+    if got.get("render"):
+        ss["edge_render"] = got["render"]
+        ss["edge_msg"] = got.get("note")
+    elif got.get("res") is not None:
+        ss.pop("edge_render", None)
+    return False
+
+
+@st.fragment(run_every=1.0)
+def _watch() -> None:
+    """⏳ The running job's progress, checked every second; the page refreshes when it is done."""
+    import mix_jobs as J
+    j = J.get(JOB_KEY)
+    if j is None or not j.active:
+        st.rerun(scope="app")
+    secs = int(time.time() - j.started)
+    st.progress(min(1.0, j.frac), text=f"{j.label}… {j.msg or ''} · {secs // 60}:{secs % 60:02d}")
+    st.caption("⏳ This runs on the server — you can leave the page or switch apps and come back; the result will be here.")
 
 
 def _lines_panel(cue_map: dict) -> None:
@@ -661,7 +740,8 @@ def _setup(rows: dict, have_tl: set) -> None:
     c[2].selectbox("Timer position", list(E.CORNERS), key="edge_corner", format_func=lambda k: E.CORNERS[k])
     st.caption("⏱️ " + E.describe(diff, rounds))
     st.caption("🔔 Every phase change brings a bell, a flash of the phase's colour and the ring in that colour; the "
-               "timer pulses over a phase's last 3 seconds. ▸ The round number sits by the timer.")
+               "timer pulses over a phase's last 3 seconds. ▸ The round number sits by the timer. 🎭 Wait favours "
+               "clips marked intro, Stop clips marked outro (🎭 Reviewer roles); the music drives the rest.")
     total = E.round_seconds(diff) * rounds
     if songs:
         mc = st.columns(2)
@@ -673,7 +753,8 @@ def _setup(rows: dict, have_tl: set) -> None:
                      help="The phases play in pairs — Wait + Slow, Medium + Fast, Extra + Stop — each pair on the "
                           "part of a song whose energy fits it (calm for Wait and Slow, the peak for Extra, Stop "
                           "fading on it). The parts are joined by the 🎚️ Mix engine: a 🧠 stem blend of about 3–4 s "
-                          "ending on the phase change (drums first into Medium, a bass drop into Extra), or a "
+                          "ending on the phase change — into a livelier part a bass drop, its drums and bass landing "
+                          "on the change (parts starting on the song's own drops are preferred) — or a "
                           "crossfade with a bass swap for a song without its drum / bass / other stems. With 🎵 New "
                           "song each round on, the parts come from that round's song (no tempo clash at the joins); "
                           "otherwise from any song in the list, key and tempo weighed. The footage follows each part.")
@@ -732,10 +813,6 @@ def _setup(rows: dict, have_tl: set) -> None:
                            format_func=lambda k: E.CORNERS[k])
             if st.session_state.get("edge_avatar_corner") == st.session_state.get("edge_corner"):
                 st.warning("The avatar and the timer are set to the same corner — she will sit under the timer.")
-    if songs and (st.session_state.get("edge_voice") or st.session_state.get("edge_avatar")):
-        st.toggle("🔉 Music dips only under her lines", key="edge_duck",
-                  help="The songs play at full volume and drop to a quarter while a line is heard (a short fade each "
-                       "way). Off: a quarter volume all the way through.")
     if st.session_state.get("edge_avatar") or st.session_state.get("edge_intro"):
         _clip_manager("avatar")
     vids = PC._video_filters("ce_", rows, have_tl,
@@ -749,7 +826,10 @@ def _setup(rows: dict, have_tl: set) -> None:
     with st.popover("⚙️ More"):
         st.number_input("At most this many different videos (0 = no limit)", 0, 60, key="edge_max_videos",
                         help="Fewer different videos = fewer files to fetch for a full-quality render.")
-    st.button("⏱️ Compile", key="edge_go", type="primary", width="stretch", on_click=_queue_compile, args=(vids,))
+    go = st.columns([2, 1])
+    go[0].button("⏱️ Compile & render", key="edge_go", type="primary", width="stretch", on_click=_start, args=(vids, True),
+                 help="Compiles, then renders straight away — on the server: you can leave the page and come back.")
+    go[1].button("Compile only", key="edge_go_only", width="stretch", on_click=_start, args=(vids, False))
 
 
 # ---------------------------------------------------------------------------
@@ -803,84 +883,90 @@ def _missing_sources(plan: dict, quick: bool) -> list:
     return [(raw, Path(colab_to_local(raw))) for raw in sorted(needed) if not Path(colab_to_local(raw)).exists()]
 
 
-def _do_pending_render(res: dict) -> None:
-    if not st.session_state.pop("edge_do_render", False):
-        return
+def _fetch_missing(missing: list, prog) -> list:
+    """Download the plan's files that aren't on the server (no page needed). Returns error strings."""
+    try:
+        from drive_sync import credentials_available, download_source_video
+        ok = credentials_available()
+    except ImportError:
+        ok = False
+    errors = []
+    for n, (raw, local) in enumerate(missing, 1):
+        if not (ok and "MyDrive/" in raw):
+            errors.append(f"{local.name}: not on the server and Drive download isn't available")
+            continue
+        prog(0.0, f"downloading {local.name} ({n}/{len(missing)})")
+        err = download_source_video(raw.split("MyDrive/", 1)[1], local)
+        if err:
+            errors.append(f"{local.name}: {err}")
+    return errors
+
+
+def _render(res: dict, settings: dict, token, prog) -> tuple:
+    """🎬 The compiled plan → a video in the renders folder, uploaded to Drive when connected. No page needed (runs
+    in the background job). Returns (message for the page, file name). Raises when it can't."""
     import fnmatch
     import re
-    from page_setup import APP_VERSION, drive_token
+    from page_setup import APP_VERSION
     from planner.state import sanitize_filename
     from render_preview import render_plan_dict
     from renders import auto_clear_enabled, clear_local, render_files, update_user_fields, upload_render
     plan = res["plan"]
-    stream = bool(st.session_state.get("edge_stream", True))
-    quick = bool(st.session_state.get("edge_quick", True))
+    stream, quick = settings["stream"], settings["quick"]
     if not stream:
         missing = _missing_sources(plan, quick)
         if missing:
-            errs = PC._download_sources(missing)
+            errs = _fetch_missing(missing, prog)
             if errs:
-                st.error("Can't render — some source files are missing and couldn't be downloaded:\n\n"
-                         + "\n".join(f"- {e}" for e in errs))
-                return
+                raise RuntimeError("some source files are missing and couldn't be downloaded: " + " · ".join(errs[:4]))
     safe = sanitize_filename(plan["track_id"])
     used = [int(m.group(1)) for p in render_files() if (m := re.search(r"\.(\d{3})\.mp4$", p.name))
             and fnmatch.fnmatch(p.name, f"temp-Video-preview-{safe}.*.mp4")]
     Path(PREVIEW_DIR).mkdir(parents=True, exist_ok=True)
     out = Path(PREVIEW_DIR) / f"temp-Video-preview-{safe}.{(max(used) + 1) if used else 1:03d}.mp4"
-    bar = st.progress(0.0, text="Rendering…")
     last, t0 = [0.0], time.time()
 
     def _prog(d, t):
         last[0] = d / max(t, 1)
         secs = time.time() - t0
-        bar.progress(last[0], text=f"Rendering segment {d}/{t}" + (f" · about {int((secs / d) * (t - d))} s left" if d else ""))
+        prog(last[0], f"rendering segment {d}/{t}" + (f" · about {int((secs / d) * (t - d))} s left" if d else ""))
 
-    try:
-        e = plan["edge"]
-        stats = render_plan_dict(plan, str(out), progress_callback=_prog, stream=stream, quick=quick,
-                                 notice=lambda txt: bar.progress(last[0], text=txt), app_version=APP_VERSION,
-                                 extra_meta={"project_name": f"⏱️ Edge · {E.DIFFICULTIES[e['difficulty']]} · {e['rounds']} rounds",
-                                             "compile_note": _used_line(res)}) or {}
-        label = " ".join(str(st.session_state.get("edge_render_name") or "").split())[:80]
-        if label:
-            update_user_fields(out, name=label)
-        secs = time.time() - t0
-        took = f"{int(secs // 60)}:{int(secs % 60):02d}"
-        note = ("info", f"Rendered {out.name} in {took}. Connect Google Drive (sidebar) to save renders there.")
-        token = drive_token()
-        if token:
-            bar.progress(1.0, text="Uploading to Google Drive…")
-            err = upload_render(out, token)
-            if err:
-                note = ("warning", f"Rendered, but the Drive upload failed: {err}")
-            elif auto_clear_enabled():
-                clear_local(out)
-                note = ("success", f"Rendered {out.name} in {took}, saved to Google Drive and cleared from the server.")
-            else:
-                note = ("success", f"Rendered {out.name} in {took} and saved to Google Drive.")
-        how = [f"{stats[k]} {w}" for k, w in (("quick", "from the 480p copies"), ("streamed", "streamed from Drive"),
-                                             ("downloaded", "downloaded"), ("local", "already on the server")) if stats.get(k)]
-        if how:
-            note = (note[0], note[1] + " Source files: " + ", ".join(how) + ".")
-        stg = stats.get("stages") or {}
-        if stg.get("ffmpeg"):                              # which ffmpeg made it (the server's differs from the test machine's)
-            note = (note[0], note[1] + " " + " ".join(str(stg["ffmpeg"]).split()[:3]) + ".")
-        steps = [f"{w} {int(stg[k] // 60)}:{int(stg[k] % 60):02d}" for k, w in (("segments", "clips"), ("edge_sound", "sound"),
-                 ("edge_screens", "intro / outro"), ("edge_picture", "timer and avatar"), ("edge_join", "joining")) if stg.get(k)]
-        if steps:
-            note = (note[0], note[1] + " Time: " + ", ".join(steps) + ".")
-        if stg.get("edge_notes"):                          # ⚡ what the Mix engine had to say (e.g. no stems for a song)
-            note = (note[0], note[1] + " ⚡ " + " · ".join(stg["edge_notes"][:3]))
-        if stg.get("edge_check") not in (None, "ok"):      # the picture or the sound isn't as long as the plan
-            note = ("warning", note[1] + f" ⚠️ Length check: {stg['edge_check']}.")
-        bar.empty()
-        st.session_state["edge_msg"] = note
-        st.session_state["edge_render"] = out.name
-        st.rerun()
-    except Exception as ex:          # noqa: BLE001
-        bar.empty()
-        st.error(f"Render failed: {ex}")
+    e = plan["edge"]
+    stats = render_plan_dict(plan, str(out), progress_callback=_prog, stream=stream, quick=quick,
+                             notice=lambda txt: prog(last[0], txt), app_version=APP_VERSION,
+                             extra_meta={"project_name": f"⏱️ Edge · {E.DIFFICULTIES[e['difficulty']]} · {e['rounds']} rounds",
+                                         "compile_note": _used_line(res)}) or {}
+    if settings.get("label"):
+        update_user_fields(out, name=settings["label"])
+    secs = time.time() - t0
+    took = f"{int(secs // 60)}:{int(secs % 60):02d}"
+    note = ("info", f"Rendered {out.name} in {took}. Connect Google Drive (sidebar) to save renders there.")
+    if token:
+        prog(1.0, "uploading to Google Drive")
+        err = upload_render(out, token)
+        if err:
+            note = ("warning", f"Rendered, but the Drive upload failed: {err}")
+        elif auto_clear_enabled():
+            clear_local(out)
+            note = ("success", f"Rendered {out.name} in {took}, saved to Google Drive and cleared from the server.")
+        else:
+            note = ("success", f"Rendered {out.name} in {took} and saved to Google Drive.")
+    how = [f"{stats[k]} {w}" for k, w in (("quick", "from the 480p copies"), ("streamed", "streamed from Drive"),
+                                         ("downloaded", "downloaded"), ("local", "already on the server")) if stats.get(k)]
+    if how:
+        note = (note[0], note[1] + " Source files: " + ", ".join(how) + ".")
+    stg = stats.get("stages") or {}
+    if stg.get("ffmpeg"):                                  # which ffmpeg made it (the server's differs from the test machine's)
+        note = (note[0], note[1] + " " + " ".join(str(stg["ffmpeg"]).split()[:3]) + ".")
+    steps = [f"{w} {int(stg[k] // 60)}:{int(stg[k] % 60):02d}" for k, w in (("segments", "clips"), ("edge_sound", "sound"),
+             ("edge_screens", "intro / outro"), ("edge_picture", "timer and avatar"), ("edge_join", "joining")) if stg.get(k)]
+    if steps:
+        note = (note[0], note[1] + " Time: " + ", ".join(steps) + ".")
+    if stg.get("edge_notes"):                              # ⚡ what the Mix engine had to say (e.g. no stems for a song)
+        note = (note[0], note[1] + " ⚡ " + " · ".join(stg["edge_notes"][:3]))
+    if stg.get("edge_check") not in (None, "ok"):          # the picture or the sound isn't as long as the plan
+        note = ("warning", note[1] + f" ⚠️ Length check: {stg['edge_check']}.")
+    return note, out.name
 
 
 def _used_line(res: dict) -> str:
@@ -940,7 +1026,6 @@ def _save(res: dict) -> None:
 
 
 def _result(res: dict) -> None:
-    _do_pending_render(res)
     plan, summary = res["plan"], res["summary"]
     c = st.columns([5, 1.4])
     c[0].subheader("⏱️ Edge Mode")
@@ -982,7 +1067,7 @@ def _result(res: dict) -> None:
     st.text_input("🏷️ Name the next render (optional)", key="edge_render_name", max_chars=80)
     b = st.columns([1.8, 0.5, 1.4, 1.4, 1.6])
     b[0].button("🎬 Render", key="edge_render_btn", type="primary", width="stretch",
-                on_click=lambda: st.session_state.update(edge_do_render=True))
+                on_click=_start, args=(res["video_ids"], True, False, res))
     with b[1].popover("⚙️", width="stretch", help="Render options"):
         st.toggle("⚡ Quick preview — use the 480p copies on the server", key="edge_quick")
         st.toggle("Stream original videos from Google Drive", key="edge_stream")
@@ -992,8 +1077,8 @@ def _result(res: dict) -> None:
     b[2].button("💾 Save plan", key="edge_save", width="stretch", on_click=_save, args=(res,))
     b[3].download_button("⬇️ Download", data=json.dumps(plan, indent=2, default=_plain), file_name=f"{plan['track_id']}_plan.json",
                          mime="application/json", width="stretch", key="edge_dl")
-    b[4].button("↻ Recompile", key="edge_again", width="stretch", on_click=_queue_compile, args=(res["video_ids"],),
-                help="Build it again with the current setup — Hard draws a new order of phases.")
+    b[4].button("↻ Recompile & render", key="edge_again", width="stretch", on_click=_start, args=(res["video_ids"], True),
+                help="Build it again with the current setup and render it — Hard draws a new order of phases.")
     if name := st.session_state.get("edge_render"):
         from library_common import show_render_player
         from renders import load_render
@@ -1009,7 +1094,12 @@ def render() -> None:
     msg = st.session_state.pop("edge_msg", None)
     if msg:
         getattr(st, msg[0])(msg[1])
-    _do_pending_compile()
+    if _take_finished_job():                               # ⏳ a compile / render is running on the server
+        _watch()
+        return
+    msg = st.session_state.pop("edge_msg", None)          # (what the finished job left)
+    if msg:
+        getattr(st, msg[0])(msg[1])
     res = st.session_state.get(RESULT_KEY)
     if res:
         _result(res)

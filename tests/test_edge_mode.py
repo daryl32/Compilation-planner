@@ -245,7 +245,8 @@ def test_the_page_compiles_and_comes_back_to_its_setup(monkeypatch):
         at.toggle(key="edge_voice").set_value(True)
         at.run()
         assert not errors(at), errors(at)
-        at.button(key="edge_go").click().run()
+        at.button(key="edge_go_only").click().run()
+        _wait_job(at)
         assert not errors(at), errors(at)
         res = at.session_state["edge_result"]
         assert res["plan"]["track_duration_sec"] == 720.0 and res["plan"]["edge"]["voiceover"]["on"]
@@ -258,6 +259,14 @@ def test_the_page_compiles_and_comes_back_to_its_setup(monkeypatch):
         assert not errors(at), errors(at)
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def _wait_job(at):
+    """⏳ The compile runs on the server (mix_jobs): wait for it, then let the page pick up its result."""
+    import mix_jobs
+    import planner.edge as PE
+    mix_jobs.wait([PE.JOB_KEY], timeout=300)
+    at.run()
 
 
 def _seconds(path):
@@ -354,7 +363,9 @@ def test_compile_carries_the_avatar_and_the_intro(monkeypatch, tmp_path):
         assert 1 <= len(edge["intro"]["thumbs"]) <= 6 and {v for v, _ in edge["intro"]["thumbs"]} <= set(VIDS)
         off = PE.compile_edge([], VIDS, "chill", 3)["plan"]["edge"]
         assert not off["avatar"]["on"] and off["avatar"]["cues"] == [] and not off["intro"]["on"]
-        # the page: the avatar's options show and compile
+        # the page: the avatar's options show and compile (an earlier test's finished job set aside first)
+        import mix_jobs
+        mix_jobs.forget(PE.JOB_KEY)
         from tests.apptest_util import errors, page_app
         at = page_app("pages/1_Compilation_Planner.py", timeout=300)
         at.session_state["planner_mode"] = "⏱️ Edge Mode"
@@ -365,7 +376,8 @@ def test_compile_carries_the_avatar_and_the_intro(monkeypatch, tmp_path):
         assert not errors(at), errors(at)
         at.radio(key="edge_avatar_mode").set_value("split")
         at.run()
-        at.button(key="edge_go").click().run()
+        at.button(key="edge_go_only").click().run()
+        _wait_job(at)
         assert not errors(at), errors(at)
         e = at.session_state["edge_result"]["plan"]["edge"]
         assert e["avatar"]["on"] and e["avatar"]["mode"] == "split" and e["intro"]["on"]
@@ -803,7 +815,7 @@ def test_compile_carries_the_new_switches_and_matches_the_beat_round_by_round(mo
         res = PE.compile_edge([], VIDS, "chill", 3)
         edge = res["plan"]["edge"]
         assert edge["signals"] == {"on": True, "sound": True, "timer": True, "flash": True} and edge["round_badge"]["on"]
-        assert edge["music"]["fade_stop"] and edge["music"]["duck"]
+        assert edge["music"]["fade_stop"] and not edge["music"]["duck"]      # a steady background under her lines
         _check_plan(res["plan"], 360.0)
         rounds = {}
         for e in res["plan"]["timeline"]:
@@ -881,14 +893,15 @@ def test_the_joins_are_the_mix_engines_stem_blends_round_by_round(tmp_path, monk
     assert all(EE.blend_bars(t) == 2 for t in tracks.values())      # 2 bars ≈ 3.8 s at 120–126 BPM
     def piece(g, r, profs, tid, bar, offset, carry=False, first=False, play=20.0):
         return {"group": g, "round": r, "profile": profs[0], "profiles": profs, "track_id": tid, "bar": bar,
-                "offset": offset, "play": play, "carry": carry, "first": first}
+                "offset": offset, "play": play, "carry": carry, "first": first,
+                "target": {"wait": 0.29, "medium": 0.66, "extra": 0.95, "slow": 0.38}[profs[0]]}
     # a stretch that carries straight on is one piece of the recipe; every other join a 🧠 blend
     recs = EE.round_recipes([piece(0, 1, ["wait", "slow"], "mix_song_c", 0.0, 0.0, first=True),
                              piece(1, 1, ["medium", "fast"], "mix_song_a", 4.0, 20.0),
                              piece(2, 1, ["extra", "stop"], "mix_song_a", 24.0, 40.0, carry=True)], tracks)
     r1 = recs[0][1]["pieces"]
     assert [(p["track"], p["start"], p["end"]) for p in r1] == [("mix_song_c", 0.0, 20.0), ("mix_song_a", 4.0, 44.0)]
-    assert r1[1]["xfade"]["neural"] == {"profile": "drums_first", "bars": 2} and "xfade" not in r1[0]
+    assert r1[1]["xfade"]["neural"] == {"profile": "bass_drop", "bars": 2} and "xfade" not in r1[0]   # livelier: the drop on the change
     # rendered by the Mix engine, a round at a time (songs of 64 s and 38 s; stretches of 20 s here)
     pieces = [piece(0, 1, ["wait", "slow"], "mix_song_c", 0.0, 0.0, first=True),
               piece(1, 1, ["medium", "fast"], "mix_song_a", 4.0, 20.0),
@@ -896,7 +909,7 @@ def test_the_joins_are_the_mix_engines_stem_blends_round_by_round(tmp_path, monk
               piece(3, 2, ["wait", "slow"], "mix_song_c", 8.0, 60.0, first=True)]
     recs = EE.round_recipes(pieces, tracks)
     assert [(r, s_) for r, _, s_ in recs] == [(1, 60.0), (2, 20.0)]
-    assert [p.get("xfade", {}).get("neural", {}).get("profile") for p in recs[0][1]["pieces"]] == [None, "drums_first", "bass_drop"]
+    assert [p.get("xfade", {}).get("neural", {}).get("profile") for p in recs[0][1]["pieces"]] == [None, "bass_drop", "bass_drop"]
     monkeypatch.setattr(render_preview, "colab_to_local", lambda p: p)
     got, warns = EE.render_rounds(pieces, tracks, tmp_path)
     assert [(r, secs) for r, _, secs in got] == [(1, 60.0), (2, 20.0)] and not [w for w in warns if "stems" in w]
@@ -962,3 +975,86 @@ def test_the_render_plays_the_energy_mix_under_the_fades(tmp_path, monkeypatch):
     full = _level(out, 25, 35)
     assert full > 0.1 and _level(out, 0, 2) < 0.2 * full and _level(out, 58, 59.9) < 0.2 * full    # 🌙 still on top
     assert _level(out, 85, 95) > 0.5 * full                # round 2's own file, from 60 s
+
+
+# ---------------------------------------------------------------------------
+# 15 Nov (afternoon): drops on the phase change, 🎭 intro / outro footage, compile & render on the server
+# ---------------------------------------------------------------------------
+
+def test_a_livelier_stretch_lands_its_drop_on_the_phase_change():
+    import edge_energy as EE
+    m = _emap([0.3] * 10 + [0.9] * 50)                     # the energy jumps at 20 s…
+    m["drops"] = [60.0]                                     # …and the analysis has a drop at 60 s
+    assert EE.drop_score(m, 60.0) == 1.0 and 0.9 < EE.drop_score(m, 20.0) < 1.0 and EE.drop_score(m, 40.0) == 0.0
+    sched = [{"index": k, "round": 1, "profile": p, "start": 20.0 * k, "end": 20.0 * k + 20.0}
+             for k, p in enumerate(("wait", "slow", "extra", "stop"))]
+    calm = _emap([0.25] * 60)
+    got = EE.pick_sections(sched, {"calm": calm, "drop": m}, allowed=lambda ph: ["calm"] if ph["profile"] in ("wait", "slow") else ["drop"])
+    assert got[1]["track_id"] == "drop" and got[1]["bar"] == 60.0       # Extra starts right on the song's drop
+    recs = EE.round_recipes(got, {"calm": {"bpm": 120}, "drop": {"bpm": 120}})
+    assert recs[0][1]["pieces"][1]["xfade"]["neural"]["profile"] == "bass_drop"    # its drums / bass swap in on the change
+    down = [{**got[1], "group": 0, "first": True}, {**got[0], "group": 1, "first": False, "round": 1}]
+    assert EE.round_recipes(down, {"calm": {"bpm": 120}, "drop": {"bpm": 120}})[0][1]["pieces"][1]["xfade"]["neural"]["profile"] == "smooth"
+
+
+def test_wait_favours_intro_clips_and_stop_outro_clips(monkeypatch):
+    out = _timelines(monkeypatch)
+    try:
+        import planner.compose as PC
+        import planner.edge as PE
+        real, seen = PC.compile_plan, []
+
+        def spy(track_id, video_ids, **kw):
+            role = kw.get("block_role")
+            seen.append((track_id, role))
+            return real(track_id, video_ids, **kw)
+        monkeypatch.setattr(PC, "compile_plan", spy)
+        PE.compile_edge([], VIDS, "chill", 3)                # the beat, round by round: each round's own phases
+        role = seen[0][1]
+        assert role(0.0, 10.0) == "intro" and role(30.0, 35.0) is None and role(105.0, 110.0) == "outro"
+        seen.clear()
+        PE.compile_edge(["song_full"], VIDS, "chill", 3)     # a song: its time where it plays in the compilation
+        role = seen[0][1]
+        assert role(2.0, 6.0) == "intro" and role(50.0, 54.0) is None
+        seen.clear()
+        PE.compile_edge(["song_full", "song_noanalysis"], VIDS, "chill", 3, energy_mix=True)
+        parts = {}
+        for tid, role in seen:
+            parts[tid] = role
+        assert any(r is not None for r in parts.values())
+        assert PE._phase_role(PE.E.schedule("chill", 3), 115.0) == "outro"
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_compile_and_render_run_on_the_server_and_the_page_picks_up_the_result(monkeypatch):
+    out = _timelines(monkeypatch)
+    try:
+        import mix_jobs
+        import planner.edge as PE
+        mix_jobs.forget(PE.JOB_KEY)
+        rendered = []
+
+        def fake_render(res, settings, token, prog):
+            prog(0.5, "rendering segment 1/2")
+            rendered.append((res["plan"]["track_duration_sec"], settings["difficulty"]))
+            return ("success", "Rendered test.001.mp4 in 0:01."), "test.001.mp4"
+        monkeypatch.setattr(PE, "_render", fake_render)
+        from tests.apptest_util import errors, page_app
+        at = page_app("pages/1_Compilation_Planner.py", timeout=300)
+        at.session_state["planner_mode"] = "⏱️ Edge Mode"
+        at.run()
+        at.button(key="edge_go").click().run()               # ⏱️ Compile & render: one press
+        assert not errors(at), errors(at)
+        _wait_job(at)
+        assert not errors(at), errors(at)
+        assert rendered == [(360.0, "chill")] and at.session_state["edge_render"] == "test.001.mp4"
+        assert at.session_state["edge_result"]["plan"]["track_duration_sec"] == 360.0
+        # a new session (the phone came back to a reloaded page) finds the finished job too
+        again = page_app("pages/1_Compilation_Planner.py", timeout=300)
+        again.session_state["planner_mode"] = "⏱️ Edge Mode"
+        again.run()
+        assert again.session_state["edge_render"] == "test.001.mp4" and not errors(again)
+        mix_jobs.forget(PE.JOB_KEY)
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
