@@ -48,8 +48,9 @@ MUSIC_UNDER_VOICE = 0.25                           # the songs' volume while the
 MUSIC_IN_STILL = 0.25                              # the songs' volume during Wait and Stop
 STILL = ("wait", "stop")
 MUSIC_FADE_SEC = 0.5                               # how long the songs take to drop to / come back from that
-# 🌙 the songs fade to silence slowly over the whole of every Stop, and come back over the whole of the Wait that
-# follows (Daryl, 15 Nov: the fade-out uses the whole Stop)
+# 🌙 Stop: the songs drop to STOP_DROP within the first STOP_DROP_SEC (noticeably lower as soon as Stop starts), then
+# fade smoothly to silence over the rest of it (Daryl, 16 Nov); they come back over the whole of the Wait that follows
+STOP_DROP, STOP_DROP_SEC, STOP_CURVE = 0.5, 1.0, 1.7
 DUCK_LEVEL = 0.25                                  # 🔉 the songs while a line plays (full volume between lines)
 DUCK_FADE_SEC = 0.3                                # how long they take to dip / come back around a line
 BEAT_UNDER_SONG = 0.6                              # the generated beat's volume when songs play too
@@ -296,7 +297,8 @@ def music_spec(sched: list, *, talking: bool, lines: list = (), fade_stop: bool 
     """The rule for the songs' volume, as numbers (the render turns it into an ffmpeg expression; music_gain reads
     it for one moment).
     - level: the songs' volume where nothing else lowers them — full, or (talking without 🔉 dips) a quarter.
-    - 🌙 fade_stop: over the whole of every Stop the songs fade slowly to silence, and over every Wait they
+    - 🌙 fade_stop: as Stop starts the songs drop to half within a second, then fade smoothly to silence by its end;
+      over every Wait they
       come back up, full as the next phase starts (the first Wait too: the compilation fades in). Off: they drop
       to `still_volume` in Wait and Stop, as before.
     - 🔉 duck (with the voiceover / avatar on): full volume, dipping to DUCK_LEVEL only while a line plays
@@ -316,7 +318,11 @@ def _fade_share(kind: str, a: float, b: float, t: float) -> float:
     if not a <= t < b:
         return 1.0
     if kind == "stop":
-        return min(max(1.0 - (t - a) / max(b - a, 1e-6), 0.0), 1.0)
+        x = t - a
+        if x < STOP_DROP_SEC:
+            return 1.0 - (1.0 - STOP_DROP) * x / STOP_DROP_SEC
+        u = min(max((x - STOP_DROP_SEC) / max(b - a - STOP_DROP_SEC, 1e-6), 0.0), 1.0)
+        return STOP_DROP * (1.0 - u) ** STOP_CURVE
     return min(max((t - a) / max(b - a, 1e-6), 0.0), 1.0)
 
 
@@ -339,7 +345,9 @@ def music_gain_expr(spec: dict) -> str:
     parts = [f"{spec['level']:.4f}"]
     for kind, a, b in spec["fades"]:
         inside = f"gte(t,{a:.3f})*lt(t,{b:.3f})"
-        share = (f"clip(1-(t-{a:.3f})/{max(b - a, 1e-6):.3f},0,1)" if kind == "stop"
+        rest = max(b - a - STOP_DROP_SEC, 1e-6)
+        share = (f"if(lt(t-{a:.3f},{STOP_DROP_SEC}),1-{1 - STOP_DROP:.3f}*(t-{a:.3f})/{STOP_DROP_SEC},"
+                 f"{STOP_DROP}*pow(clip(1-(t-{a + STOP_DROP_SEC:.3f})/{rest:.3f},0,1),{STOP_CURVE}))" if kind == "stop"
                  else f"clip((t-{a:.3f})/{max(b - a, 1e-6):.3f},0,1)")
         parts.append(f"(1-{inside}*(1-{share}))")
     if spec["still"]:

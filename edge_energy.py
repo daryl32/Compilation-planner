@@ -19,10 +19,11 @@ a bass swap where not.
    this machine).
 5. JOINS — built as a Mix recipe per round (rounds meet in the silent Stop → Wait gap, so each renders on its
    own): every join a 🧠 neural blend of NEURAL_BARS bars that ends exactly on the phase change ("comes in early").
-   Into a livelier stretch it is the Bass drop profile — the incoming song's vocals / harmonics tease in, its drums
-   and bass swap in on the downbeat, which IS the phase change (Daryl, 15 Nov: the drop must hit exactly as the
-   phase changes); the picker also prefers starting those stretches on the song's own drops. Into a calmer one:
-   Smooth.
+   Into a livelier stretch it is the "edge_land" profile (core/stem_mix.py) — the incoming drums rise through the
+   blend's second half and are full exactly on the change, its bass swaps on that downbeat, harmonics and vocals
+   blend in beneath; on the change's first frame only the incoming song is left (Daryl, 16 Nov: Drums first
+   sounded good but landed a bar early — the drop must hit exactly as the phase changes). The picker also
+   prefers starting those stretches on the song's own drops. Into a calmer one: Smooth.
 """
 
 from __future__ import annotations
@@ -83,7 +84,9 @@ def window_energy(emap: dict, a: float, b: float) -> float:
 
 def groups(sched: list) -> list:
     """The phases in pairs, round by round: [[phase index, …]] — Wait + Slow, Medium + Fast, Extra + Stop when they
-    come one after the other in a round; any other phase on its own."""
+    come one after the other in a round; then the phases left on their own pair up with a neighbour that is also on
+    its own (Hard's random draws, Medium's extra Slow…), so a stretch of music lasts 40 s wherever it can (Daryl,
+    16 Nov: no join every 20 s). Only a phase with no free neighbour stands alone."""
     out, k = [], 0
     while k < len(sched):
         ph = sched[k]
@@ -94,7 +97,14 @@ def groups(sched: list) -> list:
         else:
             out.append([k])
             k += 1
-    return out
+    merged = []
+    for g in out:                                          # lone phases, next to each other in a round: one stretch
+        if (len(g) == 1 and merged and len(merged[-1]) == 1 and sched[merged[-1][0]]["round"] == sched[g[0]]["round"]
+                and sched[g[0]]["profile"] != "stop"):
+            merged[-1] = merged[-1] + g
+        else:
+            merged.append(g)
+    return merged
 
 
 def drop_score(emap: dict, bar: float) -> float:
@@ -207,7 +217,7 @@ def round_recipes(pieces: list, tracks: dict) -> list:
                      "part": "full", "uid": f"g{p['group']}", "label": " + ".join(x.title() for x in p["profiles"])}
             if rec_pieces:
                 livelier = float(p.get("target", 0.5)) > float(prev_target) + 0.05
-                piece["xfade"] = {"neural": {"profile": "bass_drop" if livelier else "smooth",
+                piece["xfade"] = {"neural": {"profile": "edge_land" if livelier else "smooth",
                                              "bars": blend_bars(tracks.get(p["track_id"]) or {})},
                                   "bass_swap": True}
             rec_pieces.append(piece)

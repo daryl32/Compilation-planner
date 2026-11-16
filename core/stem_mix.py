@@ -177,6 +177,10 @@ _TIMING = {
     "vocal_swap":  {"vocals": (0.0, 1.0), "drums": (0.0, 1.0), "bass": (0.0, 1.0), "other": (0.0, 1.0)},
     "drums_first": {"vocals": (0.4, 1.0), "drums": (0.0, 0.5), "bass": (0.0, 0.5), "other": (0.25, 1.0)},
     "bass_drop":   {"vocals": (0.0, 0.85), "drums": (0.92, 1.0), "bass": (1.0, 1.0), "other": (0.88, 1.0)},
+    # ⏱️ Edge Mode's join (not offered in the Mix tab): like Drums first, but timed to FINISH on the line — the
+    # incoming drums rise through the second half and are full exactly at t = 1, the bass swaps on that downbeat,
+    # harmonics and vocals blend in under them; at t = 1 the outgoing deck is gone (Daryl, 16 Nov)
+    "edge_land":   {"vocals": (0.5, 1.0), "drums": (0.5, 1.0), "bass": (1.0, 1.0), "other": (0.2, 1.0)},
 }
 
 

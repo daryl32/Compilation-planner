@@ -691,7 +691,9 @@ def test_the_music_fades_in_stop_comes_back_over_wait_and_dips_only_under_lines(
     assert g(0.0) == 0.0 and g(10.0) == pytest.approx(0.5) and g(19.99) == pytest.approx(1.0, abs=1e-3)   # in over Wait
     assert g(30.0) == 1.0                                  # full between lines (with the voiceover on)
     assert g(51.0) == pytest.approx(E.DUCK_LEVEL) and g(49.0) == 1.0 and g(53.5) == 1.0
-    assert g(100.0) == 1.0 and g(110.0) == pytest.approx(0.5) and g(119.0) == pytest.approx(0.05)   # out slowly over the whole Stop
+    assert g(100.0) == 1.0 and g(101.0) == pytest.approx(0.5)       # noticeably lower within Stop's first second…
+    assert g(101.0) > g(105.0) > g(110.0) > g(115.0) > g(119.0) > 0.0 and g(119.99) < 0.01     # …then out smoothly
+    assert g(110.0) == pytest.approx(0.5 * (10 / 19) ** 1.7, rel=1e-3)
     assert g(130.0) == pytest.approx(0.5)                   # the next round's Wait brings it back
     old = E.music_spec(sched, talking=True, fade_stop=False, duck=False)      # switched off: as before
     assert E.music_gain(old, 30.0) == 0.25 and E.music_gain(old, 10.0) == 0.25
@@ -724,9 +726,10 @@ def test_the_rendered_music_follows_the_rule_and_the_bell_rings_at_each_change(t
     assert full > 0.1
     assert _level(out, 0.0, 2.0) < 0.15 * full and _level(out, 17.5, 19.5) > 0.85 * full     # fades in over Wait
     assert _level(out, 36.0, 39.0) == pytest.approx(full, rel=0.1)                            # full after the line
-    assert _level(out, 41.0, 43.0) > 0.8 * full                                               # out slowly over Stop:
-    assert _level(out, 49.0, 51.0) == pytest.approx(0.5 * full, rel=0.12)                     # half way at its middle
-    assert _level(out, 57.0, 59.5) < 0.2 * full
+    assert _level(out, 40.0, 40.3) > 0.75 * full                                              # Stop: down within a second…
+    assert _level(out, 41.2, 41.8) == pytest.approx(0.48 * full, rel=0.12)
+    assert _level(out, 49.0, 51.0) == pytest.approx(0.5 * (9.5 / 19) ** 1.7 * full, rel=0.2)    # …then out smoothly
+    assert _level(out, 57.0, 59.5) < 0.05 * full
     assert _level(out, 59.6, 59.95) < 0.05 * full
     edge["voiceover"]["cues"] = []
     edge["voiceover"]["on"] = False
@@ -850,7 +853,10 @@ def test_the_phases_play_in_pairs_on_the_stretch_that_fits_their_energy():
     sched = E.schedule("chill", 3)                         # 18 phases → 9 pairs
     assert EE.groups(sched)[:3] == [[0, 1], [2, 3], [4, 5]] and len(EE.groups(sched)) == 9
     med = E.schedule("medium", 3)                          # wait slow | medium fast | slow | medium fast | extra stop
-    assert [len(g) for g in EE.groups(med)[:5]] == [2, 2, 1, 2, 2]
+    assert [len(g) for g in EE.groups(med)[:5]] == [2, 2, 1, 2, 2]     # (the extra Slow has no free neighbour)
+    hard = [{"index": k, "round": 1, "profile": p, "start": 20.0 * k, "end": 20.0 * k + 20.0}
+            for k, p in enumerate(("wait", "fast", "extra", "extra", "slow", "medium", "fast", "extra", "stop"))]
+    assert EE.groups(hard) == [[0, 1], [2, 3], [4], [5, 6], [7, 8]]       # lone draws pair up with a lone neighbour
     calm = _emap([0.1] * 30 + [0.4] * 30)                  # 120 s: quiet, then gentle
     loud = _emap([0.6] * 30 + [1.0] * 30)                  # 120 s: busy, then the peak
     got = EE.pick_sections(sched, {"calm": calm, "loud": loud})
@@ -901,7 +907,7 @@ def test_the_joins_are_the_mix_engines_stem_blends_round_by_round(tmp_path, monk
                              piece(2, 1, ["extra", "stop"], "mix_song_a", 24.0, 40.0, carry=True)], tracks)
     r1 = recs[0][1]["pieces"]
     assert [(p["track"], p["start"], p["end"]) for p in r1] == [("mix_song_c", 0.0, 20.0), ("mix_song_a", 4.0, 44.0)]
-    assert r1[1]["xfade"]["neural"] == {"profile": "bass_drop", "bars": 2} and "xfade" not in r1[0]   # livelier: the drop on the change
+    assert r1[1]["xfade"]["neural"] == {"profile": "edge_land", "bars": 2} and "xfade" not in r1[0]   # livelier: full in on the change
     # rendered by the Mix engine, a round at a time (songs of 64 s and 38 s; stretches of 20 s here)
     pieces = [piece(0, 1, ["wait", "slow"], "mix_song_c", 0.0, 0.0, first=True),
               piece(1, 1, ["medium", "fast"], "mix_song_a", 4.0, 20.0),
@@ -909,7 +915,7 @@ def test_the_joins_are_the_mix_engines_stem_blends_round_by_round(tmp_path, monk
               piece(3, 2, ["wait", "slow"], "mix_song_c", 8.0, 60.0, first=True)]
     recs = EE.round_recipes(pieces, tracks)
     assert [(r, s_) for r, _, s_ in recs] == [(1, 60.0), (2, 20.0)]
-    assert [p.get("xfade", {}).get("neural", {}).get("profile") for p in recs[0][1]["pieces"]] == [None, "bass_drop", "bass_drop"]
+    assert [p.get("xfade", {}).get("neural", {}).get("profile") for p in recs[0][1]["pieces"]] == [None, "edge_land", "edge_land"]
     monkeypatch.setattr(render_preview, "colab_to_local", lambda p: p)
     got, warns = EE.render_rounds(pieces, tracks, tmp_path)
     assert [(r, secs) for r, _, secs in got] == [(1, 60.0), (2, 20.0)] and not [w for w in warns if "stems" in w]
@@ -992,7 +998,7 @@ def test_a_livelier_stretch_lands_its_drop_on_the_phase_change():
     got = EE.pick_sections(sched, {"calm": calm, "drop": m}, allowed=lambda ph: ["calm"] if ph["profile"] in ("wait", "slow") else ["drop"])
     assert got[1]["track_id"] == "drop" and got[1]["bar"] == 60.0       # Extra starts right on the song's drop
     recs = EE.round_recipes(got, {"calm": {"bpm": 120}, "drop": {"bpm": 120}})
-    assert recs[0][1]["pieces"][1]["xfade"]["neural"]["profile"] == "bass_drop"    # its drums / bass swap in on the change
+    assert recs[0][1]["pieces"][1]["xfade"]["neural"]["profile"] == "edge_land"    # its drums / bass full in on the change
     down = [{**got[1], "group": 0, "first": True}, {**got[0], "group": 1, "first": False, "round": 1}]
     assert EE.round_recipes(down, {"calm": {"bpm": 120}, "drop": {"bpm": 120}})[0][1]["pieces"][1]["xfade"]["neural"]["profile"] == "smooth"
 
@@ -1058,3 +1064,17 @@ def test_compile_and_render_run_on_the_server_and_the_page_picks_up_the_result(m
         mix_jobs.forget(PE.JOB_KEY)
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def test_the_edge_join_is_fully_in_exactly_on_the_phase_change():
+    import numpy as np
+    from core import stem_mix as SM
+    t = np.array([0.0, 0.25, 0.45, 0.75, 0.97, 1.0])
+    g = SM.stem_gains(t, "edge_land", total_beats=8)
+    drums_out, drums_in = g["drums"]
+    assert drums_in[2] == 0.0 and 0.4 < drums_in[3] < 0.6 and drums_in[-1] == 1.0    # rises through the second half
+    for stem in SM.STEMS:                                  # on the change: only the incoming song
+        out_, in_ = g[stem]
+        assert in_[-1] == pytest.approx(1.0) and out_[-1] == pytest.approx(0.0, abs=1e-6), stem
+    assert g["bass"][1][3] == 0.0                          # the bass swaps on the downbeat, not before
+    assert "edge_land" not in SM.PROFILES                  # (Edge's own: not offered in the Mix tab)
