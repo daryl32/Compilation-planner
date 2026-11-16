@@ -1061,3 +1061,22 @@ def test_compile_and_render_run_on_the_server_and_the_page_picks_up_the_result(m
         mix_jobs.forget(PE.JOB_KEY)
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def test_a_line_can_be_joined_to_another_and_plays_straight_after_it():
+    import edge_mode as E
+    cm = {"lines": [
+        {"name": "a", "file": "a.mp3", "seconds": 3.0, "cues": [{"type": "phase", "phases": ["slow"], "at": "start", "offset": 0,
+                                                                 "roundList": [], "diffs": []}]},
+        {"name": "b", "file": "b.mp3", "seconds": 2.0, "cues": [{"type": "after", "after": "a", "gap": 0.35, "roundList": ["2"], "diffs": []}]},
+        {"name": "c", "file": "c.mp3", "seconds": 1.0, "cues": [{"type": "after", "after": "b", "gap": 0.5, "roundList": [], "diffs": []}]},
+        {"name": "d", "file": "d.mp3", "seconds": 2.0, "cues": [{"type": "phase", "phases": ["slow"], "at": "start", "offset": 3.5,
+                                                                 "roundList": ["3"], "diffs": []}]}]}
+    got = E.resolve_lines(E.schedule("chill", 3), cm, "chill")
+    by = {(p["line"], p["round"]): p for p in got["plays"]}
+    assert ("b", 1) not in by and by[("b", 2)]["time"] == 120 + 20 + 3.35        # round 2 only, as soon as "a" ends
+    assert by[("c", 2)]["time"] == by[("b", 2)]["time"] + 2.5                    # a chain: c after b after a
+    assert by[("b", 2)]["why"] == "straight after a"
+    assert ("b", 3) not in by and not [c for c in got["clashes"] if c["line"] == "b"]   # (b is for round 2 only)
+    for x, y in zip(got["plays"], got["plays"][1:]):
+        assert y["time"] >= x["time"] + x["seconds"] + E.LINE_GAP - 1e-3

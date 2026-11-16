@@ -793,7 +793,7 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
     by_round = {}
     for ph in sched:
         by_round.setdefault(ph["round"], []).append(ph)
-    fixed, flex, intro, outro, seen_cue = [], [], [], [], {}
+    fixed, flex, intro, outro, seen_cue, after = [], [], [], [], {}, []
     has_last = any("last" in [str(x) for x in c.get("roundList") or []]
                    for ln in cue_map.get("lines") or [] for c in ln.get("cues") or [])
     in_round = lambda c, r: _cue_in_round(c, r, n_rounds, has_last)          # noqa: E731
@@ -811,7 +811,10 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
             t = cue.get("type")
             base = {"line": line["name"], "file": line.get("file"), "seconds": d, "key": key,
                     "breadth": len(cue.get("roundList") or []) or 99}
-            if t == "intro":
+            if t == "after":                               # 🔗 plays as soon as another line ends, wherever that one plays
+                after.append({**base, "cue": cue, "target": str(cue.get("after") or ""),
+                              "gap": max(float(cue.get("gap") if cue.get("gap") is not None else LINE_GAP), 0.0)})
+            elif t == "intro":
                 intro.append((cue.get("order", 99), li, line["name"])); seen_cue[key] = True
             elif t == "outro":
                 outro.append((cue.get("order", 99), li, line["name"])); seen_cue[key] = True
@@ -909,6 +912,29 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
         plays.append({"time": round(t, 3), "seconds": round(c["seconds"], 3), "line": c["line"], "file": c["file"],
                       "profile": c["profile"], "round": c["round"], "why": c["why"], "moved": moved})
         seen_cue[c["key"]] = True
+    for _pass in range(3):                                 # 🔗 joined lines, after the lines they follow (chains: up to 3 deep)
+        for a in after:
+            for tp in [p for p in plays if p["line"] == a["target"]]:
+                done = tp.setdefault("_joined", set())
+                if a["line"] in done or not in_round(a["cue"], tp["round"]):
+                    continue
+                done.add(a["line"])
+                t = tp["time"] + tp["seconds"] + a["gap"]
+                where_ = f"round {tp['round']}, straight after {a['target']}"
+                if t + a["seconds"] > total + 1e-6:
+                    clashes.append({"line": a["line"], "with": "the compilation's end", "round": tp["round"], "where": where_,
+                                    "result": "left out"})
+                    continue
+                hit = next((p for p in plays if p is not tp and t < p["time"] + p["seconds"] + LINE_GAP - 1e-6
+                            and t + a["seconds"] > p["time"] - LINE_GAP + 1e-6), None)
+                if hit is not None:
+                    clashes.append({"line": a["line"], "with": hit["line"], "round": tp["round"], "where": where_, "result": "left out"})
+                    continue
+                plays.append({"time": round(t, 3), "seconds": round(a["seconds"], 3), "line": a["line"], "file": a["file"],
+                              "profile": tp["profile"], "round": tp["round"], "why": f"straight after {a['target']}", "moved": 0.0})
+                seen_cue[a["key"]] = True
+    for p in plays:
+        p.pop("_joined", None)
     for c in flex:
         spans = [(lo, hi - c["seconds"]) for lo, hi in _free_spans(c["lo"], min(c["hi"], total),
                                                                    [(p["time"], p["time"] + p["seconds"]) for p in plays])
