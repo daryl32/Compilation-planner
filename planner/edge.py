@@ -507,6 +507,16 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                 first = seen.setdefault(link["video_id"], [0.0, float(link["clip_start_sec"])])
                 first[0] += float(link["clip_duration_sec"])
     thumbs = [[vid, t] for vid, (_secs, t) in sorted(seen.items(), key=lambda kv: -kv[1][0])[:6]]
+    # 🎯 the stroke bar's beats: the generated beat's, or the songs' thinned / doubled toward each phase's pace
+    song_beats = {tid: PC._load_track(tid).get("beat_times") or [] for tid in dict.fromkeys(p["track_id"] for p in parts)}
+    guide = E.pace_guide(sched, parts if track_ids else [], song_beats)
+    off = E.guide_off_target(guide["per_phase"])
+    if off:
+        worst = max(off, key=lambda q: abs(q["bpm_used"] / q["bpm_target"] - 1))
+        ph_ = sched[worst["index"]]
+        notes.append(f"🎯 Pace guide: {len(off)} phase{'s' if len(off) != 1 else ''} follow the song's beat away from "
+                     f"their pace (e.g. round {ph_['round']} {E.PROFILES[ph_['profile']]['label'].title()}: target "
+                     f"{worst['bpm_target']:.0f} bpm, the song gives {worst['bpm_used']:.0f}).")
     name = f"edge_{difficulty}_{len(sched) and sched[-1]['round']}r" + ("_" + track_ids[0] if track_ids else "_beat")
     plan = {
         **base["plan"],
@@ -533,6 +543,10 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                       "energy_mix": bool(energy_mix and track_ids)},
             "signals": {"on": bool(signals), "sound": bool(signals), "timer": bool(signals), "flash": bool(signals)},
             "round_badge": {"on": bool(round_badge)},
+            # 🎯 the stroke bar by the timer (Daryl, 16 Nov: always on) and ⏭️ the next phase's name under the timer
+            "pace": {"on": True, "beats": guide["beats"], "per_phase": guide["per_phase"],
+                     "table": {d: dict(v) for d, v in E.PACE.items()}},
+            "next_up": {"on": True},
             "phase_tags": {p: list(v) for p, v in (phase_tags or {}).items() if v},
             "avatar": {"on": bool(avatar), "mode": avatar_mode if avatar_mode in E.AVATAR_MODES else "corner",
                        "corner": avatar_corner, "cues": av_cues, "placeholders": missing_avatar},

@@ -41,6 +41,13 @@ PROFILES = {
 ORDER = ["wait", "slow", "medium", "fast", "extra", "stop"]
 
 DIFFICULTIES = {"chill": "😌 Chill", "medium": "🔥 Medium", "hard": "💀 Hard"}
+# 🏃 Each difficulty's speed for each moving phase (bpm), and how much faster each round after the first gets
+# (Daryl, 16 Nov: "pacing seems fine for each"). Wait and Stop have none.
+PACE = {"chill": {"slow": 50, "medium": 80, "fast": 110, "extra": 140},
+        "medium": {"slow": 60, "medium": 100, "fast": 140, "extra": 180},
+        "hard": {"slow": 70, "medium": 110, "fast": 160, "extra": 210}}
+PACE_BUILD = {"chill": 0.0, "medium": 0.03, "hard": 0.05}
+PACE_CAP = 1.25
 HARD_RANDOM = 12                                   # Wait + 12 drawn + Extra + Stop = 15 phases = 300 s
 HARD_WEIGHTS = {"slow": 1.0, "medium": 2.0, "fast": 2.0, "extra": 2.0}
 MIN_ROUNDS, MAX_ROUNDS = 3, 6
@@ -83,6 +90,20 @@ def round_phases(difficulty: str, rng: random.Random = None) -> list:
     raise ValueError(f"Unknown difficulty: {difficulty}")
 
 
+def pace(profile: str, difficulty: str, rnd: int = 1) -> float:
+    """🏃 A phase's speed (bpm) in this difficulty and round: the PACE table, PACE_BUILD faster each round after the
+    first (at most PACE_CAP ×). Wait / Stop: 0."""
+    base = PACE.get(difficulty, {}).get(profile)
+    if base is None:
+        return float(PROFILES[profile]["bpm"])
+    return round(base * min(1.0 + PACE_BUILD.get(difficulty, 0.0) * (max(int(rnd), 1) - 1), PACE_CAP), 1)
+
+
+def phase_bpm(ph: dict) -> float:
+    """The phase's speed: its own (plans from 16 Nov), else its profile's (older plans)."""
+    return float(ph["bpm"]) if ph.get("bpm") is not None else float(PROFILES[ph["profile"]]["bpm"])
+
+
 def round_seconds(difficulty: str) -> float:
     return sum(PROFILES[p]["seconds"] for p in round_phases(difficulty))
 
@@ -95,7 +116,8 @@ def schedule(difficulty: str, rounds: int, seed: int = 0) -> list:
     for r in range(1, rounds + 1):
         for p in round_phases(difficulty, rng):
             d = float(PROFILES[p]["seconds"])
-            out.append({"index": len(out), "round": r, "profile": p, "start": round(t, 3), "end": round(t + d, 3)})
+            out.append({"index": len(out), "round": r, "profile": p, "start": round(t, 3), "end": round(t + d, 3),
+                        "bpm": pace(p, difficulty, r)})
             t += d
     return out
 
@@ -118,7 +140,7 @@ def phase_at(sched: list, t: float) -> dict | None:
 def phase_beats(ph: dict) -> list:
     """One phase's beats: the first on the phase's start, then at its profile's speed. A last beat that would land
     less than half a beat before the next phase starts is left out (it would stumble into the next phase's first)."""
-    bpm = PROFILES[ph["profile"]]["bpm"]
+    bpm = phase_bpm(ph)
     if bpm <= 0:
         return []
     step, out, k = 60.0 / bpm, [], 0
@@ -144,8 +166,8 @@ def beat_track(sched: list) -> dict:
     for ph in sched:
         prof = PROFILES[ph["profile"]]
         lo, hi = int(round(ph["start"] * CURVE_RATE)), min(int(round(ph["end"] * CURVE_RATE)), n)
-        if prof["bpm"] > 0:
-            step = 60.0 / prof["bpm"]
+        if phase_bpm(ph) > 0:
+            step = 60.0 / phase_bpm(ph)
             pulse = np.cos(np.pi * (((t[lo:hi] - ph["start"]) % step) / step)) ** 8      # 1 on the beat, 0 between
             rms[lo:hi] = prof["level"] * (0.65 + 0.35 * pulse)
             kick[lo:hi] = pulse
@@ -153,7 +175,7 @@ def beat_track(sched: list) -> dict:
         else:
             rms[lo:hi] = prof["level"]
             down.append(float(ph["start"]))
-    bpms = [PROFILES[ph["profile"]]["bpm"] for ph in sched if PROFILES[ph["profile"]]["bpm"] > 0]
+    bpms = [phase_bpm(ph) for ph in sched if phase_bpm(ph) > 0]
     r3 = lambda a: [round(float(x), 3) for x in a]          # noqa: E731
     return {
         "track_id": TRACK_ID, "source_path": "", "duration_sec": round(total, 3),
@@ -165,6 +187,126 @@ def beat_track(sched: list) -> dict:
                      "methods": {"beats": "edge mode"}},
         "edge_generated": True,
     }
+
+
+# ---------------------------------------------------------------------------
+# 🎯 The pace guide: the beats the stroke bar moves on
+# ---------------------------------------------------------------------------
+
+GUIDE_STEPS = (0.25, 0.5, 1.0, 2.0)          # a song's beat thinned (every 4th / 2nd) or doubled to near the phase's pace
+GUIDE_OFF = 0.15                             # further than this from the phase's pace: the result page says so
+
+
+def _song_beats_at(parts: list, beats: dict, a: float, b: float) -> list:
+    """The songs' beats heard between a and b (compilation time). parts: [{"track_id", "offset" (where it starts in
+    the compilation), "play", "bar" / "start" (where in the song)}]; beats: {track_id: [song-time beats]}."""
+    out = []
+    for p in parts:
+        o0, o1 = float(p["offset"]), float(p["offset"]) + float(p["play"])
+        if o1 <= a or o0 >= b:
+            continue
+        s0 = float(p.get("bar", p.get("start", 0.0)) or 0.0)
+        for t in beats.get(p["track_id"]) or ():
+            c = o0 + float(t) - s0
+            if max(a, o0) - 1e-6 <= c < min(b, o1) - 1e-6:
+                out.append(round(c, 4))
+    return sorted(set(out))
+
+
+def pace_guide(sched: list, parts: list = (), beats: dict = None) -> dict:
+    """🎯 The stroke bar's beats for the whole compilation → {"beats": [...], "per_phase": [{"index", "bpm_target",
+    "bpm_used", "source"}]}. With no songs: the generated beat's own hits (exact). With songs: the beats of the song
+    playing, thinned to every 2nd / 4th or doubled, whichever comes nearest the phase's pace — the bar stays on the
+    music. Too few song beats in a phase (an unanalysed song): the phase's own pace. Wait / Stop: none."""
+    beats = beats or {}
+    out, info = [], []
+    for ph in sched:
+        target = phase_bpm(ph)
+        if target <= 0:
+            continue
+        a, b = float(ph["start"]), float(ph["end"])
+        got = _song_beats_at(list(parts or ()), beats, a, b) if parts else []
+        if len(got) < 4:
+            own = phase_beats(ph)
+            out += own
+            info.append({"index": ph["index"], "bpm_target": target, "bpm_used": target,
+                         "source": "song (no beats: the phase's pace)" if parts else "beat"})
+            continue
+        step = float(np.median(np.diff(got)))
+        song_bpm = 60.0 / max(step, 1e-6)
+        f = min(GUIDE_STEPS, key=lambda k: abs(math.log2(song_bpm * k / target)))
+        if f >= 1.0:
+            g = list(got)
+            if f == 2.0:
+                g += [round((x + y) / 2, 4) for x, y in zip(got, got[1:])]
+        else:
+            g = got[::int(round(1 / f))]
+        out += g
+        info.append({"index": ph["index"], "bpm_target": target, "bpm_used": round(song_bpm * f, 1), "source": "song"})
+    return {"beats": sorted(set(round(t, 4) for t in out)), "per_phase": info}
+
+
+def guide_off_target(per_phase: list) -> list:
+    """The phases whose guide is further than GUIDE_OFF from their pace (the song can't be thinned / doubled near it)."""
+    return [p for p in per_phase if p["bpm_target"] and abs(p["bpm_used"] / p["bpm_target"] - 1.0) > GUIDE_OFF]
+
+
+def guide_position(beats, t: float) -> float | None:
+    """Where the stroke bar's marker is at time t: 0 = top, 1 = bottom — at the top on one beat, the bottom on the
+    next, easing between (it lingers at the ends). None before the first beat or after the last."""
+    import bisect
+    k = bisect.bisect_right(beats, t) - 1
+    if k < 0 or k + 1 >= len(beats):
+        return None
+    frac = (t - beats[k]) / max(beats[k + 1] - beats[k], 1e-6)
+    return 0.5 - 0.5 * math.cos(math.pi * (k + frac))
+
+
+def guide_bar(height: int):
+    """The stroke bar's track: a dark see-through rounded bar. Returns (track picture, its width)."""
+    from PIL import Image, ImageDraw
+    w = max(int(height * 0.09) // 2 * 2, 6)
+    s = 3
+    img = Image.new("RGBA", (w * s, height * s), (0, 0, 0, 0))
+    ImageDraw.Draw(img).rounded_rectangle((0, 0, w * s - 1, height * s - 1), radius=w * s // 2, fill=(0, 0, 0, 150))
+    return img.resize((w, height), Image.LANCZOS), w
+
+
+def guide_marker(width: int, colour, dim: bool = False):
+    """The stroke bar's marker: a pill a little wider than the bar, in the phase's colour (grey and faint: hands off)."""
+    from PIL import Image, ImageDraw
+    w, h = int(width * 1.8) // 2 * 2, max(int(width * 1.1) // 2 * 2, 4)
+    s = 3
+    img = Image.new("RGBA", (w * s, h * s), (0, 0, 0, 0))
+    fill = (150, 150, 155, 120) if dim else tuple(colour) + (255,)
+    ImageDraw.Draw(img).rounded_rectangle((0, 0, w * s - 1, h * s - 1), radius=h * s // 2, fill=fill,
+                                          outline=(255, 255, 255, 200 if not dim else 60), width=s)
+    return img.resize((w, h), Image.LANCZOS)
+
+
+def next_chip(profile: str | None, width: int):
+    """⏭️ "NEXT ▸ FAST" on a small dark label as wide as the timer, the phase's name on its own colour. profile None:
+    the last phase ("NEXT ▸ END")."""
+    from PIL import Image, ImageDraw
+    s = 3
+    h = max(int(width * 0.17) // 2 * 2, 12)
+    img = Image.new("RGBA", (width * s, h * s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    pad = int(width * 0.06) * s
+    d.rounded_rectangle((pad, 0, width * s - pad, h * s - 1), radius=int(h * s * 0.45), fill=(0, 0, 0, 140))
+    f = _font(int(h * s * 0.52), bold=True)
+    head, name = "NEXT ▸ ", (PROFILES[profile]["label"] if profile else "END")
+    hb, nb = d.textbbox((0, 0), head, font=f), d.textbbox((0, 0), name, font=f)
+    nw = nb[2] - nb[0] + int(h * s * 0.5)
+    total = (hb[2] - hb[0]) + nw
+    x = width * s / 2 - total / 2
+    y = h * s / 2
+    d.text((x - hb[0], y - (hb[3] + hb[1]) / 2), head, font=f, fill=(255, 255, 255, 220))
+    nx = x + (hb[2] - hb[0])
+    colour = tuple(PROFILES[profile]["colour"]) if profile else (90, 90, 95)
+    d.rounded_rectangle((nx, int(h * s * 0.14), nx + nw, int(h * s * 0.86)), radius=int(h * s * 0.3), fill=colour + (255,))
+    d.text((nx + nw / 2 - (nb[2] + nb[0]) / 2, y - (nb[3] + nb[1]) / 2), name, font=f, fill=(255, 255, 255, 255))
+    return img.resize((width, h), Image.LANCZOS)
 
 
 BLOCK_TARGET_SEC = 4.0             # a clip under the generated beat aims for about this long, on whole bars
@@ -180,8 +322,8 @@ def beat_segments(sched: list) -> list:
     for ph in sched:
         prof = PROFILES[ph["profile"]]
         a, b = float(ph["start"]), float(ph["end"])
-        if prof["bpm"] > 0:
-            beat = 60.0 / prof["bpm"]
+        if phase_bpm(ph) > 0:
+            beat = 60.0 / phase_bpm(ph)
             n_beats = min((4, 8, 16), key=lambda k: abs(k * beat - BLOCK_TARGET_SEC) + 1e-6 * k)   # a tie: the shorter
             size = n_beats * beat
         else:
@@ -192,8 +334,8 @@ def beat_segments(sched: list) -> list:
         for k, s in enumerate(cuts):
             e = cuts[k + 1] if k + 1 < len(cuts) else b
             out.append({"start": round(s, 3), "end": round(e, 3), "energy": prof["level"], "intensity": prof["level"],
-                        "section_type": "rhythmic", "driver": "drums" if prof["bpm"] > 0 else "loudness",
-                        "bpm": float(prof["bpm"]) or None, "edge_profile": ph["profile"]})
+                        "section_type": "rhythmic", "driver": "drums" if phase_bpm(ph) > 0 else "loudness",
+                        "bpm": phase_bpm(ph) or None, "edge_profile": ph["profile"]})
     return out
 
 
@@ -541,7 +683,10 @@ def describe(difficulty: str, rounds: int) -> str:
     tot = r * rounds
     return (f"{rounds} rounds × {int(r // 60)}:{int(r % 60):02d} = {int(tot // 60)}:{int(tot % 60):02d} · "
             + " → ".join(PROFILES[p]["label"].title() for p in (round_phases(difficulty) if difficulty != "hard" else
-                                                                 ["wait"])) + (" → 12 at random → Extra → Stop" if difficulty == "hard" else ""))
+                                                                 ["wait"])) + (" → 12 at random → Extra → Stop" if difficulty == "hard" else "")
+            + " · 🏃 " + " / ".join(f"{PACE[difficulty][p]}" for p in ("slow", "medium", "fast", "extra")) + " bpm"
+            + (f", +{PACE_BUILD[difficulty]:.0%} a round" if PACE_BUILD.get(difficulty) else "")) if difficulty in PACE else \
+        (f"{rounds} rounds")
 
 
 # ---------------------------------------------------------------------------

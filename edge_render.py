@@ -581,6 +581,53 @@ def _badge_xy(corner: str, frame: tuple, timer: tuple, badge: tuple, margin_shar
     return (x, ty - badge[1] - gap) if corner.startswith("bottom") else (x, ty + timer[1] + gap)
 
 
+def _rgba(img):
+    import numpy as np
+    a = np.asarray(img.convert("RGBA"), dtype=np.uint8)
+    return a[..., :3].copy(), a[..., 3:4].astype(np.uint16)
+
+
+def _guide_layers(edge: dict, sched: list, corner: str, frame: tuple, badges: dict) -> dict:
+    """🎯 The stroke bar (beside the timer's ring, on the side away from the frame's edge) and ⏭️ the next-phase labels
+    (under the round label, or under the timer) → {"bar": {...}, "next": {phase index: (picture, solid, x, y)}}.
+    Plans from before 16 Nov have neither."""
+    W, H = frame
+    tw, th = E.overlay_size(H)
+    tx, ty = _corner_xy(corner, (W, H), (tw, th))
+    out = {}
+    pace = edge.get("pace") or {}
+    if pace.get("on") and pace.get("beats"):
+        ring = tw - 8
+        track, bw = E.guide_bar(ring)
+        gap = max(int(W * 0.008), 3)
+        mk = {p: _rgba(E.guide_marker(bw, E.PROFILES[p]["ring"])) for p in E.ORDER}
+        dim = _rgba(E.guide_marker(bw, (0, 0, 0), dim=True))
+        mw, mh = mk["slow"][0].shape[1], mk["slow"][0].shape[0]
+        x = tx + tw + gap if corner.endswith("left") else tx - mw - gap
+        y = ty + 4
+        out["bar"] = {"beats": [float(t) for t in pace["beats"]], "track": _rgba(track),
+                      "track_x": x + (mw - bw) // 2, "y": y, "height": ring, "markers": mk, "dim": dim, "marker_x": x,
+                      "marker_h": mh}
+    if (edge.get("next_up") or {}).get("on") and sched:
+        chips = {}
+        gap = max(int(H * 0.012), 2)
+        out["next"] = {}
+        for k, ph in enumerate(sched):
+            nxt = sched[k + 1]["profile"] if k + 1 < len(sched) else None
+            if nxt not in chips:
+                chips[nxt] = _rgba(E.next_chip(nxt, tw))
+            rgb, solid = chips[nxt]
+            ch = rgb.shape[0]
+            badge = badges.get(ph["round"])
+            if corner.startswith("bottom"):                # stacked above the timer (and its round label)
+                top = badge[3] if badge is not None else ty
+                yy = top - ch - gap
+            else:                                          # stacked under them
+                yy = (badge[3] + badge[0].shape[0] if badge is not None else ty + th) + gap
+            out["next"][ph["index"]] = (rgb, solid, tx + (tw - rgb.shape[1]) // 2, yy)
+    return out
+
+
 def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av: dict, frame: tuple, out: Path,
            footage: float = None, extras: dict = None) -> None:
     """One phase's picture → out: that stretch of the footage, the avatar appearances (or the parts of them) that
@@ -639,6 +686,9 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
     flash_n = int(round(E.FLASH_SEC * FPS)) if extras.get("flash") and int(ph.get("index", 0)) > 0 else 0
     tint = np.array(E.PROFILES[ph["profile"]]["ring"], dtype=np.float32)
     badge = extras.get("badge")
+    nxt = extras.get("next")
+    bar = extras.get("guide")
+    moving = E.phase_bpm(ph) > 0
 
     def make(i):
         buf = dec.stdout.read(size) if dec is not None else b""
@@ -662,6 +712,14 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
             _lay(pic, tx, ty, rgb, solid)
         if badge is not None:
             _lay(pic, badge[2], badge[3], badge[0], badge[1])
+        if nxt is not None:
+            _lay(pic, nxt[2], nxt[3], nxt[0], nxt[1])
+        if bar is not None:                                # 🎯 the stroke bar: the marker slides top ↔ bottom on the beats
+            _lay(pic, bar["track_x"], bar["y"], *bar["track"])
+            pos = E.guide_position(bar["beats"], a + i / FPS) if moving else None
+            m = bar["markers"][ph["profile"]] if pos is not None else bar["dim"]
+            pos = 0.5 if pos is None else pos
+            _lay(pic, bar["marker_x"], int(round(bar["y"] + pos * (bar["height"] - bar["marker_h"]))), *m)
         return pic
     try:
         _write_video(out, frame, n_frames, make, [dec] if dec is not None else None)
@@ -744,10 +802,12 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
             a = np.asarray(E.round_badge(r, n_rounds, tw).convert("RGBA"), dtype=np.uint8)
             rgb, solid = a[..., :3].copy(), a[..., 3:4].astype(np.uint16)
             badges[r] = (rgb, solid, *_badge_xy(corner, (W, H), (tw, th), (rgb.shape[1], rgb.shape[0])))
+    guide = _guide_layers(edge, sched, corner, (W, H), badges)
     n = max(1, min(int(workers or min(4, os.cpu_count() or 2)), len(sched) or 1))
     with ThreadPoolExecutor(max_workers=n) as pool:
         jobs = [pool.submit(_piece, combined_video, ph, timers, corner, shows, av, (W, H), piece, footage,
-                            {"flash": bool(signals.get("flash")), "badge": badges.get(ph["round"])})
+                            {"flash": bool(signals.get("flash")), "badge": badges.get(ph["round"]),
+                             "guide": guide.get("bar"), "next": guide.get("next", {}).get(ph["index"])})
                 for ph, piece in zip(sched, pieces)]
         try:
             for done, job in enumerate(as_completed(jobs), 1):

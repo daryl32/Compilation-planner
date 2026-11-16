@@ -44,7 +44,8 @@ def test_the_generated_beat_follows_the_phases(tmp_path):
     beats = np.array(E.beat_times(sched))
     for ph in sched[:6]:
         inside = beats[(beats >= ph["start"]) & (beats < ph["end"])]
-        bpm = E.PROFILES[ph["profile"]]["bpm"]
+        bpm = E.phase_bpm(ph)
+        assert bpm == E.pace(ph["profile"], "chill", ph["round"])
         assert len(inside) == (round(20 * bpm / 60) if bpm else 0)
         if bpm:
             assert abs(inside[0] - ph["start"]) < 1e-6 and abs(np.diff(inside).mean() - 60 / bpm) < 1e-3
@@ -59,7 +60,7 @@ def test_the_generated_beat_follows_the_phases(tmp_path):
     for s in segs:
         by.setdefault(s["edge_profile"], []).append(s["end"] - s["start"])
     assert all(2.0 <= d <= 5.7 for p in ("slow", "medium", "fast", "extra") for d in by[p]) and set(by["wait"]) == {10.0}
-    assert {s["bpm"] for s in segs if s["edge_profile"] == "fast"} == {140.0}
+    assert {s["bpm"] for s in segs if s["edge_profile"] == "fast"} == {110.0}           # 😌 Chill's Fast
     wav = E.write_beat_wav(sched[:3], tmp_path / "beat.wav")
     with wave.open(str(wav)) as w:
         x = np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(float) / 32768
@@ -115,3 +116,60 @@ def test_the_music_fades_in_stop_comes_back_over_wait_and_dips_only_under_lines(
     quiet = E.music_spec(sched, talking=False, fade_stop=False)
     assert E.music_gain(quiet, 30.0) == 1.0 and E.music_gain(quiet, 10.0) == pytest.approx(0.25)
     assert "gte(t" in E.music_gain_expr(spec) and "min(1," in E.music_gain_expr(spec)
+
+
+def test_each_difficulty_has_its_own_pace_building_round_by_round():
+    import edge_mode as E
+    assert [E.pace(p, "chill", 1) for p in ("slow", "medium", "fast", "extra")] == [50, 80, 110, 140]
+    assert [E.pace(p, "hard", 1) for p in ("slow", "medium", "fast", "extra")] == [70, 110, 160, 210]
+    assert E.pace("fast", "chill", 3) == 110 and E.pace("wait", "hard", 2) == 0 and E.pace("stop", "medium", 1) == 0
+    assert E.pace("fast", "medium", 3) == round(140 * 1.06, 1)                       # +3 % a round
+    assert E.pace("extra", "hard", 6) == round(210 * 1.25, 1)                        # +5 % a round, at most 1.25 ×
+    sched = E.schedule("medium", 3)
+    assert all(ph["bpm"] == E.pace(ph["profile"], "medium", ph["round"]) for ph in sched)
+    assert E.phase_bpm({"profile": "fast", "start": 0, "end": 20}) == 140            # an older plan: the profile's
+    r3 = [ph for ph in sched if ph["round"] == 3 and ph["profile"] == "fast"][0]
+    beats = E.phase_beats(r3)
+    assert abs((beats[1] - beats[0]) - 60 / r3["bpm"]) < 1e-3
+
+
+def test_the_pace_guide_follows_the_beat_or_the_song_near_each_phase_pace():
+    import edge_mode as E
+    sched = E.schedule("medium", 3)
+    g = E.pace_guide(sched)                                          # 🥁 no songs: the generated beat, exactly
+    assert g["beats"] == E.beat_times(sched) and all(p["source"] == "beat" for p in g["per_phase"])
+    assert {p["index"] for p in g["per_phase"]} == {ph["index"] for ph in sched if ph["bpm"] > 0}
+    # 🎵 a 120 bpm song from the start: Slow (60) gets every 2nd beat, Fast (140) every beat, Extra (180) every beat
+    total = E.total_seconds(sched)
+    parts = [{"track_id": "s", "offset": 0.0, "play": total}]
+    song = {"s": [k * 0.5 for k in range(int(total * 2) + 4)]}
+    g = E.pace_guide(sched, parts, song)
+    by = {p["index"]: p for p in g["per_phase"]}
+    slow = next(ph for ph in sched if ph["profile"] == "slow")
+    fast = next(ph for ph in sched if ph["profile"] == "fast")
+    assert by[slow["index"]]["bpm_used"] == 60 and by[fast["index"]]["bpm_used"] == 120
+    inside = [t for t in g["beats"] if slow["start"] <= t < slow["end"]]
+    assert all(abs((b - a) - 1.0) < 1e-6 for a, b in zip(inside, inside[1:]))
+    assert not any(ph["start"] <= t < ph["end"] for t in g["beats"] for ph in sched if ph["profile"] in ("wait", "stop"))
+    # a song started part-way (the ⚡ energy mix's "bar"): its beats move to where it plays
+    g2 = E.pace_guide(sched[:2], [{"track_id": "s", "offset": 20.0, "play": 20.0, "bar": 30.25}], song)
+    assert abs(g2["beats"][0] - 20.25) < 1e-6
+    # no beats for the song: the phase's own pace
+    g3 = E.pace_guide(sched[:2], parts, {})
+    assert g3["per_phase"][0]["source"].startswith("song (no beats") and g3["beats"] == E.phase_beats(sched[1])
+    # off target by more than 15 % is reported
+    assert E.guide_off_target([{"index": 1, "bpm_target": 140, "bpm_used": 110}]) and \
+        not E.guide_off_target([{"index": 1, "bpm_target": 140, "bpm_used": 130}])
+
+
+def test_the_stroke_bar_moves_top_to_bottom_on_the_beats_and_the_labels_draw():
+    import edge_mode as E
+    beats = [10.0, 11.0, 12.0, 13.0]
+    assert E.guide_position(beats, 10.0) == 0.0 and abs(E.guide_position(beats, 11.0) - 1.0) < 1e-9
+    assert abs(E.guide_position(beats, 10.5) - 0.5) < 1e-9 and abs(E.guide_position(beats, 12.0)) < 1e-9
+    assert E.guide_position(beats, 9.0) is None and E.guide_position(beats, 13.5) is None
+    track, w = E.guide_bar(200)
+    assert track.size == (w, 200) and E.guide_marker(w, (255, 0, 0)).size[0] > w
+    chip = E.next_chip("fast", 180)
+    assert chip.size[0] == 180 and chip.getpixel((90, chip.size[1] // 2))[3] > 0
+    assert E.next_chip(None, 180).size == chip.size

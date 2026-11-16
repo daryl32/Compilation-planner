@@ -369,3 +369,43 @@ def test_phase_signals_colour_the_ring_flash_the_picture_and_the_round_label_sho
     badge_y = top + h + int(360 * 0.012) + int(w * 0.17) // 2
     assert max(_pixel(out, 5.0, cx, badge_y)) > 150         # the round label's white letters / its dark pill under the timer
     assert _level(out, 20.0, 20.4) > 0.01
+
+
+def test_the_stroke_bar_moves_on_the_beat_and_the_next_phase_shows(tmp_path, monkeypatch):
+    import sys
+    import types
+    import edge_mode as E
+    import edge_render as R
+    monkeypatch.setitem(sys.modules, "render_preview", types.SimpleNamespace(get_track_raw_source=lambda t: t))
+    comb = tmp_path / "comb.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x202020:s=640x360:r=25:d=40",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(comb)], check=True)
+    sched = [{"index": 0, "round": 1, "profile": "slow", "start": 0.0, "end": 20.0, "bpm": 60.0},
+             {"index": 1, "round": 1, "profile": "stop", "start": 20.0, "end": 40.0, "bpm": 0.0}]
+    guide = E.pace_guide(sched)
+    edge = {"schedule": sched, "playlist": [], "beat": {"on": True, "volume": 1.0}, "voiceover": {"on": False, "cues": []},
+            "overlay": {"corner": "top-left"}, "avatar": {"on": False}, "intro": {"on": False}, "outro": {"on": False},
+            "signals": {"sound": False, "timer": True, "flash": False}, "round_badge": {"on": False},
+            "pace": {"on": True, "beats": guide["beats"]}, "next_up": {"on": True}}
+
+    def run(cmd):
+        subprocess.run(cmd, capture_output=True, check=True)
+    out = tmp_path / "out.mp4"
+    took = R.finish({"edge": edge}, comb, str(out), types.SimpleNamespace(input_args=lambda raw: ["-i", raw]), tmp_path / "w",
+                    run, 360, 640)
+    assert took["edge_check"] == "ok"
+    lay = R._guide_layers(edge, sched, "top-left", (640, 360), {})
+    bar = lay["bar"]
+    mx = bar["marker_x"] + bar["markers"]["slow"][0].shape[1] // 2
+    top_y = bar["y"] + bar["marker_h"] // 2
+    bottom_y = bar["y"] + bar["height"] - bar["marker_h"] // 2
+    green = lambda px: px[1] > 140 and px[1] > px[0] + 40            # noqa: E731  (Slow's ring colour)
+    assert green(_pixel(out, 4.0, mx, top_y)) and not green(_pixel(out, 4.0, mx, bottom_y))      # beat 5: at the top
+    assert green(_pixel(out, 5.0, mx, bottom_y)) and not green(_pixel(out, 5.0, mx, top_y))      # beat 6: at the bottom
+    assert not green(_pixel(out, 25.0, mx, top_y)) and not green(_pixel(out, 25.0, mx, bottom_y))   # Stop: no marker
+    nx = lay["next"][0]
+    cx, cy = nx[2] + nx[0].shape[1] * 3 // 4, nx[3] + nx[0].shape[0] // 2
+    r, g, b = _pixel(out, 5.0, cx, cy)                               # "NEXT ▸ STOP": the Stop label's grey
+    assert abs(r - g) < 30 and max(r, g, b) > 45
+    r, g, b = _pixel(out, 25.0, cx, cy)                              # the last phase: "NEXT ▸ END"
+    assert max(r, g, b) > 45
