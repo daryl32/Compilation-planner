@@ -127,7 +127,7 @@ def _lay(frame, x: int, y: int, rgb, alpha=None) -> None:
 
 
 def _corner_xy(corner: str, frame: tuple, size: tuple, margin_share: float = 0.035) -> tuple:
-    """Where a picture of `size` sits in a corner of the frame (the same places as edge_mode.overlay_xy)."""
+    """Where a picture of `size` sits in a corner of the frame (a margin of 3.5 % of its height)."""
     W, H = frame
     w, h = size
     m = int(H * margin_share)

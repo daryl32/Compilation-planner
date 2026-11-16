@@ -20,9 +20,9 @@ import streamlit as st
 import plotly.graph_objects as go
 from PIL import Image
 
-from render_preview import render_plan_dict, colab_to_local
-from renders import (delete_render, load_render, render_files, upload_render, clear_local,
-                     auto_clear_enabled)
+from render_preview import colab_to_local
+import render_jobs as _RJ
+from renders import delete_render, load_render, render_files
 import video_ranking as VR
 import catalogue_store as CStore
 import autofill as AF
@@ -2690,7 +2690,7 @@ _fin = st.columns([2, 1.5, 1.5, 0.7])
 _render_clicked = _fin[0].button("🎬 Render Preview", type="primary", width="stretch")
 _save_clicked = _fin[1].button("💾 Save plan", width="stretch")
 _fin[2].download_button(
-    "⬇️ Download plan", data=json.dumps(export_plan, indent=2), file_name=f"{track_id}_plan.json",
+    "⬇️ Download plan", data=_RJ.plan_json(export_plan), file_name=f"{track_id}_plan.json",
     mime="application/json", width="stretch", help="The plan as JSON, for the Blender add-on.")
 _stream_sources = False
 with _fin[3].popover("⚙️", width="stretch", help="Render options"):
@@ -2737,113 +2737,35 @@ def existing_preview_versions() -> list[Path]:
                   key=lambda p: p.name)
 
 
-def next_preview_path() -> Path:
-    existing = existing_preview_versions()
-    used_numbers = []
-    for p in existing:
-        m = re.search(r"\.(\d{3})\.mp4$", p.name)
-        if m:
-            used_numbers.append(int(m.group(1)))
-    next_num = (max(used_numbers) + 1) if used_numbers else 1
-    return PREVIEW_DIR / f"temp-Video-preview-{safe_track_id}.{next_num:03d}.mp4"
+def _classic_render_job(job, plan: dict, stream: bool, token, extra_meta: dict, track_raw: str) -> dict:
+    """🎬 The render as a server job (render_jobs.render) — it carries on when the page is left. Everything it needs
+    was taken from the page when 🎬 was pressed."""
+    note, name = _RJ.render(plan, stream=stream, quick=False, token=token, extra_meta=extra_meta, extra_raw=[track_raw],
+                            prog=lambda f, txt: job.progress(min(f, 1.0), txt))
+    return {"note": note, "render": name}
 
 
-def ensure_render_sources_local() -> list:
-    """Make sure the track's audio and every video the plan uses exist on this machine,
-    downloading any that are missing from Google Drive (sync_pull only brings over the
-    catalogue/audio JSONs, never the media itself). Returns a list of error strings."""
-    needed = {track["source_path"]}
-    for _e in timeline:
-        for _slot in _e["scenes"]:
-            for _lnk in _slot["chain"]:
-                needed.add(catalogues[_lnk["video_id"]]["source_path"])
-    missing = [(raw, Path(colab_to_local(raw))) for raw in sorted(needed)
-               if not Path(colab_to_local(raw)).exists()]
-    errors = []
-    if not missing:
-        return errors
-    for n, (raw, local) in enumerate(missing, 1):
-        if not (_DRIVE_SYNC_AVAILABLE and "MyDrive/" in raw):
-            errors.append(f"{local.name}: not found at {local} and Drive download isn't available")
-            continue
-        _bar = st.progress(0.0, text=f"Downloading {local.name} from Google Drive ({n}/{len(missing)})...")
-        _err = download_source_video(
-            raw.split("MyDrive/", 1)[1], local,
-            progress_callback=lambda p, _b=_bar, _n=local.name, _i=n: _b.progress(
-                min(p, 1.0), text=f"Downloading {_n} from Google Drive ({_i}/{len(missing)})..."),
-        )
-        _bar.empty()
-        if _err:
-            errors.append(f"{local.name}: {_err}")
-    return errors
-
-
+_CLASSIC_JOB = "classic:render"
 if _render_clicked:
-    if not _stream_sources:
-        _src_errors = ensure_render_sources_local()
-        if _src_errors:
-            st.error("Can't render — some source files are missing and couldn't be downloaded:\n\n"
-                     + "\n".join(f"- {e}" for e in _src_errors))
-            st.stop()
-    out_path = next_preview_path()
-    progress_bar = st.progress(0.0, text="Rendering...")
-    _render_started = time.time()
+    from page_setup import drive_token as _drive_token
+    if _RJ.start(_CLASSIC_JOB, "🎬 Rendering", _classic_render_job, json.loads(_RJ.plan_json(export_plan)),
+                 bool(_stream_sources), _drive_token(),
+                 {"project": _build_project_save_dict(),
+                  "project_name": (st.session_state.get("project_save_name") or "").strip() or None},
+                 track["source_path"]) is None:
+        st.warning("A render is already running — it is shown below.")
+    else:
+        st.session_state["classic_job_seen"] = None
+_cjob, _crunning = _RJ.take_finished(_CLASSIC_JOB, "classic_job_seen")
+if _crunning:
+    _RJ.watch(_CLASSIC_JOB)
+elif _cjob is not None:
+    if _cjob.state == "error":
+        st.error(f"Render failed: {_cjob.error}")
+    else:
+        st.session_state["render_drive_note"] = (_cjob.result or {}).get("note")
+        st.session_state["preview_just_rendered"] = (_cjob.result or {}).get("render")      # opens its player below
 
-    def _progress(done, total):
-        progress_bar.progress(done / total, text=f"Rendering segment {done}/{total}...")
-
-    def _notice(text):
-        progress_bar.progress(progress_bar_value[0], text=text)
-
-    progress_bar_value = [0.0]
-
-    def _progress_tracked(done, total):
-        progress_bar_value[0] = done / total
-        _progress(done, total)
-
-    try:
-        _src_stats = render_plan_dict(export_plan, str(out_path), progress_callback=_progress_tracked,
-                                      stream=_stream_sources, notice=_notice,
-                                      app_version=APP_VERSION,
-                                      extra_meta={"project": _build_project_save_dict(),
-                                                  "project_name": (st.session_state.get("project_save_name") or "").strip() or None},
-                                      ) or {}
-        _secs = time.time() - _render_started
-        _how = []
-        if _src_stats.get("streamed"):
-            _how.append(f"{_src_stats['streamed']} streamed from Drive")
-        if _src_stats.get("downloaded"):
-            _how.append(f"{_src_stats['downloaded']} downloaded after a stream failed")
-        if _src_stats.get("local"):
-            _how.append(f"{_src_stats['local']} already on the server")
-        st.session_state["render_last_stats"] = (
-            f"Last render took {int(_secs // 60)}:{int(_secs % 60):02d}"
-            + (f" — source files: {', '.join(_how)}." if _how else ".")
-        )
-        progress_bar.progress(1.0, text="Done.")
-        _token = drive_token()
-        if _token:
-            progress_bar.progress(1.0, text="Uploading to Google Drive…")
-            _err = upload_render(out_path, _token)
-            if _err:
-                st.session_state["render_drive_note"] = ("warning", f"Rendered, but the Drive upload failed: {_err} "
-                                                         f"— upload it later from Media Library → Renders.")
-            elif auto_clear_enabled():
-                clear_local(out_path)
-                st.session_state["render_drive_note"] = ("success", f"Rendered {out_path.name}, saved to Google Drive "
-                                                         f"and cleared from the server.")
-            else:
-                st.session_state["render_drive_note"] = ("success", f"Rendered {out_path.name} and saved to Google Drive.")
-        else:
-            st.session_state["render_drive_note"] = ("info", f"Rendered {out_path.name}. Connect Google Drive (sidebar) "
-                                                     f"to save renders there — then upload it from Media Library → Renders.")
-        st.session_state["preview_just_rendered"] = out_path.name      # opens its player below
-        st.rerun()
-    except Exception as e:
-        st.error(f"Render failed: {e}")
-
-if st.session_state.get("render_last_stats"):
-    st.caption("⏱️ " + st.session_state["render_last_stats"])
 _drive_note = st.session_state.pop("render_drive_note", None)
 if _drive_note:
     getattr(st, _drive_note[0])(_drive_note[1])

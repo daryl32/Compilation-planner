@@ -399,35 +399,6 @@ def write_chime_wav(sched: list, path) -> Path:
 VOICE_EXT = (".mp3", ".m4a", ".wav", ".ogg")
 
 
-def voice_files(folder) -> dict:
-    """{profile: [files]} — the voiceover clips for each phase: <folder>/<profile>/*.mp3 (wait, slow, medium, fast,
-    extra, stop)."""
-    folder = Path(folder)
-    out = {}
-    for p in ORDER:
-        d = folder / p
-        out[p] = sorted(f for f in d.iterdir() if f.suffix.lower() in VOICE_EXT) if d.is_dir() else []
-    return out
-
-
-def voice_cues(sched: list, files: dict, seed: int = 0) -> list:
-    """One cue at the start of every phase: [{"time", "profile", "file" (None = no clip yet → the placeholder
-    tone)}]. A profile's clips take turns in a shuffled order, so none repeats until all have played."""
-    rng = random.Random(seed + 7919)
-    bags, out = {}, []
-    for ph in sched:
-        p = ph["profile"]
-        have = list((files or {}).get(p) or [])
-        pick = None
-        if have:
-            if not bags.get(p):
-                bags[p] = have[:]
-                rng.shuffle(bags[p])
-            pick = str(bags[p].pop())
-        out.append({"time": float(ph["start"]), "profile": p, "file": pick})
-    return out
-
-
 def write_placeholder_cue(profile: str, path) -> Path:
     """A stand-in for a voiceover clip that isn't there yet: short tones, a different pattern for each phase
     (Wait one low, Slow one, Medium two, Fast three, Extra four rising, Stop one long falling)."""
@@ -539,31 +510,18 @@ def round_badge(r: int, n: int, width: int):
 
 def write_overlay(sched: list, folder, frame_height: int, signals: bool = False) -> tuple:
     """Draws the overlay's pictures (one set per phase name in use — the same 20 seconds serve every phase of that
-    name) and writes the list ffmpeg plays them from. Returns (list file, (width, height)). signals: 🔔 the
+    name; the render lays them on itself, edge_render._timer_pictures). Returns (width, height). signals: 🔔 the
     coloured ring, its flash and its pulse (overlay_image)."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     size = overlay_size(frame_height)
     step = 1.0 / OVERLAY_FPS
-    frames = {}
     for p in sorted({ph["profile"] for ph in sched}):
         n = int(round(PROFILES[p]["seconds"] * OVERLAY_FPS))
-        frames[p] = []
         for k in range(n):
             f = folder / f"{p}_{k:04d}.png"
             overlay_image(p, PROFILES[p]["seconds"] - k * step, size, signals).save(f)
-            frames[p].append(f)
-    lines = ["ffconcat version 1.0"]
-    last = None
-    for ph in sched:
-        for f in frames[ph["profile"]]:
-            lines += [f"file '{f.name}'", f"duration {step:.4f}"]
-            last = f
-    if last is not None:
-        lines.append(f"file '{last.name}'")                # the concat reader wants the last picture named twice
-    lst = folder / "overlay.txt"
-    lst.write_text("\n".join(lines) + "\n")
-    return lst, size
+    return size
 
 
 def still_spans(sched: list) -> list:
@@ -576,13 +534,6 @@ def still_spans(sched: list) -> list:
             else:
                 out.append((ph["start"], ph["end"]))
     return out
-
-
-def overlay_xy(corner: str, margin_share: float = 0.035) -> tuple:
-    """ffmpeg overlay positions (x, y expressions) for a corner of the frame."""
-    m = f"(H*{margin_share})"
-    return {"top-left": (m, m), "top-right": (f"W-w-{m}", m), "bottom-left": (m, f"H-h-{m}"),
-            "bottom-right": (f"W-w-{m}", f"H-h-{m}"), "centre": ("(W-w)/2", "(H-h)/2")}.get(corner, (m, m))
 
 
 def describe(difficulty: str, rounds: int) -> str:
@@ -599,27 +550,9 @@ def describe(difficulty: str, rounds: int) -> str:
 
 VIDEO_EXT = (".mp4", ".mov", ".webm", ".m4v")
 AVATAR_MODES = {"corner": "🪟 In a corner", "split": "◧ Split screen"}
-AVATAR_SLOTS = ["intro"] + ORDER                   # <folder>/intro/ and one folder per phase
 AVATAR_CORNER_SHARE = 0.42                         # her box's height, as a share of the frame's
 PLACEHOLDER_CUE_SEC = 3.0                          # how long the stand-in figure shows at a cue
 PLACEHOLDER_INTRO_SEC = 8.0                        # the intro's length until her intro clip exists
-
-
-def clip_files(folder, slots=None, exts=VIDEO_EXT) -> dict:
-    """{slot: [files]} — <folder>/<slot>/* with one of the extensions (the avatar's clips: intro + one per phase)."""
-    folder = Path(folder)
-    out = {}
-    for p in (slots or AVATAR_SLOTS):
-        d = folder / p
-        out[p] = sorted(f for f in d.iterdir() if f.suffix.lower() in exts) if d.is_dir() else []
-    return out
-
-
-def avatar_cues(sched: list, files: dict, seed: int = 0) -> list:
-    """One appearance at the start of every phase: [{"time", "profile", "clip" (None = no clip yet → the stand-in
-    figure)}] — a phase's clips take turns, like the voiceover's. (Daryl's own cue list replaces this rule.)"""
-    return [{"time": c["time"], "profile": c["profile"], "clip": c["file"]}
-            for c in voice_cues(sched, files, seed + 101)]
 
 
 def avatar_placeholder(size: tuple, label: str = "AVATAR"):

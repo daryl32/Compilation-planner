@@ -51,7 +51,10 @@ def test_change_comes_back_to_the_settings_as_they_were_and_a_render_takes_its_n
                 "compose_punch": 0.5, "compose_vocal_rule": False, "compose_natural": True, "compose_lab_min_lines": False,
                 "cs_minlen": 1, "cs_q": "song", "cs_track": at.session_state["cs_track"]}
         assert tracks and all(at.session_state[k] == v for k, v in want.items())
-        at.button(key="cs_go").click().run()
+        import mix_jobs
+        at.button(key="cs_go").click().run()                     # 🤖 Compile only: runs on the server
+        mix_jobs.wait([PC.JOB_KEY], timeout=300)
+        at.run()
         assert not errors(at), errors(at)
         res = at.session_state[PC.RESULT_KEY]
         assert res["used"]["cuts"] == "lines" and res["used"]["punch"] == 0.5 and res["plan"]["story"]["natural"]
@@ -59,6 +62,8 @@ def test_change_comes_back_to_the_settings_as_they_were_and_a_render_takes_its_n
         # 🏷️ a named render
         at.text_input(key="compose_render_name").set_value("  lead  on,   punch half ").run()
         at.button(key="compose_render_btn").click().run()
+        mix_jobs.wait([PC.JOB_KEY], timeout=300)
+        at.run()
         assert not errors(at), errors(at)
         name = at.session_state["compose_render"]
         meta = RN.load_render(Path(PREVIEW_DIR) / name)
@@ -90,6 +95,9 @@ def test_change_comes_back_to_the_settings_as_they_were_and_a_render_takes_its_n
         PC._in_range("t_never_set", 0, 1)
         assert "t_never_set" not in st.session_state
     finally:
+        import mix_jobs
+        import planner.compose as PC
+        mix_jobs.forget(PC.JOB_KEY)                         # a finished job is kept for a reloaded page: not for the next test
         shutil.rmtree(out, ignore_errors=True)
         from config import PREVIEW_DIR
         for p in Path(PREVIEW_DIR).glob("temp-Video-preview-*"):

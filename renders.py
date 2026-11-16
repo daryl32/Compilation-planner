@@ -721,6 +721,13 @@ def reopen_state(meta: dict) -> tuple:
     render, or (None, None) if it has neither a project nor a plan."""
     if isinstance(meta.get("project"), dict):
         return meta["project"], "full"
+    plan = meta.get("plan") if isinstance(meta.get("plan"), dict) else None
+    if plan and plan.get("matching_mode") == "Edge" and isinstance(plan.get("edge"), dict):
+        # ⏱️ an Edge render reopens in ⏱️ Edge Mode: its plan, and the setup it was made with (saved with renders
+        # from 16 Nov; for older ones the page works it out from the plan)
+        return {"plan": plan, "setup": meta.get("edge_setup")}, "edge"
+    if plan and plan.get("matching_mode") == "Auto story":
+        return {"plan": plan}, "compose"                   # 🤖 a new-matcher render reopens there, on its result
     if isinstance(meta.get("plan"), dict) and meta["plan"].get("track_id"):
         return project_from_plan(meta["plan"]), "settings"
     return None, None

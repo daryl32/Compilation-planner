@@ -61,14 +61,14 @@ def test_compile_suggest_and_result(monkeypatch):
 def test_planner_landing_and_new_matcher_pages(monkeypatch):
     out = _timelines(monkeypatch)
     try:
-        from tests.apptest_util import errors, page_app
+        from tests.apptest_util import errors, page_app, press_and_wait
         at = page_app("pages/1_Compilation_Planner.py", timeout=300)
         at.session_state["planner_mode"] = "🤖 New matcher"
         at.run()
         assert not errors(at), errors(at)
         assert at.radio(key="compose_way").value == "🎵 By song"
         assert at.selectbox(key="cs_track").value
-        at.button(key="cs_go").click().run()
+        press_and_wait(at, "cs_go")
         assert not errors(at), errors(at)
         assert any("blocks" in c.value for c in at.caption)
         assert [b for b in at.button if b.key == "compose_save"]
@@ -84,12 +84,12 @@ def test_planner_landing_and_new_matcher_pages(monkeypatch):
         assert at.radio(key="cv_track").value
         at.button(key="cv_more").click().run()                 # stage 2: other videos (optional)
         assert not errors(at), errors(at)
-        at.button(key="cv_go").click().run()
+        press_and_wait(at, "cv_go")
         assert not errors(at), errors(at)
         assert at.session_state[PC_RESULT()]["way"] == "video"
         # 🔁 on the result page: 🚫 a clip → its block's next-best clips show; ✅ one swaps it in, 🔁 redoes the block
         at.session_state["compose_movement_only"] = True
-        at.button(key="compose_again").click().run()
+        press_and_wait(at, "compose_again")
         assert not errors(at), errors(at)
         res = at.session_state[PC_RESULT()]
         import core.story_matcher as SMX

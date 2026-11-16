@@ -272,7 +272,7 @@ def test_natural_and_the_lab_on_the_page(monkeypatch):
     out = _setup(monkeypatch)
     try:
         import planner.compose as PC
-        from tests.apptest_util import errors, page_app
+        from tests.apptest_util import errors, page_app, press_and_wait
         at = page_app("pages/1_Compilation_Planner.py", timeout=300)
         at.session_state["planner_mode"] = "🤖 New matcher"
         at.run()
@@ -294,7 +294,7 @@ def test_natural_and_the_lab_on_the_page(monkeypatch):
         assert not errors(at), errors(at)
         assert not at.number_input(key="compose_min_clip").disabled
         assert any("🧪 Lab — 1 on" in e.label for e in at.expander)
-        at.button(key="cs_go").click().run()
+        press_and_wait(at, "cs_go")
         assert not errors(at), errors(at)
         res = at.session_state[PC.RESULT_KEY]
         assert res["plan"]["story"]["natural"] and res["plan"]["story"]["lab"] == {

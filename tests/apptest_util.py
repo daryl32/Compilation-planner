@@ -48,3 +48,13 @@ def press_match(at) -> bool:
     if go:
         go[0].click().run()
     return bool(go)
+
+
+def press_and_wait(at, key: str, job_key: str = "compose:job", timeout: float = 300):
+    """Press a button whose work runs as a server job (mix_jobs), wait for the job, and let the page pick up its
+    result. A finished job stays on the server for a reloaded page — forget it so the next test starts clean."""
+    import mix_jobs
+    at.button(key=key).click().run()
+    mix_jobs.wait([job_key], timeout=timeout)
+    at.run()
+    return at
