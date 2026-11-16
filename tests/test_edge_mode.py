@@ -907,7 +907,7 @@ def test_the_joins_are_the_mix_engines_stem_blends_round_by_round(tmp_path, monk
                              piece(2, 1, ["extra", "stop"], "mix_song_a", 24.0, 40.0, carry=True)], tracks)
     r1 = recs[0][1]["pieces"]
     assert [(p["track"], p["start"], p["end"]) for p in r1] == [("mix_song_c", 0.0, 20.0), ("mix_song_a", 4.0, 44.0)]
-    assert r1[1]["xfade"]["neural"] == {"profile": "edge_land", "bars": 2} and "xfade" not in r1[0]   # livelier: full in on the change
+    assert r1[1]["xfade"]["neural"] == {"profile": "vocal_swap", "curves": {"preset": "hold_cut"}, "bars": 2} and "xfade" not in r1[0]   # his tested join
     # rendered by the Mix engine, a round at a time (songs of 64 s and 38 s; stretches of 20 s here)
     pieces = [piece(0, 1, ["wait", "slow"], "mix_song_c", 0.0, 0.0, first=True),
               piece(1, 1, ["medium", "fast"], "mix_song_a", 4.0, 20.0),
@@ -915,7 +915,7 @@ def test_the_joins_are_the_mix_engines_stem_blends_round_by_round(tmp_path, monk
               piece(3, 2, ["wait", "slow"], "mix_song_c", 8.0, 60.0, first=True)]
     recs = EE.round_recipes(pieces, tracks)
     assert [(r, s_) for r, _, s_ in recs] == [(1, 60.0), (2, 20.0)]
-    assert [p.get("xfade", {}).get("neural", {}).get("profile") for p in recs[0][1]["pieces"]] == [None, "edge_land", "edge_land"]
+    assert [p.get("xfade", {}).get("neural", {}).get("profile") for p in recs[0][1]["pieces"]] == [None, "vocal_swap", "vocal_swap"]
     monkeypatch.setattr(render_preview, "colab_to_local", lambda p: p)
     got, warns = EE.render_rounds(pieces, tracks, tmp_path)
     assert [(r, secs) for r, _, secs in got] == [(1, 60.0), (2, 20.0)] and not [w for w in warns if "stems" in w]
@@ -998,9 +998,9 @@ def test_a_livelier_stretch_lands_its_drop_on_the_phase_change():
     got = EE.pick_sections(sched, {"calm": calm, "drop": m}, allowed=lambda ph: ["calm"] if ph["profile"] in ("wait", "slow") else ["drop"])
     assert got[1]["track_id"] == "drop" and got[1]["bar"] == 60.0       # Extra starts right on the song's drop
     recs = EE.round_recipes(got, {"calm": {"bpm": 120}, "drop": {"bpm": 120}})
-    assert recs[0][1]["pieces"][1]["xfade"]["neural"]["profile"] == "edge_land"    # its drums / bass full in on the change
+    assert recs[0][1]["pieces"][1]["xfade"]["neural"] == {"profile": "vocal_swap", "curves": {"preset": "hold_cut"}, "bars": 2}
     down = [{**got[1], "group": 0, "first": True}, {**got[0], "group": 1, "first": False, "round": 1}]
-    assert EE.round_recipes(down, {"calm": {"bpm": 120}, "drop": {"bpm": 120}})[0][1]["pieces"][1]["xfade"]["neural"]["profile"] == "smooth"
+    assert EE.round_recipes(down, {"calm": {"bpm": 120}, "drop": {"bpm": 120}})[0][1]["pieces"][1]["xfade"]["neural"]["profile"] == "vocal_swap"
 
 
 def test_wait_favours_intro_clips_and_stop_outro_clips(monkeypatch):
@@ -1064,17 +1064,3 @@ def test_compile_and_render_run_on_the_server_and_the_page_picks_up_the_result(m
         mix_jobs.forget(PE.JOB_KEY)
     finally:
         shutil.rmtree(out, ignore_errors=True)
-
-
-def test_the_edge_join_is_fully_in_exactly_on_the_phase_change():
-    import numpy as np
-    from core import stem_mix as SM
-    t = np.array([0.0, 0.25, 0.45, 0.75, 0.97, 1.0])
-    g = SM.stem_gains(t, "edge_land", total_beats=8)
-    drums_out, drums_in = g["drums"]
-    assert drums_in[2] == 0.0 and 0.4 < drums_in[3] < 0.6 and drums_in[-1] == 1.0    # rises through the second half
-    for stem in SM.STEMS:                                  # on the change: only the incoming song
-        out_, in_ = g[stem]
-        assert in_[-1] == pytest.approx(1.0) and out_[-1] == pytest.approx(0.0, abs=1e-6), stem
-    assert g["bass"][1][3] == 0.0                          # the bass swaps on the downbeat, not before
-    assert "edge_land" not in SM.PROFILES                  # (Edge's own: not offered in the Mix tab)

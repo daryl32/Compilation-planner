@@ -18,17 +18,14 @@ a bass swap where not.
    song is cheaper where the bars either side sound alike (the Mix tab's bar similarity, when its features are on
    this machine).
 5. JOINS — built as a Mix recipe per round (rounds meet in the silent Stop → Wait gap, so each renders on its
-   own): every join a 🧠 neural blend of NEURAL_BARS bars that ends exactly on the phase change ("comes in early").
-   Into a livelier stretch it is the "edge_land" profile (core/stem_mix.py) — the incoming drums rise through the
-   blend's second half and are full exactly on the change, its bass swaps on that downbeat, harmonics and vocals
-   blend in beneath; on the change's first frame only the incoming song is left (Daryl, 16 Nov: Drums first
-   sounded good but landed a bar early — the drop must hit exactly as the phase changes). The picker also
-   prefers starting those stretches on the song's own drops. Into a calmer one: Smooth.
+   own): every join is the 🧠 neural blend Daryl tested in the Mix tab (16 Nov: "worked well") — Vocal swap,
+   shaped Hold then cut, 2 bars — placed before the join, so the outgoing song holds and then cuts over to the
+   incoming one as the phase changes. (Tried before and dropped: drums first — landed a bar early; bass drop; an
+   Edge-only "edge_land" timing.) A pair of phases is one continuous stretch, with no join inside.
 """
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import numpy as np
@@ -41,8 +38,6 @@ REUSE_PENALTY = 0.6                # a stretch already played (scaled by how muc
 CARRY_BONUS = 0.06                 # carrying straight on in the same song (no join)
 SWITCH_PENALTY = 0.12              # a change of song, times (1 − how well key and tempo fit)
 JUMP_BONUS = 0.05                  # a jump within a song, times how alike the bars either side sound
-NEURAL_BARS = 2                    # 🧠 the blend's length (≈ 3–4 s — twice the first version's 1.5 s)
-MIN_BLEND_SEC = 3.0                # … at least this long (more bars for a fast song)
 DROP_BONUS = 0.08                  # a livelier stretch starting on one of the song's own drops (its analysis)
 RISE_BONUS = 0.05                  # … or where its energy jumps (times the jump, 0–1)
 
@@ -192,11 +187,13 @@ def pick_sections(sched: list, maps: dict, allowed=None, jump_fit=None) -> list:
     return out
 
 
+# 🧠 Every Edge join (Daryl, 16 Nov — tested in the Mix tab: "worked well"): Vocal swap, shaped Hold then cut, 2 bars
+JOIN = {"profile": "vocal_swap", "curves": {"preset": "hold_cut"}, "bars": 2}
+
+
 def blend_bars(track: dict) -> int:
-    """🧠 How many bars a blend into this song lasts: NEURAL_BARS, more for a fast song (at least MIN_BLEND_SEC)."""
-    bpm = float(track.get("bpm") or 120.0) or 120.0
-    bar = 4 * 60.0 / bpm
-    return max(NEURAL_BARS, int(math.ceil(MIN_BLEND_SEC / bar - 1e-6)))
+    """🧠 How many bars a blend lasts: always JOIN's 2 (Daryl's tested setting), whatever the song's tempo."""
+    return int(JOIN["bars"])
 
 
 def round_recipes(pieces: list, tracks: dict) -> list:
@@ -207,21 +204,18 @@ def round_recipes(pieces: list, tracks: dict) -> list:
     out = []
     for r in sorted({p["round"] for p in pieces}):
         mine = [p for p in pieces if p["round"] == r]
-        rec_pieces, prev_target = [], 0.0
+        rec_pieces = []
         for p in mine:
             if rec_pieces and p["carry"] and rec_pieces[-1]["track"] == p["track_id"]:
                 rec_pieces[-1]["end"] = round(p["bar"] + p["play"], 3)          # carries on: one longer piece
-                prev_target = p.get("target", 0.5)
                 continue
             piece = {"track": p["track_id"], "start": p["bar"], "end": round(p["bar"] + p["play"], 3),
                      "part": "full", "uid": f"g{p['group']}", "label": " + ".join(x.title() for x in p["profiles"])}
             if rec_pieces:
-                livelier = float(p.get("target", 0.5)) > float(prev_target) + 0.05
-                piece["xfade"] = {"neural": {"profile": "edge_land" if livelier else "smooth",
+                piece["xfade"] = {"neural": {"profile": JOIN["profile"], "curves": dict(JOIN["curves"]),
                                              "bars": blend_bars(tracks.get(p["track_id"]) or {})},
                                   "bass_swap": True}
             rec_pieces.append(piece)
-            prev_target = p.get("target", 0.5)
         seconds = round(sum(p["play"] for p in mine), 3)
         out.append((r, {"id": f"edge_round_{r}", "name": f"Edge round {r}", "kind": "mashup", "pieces": rec_pieces,
                         "layers": [], "bpm": None, "xfade_same": 0.5, "xfade_other": 8, "fade_in": 0.0,

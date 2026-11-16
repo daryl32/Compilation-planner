@@ -752,9 +752,9 @@ def _setup(rows: dict, have_tl: set) -> None:
         mc[1].toggle("⚡ Match song sections to each phase", key="edge_energy_mix",
                      help="The phases play in pairs — Wait + Slow, Medium + Fast, Extra + Stop — each pair on the "
                           "part of a song whose energy fits it (calm for Wait and Slow, the peak for Extra, Stop "
-                          "fading on it). The parts are joined by the 🎚️ Mix engine: a 🧠 stem blend of about 3–4 s "
-                          "ending on the phase change — into a livelier part a bass drop, its drums and bass landing "
-                          "on the change (parts starting on the song's own drops are preferred) — or a "
+                          "fading on it). The parts are joined by the 🎚️ Mix engine: a 🧠 stem blend — Vocal swap, "
+                          "Hold then cut, 2 bars — that cuts over to the next part as the phase changes (livelier "
+                          "parts starting on the song's own drops are preferred), or a "
                           "crossfade with a bass swap for a song without its drum / bass / other stems. With 🎵 New "
                           "song each round on, the parts come from that round's song (no tempo clash at the joins); "
                           "otherwise from any song in the list, key and tempo weighed. The footage follows each part.")
