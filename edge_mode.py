@@ -108,18 +108,226 @@ def round_seconds(difficulty: str) -> float:
     return sum(PROFILES[p]["seconds"] for p in round_phases(difficulty))
 
 
-def schedule(difficulty: str, rounds: int, seed: int = 0) -> list:
-    """Every phase of the compilation: [{"index", "round" (from 1), "profile", "start", "end"}]."""
+# 💀 Hard's round (Daryl, 16 Nov): Wait 20 s, a random middle, then Extra → Stop — 5:00 as before. The middle's
+# phases are drawn with weights that rise through the round, the faster ones last longer, Fast / Extra drop back to
+# Slow now and then, and the same phase never comes twice running.
+HARD_ROUND_SEC = 300
+HARD_WAIT_SEC, HARD_STOP_SEC, HARD_FINAL_EXTRA = 20, 20, (20, 30)
+HARD_LEN = {"slow": (10, 18), "medium": (12, 22), "fast": (15, 28), "extra": (18, 32)}
+HARD_EARLY = {"slow": 2.0, "medium": 2.0, "fast": 1.0, "extra": 0.5}       # the middle's first half
+HARD_LATE = {"slow": 0.7, "medium": 1.0, "fast": 2.0, "extra": 2.0}        # its second half
+HARD_DROP_CHANCE, HARD_MAX_DROPS = 0.3, 2
+FAST_ONES = ("fast", "extra")
+
+
+def hard_round(rng: random.Random) -> list:
+    """💀 One Hard round → [(profile, seconds)]: Wait, the random middle, Extra, Stop — always HARD_ROUND_SEC long.
+    Rules: weights HARD_EARLY then HARD_LATE (half way through the middle); after Fast / Extra a HARD_DROP_CHANCE to drop
+    back to Slow (at most HARD_MAX_DROPS); never the same phase twice running; never three of Fast / Extra in a row;
+    at least one Extra in the middle; the middle doesn't end on Extra (the round's own Extra follows)."""
+    final = rng.randint(*HARD_FINAL_EXTRA)
+    room = HARD_ROUND_SEC - HARD_WAIT_SEC - final - HARD_STOP_SEC
+    mid, left, drops = [], room, 0
+    while left > 0:
+        prev = mid[-1][0] if mid else "wait"
+        two_fast = len(mid) >= 2 and mid[-1][0] in FAST_ONES and mid[-2][0] in FAST_ONES
+        if prev in FAST_ONES and drops < HARD_MAX_DROPS and rng.random() < HARD_DROP_CHANCE:
+            p = "slow"
+            drops += 1
+        else:
+            w = HARD_EARLY if (room - left) < room / 2 else HARD_LATE
+            opts = [q for q in w if q != prev and not (two_fast and q in FAST_ONES)]
+            if left <= HARD_LEN["extra"][1]:                   # the last of the middle: not Extra
+                opts = [q for q in opts if q != "extra"] or ["medium"]
+            p = rng.choices(opts, [w[q] for q in opts])[0]
+        lo, hi = HARD_LEN[p]
+        if left <= hi or left - lo < 10:                       # the rest fits this phase (a little over is fine)
+            if left < lo and mid:                              # too short for a phase of its own: the last one stretches
+                mid[-1] = (mid[-1][0], mid[-1][1] + left)
+                break
+            n = left
+        else:
+            n = rng.randint(lo, min(hi, left - 10))
+        mid.append((p, n))
+        left -= n
+    if mid and mid[-1][0] == "extra":
+        mid[-1] = ("fast" if len(mid) < 2 or mid[-2][0] != "fast" else "medium", mid[-1][1])
+    if not any(p == "extra" for p, _ in mid):                  # at least one Extra in the middle
+        ok = [k for k, (p, _) in enumerate(mid[:-1]) if p == "fast"
+              and (k == 0 or mid[k - 1][0] != "extra") and mid[k + 1][0] != "extra"]
+        if ok:
+            k = max(ok, key=lambda k: mid[k][1])
+            mid[k] = ("extra", mid[k][1])
+    merged = []
+    for p, n in mid:                                           # (an edit above can't leave two the same running: merge)
+        if merged and merged[-1][0] == p:
+            merged[-1] = (p, merged[-1][1] + n)
+        else:
+            merged.append((p, n))
+    return [("wait", HARD_WAIT_SEC)] + merged + [("extra", final), ("stop", HARD_STOP_SEC)]
+
+
+# 🎲 Surprises (Chill / Medium, one switch — Daryl, 16 Nov). Decided at compile from the seed and written into the
+# schedule, so the music, footage, voice and timer all know. "Next up" never warns.
+# ✋ Hands off: inside a phase, the phase's clock freezes for a random few seconds (the round gets longer), then the
+#   phase carries on where it was. ⏩ Override: a phase runs past its zero by +N s — before any phase but Wait / Slow.
+# 🎭 False finish: the round's last Extra counts down to Stop… then "NOT YET" and +10 s. Once a compilation at most.
+HANDS_OFF_SEC = {"chill": (3, 5), "medium": (5, 8, 12)}
+OVERRIDE_SEC = {"chill": (5,), "medium": (5, 10, 15)}
+FALSE_FINISH_SEC = 10
+FALSE_FINISH_CHANCE = 0.6
+HANDS_OFF_IN = {"chill": ("fast", "extra"), "medium": ("medium", "fast", "extra")}
+HANDS_OFF_EARLIEST, HANDS_OFF_LATEST = 6.0, 4.0                # seconds into the phase / before its end
+NO_OVERRIDE_BEFORE = ("wait", "slow")
+SURPRISE_STYLES = {                                            # the timer's look during one (PROFILES-like)
+    "handsoff": {"label": "HANDS OFF", "colour": (95, 95, 100), "ring": (175, 175, 185), "chime": 261.6},
+    "override": {"label": "OVERRIDE", "colour": (150, 20, 25), "ring": (245, 45, 50), "chime": 1046.5},
+    "notyet": {"label": "NOT YET", "colour": (150, 20, 25), "ring": (245, 45, 50), "chime": 1046.5},
+}
+
+
+def plan_surprises(rounds: list, difficulty: str, rng: random.Random) -> list:
+    """🎲 Where the surprises go → [{"round", "unit" (the phase's place in its round), "kind": handsoff | override |
+    falsefinish, "seconds", "at" (hands off: seconds into the phase)}]. rounds: [[(profile, seconds)], …].
+    Rules: none in round 1; Chill 0–1 a round (60 %), Medium 1–2; at least one in the compilation; never two in one
+    phase or in neighbouring phases; Medium never the same kind twice running; hands off only in HANDS_OFF_IN phases
+    long enough to have a middle; override not before Wait / Slow; false finish at most once, on the last or
+    second-last round's final Extra."""
+    if difficulty not in HANDS_OFF_SEC or len(rounds) < 2:
+        return []
+    out, used, last_kind = [], set(), None
+    budget = {r: (1 if rng.random() < 0.6 else 0) if difficulty == "chill" else 1 + (rng.random() < 0.5)
+              for r in range(2, len(rounds) + 1)}
+    if not any(budget.values()):
+        budget[len(rounds)] = 1
+    ff_round = None
+    if rng.random() < FALSE_FINISH_CHANCE:
+        ff_round = rng.choice([r for r in (len(rounds) - 1, len(rounds)) if r >= 2])
+    for r in sorted(budget):
+        units = rounds[r - 1]
+        take = budget[r]
+
+        def free(k, _r=r):
+            return not any((_r, j) in used for j in (k - 1, k, k + 1))
+        if r == ff_round and take:
+            k = len(units) - 2                                 # the round's final Extra (before Stop)
+            if units[k][0] == "extra" and free(k):
+                out.append({"round": r, "unit": k, "kind": "falsefinish", "seconds": FALSE_FINISH_SEC})
+                used.add((r, k))
+                take -= 1
+                last_kind = "override"
+        for _ in range(take):
+            kinds = ["handsoff", "override"]
+            rng.shuffle(kinds)
+            if difficulty == "medium" and last_kind in kinds:
+                kinds.remove(last_kind)
+                kinds.append(last_kind)
+            for kind in kinds:
+                if kind == "handsoff":
+                    hosts = [k for k, (p, n) in enumerate(units) if p in HANDS_OFF_IN[difficulty]
+                             and n >= HANDS_OFF_EARLIEST + HANDS_OFF_LATEST + 2 and free(k)]
+                else:
+                    hosts = [k for k, (p, n) in enumerate(units[:-1]) if p not in ("wait", "stop")
+                             and units[k + 1][0] not in NO_OVERRIDE_BEFORE and free(k)]
+                if not hosts:
+                    continue
+                k = rng.choice(hosts)
+                if kind == "handsoff":
+                    n = units[k][1]
+                    span = n - HANDS_OFF_EARLIEST - HANDS_OFF_LATEST
+                    at = round((HANDS_OFF_EARLIEST + span * math.sqrt(rng.random())) * 2) / 2   # later is likelier
+                    out.append({"round": r, "unit": k, "kind": kind, "seconds": rng.choice(HANDS_OFF_SEC[difficulty]),
+                                "at": at})
+                else:
+                    out.append({"round": r, "unit": k, "kind": kind, "seconds": rng.choice(OVERRIDE_SEC[difficulty])})
+                used.add((r, k))
+                last_kind = kind
+                break
+    return sorted(out, key=lambda s: (s["round"], s["unit"]))
+
+
+def round_units(difficulty: str, rounds: int, rng: random.Random) -> list:
+    """Each round's phases with their lengths → [[(profile, seconds)], …]."""
+    out = []
+    for _r in range(rounds):
+        if difficulty == "hard":
+            out.append(hard_round(rng))
+        else:
+            out.append([(p, float(PROFILES[p]["seconds"])) for p in round_phases(difficulty, rng)])
+    return out
+
+
+def schedule(difficulty: str, rounds: int, seed: int = 0, surprises: bool = False) -> list:
+    """Every stretch of the compilation: [{"index", "round", "profile", "start", "end", "bpm", "unit" (which phase of
+    the compilation it belongs to — a phase split by a surprise keeps one), "kind" (phase | handsoff | override),
+    "clock": {"total", "left"} (what the timer counts: from `left` at the start, out of `total`), "label" (override:
+    "OVERRIDE" / "NOT YET")}]. surprises: 🎲 for Chill / Medium (Hard has its own random structure instead)."""
     rounds = int(min(max(int(rounds), MIN_ROUNDS), MAX_ROUNDS))
     rng = random.Random(seed)
-    out, t = [], 0.0
-    for r in range(1, rounds + 1):
-        for p in round_phases(difficulty, rng):
-            d = float(PROFILES[p]["seconds"])
-            out.append({"index": len(out), "round": r, "profile": p, "start": round(t, 3), "end": round(t + d, 3),
-                        "bpm": pace(p, difficulty, r)})
-            t += d
+    units = round_units(difficulty, rounds, rng)
+    sur = plan_surprises(units, difficulty, random.Random(seed * 7919 + 17)) if surprises else []
+    by = {(s["round"], s["unit"]): s for s in sur}
+    out, t, u = [], 0.0, 0
+
+    def add(r, p, n, kind, total, left, **extra):
+        nonlocal t
+        bpm = 0.0 if kind == "handsoff" else pace(p, difficulty, r)
+        out.append({"index": len(out), "round": r, "profile": p, "start": round(t, 3), "end": round(t + n, 3), "bpm": bpm,
+                    "unit": u, "kind": kind, "clock": {"total": float(total), "left": float(left)}, **extra})
+        t += n
+    for r, phases in enumerate(units, 1):
+        for k, (p, n) in enumerate(phases):
+            s_ = by.get((r, k))
+            if s_ and s_["kind"] == "handsoff":
+                add(r, p, s_["at"], "phase", n, n)
+                add(r, p, s_["seconds"], "handsoff", s_["seconds"], s_["seconds"], surprise="handsoff")
+                add(r, p, n - s_["at"], "phase", n, n - s_["at"])
+            else:
+                add(r, p, n, "phase", n, n)
+                if s_:
+                    ff = s_["kind"] == "falsefinish"
+                    add(r, p, s_["seconds"], "override", s_["seconds"], s_["seconds"], surprise=s_["kind"],
+                        label="NOT YET" if ff else "OVERRIDE")
+            u += 1
     return out
+
+
+def surprise_list(sched: list) -> list:
+    """🎲 The schedule's surprises → [{"kind", "round", "profile", "start", "seconds"}]."""
+    return [{"kind": ph["surprise"], "round": ph["round"], "profile": ph["profile"], "start": ph["start"],
+             "seconds": round(ph["end"] - ph["start"], 3)} for ph in sched if ph.get("surprise")]
+
+
+def timer_style(ph: dict) -> str:
+    """The timer's look for this stretch: its phase's, or ✋ / ⏩ / 🎭's."""
+    if ph.get("kind") == "handsoff":
+        return "handsoff"
+    if ph.get("kind") == "override":
+        return "notyet" if ph.get("label") == "NOT YET" else "override"
+    return ph["profile"]
+
+
+def style(name: str) -> dict:
+    return PROFILES.get(name) or SURPRISE_STYLES[name]
+
+
+def clock(ph: dict) -> tuple:
+    """(total, left at the stretch's start) the timer counts — older plans: the stretch itself."""
+    c = ph.get("clock") or {}
+    n = float(ph["end"]) - float(ph["start"])
+    return float(c.get("total", n)), float(c.get("left", n))
+
+
+def timer_key(ph: dict) -> str:
+    """Which set of timer pictures serves this stretch: its look and how long the clock is ("fast-20", "handsoff-5")."""
+    return f"{timer_style(ph)}-{clock(ph)[0]:g}"
+
+
+def next_real(sched: list, k: int) -> str | None:
+    """⏭️ The phase "Next up" promises after stretch k: the next phase of the compilation (a surprise is never
+    announced). None after the last."""
+    u = sched[k].get("unit", sched[k]["index"])
+    return next((ph["profile"] for ph in sched[k + 1:] if ph.get("unit", ph["index"]) != u), None)
 
 
 def total_seconds(sched: list) -> float:
@@ -446,6 +654,7 @@ def music_spec(sched: list, *, talking: bool, lines: list = (), fade_stop: bool 
     - 🔉 duck (with the voiceover / avatar on): full volume, dipping to DUCK_LEVEL only while a line plays
       (lines: [(start, end)]). Off: a quarter all the way through, as before."""
     dips = [(float(a), float(b)) for a, b in lines] if (talking and duck) else []
+    dips += [(float(ph["start"]), float(ph["end"])) for ph in sched if ph.get("kind") == "handsoff"]   # ✋ a quarter
     level = 1.0 if (not talking or duck) else float(under_voice)
     spec = {"level": level, "fades": [], "still": [], "dips": dips, "dip_level": DUCK_LEVEL, "dip_fade": DUCK_FADE_SEC,
             "still_volume": float(still_volume), "still_fade": MUSIC_FADE_SEC}
@@ -518,7 +727,7 @@ def _chime(freq: float) -> np.ndarray:
 
 def chime_times(sched: list) -> list:
     """(time, profile) of every phase change — each phase's start but the very first."""
-    return [(float(ph["start"]), ph["profile"]) for ph in sched[1:]]
+    return [(float(ph["start"]), timer_style(ph)) for ph in sched[1:]]
 
 
 def write_chime_wav(sched: list, path) -> Path:
@@ -528,7 +737,7 @@ def write_chime_wav(sched: list, path) -> Path:
     out = np.zeros(int(round(total * AUDIO_RATE)) + AUDIO_RATE)
     bells = {}
     for t, p in chime_times(sched):
-        hit = bells.setdefault(p, _chime(PROFILES[p]["chime"]))
+        hit = bells.setdefault(p, _chime(style(p)["chime"]))
         i = int(round(t * AUDIO_RATE))
         out[i:i + len(hit)] += hit[:len(out) - i]
     return _write_wav(path, out[:int(round(total * AUDIO_RATE))])
@@ -587,13 +796,14 @@ def overlay_size(frame_height: int) -> tuple:
 PULSE_SEC = 3.0                    # 🔔 the timer pulses over a phase's last seconds
 
 
-def overlay_image(profile: str, left: float, size: tuple, signals: bool = False):
+def overlay_image(profile: str, left: float, size: tuple, signals: bool = False, total: float = None):
     """The timer as a picture with a see-through background: a thin ring that empties as the phase runs out, the
     seconds left in the middle (00:17), and the phase's name on a coloured label underneath. left: seconds left.
     🔔 signals: the ring in the phase's own colour, wide and bright for the phase's first moment, and over the last
     PULSE_SEC seconds the number takes the ring's colour and the ring swells at every second."""
     from PIL import Image, ImageDraw
-    prof = PROFILES[profile]
+    prof = style(profile)
+    total = float(total if total is not None else prof.get("seconds", PHASE_SEC))
     w, h = size
     s = 3                                                  # drawn large, shrunk down: smooth edges
     img = Image.new("RGBA", (w * s, h * s), (0, 0, 0, 0))
@@ -605,7 +815,7 @@ def overlay_image(profile: str, left: float, size: tuple, signals: bool = False)
     colour, number = RING, (255, 255, 255, 255)
     if signals:
         colour = tuple(prof["ring"])
-        since = float(prof["seconds"]) - left
+        since = total - left
         if since < 0.4:                                    # the phase has just started: a wide, bright ring
             width = int(width * 2.4)
         elif 0 < left <= PULSE_SEC:                        # the last seconds: swells as each second starts
@@ -613,11 +823,11 @@ def overlay_image(profile: str, left: float, size: tuple, signals: bool = False)
             width = int(width * (1.0 + 1.3 * max(frac - 0.4, 0.0) / 0.6))
             number = colour + (255,)
     d.arc((x0, y0, x1, y1), 0, 360, fill=(255, 255, 255, 50), width=width)
-    share = float(min(max(left / max(float(prof["seconds"]), 1e-6), 0.0), 1.0))
+    share = float(min(max(left / max(total, 1e-6), 0.0), 1.0))
     if share > 0:
         d.arc((x0, y0, x1, y1), -90, -90 + 360 * share, fill=colour + (255,), width=width)
     secs = int(math.ceil(left - 1e-6))
-    text = f"{secs // 60:02d}:{secs % 60:02d}"
+    text = f"{secs // 60:02d}:{secs % 60:02d}" if profile not in ("override", "notyet") else f"+{secs:d}"
     f = _font(int(ring * 0.27 * s))
     box = d.textbbox((0, 0), text, font=f)
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
@@ -626,8 +836,13 @@ def overlay_image(profile: str, left: float, size: tuple, signals: bool = False)
     lx0, lx1 = int(w * 0.14) * s, int(w * 0.86) * s
     ly0 = y1 + int(ring * 0.05) * s
     d.rounded_rectangle((lx0, ly0, lx1, ly0 + lab_h), radius=int(lab_h * 0.28), fill=tuple(prof["colour"]) + (255,))
-    fb = _font(int(lab_h * 0.62), bold=True)
+    fs = int(lab_h * 0.62)
+    fb = _font(fs, bold=True)
     box = d.textbbox((0, 0), prof["label"], font=fb)
+    while box[2] - box[0] > (lx1 - lx0) * 0.86 and fs > 6:     # a long label ("HANDS OFF") shrinks to fit its pill
+        fs = int(fs * 0.92)
+        fb = _font(fs, bold=True)
+        box = d.textbbox((0, 0), prof["label"], font=fb)
     d.text(((lx0 + lx1) / 2 - (box[2] + box[0]) / 2, ly0 + lab_h / 2 - (box[3] + box[1]) / 2), prof["label"], font=fb,
            fill=(255, 255, 255, 255))
     return img.resize((w, h), Image.LANCZOS)
@@ -651,18 +866,18 @@ def round_badge(r: int, n: int, width: int):
 
 
 def write_overlay(sched: list, folder, frame_height: int, signals: bool = False) -> tuple:
-    """Draws the overlay's pictures (one set per phase name in use — the same 20 seconds serve every phase of that
-    name; the render lays them on itself, edge_render._timer_pictures). Returns (width, height). signals: 🔔 the
-    coloured ring, its flash and its pulse (overlay_image)."""
+    """Draws the overlay's pictures: one set per timer look and clock length in use (timer_key — "fast-20",
+    "handsoff-5"; a phase split by ✋ Hands off reads its set from where its clock stands). The render lays them on
+    itself (edge_render._timer_pictures). Returns (width, height). signals: 🔔 the coloured ring, its flash and pulse."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     size = overlay_size(frame_height)
     step = 1.0 / OVERLAY_FPS
-    for p in sorted({ph["profile"] for ph in sched}):
-        n = int(round(PROFILES[p]["seconds"] * OVERLAY_FPS))
-        for k in range(n):
-            f = folder / f"{p}_{k:04d}.png"
-            overlay_image(p, PROFILES[p]["seconds"] - k * step, size, signals).save(f)
+    for key in sorted({timer_key(ph) for ph in sched}):
+        look, total = key.rsplit("-", 1)
+        total = float(total)
+        for k in range(int(round(total * OVERLAY_FPS))):
+            overlay_image(look, total - k * step, size, signals, total=total).save(folder / f"{key}_{k:04d}.png")
     return size
 
 
@@ -683,7 +898,7 @@ def describe(difficulty: str, rounds: int) -> str:
     tot = r * rounds
     return (f"{rounds} rounds × {int(r // 60)}:{int(r % 60):02d} = {int(tot // 60)}:{int(tot % 60):02d} · "
             + " → ".join(PROFILES[p]["label"].title() for p in (round_phases(difficulty) if difficulty != "hard" else
-                                                                 ["wait"])) + (" → 12 at random → Extra → Stop" if difficulty == "hard" else "")
+                                                                 ["wait"])) + (" → a random middle (types and lengths) → Extra → Stop" if difficulty == "hard" else "")
             + " · 🏃 " + " / ".join(f"{PACE[difficulty][p]}" for p in ("slow", "medium", "fast", "extra")) + " bpm"
             + (f", +{PACE_BUILD[difficulty]:.0%} a round" if PACE_BUILD.get(difficulty) else "")) if difficulty in PACE else \
         (f"{rounds} rounds")
@@ -871,7 +1086,7 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
     by_round = {}
     for ph in sched:
         by_round.setdefault(ph["round"], []).append(ph)
-    fixed, flex, intro, outro, seen_cue, after = [], [], [], [], {}, []
+    fixed, flex, intro, outro, seen_cue, after, surprise_lines = [], [], [], [], {}, [], []
     has_last = any("last" in [str(x) for x in c.get("roundList") or []]
                    for ln in cue_map.get("lines") or [] for c in ln.get("cues") or [])
     in_round = lambda c, r: _cue_in_round(c, r, n_rounds, has_last)          # noqa: E731
@@ -889,6 +1104,10 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
             t = cue.get("type")
             base = {"line": line["name"], "file": line.get("file"), "seconds": d, "key": key,
                     "breadth": len(cue.get("roundList") or []) or 99}
+            if t == "surprise":                            # 🎲 a line for a surprise: picked when one comes up (below)
+                surprise_lines.append({**base, "kind": cue.get("kind") or "handsoff", "at": cue.get("at") or "start",
+                                       "length": cue.get("length")})
+                continue
             if t == "after":                               # 🔗 plays as soon as another line ends, wherever that one plays
                 after.append({**base, "cue": cue, "target": str(cue.get("after") or ""),
                               "gap": max(float(cue.get("gap") if cue.get("gap") is not None else LINE_GAP), 0.0)})
@@ -902,10 +1121,13 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
                     if not in_round(cue, r):
                         continue
                     for p in (cue.get("phases") or ORDER):
-                        occ = [ph for ph in phases if ph["profile"] == p]
+                        occ = [ph for ph in phases if ph["profile"] == p and ph.get("kind", "phase") == "phase"]
                         if not occ:
                             continue
                         ph = occ[-1] if at == "end" else occ[0]
+                        if at == "end":                    # (⏩ an override is still this phase: its end is the end)
+                            u = ph.get("unit", ph["index"])
+                            ph = {**ph, "end": max(q["end"] for q in phases if q.get("unit", q["index"]) == u)}
                         where = {"round": r, "profile": p}
                         if at == "during":
                             flex.append({**base, **where, "lo": ph["start"] + max(off, 0.0), "hi": ph["end"],
@@ -949,7 +1171,7 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
                     tt += every
             elif t == "random":
                 times, per = max(int(cue.get("times") or 1), 1), cue.get("per") or "round"
-                ok = [ph for ph in sched if in_round(cue, ph["round"])
+                ok = [ph for ph in sched if in_round(cue, ph["round"]) and ph.get("kind", "phase") == "phase"
                       and (not cue.get("phases") or ph["profile"] in cue["phases"])]
                 groups = ([[ph] for ph in ok] if per == "phase" else [ok] if per == "compilation"
                           else [[ph for ph in ok if ph["round"] == r] for r in by_round])
@@ -965,6 +1187,32 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
     def where(c):
         return f"round {c['round']}, {c['why']}"
 
+    # 🎲 a surprise's lines come first and always play (must play): for each surprise and each moment of it (start /
+    # end / before), one line of its kind — one made for its length when there is one — picked at random
+    for ph in sched:
+        kind = ph.get("surprise")
+        if not kind:
+            continue
+        n = float(ph["end"]) - float(ph["start"])
+        for at in ("before", "start", "end"):
+            pool = [c for c in surprise_lines if c["kind"] == kind and c["at"] == at]
+            if not pool and kind == "falsefinish":
+                pool = [c for c in surprise_lines if c["kind"] == "override" and c["at"] == at]
+            if not pool:
+                continue
+            fit = [c for c in pool if c.get("length") not in (None, "") and abs(float(c["length"]) - n) < 0.5]
+            c = rng.choice(fit or [c for c in pool if c.get("length") in (None, "")] or pool)
+            t = {"before": ph["start"] - c["seconds"], "start": ph["start"], "end": ph["end"] - c["seconds"]}[at]
+            t = max(0.0, min(t, total - c["seconds"]))
+            while (hit := blocker(t, t + c["seconds"])) is not None:
+                t = hit["time"] + hit["seconds"] + LINE_GAP
+            if t + c["seconds"] > total + 1e-6:
+                continue
+            label = {"handsoff": "hands off", "override": "override", "falsefinish": "false finish"}[kind]
+            plays.append({"time": round(t, 3), "seconds": round(c["seconds"], 3), "line": c["line"], "file": c["file"],
+                          "profile": ph["profile"], "round": ph["round"], "why": f"🎲 {label} ({n:g} s), {at}",
+                          "moved": 0.0})
+            seen_cue[c["key"]] = True
     for c in sorted(fixed, key=lambda c: (c["time"], c["breadth"], c["line"])):
         t = min(c["time"], total - c["seconds"])                     # a line never runs past the compilation's end
         moved = round(t - c["time"], 2)

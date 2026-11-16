@@ -18,19 +18,33 @@ def test_rounds_follow_the_difficulty():
     assert E.round_phases("chill") == ["wait", "slow", "medium", "fast", "extra", "stop"]
     assert E.round_phases("medium") == ["wait", "slow", "medium", "fast", "slow", "medium", "fast", "extra", "stop"]
     assert (E.round_seconds("chill"), E.round_seconds("medium"), E.round_seconds("hard")) == (120.0, 180.0, 300.0)
-    counts = {p: 0 for p in E.ORDER}
+    # 💀 Hard (16 Nov): Wait 20 s, a random middle, Extra → Stop, 5:00 a round
+    early, late, drops, lengths = {p: 0 for p in E.ORDER}, {p: 0 for p in E.ORDER}, 0, {p: [] for p in E.ORDER}
     for seed in range(200):
         sched = E.schedule("hard", 3, seed)
-        assert len(sched) == 45 and E.total_seconds(sched) == 900.0
+        assert abs(E.total_seconds(sched) - 900.0) < 1e-6
         for r in (1, 2, 3):
-            ph = [p["profile"] for p in sched if p["round"] == r]
-            assert ph[0] == "wait" and ph[-2:] == ["extra", "stop"] and len(ph) == 15
-            mid = ph[1:-2]
-            assert set(mid) <= {"slow", "medium", "fast", "extra"}
-            assert not any(a == b == c for a, b, c in zip(mid, mid[1:], mid[2:]))      # never three the same running
-            for p in mid:
-                counts[p] += 1
-    assert counts["slow"] < min(counts["medium"], counts["fast"], counts["extra"])     # the weights lean away from Slow
+            rp = [p for p in sched if p["round"] == r]
+            ph = [p["profile"] for p in rp]
+            assert ph[0] == "wait" and ph[-2:] == ["extra", "stop"]
+            assert rp[0]["end"] - rp[0]["start"] == 20 and rp[-1]["end"] - rp[-1]["start"] == 20
+            assert 20 <= rp[-2]["end"] - rp[-2]["start"] <= 30
+            mid = rp[1:-2]
+            assert {p["profile"] for p in mid} <= {"slow", "medium", "fast", "extra"} and "extra" in {p["profile"] for p in mid}
+            assert all(a != b for a, b in zip(ph, ph[1:]))                                     # never the same twice running
+            assert not any(a in E.FAST_ONES and b in E.FAST_ONES and c in E.FAST_ONES
+                           for a, b, c in zip(ph[1:-2], ph[2:-2], ph[3:-2]))
+            half = mid[0]["start"] + (mid[-1]["end"] - mid[0]["start"]) / 2
+            for k, p in enumerate(mid):
+                (early if p["start"] < half else late)[p["profile"]] += 1
+                lengths[p["profile"]].append(p["end"] - p["start"])
+                drops += k > 0 and mid[k - 1]["profile"] in E.FAST_ONES and p["profile"] == "slow"
+            assert all(p["kind"] == "phase" and p["clock"]["total"] == p["end"] - p["start"] for p in rp)
+    assert early["slow"] + early["medium"] > early["fast"] + early["extra"]                  # calmer first half
+    assert late["fast"] + late["extra"] > late["slow"] + late["medium"]                      # faster second half
+    mean = {p: sum(v) / len(v) for p, v in lengths.items() if v}
+    assert mean["slow"] < mean["medium"] < mean["fast"] < mean["extra"]                      # the faster, the longer
+    assert drops > 100                                                                         # drop-backs happen
     assert E.schedule("hard", 4, 5) == E.schedule("hard", 4, 5) != E.schedule("hard", 4, 6)
     # rounds are held to 3–6, phases are back to back
     assert E.schedule("chill", 1)[-1]["round"] == 3 and E.schedule("chill", 9)[-1]["round"] == 6
@@ -173,3 +187,68 @@ def test_the_stroke_bar_moves_top_to_bottom_on_the_beats_and_the_labels_draw():
     chip = E.next_chip("fast", 180)
     assert chip.size[0] == 180 and chip.getpixel((90, chip.size[1] // 2))[3] > 0
     assert E.next_chip(None, 180).size == chip.size
+
+
+def test_surprises_follow_their_rules():
+    import edge_mode as E
+    import edge_energy as EE
+    assert E.schedule("medium", 3, 1) == E.schedule("medium", 3, 1, surprises=False)
+    assert not any(ph.get("surprise") for ph in E.schedule("hard", 3, 1, surprises=True))      # Hard: none
+    kinds, lengths = {}, {"chill": set(), "medium": set()}
+    for diff in ("chill", "medium"):
+        for seed in range(150):
+            sched = E.schedule(diff, 4, seed, surprises=True)
+            sl = [ph for ph in sched if ph.get("surprise")]
+            assert sl                                                            # at least one a compilation
+            assert all(abs(a["end"] - b["start"]) < 1e-9 for a, b in zip(sched, sched[1:]))
+            plain = E.schedule(diff, 4, seed)
+            assert abs(E.total_seconds(sched) - E.total_seconds(plain) - sum(p["end"] - p["start"] for p in sl)) < 1e-6
+            assert sum(1 for p in sl if p["surprise"] == "falsefinish") <= 1
+            per_round = {}
+            for ph in sl:
+                k = sched.index(ph)
+                assert ph["round"] >= 2                                          # none in round 1
+                per_round[ph["round"]] = per_round.get(ph["round"], 0) + 1
+                kinds[ph["surprise"]] = kinds.get(ph["surprise"], 0) + 1
+                lengths[diff].add((ph["surprise"], ph["end"] - ph["start"]))
+                if ph["kind"] == "handsoff":                                     # ✋ the phase splits, its clock carries on
+                    before, after = sched[k - 1], sched[k + 1]
+                    assert before["unit"] == ph["unit"] == after["unit"] and before["profile"] == after["profile"] == ph["profile"]
+                    assert ph["profile"] in E.HANDS_OFF_IN[diff] and ph["bpm"] == 0
+                    into = before["end"] - before["start"]
+                    assert E.HANDS_OFF_EARLIEST <= into <= before["clock"]["total"] - E.HANDS_OFF_LATEST
+                    assert after["clock"]["left"] == before["clock"]["total"] - into
+                    assert E.timer_style(ph) == "handsoff" and E.next_real(sched, k) == E.next_real(sched, k - 1)
+                else:                                                            # ⏩ / 🎭 after its phase, same unit
+                    nxt = sched[k + 1]["profile"] if k + 1 < len(sched) else None
+                    assert sched[k - 1]["unit"] == ph["unit"] and nxt not in E.NO_OVERRIDE_BEFORE
+                    assert E.next_real(sched, k) == nxt and E.next_real(sched, k - 1) == nxt      # Next up never warns
+                    if ph["surprise"] == "falsefinish":
+                        assert ph["profile"] == "extra" and nxt == "stop" and ph["label"] == "NOT YET"
+                        assert ph["round"] >= max(p["round"] for p in sched) - 1
+            assert max(per_round.values()) <= (1 if diff == "chill" else 2)
+            units = [ph.get("unit") for ph in sched]
+            for g in EE.groups(sched):                                           # the music never joins inside a phase
+                assert all(units.count(units[i]) == sum(1 for j in g if units[j] == units[i]) for i in g)
+    assert set(kinds) == {"handsoff", "override", "falsefinish"}
+    assert {n for k, n in lengths["chill"] if k == "handsoff"} == {3, 5} and {n for k, n in lengths["chill"] if k == "override"} == {5}
+    assert {n for k, n in lengths["medium"] if k == "handsoff"} == {5, 8, 12}
+    assert {n for k, n in lengths["medium"] if k == "override"} == {5, 10, 15}
+
+
+def test_hands_off_dips_the_music_and_the_timer_shows_each_surprise(tmp_path):
+    import edge_mode as E
+    sched = next(s for s in (E.schedule("medium", 3, k, surprises=True) for k in range(50))
+                 if any(p["kind"] == "handsoff" for p in s) and any(p["kind"] == "override" for p in s))
+    ho = next(p for p in sched if p["kind"] == "handsoff")
+    spec = E.music_spec(sched, talking=False)
+    mid = (ho["start"] + ho["end"]) / 2
+    assert E.music_gain(spec, mid) < 0.3 and E.music_gain(spec, ho["start"] - 2) > 0.9
+    assert all(p["kind"] != "handsoff" or not E.phase_beats(p) for p in sched)        # no beat while hands off
+    E.write_overlay(sched, tmp_path / "ov", 360)
+    keys = {E.timer_key(p) for p in sched}
+    assert any(k.startswith("handsoff-") for k in keys) and any(k.startswith("override-") for k in keys)
+    for k in keys:
+        assert len(list((tmp_path / "ov").glob(f"{k}_*.png"))) == round(float(k.rsplit("-", 1)[1]) * E.OVERLAY_FPS)
+    assert E.overlay_image("handsoff", 3, E.overlay_size(360), True, total=5).getpixel((5, 5)) is not None
+    assert (261.6 if True else 0) == E.style("handsoff")["chime"] and dict(E.chime_times(sched))[ho["start"]] == "handsoff"

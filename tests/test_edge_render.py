@@ -409,3 +409,41 @@ def test_the_stroke_bar_moves_on_the_beat_and_the_next_phase_shows(tmp_path, mon
     assert abs(r - g) < 30 and max(r, g, b) > 45
     r, g, b = _pixel(out, 25.0, cx, cy)                              # the last phase: "NEXT ▸ END"
     assert max(r, g, b) > 45
+
+
+def test_a_hands_off_greys_the_timer_and_the_phase_carries_on(tmp_path, monkeypatch):
+    import sys
+    import types
+    import edge_mode as E
+    import edge_render as R
+    monkeypatch.setitem(sys.modules, "render_preview", types.SimpleNamespace(get_track_raw_source=lambda t: t))
+    comb = tmp_path / "comb.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x202020:s=640x360:r=25:d=23",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(comb)], check=True)
+    sched = [{"index": 0, "round": 1, "profile": "fast", "start": 0.0, "end": 8.0, "bpm": 140.0, "unit": 0, "kind": "phase",
+              "clock": {"total": 20.0, "left": 20.0}},
+             {"index": 1, "round": 1, "profile": "fast", "start": 8.0, "end": 11.0, "bpm": 0.0, "unit": 0, "kind": "handsoff",
+              "clock": {"total": 3.0, "left": 3.0}, "surprise": "handsoff"},
+             {"index": 2, "round": 1, "profile": "fast", "start": 11.0, "end": 23.0, "bpm": 140.0, "unit": 0, "kind": "phase",
+              "clock": {"total": 20.0, "left": 12.0}}]
+    edge = {"schedule": sched, "playlist": [], "beat": {"on": True, "volume": 1.0}, "voiceover": {"on": False, "cues": []},
+            "overlay": {"corner": "top-left"}, "avatar": {"on": False}, "intro": {"on": False}, "outro": {"on": False},
+            "signals": {"sound": True, "timer": True, "flash": False}, "round_badge": {"on": False}}
+
+    def run(cmd):
+        subprocess.run(cmd, capture_output=True, check=True)
+    out = tmp_path / "out.mp4"
+    took = R.finish({"edge": edge}, comb, str(out), types.SimpleNamespace(input_args=lambda raw: ["-i", raw]), tmp_path / "w",
+                    run, 360, 640)
+    assert took["edge_check"] == "ok"
+    w, h = E.overlay_size(360)
+    ring = w - 8
+    m = int(360 * 0.035)
+    lx, ly = m + int(w * 0.17), m + 4 + ring + int(ring * 0.05) + int(ring * 0.22) // 2
+    r, g, b = _pixel(out, 9.0, lx, ly)                      # ✋ the grey HANDS OFF label
+    assert abs(r - b) < 30 and 60 < r < 140
+    r, g, b = _pixel(out, 12.0, lx, ly)                     # Fast's orange label again
+    assert r > 180 and r > b + 100
+    # the clock carried on: 12 s after the restart the ring is all but empty (20 − 8 − 11.5 ≈ 0.5 s left)
+    top = _pixel(out, 22.5, m + w // 2, m + 4)
+    assert max(top) < 200 or abs(top[0] - top[2]) < 40

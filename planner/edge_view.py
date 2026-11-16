@@ -115,6 +115,17 @@ def _setup(rows: dict, have_tl: set) -> None:
     rounds = c[1].slider("Rounds", E.MIN_ROUNDS, E.MAX_ROUNDS, key="edge_rounds")
     c[2].selectbox("Timer position", list(E.CORNERS), key="edge_corner", format_func=lambda k: E.CORNERS[k])
     st.caption("⏱️ " + E.describe(diff, rounds))
+    if diff in E.HANDS_OFF_SEC:
+        st.toggle("🎲 Surprises", key="edge_surprises",
+                  help="From round 2, the timer doesn't always do what ⏭️ Next up promised: ✋ Hands off — the clock "
+                       "freezes for a random few seconds mid-phase, then carries on; ⏩ Override — a phase runs past its "
+                       "zero (+5 s, or up to +15 s on Medium), never before Wait or Slow; 🎭 False finish — once at most, "
+                       "the last Extra counts down to Stop… then NOT YET, +10 s. Chill: 0–1 a round, Medium: 1–2. "
+                       "Each has its own lines in the Cue Map (🎲 cue).")
+    else:
+        st.caption("💀 Hard draws its own structure every round: Wait, then random phases of random lengths — calmer "
+                   "first, faster later, the faster ones longer, now and then a drop back to Slow — then Extra → Stop. "
+                   "⏭️ Next up always tells the truth; how long is the surprise.")
     st.caption("🔔 Every phase change brings a bell, a flash of the phase's colour and the ring in that colour; the "
                "timer pulses over a phase's last 3 seconds. ▸ The round number sits by the timer. 🎭 Wait favours "
                "clips marked intro, Stop clips marked outro (🎭 Reviewer roles); the music drives the rest.")

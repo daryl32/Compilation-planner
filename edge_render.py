@@ -560,16 +560,16 @@ def _mix(edge: dict, shows: list, sources, tmp_dir: Path, run, notes: list = Non
 
 
 def _timer_pictures(timer_dir: Path, sched: list) -> dict:
-    """{phase name: [(picture (h, w, 3), how solid (h, w, 1))] — one every 1 / OVERLAY_FPS s} from the pictures
-    edge_mode.write_overlay drew."""
+    """{timer key ("fast-20", "handsoff-5"): [(picture (h, w, 3), how solid (h, w, 1))] — one every 1 / OVERLAY_FPS s}
+    from the pictures edge_mode.write_overlay drew."""
     import numpy as np
     from PIL import Image
     out = {}
-    for p in sorted({ph["profile"] for ph in sched}):
-        out[p] = []
-        for f in sorted(timer_dir.glob(f"{p}_*.png")):
+    for key in sorted({E.timer_key(ph) for ph in sched}):
+        out[key] = []
+        for f in sorted(timer_dir.glob(f"{key}_*.png")):
             a = np.asarray(Image.open(f).convert("RGBA"), dtype=np.uint8)
-            out[p].append((a[..., :3].copy(), a[..., 3:4].astype(np.uint16)))
+            out[key].append((a[..., :3].copy(), a[..., 3:4].astype(np.uint16)))
     return out
 
 
@@ -613,7 +613,7 @@ def _guide_layers(edge: dict, sched: list, corner: str, frame: tuple, badges: di
         gap = max(int(H * 0.012), 2)
         out["next"] = {}
         for k, ph in enumerate(sched):
-            nxt = sched[k + 1]["profile"] if k + 1 < len(sched) else None
+            nxt = E.next_real(sched, k)                    # (a surprise is never announced)
             if nxt not in chips:
                 chips[nxt] = _rgba(E.next_chip(nxt, tw))
             rgb, solid = chips[nxt]
@@ -672,7 +672,9 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
         x, y = (W // 2, 0) if split else _corner_xy(av.get("corner", "bottom-right"), (W, H), box)
         layers.append((first, last, got, solid, x, y))
 
-    pictures = timers.get(ph["profile"]) or []
+    pictures = timers.get(E.timer_key(ph)) or []
+    c_total, c_left = E.clock(ph)
+    skip = int(round((c_total - c_left) * E.OVERLAY_FPS))      # ✋ the part after a hands off: its clock carries on
     tw, th = (pictures[0][0].shape[1], pictures[0][0].shape[0]) if pictures else (0, 0)
     tx, ty = _corner_xy(timer_corner, (W, H), (tw, th))
     per = FPS / float(E.OVERLAY_FPS)                       # footage frames per timer picture
@@ -684,7 +686,7 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     held = [black]
     flash_n = int(round(E.FLASH_SEC * FPS)) if extras.get("flash") and int(ph.get("index", 0)) > 0 else 0
-    tint = np.array(E.PROFILES[ph["profile"]]["ring"], dtype=np.float32)
+    tint = np.array(E.style(E.timer_style(ph))["ring"], dtype=np.float32)
     badge = extras.get("badge")
     nxt = extras.get("next")
     bar = extras.get("guide")
@@ -708,7 +710,7 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
             j = min(i - on[0], len(on[2]) - 1)
             _lay(pic, on[4], on[5], on[2][j], None if on[3] is None else on[3][j])
         if pictures:
-            rgb, solid = pictures[min(int(i / per), len(pictures) - 1)]
+            rgb, solid = pictures[min(skip + int(i / per), len(pictures) - 1)]
             _lay(pic, tx, ty, rgb, solid)
         if badge is not None:
             _lay(pic, badge[2], badge[3], badge[0], badge[1])

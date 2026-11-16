@@ -78,27 +78,39 @@ def window_energy(emap: dict, a: float, b: float) -> float:
 
 
 def groups(sched: list) -> list:
-    """The phases in pairs, round by round: [[phase index, …]] — Wait + Slow, Medium + Fast, Extra + Stop when they
+    """The phases in pairs, round by round: [[stretch index, …]] — Wait + Slow, Medium + Fast, Extra + Stop when they
     come one after the other in a round; then the phases left on their own pair up with a neighbour that is also on
     its own (Hard's random draws, Medium's extra Slow…), so a stretch of music lasts 40 s wherever it can (Daryl,
-    16 Nov: no join every 20 s). Only a phase with no free neighbour stands alone."""
+    16 Nov: no join every 20 s). Only a phase with no free neighbour stands alone. A phase a 🎲 surprise splits or
+    lengthens (its "unit") counts as one phase: the music never joins inside it."""
+    units = []
+    for k, ph in enumerate(sched):
+        u = ph.get("unit", ph["index"])
+        if units and sched[units[-1][0]].get("unit", sched[units[-1][0]]["index"]) == u:
+            units[-1].append(k)
+        else:
+            units.append([k])
     out, k = [], 0
-    while k < len(sched):
-        ph = sched[k]
-        nxt = sched[k + 1] if k + 1 < len(sched) else None
+    while k < len(units):
+        ph = sched[units[k][0]]
+        nxt = sched[units[k + 1][0]] if k + 1 < len(units) else None
         if nxt and nxt["round"] == ph["round"] and (ph["profile"], nxt["profile"]) in PAIRS:
-            out.append([k, k + 1])
+            out.append(units[k] + units[k + 1])
             k += 2
         else:
-            out.append([k])
+            out.append(list(units[k]))
             k += 1
-    merged = []
+    merged, lone = [], []
     for g in out:                                          # lone phases, next to each other in a round: one stretch
-        if (len(g) == 1 and merged and len(merged[-1]) == 1 and sched[merged[-1][0]]["round"] == sched[g[0]]["round"]
-                and sched[g[0]]["profile"] != "stop"):
+        first = sched[g[0]]
+        is_lone = len({sched[i].get("unit", sched[i]["index"]) for i in g}) == 1
+        if (is_lone and merged and lone[-1] and sched[merged[-1][0]]["round"] == first["round"]
+                and first["profile"] != "stop"):
             merged[-1] = merged[-1] + g
+            lone[-1] = False
         else:
             merged.append(g)
+            lone.append(is_lone)
     return merged
 
 

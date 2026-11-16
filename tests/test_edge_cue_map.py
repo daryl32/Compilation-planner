@@ -224,3 +224,37 @@ def test_the_newest_cue_map_sent_from_the_page_is_fetched_and_its_lines_too(tmp_
     assert not errs and got[0].endswith("edge_cues_2026-11-16T12-00.json")
     assert "scene-labeling/Edge_voiceover/New one.mp3" in got                # a line only the sent map has is fetched too
     assert PE.cue_map_path() == tmp_path / "edge_voiceover" / "edge_cues.json" and PE.load_cue_map()["lines"][0]["name"] == "New one"
+
+
+def test_surprise_lines_play_at_their_surprise_and_fit_its_length():
+    import edge_mode as E
+    sched = next(s for s in (E.schedule("medium", 4, k, surprises=True) for k in range(80))
+                 if any(p["kind"] == "handsoff" for p in s) and any(p.get("surprise") == "falsefinish" for p in s))
+    hos = [p for p in sched if p["kind"] == "handsoff"]
+    ff = next(p for p in sched if p.get("surprise") == "falsefinish")
+    lines = [{"name": f"Hands off {n}", "seconds": 1.5, "cues": [{"type": "surprise", "kind": "handsoff", "at": "start", "length": n}]}
+             for n in (5, 8, 12)]
+    lines += [{"name": "Back on", "seconds": 1.2, "cues": [{"type": "surprise", "kind": "handsoff", "at": "end"}]},
+              {"name": "Almost 321", "seconds": 3.8, "cues": [{"type": "surprise", "kind": "falsefinish", "at": "before"}]},
+              {"name": "Scratch that", "seconds": 8.6, "cues": [{"type": "surprise", "kind": "falsefinish", "at": "start"}]},
+              # an ordinary line wanting the same moment as a hands off: the surprise's line wins
+              {"name": "Busy", "seconds": 3.0, "cues": [{"type": "time", "clock": E.fmt_clock(hos[0]["start"]) if hasattr(E, "fmt_clock") else
+                                                          f"{int(hos[0]['start'] // 60)}:{hos[0]['start'] % 60:05.2f}"}]}]
+    got = E.resolve_lines(sched, {"lines": lines}, "medium", seed=3)
+    for ho in hos:
+        n = ho["end"] - ho["start"]
+        start = [p for p in got["plays"] if abs(p["time"] - ho["start"]) < 1e-6]
+        assert [p["line"] for p in start] == [f"Hands off {n:g}"]                   # the line made for its length
+        assert any(p["line"] == "Back on" and abs(p["time"] + p["seconds"] - ho["end"]) < 1e-6 for p in got["plays"])
+    assert any(p["line"] == "Almost 321" and abs(p["time"] + 3.8 - ff["start"]) < 1e-6 for p in got["plays"])
+    assert any(p["line"] == "Scratch that" and -1e-6 < p["time"] - ff["start"] <= E.LINE_GAP + 1e-6 for p in got["plays"])
+    busy = [p for p in got["plays"] if p["line"] == "Busy"]
+    assert not busy or busy[0]["time"] >= hos[0]["start"] + 1.5                       # moved off, or left out
+    # "end of Extra" waits for an override to finish: it plays as Stop really starts
+    sched2 = next(s for s in (E.schedule("medium", 3, k, surprises=True) for k in range(80))
+                  if any(p.get("surprise") in ("override", "falsefinish") and p["profile"] == "extra" for p in s))
+    ov = next(p for p in sched2 if p.get("surprise") in ("override", "falsefinish") and p["profile"] == "extra")
+    got = E.resolve_lines(sched2, {"lines": [{"name": "Now stop", "seconds": 1.6,
+                                              "cues": [{"type": "phase", "phases": ["extra"], "at": "end", "roundList": [ov["round"]]}]}]},
+                          "medium")
+    assert abs(got["plays"][0]["time"] - ov["end"]) < 1e-6
