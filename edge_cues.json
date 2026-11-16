@@ -1,6 +1,6 @@
 {
  "version": 1,
- "source": "Edge Mode Cue Map (claude.ai artifact), as saved 14 Nov 2026 02:05; 14 Nov 02:39: You can survive \u2192 round 5 only, Keep going \u2192 filler",
+ "source": "Edge Mode Cue Map (claude.ai artifact), as saved 16 Nov 2026 02:18 (57 lines, 12 new on 16 Nov)",
  "drive_folder": "scene-labeling/Edge_voiceover",
  "note": "seconds are estimated from the MP3 size at 192 kbps; the app measures the real file when it has it",
  "lines": [
@@ -32,12 +32,11 @@
     {
      "type": "phase",
      "phases": [
-      "fast"
+      "extra"
      ],
-     "at": "end",
+     "at": "start",
      "offset": 3,
      "roundList": [
-      "6",
       "last"
      ],
      "diffs": [],
@@ -70,7 +69,21 @@
    "name": "Control yourself",
    "file": "Control yourself.mp3",
    "seconds": 1.93,
-   "cues": []
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "stop"
+     ],
+     "at": "end",
+     "offset": 3,
+     "roundList": [
+      "2"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
   },
   {
    "name": "Dont you dare cum",
@@ -80,12 +93,12 @@
     {
      "type": "phase",
      "phases": [
-      "stop"
+      "extra"
      ],
-     "at": "during",
+     "at": "end",
      "offset": 3,
      "roundList": [
-      "3"
+      "2"
      ],
      "diffs": [],
      "note": ""
@@ -100,7 +113,7 @@
     {
      "type": "phase",
      "phases": [
-      "slow"
+      "wait"
      ],
      "at": "start",
      "offset": 0,
@@ -116,34 +129,47 @@
    "name": "Moan",
    "file": "Moan.mp3",
    "seconds": 1.49,
-   "cues": []
-  },
-  {
-   "name": "Faster",
-   "file": "Faster.mp3",
-   "seconds": 1.65,
-   "cues": []
-  },
-  {
-   "name": "Just stroke",
-   "file": "Just stroke.mp3",
-   "seconds": 2.43,
    "cues": [
     {
      "type": "phase",
      "phases": [
-      "slow"
+      "medium"
      ],
-     "at": "start",
-     "offset": 0,
+     "at": "end",
+     "offset": 3,
      "roundList": [
-      "6",
       "last"
      ],
      "diffs": [],
      "note": ""
     }
    ]
+  },
+  {
+   "name": "Faster",
+   "file": "Faster.mp3",
+   "seconds": 1.65,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "extra"
+     ],
+     "at": "during",
+     "offset": 0,
+     "roundList": [
+      "1"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Just stroke",
+   "file": "Just stroke.mp3",
+   "seconds": 2.43,
+   "cues": []
   },
   {
    "name": "Relax for a sec",
@@ -153,12 +179,12 @@
     {
      "type": "phase",
      "phases": [
-      "wait"
+      "stop"
      ],
-     "at": "start",
+     "at": "during",
      "offset": 0,
      "roundList": [
-      "2"
+      "1"
      ],
      "diffs": [],
      "note": "Round 2"
@@ -189,7 +215,21 @@
    "name": "Stroke it",
    "file": "Stroke it.mp3",
    "seconds": 1.44,
-   "cues": []
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "medium"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "1"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
   },
   {
    "name": "Just sit there",
@@ -224,8 +264,7 @@
      "at": "start",
      "offset": 0,
      "roundList": [
-      "1",
-      "2"
+      "1"
      ],
      "diffs": [],
      "note": ""
@@ -254,7 +293,7 @@
       "5"
      ],
      "diffs": [],
-     "note": "14 Nov: every round was a mistake; round 5 is the one round whose start of Slow was free (Daryl to confirm)"
+     "note": ""
     }
    ]
   },
@@ -281,6 +320,19 @@
      ],
      "diffs": [],
      "note": ""
+    },
+    {
+     "type": "phase",
+     "phases": [
+      "stop"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "last"
+     ],
+     "diffs": [],
+     "note": ""
     }
    ]
   },
@@ -292,12 +344,12 @@
     {
      "type": "phase",
      "phases": [
-      "extra"
+      "fast"
      ],
      "at": "start",
      "offset": 0,
      "roundList": [
-      "3"
+      "1"
      ],
      "diffs": [],
      "note": ""
@@ -331,16 +383,22 @@
    "seconds": 1.57,
    "cues": [
     {
-     "type": "random",
-     "times": 1,
-     "per": "round",
+     "type": "phase",
      "phases": [
-      "medium",
-      "fast"
+      "medium"
      ],
-     "roundList": [],
+     "at": "during",
+     "offset": 0,
+     "roundList": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6"
+     ],
      "diffs": [],
-     "note": "filler: once a round, in a silence during Medium or Fast"
+     "note": "Filler: once a round, in a free silence during Medium or Fast"
     }
    ]
   },
@@ -374,7 +432,21 @@
    "name": "Harder-again",
    "file": "Harder-again.mp3",
    "seconds": 2.07,
-   "cues": []
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "fast"
+     ],
+     "at": "end",
+     "offset": 3,
+     "roundList": [
+      "2"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
   },
   {
    "name": "Stroke again - faster",
@@ -445,7 +517,21 @@
    "name": "Its so much fun watching you shake",
    "file": "Its so much fun watching you shake.mp3",
    "seconds": 15.31,
-   "cues": []
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "wait"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "last"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
   },
   {
    "name": "Again - really hard and really fast - you need to show me",
@@ -461,6 +547,19 @@
      "offset": 3,
      "roundList": [
       "5"
+     ],
+     "diffs": [],
+     "note": ""
+    },
+    {
+     "type": "phase",
+     "phases": [
+      "extra"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "1"
      ],
      "diffs": [],
      "note": ""
@@ -515,12 +614,11 @@
     {
      "type": "phase",
      "phases": [
-      "wait"
+      "extra"
      ],
-     "at": "during",
-     "offset": 0,
+     "at": "end",
+     "offset": 3,
      "roundList": [
-      "6",
       "last"
      ],
      "diffs": [],
@@ -536,9 +634,9 @@
     {
      "type": "phase",
      "phases": [
-      "medium"
+      "slow"
      ],
-     "at": "end",
+     "at": "start",
      "offset": 0,
      "roundList": [
       "last"
@@ -558,21 +656,7 @@
    "name": "show me how much - now stop",
    "file": "show me how much - now stop.mp3",
    "seconds": 6.67,
-   "cues": [
-    {
-     "type": "phase",
-     "phases": [
-      "extra"
-     ],
-     "at": "end",
-     "offset": 3,
-     "roundList": [
-      "last"
-     ],
-     "diffs": [],
-     "note": ""
-    }
-   ]
+   "cues": []
   },
   {
    "name": "Stop - look at my tits",
@@ -584,21 +668,7 @@
    "name": "Slow",
    "file": "Slow.mp3",
    "seconds": 10.56,
-   "cues": [
-    {
-     "type": "phase",
-     "phases": [
-      "slow"
-     ],
-     "at": "start",
-     "offset": 0,
-     "roundList": [
-      "3"
-     ],
-     "diffs": [],
-     "note": ""
-    }
-   ]
+   "cues": []
   },
   {
    "name": "Get hard for me",
@@ -608,9 +678,9 @@
     {
      "type": "phase",
      "phases": [
-      "slow"
+      "wait"
      ],
-     "at": "start",
+     "at": "end",
      "offset": 0,
      "roundList": [
       "1"
@@ -636,7 +706,7 @@
       "1"
      ],
      "diffs": [],
-     "note": "During wait"
+     "note": ""
     }
    ]
   },
@@ -647,7 +717,6 @@
    "cues": [
     {
      "type": "intro",
-     "order": 2,
      "roundList": [],
      "diffs": [],
      "note": "2nd audio of the video"
@@ -658,15 +727,7 @@
    "name": "Welcome",
    "file": "Welcome.mp3",
    "seconds": 3.19,
-   "cues": [
-    {
-     "type": "intro",
-     "order": 1,
-     "roundList": [],
-     "diffs": [],
-     "note": "1st audio of the video"
-    }
-   ]
+   "cues": []
   },
   {
    "name": "Show me how bad",
@@ -698,10 +759,235 @@
      "phases": [
       "medium"
      ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "2"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Are you ready babe",
+   "file": "Are you ready babe.mp3",
+   "seconds": 1.59,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "slow"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "1"
+     ],
+     "diffs": [],
+     "note": ""
+    },
+    {
+     "type": "phase",
+     "phases": [
+      "fast"
+     ],
      "at": "end",
      "offset": 0,
      "roundList": [
-      "3"
+      "1"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Are you ready for round 2",
+   "file": "Are you ready for round 2.mp3",
+   "seconds": 2.39,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "wait"
+     ],
+     "at": "end",
+     "offset": 0,
+     "roundList": [
+      "2"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Almost there babe 321",
+   "file": "Almost there babe 321.mp3",
+   "seconds": 3.84,
+   "cues": []
+  },
+  {
+   "name": "Don’t you dare slow down- rush",
+   "file": "Don’t you dare slow down- rush.mp3",
+   "seconds": 5.76,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "fast"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "last"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Final round prepare yourself",
+   "file": "Final round prepare yourself.mp3",
+   "seconds": 8.05,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "wait"
+     ],
+     "at": "end",
+     "offset": 0,
+     "roundList": [
+      "last"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Scratch that - gasping",
+   "file": "Scratch that - gasping.mp3",
+   "seconds": 8.59,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "fast"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "2"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Look into my eyes",
+   "file": "Look into my eyes.mp3",
+   "seconds": 9.06,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "slow"
+     ],
+     "at": "end",
+     "offset": 0,
+     "roundList": [
+      "last"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Stop hands off punish you",
+   "file": "Stop hands off punish you.mp3",
+   "seconds": 10.25,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "stop"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "2"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "You think you gonna finish today laughing",
+   "file": "You think you gonna finish today laughing.mp3",
+   "seconds": 11.68,
+   "cues": []
+  },
+  {
+   "name": "Listen to my voice, just the tip",
+   "file": "Listen to my voice, just the tip.mp3",
+   "seconds": 11.78,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "slow"
+     ],
+     "at": "end",
+     "offset": 0,
+     "roundList": [
+      "1"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Completely at my mercy 2 fingers on head",
+   "file": "Completely at my mercy 2 fingers on head.mp3",
+   "seconds": 12.76,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "slow"
+     ],
+     "at": "start",
+     "offset": 0,
+     "roundList": [
+      "2"
+     ],
+     "diffs": [],
+     "note": ""
+    }
+   ]
+  },
+  {
+   "name": "Get ready wank off fast",
+   "file": "Get ready wank off fast.mp3",
+   "seconds": 13.28,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "fast"
+     ],
+     "at": "end",
+     "offset": 3,
+     "roundList": [
+      "last"
      ],
      "diffs": [],
      "note": ""

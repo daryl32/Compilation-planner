@@ -751,8 +751,8 @@ def _cue_in_round(cue: dict, r: int, n_rounds: int, last_replaces: bool = False)
     number. last_replaces: in the final round the "last" lines stand in for that round number's own — a cue set
     for round 3 (and not for "last") stays out when round 3 is the last."""
     want = [str(x) for x in cue.get("roundList") or []]
-    if not want:
-        return True
+    if not want or {"1", "2", "3", "4", "5", "6"} <= set(want):     # every round number ticked = every round (Daryl's
+        return True                                                  # "Keep going", 16 Nov) — the last one included
     if r == n_rounds and "last" in want:
         return True
     if r == n_rounds and last_replaces:

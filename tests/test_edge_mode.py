@@ -126,7 +126,7 @@ def test_compile_without_a_song_and_with_a_playlist(monkeypatch):
         assert all(c["file"] is None for c in vo["cues"]) and "Now stop" in vo["lines_missing"]      # no files here: tones
         assert not edge["intro"]["on"] and edge["intro"]["lines"] == []          # the intro screen only when switched on
         shown = PE.compile_edge([], VIDS, "chill", 3, voiceover=True, intro=True)["plan"]["edge"]["intro"]
-        assert shown["on"] and [x["line"] for x in shown["lines"]] == ["Welcome", "Intro to NNN"]
+        assert shown["on"] and [x["line"] for x in shown["lines"]] == ["Intro to NNN"]      # (16 Nov map: Welcome has no cue)
         assert edge["outro"]["on"] and [x["line"] for x in edge["outro"]["lines"]] == ["I hope not"]
         assert res["voice_clashes"] and {"line", "with", "round", "where", "result"} <= set(res["voice_clashes"][0])
         quiet = PE.compile_edge([], VIDS, "chill", 3)["plan"]["edge"]
@@ -357,7 +357,7 @@ def test_compile_carries_the_avatar_and_the_intro(monkeypatch, tmp_path):
         # the avatar brings the lines with her, voiceover switch or not: she appears with every line of the cue map
         assert edge["avatar"]["on"] and edge["avatar"]["mode"] == "split" and edge["voiceover"]["on"]
         assert [(c["time"], c["line"]) for c in edge["avatar"]["cues"]] == [(c["time"], c["line"]) for c in edge["voiceover"]["cues"]]
-        assert len(edge["avatar"]["cues"]) == 17 and "Start-Round 1" in edge["avatar"]["placeholders"]      # no clips here: stand-ins
+        assert len(edge["avatar"]["cues"]) == len(edge["voiceover"]["cues"]) >= 20 and "Start-Round 1" in edge["avatar"]["placeholders"]      # no clips here: stand-ins
         assert edge["intro"]["on"] and edge["intro"]["clip"].endswith("intro_1.mp4")
         assert edge["intro"]["stats"] == [["Difficulty", "Chill"], ["Rounds", "3"], ["Time", "6:00"]]
         assert 1 <= len(edge["intro"]["thumbs"]) <= 6 and {v for v, _ in edge["intro"]["thumbs"]} <= set(VIDS)
@@ -388,7 +388,7 @@ def test_compile_carries_the_avatar_and_the_intro(monkeypatch, tmp_path):
 def test_the_cue_map_gives_every_line_its_moment_and_never_two_at_once():
     import edge_mode as E
     cm = E.load_cue_map()
-    assert len(cm["lines"]) == 45 and sum(1 for ln in cm["lines"] if ln["cues"]) == 32
+    assert len(cm["lines"]) == 57 and sum(1 for ln in cm["lines"] if ln["cues"]) == 44          # the 16 Nov map
     assert E.PROFILES["extra"]["bpm"] == 200                                       # a little faster than at first (180)
     for diff in E.DIFFICULTIES:
         for rounds in (3, 4, 5, 6):
@@ -399,33 +399,30 @@ def test_the_cue_map_gives_every_line_its_moment_and_never_two_at_once():
                 assert pl and all(0 <= p["time"] and p["time"] + p["seconds"] <= E.total_seconds(sched) + 1e-6 for p in pl)
                 for a, b in zip(pl, pl[1:]):
                     assert b["time"] >= a["time"] + a["seconds"] + E.LINE_GAP - 1e-3, (diff, rounds, a, b)
-                assert got["intro"] == ["Welcome", "Intro to NNN"] and got["outro"] == ["I hope not"]
+                assert got["intro"] == ["Intro to NNN"] and got["outro"] == ["I hope not"]
     got = E.resolve_lines(E.schedule("chill", 6), cm, "chill")
     at = {(p["line"], p["round"]): p for p in got["plays"]}
-    assert at[("Start-Round 1", 1)]["time"] == 0.0 and at[("Now stop", 1)]["time"] == 100.0 and at[("Now stop", 2)]["time"] == 220.0
-    assert ("Now stop", 3) not in at                                               # set for rounds 1 and 2 only
+    assert at[("Start-Round 1", 1)]["time"] == 0.0 and at[("Now stop", 1)]["time"] == 100.0
+    assert ("Now stop", 2) not in at                                               # set for round 1 only
     assert at[("Now stop (2)", 5)]["time"] == 4 * 120 + 97.0                       # 3 s before Extra ends
-    assert at[("Stroke faster", 3)]["time"] == 2 * 120 + 60.0                      # as Medium ends
+    assert at[("Stroke faster", 2)]["time"] == 120 + 40.0                          # as Medium starts
     p = at[("I love edging you", 4)]
     assert 3 * 120 + 100 <= p["time"] and p["time"] + p["seconds"] <= 3 * 120 + 120       # somewhere during Stop
     last = at[("Did you cum", 6)]
     assert abs(last["time"] + last["seconds"] - 720.0) < 1e-6 and last["moved"] < 0       # finishes as the compilation ends
-    # "You can survive" is round 5's line only (every round was a slip); "Keep going" is a filler, once a round
-    assert [r for (n, r) in at if n == "You can survive"] == [5] and at[("You can survive", 5)]["time"] == 4 * 120 + 20.0
-    assert sorted(r for (n, r) in at if n == "Keep going") == [1, 2, 3, 4, 5, 6]
-    assert all(at[("Keep going", r)]["profile"] in ("medium", "fast") for r in range(1, 7))
-    # two lines at one moment: the later one waits its turn — and that is reported
-    assert at[("Slow", 3)]["moved"] > 0 and any(c["line"] == "Slow" and c["with"] == "Ok stroke again" for c in got["clashes"])
+    assert [r for (n, r) in at if n == "You can survive"] == [5]
+    assert sorted(r for (n, r) in at if n == "Keep going") == [1, 2, 3, 4, 5, 6]      # a filler in every round's Medium
+    assert all(at[("Keep going", r)]["profile"] == "medium" for r in range(1, 7))
     # "last" means the final round whatever its number — and there its lines replace that round's own
     for rounds in (3, 4, 5):
         g = E.resolve_lines(E.schedule("chill", rounds), cm, "chill")
         names = {p["line"] for p in g["plays"] if p["round"] == rounds}
-        assert {"Did you cum", "show me how much - now stop", "Just stroke", "Now Stroke"} <= names
-        assert not names & {"Slow", "Stroke faster", "relax-fingertips", "How stroke even more", "Balls bursting", "Now stop (2)",
-                            "And dont cum", "Just sit there", "I know you can do it", "You can survive"}
-        assert not [c for c in g["clashes"] if c["round"] == rounds and c["result"].startswith("left out")]
-    six = {p["line"] for p in got["plays"] if p["round"] == 5}
-    assert {"Balls bursting", "Now stop (2)", "And dont cum"} <= six                # round 5 keeps its own when it isn't the last
+        assert {"Did you cum", "Final round prepare yourself", "Its so much fun watching you shake"} <= names
+        own = {3: {"Just sit there", "Ok stroke again"}, 4: {"I know you can do it", "relax-fingertips", "How stroke even more"},
+               5: {"Balls bursting", "And dont cum", "You can survive"}}[rounds]
+        assert not names & own
+    five = {p["line"] for p in got["plays"] if p["round"] == 5}
+    assert {"Balls bursting", "Now stop (2)", "And dont cum"} <= five               # round 5 keeps its own when it isn't the last
     only_hard = {"lines": [{"name": "x", "file": "x.mp3", "seconds": 2.0, "cues": [
         {"type": "phase", "phases": ["fast"], "at": "start", "offset": 0, "roundList": [], "diffs": ["hard"]}]}]}
     assert E.resolve_lines(E.schedule("chill", 3), only_hard, "chill")["plays"] == []
@@ -520,14 +517,14 @@ def test_the_avatar_follows_the_cue_map(monkeypatch, tmp_path):
         import planner.edge as PE
         monkeypatch.setattr(PE, "avatar_dir", lambda: tmp_path / "avatar")
         (tmp_path / "avatar" / "lines").mkdir(parents=True)
-        for n in ("Now stop", "Welcome"):
+        for n in ("Now stop", "Intro to NNN"):
             (tmp_path / "avatar" / "lines" / f"{n}.mp4").write_bytes(b"x")
         res = PE.compile_edge([], VIDS, "chill", 3, voiceover=True, avatar=True, intro=True)
         edge = res["plan"]["edge"]
         av, vo = edge["avatar"]["cues"], edge["voiceover"]["cues"]
         assert [(c["time"], c["line"]) for c in av] == [(c["time"], c["line"]) for c in vo]      # she appears with every line
         assert {c["line"] for c in av if c["clip"]} == {"Now stop"} and "Get hard for me" in edge["avatar"]["placeholders"]
-        assert [x.get("clip") is not None for x in edge["intro"]["lines"]] == [True, False]      # Welcome has her clip
+        assert [x.get("clip") is not None for x in edge["intro"]["lines"]] == [True]      # her intro clip
         assert edge["music"]["still_volume"] == 0.25
     finally:
         shutil.rmtree(out, ignore_errors=True)
