@@ -81,6 +81,40 @@ def _lines_panel(cue_map: dict) -> None:
             st.rerun()
 
 
+STUDIO_JOB = "studio:previews"
+
+
+def _studio_panel() -> None:
+    """🧍 Previews for the Avatar Studio: a small copy and a 3-frame thumbnail strip of every avatar clip, on Drive."""
+    j, running = RJ.take_finished(STUDIO_JOB, "studio_job_seen")
+    with st.expander("🧍 Avatar Studio previews", expanded=running or j is not None):
+        if running:
+            RJ.watch(STUDIO_JOB)
+            return
+        if j is not None:
+            if j.state == "error":
+                st.error(f"Previews failed: {j.error}")
+            else:
+                r = j.result or {}
+                st.success(f"Made {r.get('made', 0)} preview(s); {r.get('skipped', 0)} clip(s) already had one.")
+                if r.get("errors"):
+                    st.warning(f"{len(r['errors'])} couldn't be made: " + " · ".join(r["errors"][:4]))
+        st.caption("The Studio can't open clips over 10 MB, or the old transparent .webm clips on a phone, and Drive "
+                   "gives it no thumbnails. This makes a small copy and a first | middle | last thumbnail strip of "
+                   "every avatar clip into Edge_voiceover/_studio_previews. Run it again after adding clips — clips "
+                   "that already have one are skipped.")
+        from page_setup import drive_token
+        token = drive_token()
+        if not token:
+            st.info("Connect Google Drive (sidebar) first — the previews are saved to your Drive.")
+        c = st.columns(2)
+        redo = c[1].toggle("Redo all", key="studio_redo", help="Make them again even where they exist.")
+        if c[0].button("🎞️ Make Studio previews", key="studio_make", disabled=not token, type="primary"):
+            import studio_previews as SP
+            RJ.start(STUDIO_JOB, "Making Studio previews", SP.run, token, redo)
+            st.rerun()
+
+
 def _phase_tags_panel(rows: dict, vids: list) -> None:
     """🏷️ Tags per phase: each phase's footage keeps to clips with one of its tags (blank = anything the filters allow)."""
     tags = sorted({t for v in vids if v in rows for t in PC._video_tags(rows[v])}, key=str.lower)
@@ -188,6 +222,7 @@ def _setup(rows: dict, have_tl: set) -> None:
                 help="Before the compilation: the avatar giving her intro, beside the difficulty, rounds, total time "
                      "and thumbnails of the videos used. It lasts as long as her intro clip (8 s with the stand-in).")
     if st.session_state.get("edge_avatar"):
+        _studio_panel()
         m = st.columns(2)
         mode = m[0].radio("She appears", list(E.AVATAR_MODES), key="edge_avatar_mode", horizontal=True,
                           format_func=lambda k: E.AVATAR_MODES[k],

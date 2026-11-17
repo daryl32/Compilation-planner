@@ -116,6 +116,7 @@ def test_compile_carries_the_avatar_and_the_intro(monkeypatch, tmp_path):
         at.toggle(key="edge_intro").set_value(True)
         at.run()
         assert not errors(at), errors(at)
+        assert at.button(key="studio_make").disabled          # 🧍 Studio previews: needs the Drive connection
         at.radio(key="edge_avatar_mode").set_value("split")
         at.run()
         at.button(key="edge_go_only").click().run()
