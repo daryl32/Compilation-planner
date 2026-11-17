@@ -241,7 +241,7 @@ def _voice_track(cues: list, total: float, tmp_dir: Path, run, name: str = "voic
     out = tmp_dir / name
     mix = "".join(f"[c{k}]" for k in range(len(cues)))
     run(["ffmpeg", "-y", *inputs, "-filter_complex",
-         ";".join(parts) + f";{mix}amix=inputs={len(cues)}:normalize=0:duration=longest[a]",
+         ";".join(parts) + f";{mix}amix=inputs={len(cues)}:normalize=0:duration=longest,volume={E.VOICE_LEVEL:.3f}[a]",
          "-map", "[a]", "-t", f"{total:.3f}", str(out)])
     return out
 
@@ -519,7 +519,7 @@ def _mix(edge: dict, shows: list, sources, tmp_dir: Path, run, notes: list = Non
                             still_volume=float(music.get("still_volume", E.MUSIC_IN_STILL)),
                             # (never above a quarter: a plan compiled earlier stored 0.5)
                             under_voice=min(float(voice.get("music_volume", E.MUSIC_UNDER_VOICE)), E.MUSIC_UNDER_VOICE))
-        level = f"volume=volume='{E.music_gain_expr(spec)}':eval=frame"
+        level = f"volume=volume='{E.music_gain_expr(spec)}':eval=frame,volume={E.MUSIC_LEVEL:.3f}"
         if music.get("energy_mix"):
             filters.append(f"[mixed]{level}[music]")
         else:

@@ -447,3 +447,14 @@ def test_a_hands_off_greys_the_timer_and_the_phase_carries_on(tmp_path, monkeypa
     # the clock carried on: 12 s after the restart the ring is all but empty (20 − 8 − 11.5 ≈ 0.5 s left)
     top = _pixel(out, 22.5, m + w // 2, m + 4)
     assert max(top) < 200 or abs(top[0] - top[2]) < 40
+
+
+def test_the_voice_is_15_percent_louder_and_the_music_5_percent_quieter(tmp_path):
+    import edge_mode as E
+    import edge_render as R
+    assert (E.VOICE_LEVEL, E.MUSIC_LEVEL) == (1.15, 0.95)                      # Daryl, 17 Nov
+    seen = []
+    wav = E.write_placeholder_cue("fast", tmp_path / "x.wav")
+    R._voice_track([{"time": 1.0, "file": str(wav), "profile": "fast"}], 5.0, tmp_path, lambda cmd: seen.append(cmd))
+    assert any("volume=1.150[a]" in " ".join(c) for c in seen)
+    assert "volume={E.MUSIC_LEVEL:.3f}" in open(R.__file__).read()                # on the songs, after their fades

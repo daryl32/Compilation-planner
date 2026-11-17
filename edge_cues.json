@@ -302,8 +302,8 @@
     {
      "at": "start",
      "diffs": [],
-     "note": "",
-     "offset": 0,
+     "note": "Claude 17 Nov: 12 s into Medium, straight after “Listen to my voice”",
+     "offset": 12.2,
      "phases": [
       "medium"
      ],
@@ -886,8 +886,8 @@
     {
      "at": "end",
      "diffs": [],
-     "note": "",
-     "offset": 3,
+     "note": "Claude 17 Nov: ends as the next phase starts (no longer pushes its start line out)",
+     "offset": 10.1,
      "phases": [
       "extra"
      ],
@@ -1185,8 +1185,8 @@
     {
      "at": "end",
      "diffs": [],
-     "note": "",
-     "offset": 0,
+     "note": "Claude 17 Nov: just before Fast ends (Extra's start line follows)",
+     "offset": 2,
      "phases": [
       "fast"
      ],
@@ -1285,8 +1285,8 @@
     {
      "at": "end",
      "diffs": [],
-     "note": "",
-     "offset": 0,
+     "note": "Claude 17 Nov: ends as the next phase starts (no longer pushes its start line out)",
+     "offset": 8.5,
      "phases": [
       "wait"
      ],
@@ -1346,8 +1346,8 @@
     {
      "at": "end",
      "diffs": [],
-     "note": "",
-     "offset": 0,
+     "note": "Claude 17 Nov: ends as the next phase starts (no longer pushes its start line out)",
+     "offset": 9.5,
      "phases": [
       "slow"
      ],
@@ -1425,7 +1425,7 @@
     {
      "at": "end",
      "diffs": [],
-     "note": "",
+     "note": "Claude 17 Nov: as Medium starts (round 1's Slow is full with “Get hard for me”)",
      "offset": 0,
      "phases": [
       "slow"
@@ -1477,8 +1477,8 @@
     {
      "at": "end",
      "diffs": [],
-     "note": "",
-     "offset": 3,
+     "note": "Claude 17 Nov: ends as the next phase starts (no longer pushes its start line out)",
+     "offset": 13.7,
      "phases": [
       "fast"
      ],
