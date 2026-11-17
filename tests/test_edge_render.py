@@ -230,9 +230,9 @@ def test_with_the_avatar_her_clips_sound_is_heard_at_the_lines_loudness(tmp_path
     import edge_render as R
     ff = lambda *a: subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *a], check=True)      # noqa: E731
     mp3, clip = tmp_path / "line.wav", tmp_path / "her.mp4"
-    ff("-f", "lavfi", "-i", "sine=frequency=700:duration=2", "-af", "volume=6", str(mp3))        # the line: loud
+    ff("-f", "lavfi", "-i", "sine=frequency=700:duration=2", "-af", "volume=1", str(mp3))        # the line: loud
     ff("-f", "lavfi", "-i", "color=c=yellow:s=90x160:d=3:r=25", "-f", "lavfi", "-i", "sine=frequency=700:duration=3",
-       "-af", "volume=0.5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", str(clip))    # her clip: much quieter
+       "-af", "volume=0.1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", str(clip))    # her clip: much quieter
     edge = {"voiceover": {"on": True, "cues": [{"time": 5.0, "profile": "slow", "file": str(mp3)},
                                                {"time": 30.0, "profile": "slow", "file": None},
                                                {"time": 40.0, "profile": "slow", "file": str(mp3)}]}}
@@ -246,9 +246,42 @@ def test_with_the_avatar_her_clips_sound_is_heard_at_the_lines_loudness(tmp_path
 
     def run(cmd):
         subprocess.run(cmd, capture_output=True, check=True)
-    track = R._voice_track(cues, 50.0, tmp_path, run)
+    R._TARGET.clear()
+    import unittest.mock as um
+    with um.patch.object(R, "voice_target", lambda: -26.0):                                   # 🔊 one common level
+        track = R._voice_track(cues, 50.0, tmp_path, run)
     assert _level(track, 5.2, 6.8) == pytest.approx(_level(track, 40.2, 41.8), rel=0.25)      # as loud as the line itself
-    assert _level(track, 30.2, 31.8) < 0.3 * _level(track, 5.2, 6.8)                          # nothing to match: as it is
+    assert _level(track, 30.2, 31.8) == pytest.approx(_level(track, 5.2, 6.8), rel=0.25)      # and every clip at the same level
+
+
+def test_quiet_lines_are_brought_up_to_the_typical_line_and_the_cue_maps_gain_goes_on_top(tmp_path, monkeypatch):
+    """🔊 (17 Nov) A line recorded 18 dB quieter than the rest comes up to their level; the loud one comes down (at
+    most 6 dB); a line's own ± dB from the Cue Map is added; the typical level is the middle of the lines on the server."""
+    import edge_render as R
+    import planner.edge as PE
+    ff = lambda *a: subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *a], check=True)      # noqa: E731
+    lines = tmp_path / "lines"
+    lines.mkdir()
+    for name, vol in (("a", 0.1), ("b", 0.1), ("c", 0.1), ("quiet", 0.0125), ("loud", 0.8)):
+        ff("-f", "lavfi", "-i", "sine=frequency=500:duration=1.5", "-af", f"volume={vol}", str(lines / f"{name}.wav"))
+    monkeypatch.setattr(PE, "lines_dir", lambda: lines)
+    R._TARGET.clear()
+    t = R.voice_target()
+    assert t == pytest.approx(R._peak_db(lines / "a.wav"), abs=0.2)
+    assert R.level_gain(lines / "quiet.wav") == pytest.approx(18.06 if 18.06 < R.LEVEL_UP_MAX else R.LEVEL_UP_MAX, abs=0.5)
+    assert R.level_gain(lines / "loud.wav") == -R.LEVEL_DOWN_MAX and R.level_gain(lines / "a.wav") == pytest.approx(0, abs=0.2)
+    got = R.voice_levels({n: lines / f"{n}.wav" for n in ("a", "quiet", "loud")} | {"missing": None})
+    assert [g[0] for g in got] == ["quiet", "a", "loud"]
+
+    def run(cmd):
+        subprocess.run(cmd, capture_output=True, check=True)
+    cues = [{"time": 1.0, "profile": "slow", "file": str(lines / "a.wav")},
+            {"time": 4.0, "profile": "slow", "file": str(lines / "quiet.wav")},
+            {"time": 7.0, "profile": "slow", "file": str(lines / "a.wav"), "gain": 6}]
+    track = R._voice_track(cues, 10.0, tmp_path, run)
+    a, q, boosted = _level(track, 1.2, 2.3), _level(track, 4.2, 5.3), _level(track, 7.2, 8.3)
+    assert q == pytest.approx(a * 10 ** ((R.LEVEL_UP_MAX - 18.06) / 20), rel=0.2)      # up as far as allowed
+    assert boosted == pytest.approx(a * 2.0, rel=0.15)                                  # +6 dB from the Cue Map
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
@@ -456,5 +489,13 @@ def test_the_voice_is_15_percent_louder_and_the_music_5_percent_quieter(tmp_path
     seen = []
     wav = E.write_placeholder_cue("fast", tmp_path / "x.wav")
     R._voice_track([{"time": 1.0, "file": str(wav), "profile": "fast"}], 5.0, tmp_path, lambda cmd: seen.append(cmd))
-    assert any("volume=1.150[a]" in " ".join(c) for c in seen)
+    assert any("volume=1.150,alimiter" in " ".join(c) for c in seen)          # (then the limiter, 17 Nov)
     assert "volume={E.MUSIC_LEVEL:.3f}" in open(R.__file__).read()                # on the songs, after their fades
+
+
+def test_her_clip_keeps_the_lines_cue_map_gain():
+    import edge_render as R
+    edge = {"voiceover": {"on": True, "cues": [{"time": 5.0, "profile": "slow", "file": "line.mp3", "gain": -3}]}}
+    shows = [{"time": 5.0, "seconds": 3.0, "profile": "slow", "clip": "her.mp4", "still": None, "sound": "her.mp4"}]
+    assert R._sound_cues(edge, shows)[0]["gain"] == -3
+

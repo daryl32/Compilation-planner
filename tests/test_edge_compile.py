@@ -117,6 +117,10 @@ def test_compile_carries_the_avatar_and_the_intro(monkeypatch, tmp_path):
         at.run()
         assert not errors(at), errors(at)
         assert at.button(key="studio_make").disabled          # 🧍 Studio previews: needs the Drive connection
+        at.button(key="edge_loudness").click().run()        # 🔊 the loudness check
+        assert not errors(at), errors(at)
+        shown = " ".join(x.value for x in at.info) + " ".join(str(x.value) for x in at.markdown)
+        assert "No line is on the server yet" in shown or "Typical line" in shown
         at.radio(key="edge_avatar_mode").set_value("split")
         at.run()
         at.button(key="edge_go_only").click().run()

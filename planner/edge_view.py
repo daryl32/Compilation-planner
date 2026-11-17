@@ -79,6 +79,32 @@ def _lines_panel(cue_map: dict) -> None:
             st.session_state["edge_cue_up_n"] = n + 1
             st.session_state["edge_msg"] = ("error", err) if err else ("success", "Cue map replaced — the next compile uses it.")
             st.rerun()
+        _loudness(lines)
+
+
+def _loudness(lines: list) -> None:
+    """🔊 How loud each line is as recorded, and what the render does about it."""
+    import edge_render as R
+    st.caption("🔊 Every line is evened out when rendered: each one is brought to the typical line's level (quiet ones "
+               "up to +15 dB, loud ones down up to 6 dB), her clips' sound too — then the voiceover's +15 % and a "
+               "limiter so nothing clips. A line's own ± from the Cue Map's 🔊 slider goes on top.")
+    if not st.button("📊 Check the loudness", key="edge_loudness"):
+        return
+    files = {ln["name"]: line_file(ln) for ln in lines}
+    with st.spinner("Measuring the lines…"):
+        got = R.voice_levels(files)
+        target = R.voice_target()
+    if not got:
+        st.info("No line is on the server yet — ⬇️ get them from Google Drive first.")
+        return
+    gains = {ln["name"]: float(ln.get("gain") or 0) for ln in lines}
+    up = [g for g in got if g[2] >= 3]
+    st.write(f"Typical line: **{target:.1f} dB** · {len(got)} measured · **{len(up)}** turned up 3 dB or more, "
+             f"{sum(1 for g in got if g[2] <= -3)} turned down 3 dB or more.")
+    st.dataframe([{"Line": n, "As recorded (dB)": round(d, 1), "Evened out (dB)": f"{g:+.1f}",
+                   "Cue Map 🔊": f"{gains.get(n, 0):+.0f}" if gains.get(n) else "",
+                   "": "⚠️ very quiet — maybe re-record" if g >= R.LEVEL_UP_MAX - 0.05 else ""} for n, d, g in got],
+                 hide_index=True, use_container_width=True)
 
 
 STUDIO_JOB = "studio:previews"

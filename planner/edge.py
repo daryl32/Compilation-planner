@@ -490,11 +490,12 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             tk = take_of(p, k)
             cues.append({"time": p["time"], "profile": p["profile"], "file": tk["file"] or (path(p["line"]) if k == 0 else None),
                          "line": p["line"], "take": k + 1, "clip": tk["clip"], "seconds": p["seconds"], "round": p["round"],
-                         "why": p["why"], "moved": p["moved"]})
+                         "why": p["why"], "moved": p["moved"], "gain": float(by_name[p["line"]].get("gain") or 0)})
         clashes = got["clashes"]
         lines_unused = list(got.get("unused") or [])       # a cue, but for a round / difficulty this compilation doesn't have
         lines_no_cue = sorted((ln["name"] for ln in cue_map["lines"] if not ln.get("cues")), key=str.lower)
-        named = lambda ns: [{"line": n, "file": path(n), "seconds": float(durations.get(n) or by_name[n].get("seconds") or 2.0)} for n in ns]   # noqa: E731
+        named = lambda ns: [{"line": n, "file": path(n), "seconds": float(durations.get(n) or by_name[n].get("seconds") or 2.0),
+                             "gain": float(by_name[n].get("gain") or 0)} for n in ns]   # noqa: E731
         intro_lines, outro_lines = named(got["intro"]), named(got["outro"])
         if avatar:                                         # 👩 she reads the lines: her clip where there is one
             vid = lambda n: (str(avatar_line_clip(by_name[n])) if avatar_line_clip(by_name[n]) else None)       # noqa: E731

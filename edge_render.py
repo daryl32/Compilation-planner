@@ -221,6 +221,45 @@ def _match_gain(sound, like) -> float:
     return max(-6.0, min(20.0, b - a))
 
 
+LEVEL_FALLBACK_DB = -20.0         # 🔊 the speech level lines are brought to when none of the lines can be measured
+LEVEL_UP_MAX, LEVEL_DOWN_MAX = 15.0, 6.0     # never more than +15 dB (noise) or −6 dB on any line
+_TARGET = {}
+
+
+def voice_target() -> float:
+    """🔊 The speech level every line is brought to (Daryl, 17 Nov: "some are very quiet"): the MIDDLE level of all
+    the cue map's lines on this machine — the quiet ones come up to the typical line, the odd loud one comes down,
+    and the mix as a whole stays where it was tuned (VOICE_LEVEL on top). Remembered until the lines change."""
+    try:
+        from planner.edge import lines_dir
+        files = sorted(f for f in lines_dir().glob("*") if f.suffix.lower() in (".mp3", ".wav", ".m4a") and f.stat().st_size)
+    except Exception:          # noqa: BLE001
+        files = []
+    key = tuple((str(f), f.stat().st_mtime_ns) for f in files)
+    if key not in _TARGET:
+        import statistics
+        got = [d for d in (_peak_db(f) for f in files) if d is not None]
+        _TARGET.clear()
+        _TARGET[key] = round(statistics.median(got), 1) if got else LEVEL_FALLBACK_DB
+    return _TARGET[key]
+
+
+def level_gain(path, target: float = None) -> float:
+    """dB that brings a line (or her clip's sound) to the common speech level; 0 when it can't be measured."""
+    d = _peak_db(path) if path else None
+    if d is None:
+        return 0.0
+    t = voice_target() if target is None else target
+    return max(-LEVEL_DOWN_MAX, min(LEVEL_UP_MAX, t - d))
+
+
+def voice_levels(files: dict) -> list:
+    """For the 🎙️ panel: [(name, speech level dB, gain dB)] for {name: path}, quietest first."""
+    t = voice_target()
+    out = [(n, _peak_db(f), level_gain(f, t)) for n, f in files.items() if f]
+    return sorted((x for x in out if x[1] is not None), key=lambda x: x[1])
+
+
 def _voice_track(cues: list, total: float, tmp_dir: Path, run, name: str = "voice.wav") -> Path | None:
     """Every cue laid at its time on one silent track of the compilation's length. A cue without a clip (or whose
     clip has gone) gets its phase's placeholder tone."""
@@ -233,15 +272,17 @@ def _voice_track(cues: list, total: float, tmp_dir: Path, run, name: str = "voic
             p = cue["profile"]
             if p not in placeholders:
                 placeholders[p] = E.write_placeholder_cue(p, tmp_dir / f"cue_{p}.wav")
-            f = placeholders[p]
+            f, gain = placeholders[p], 0.0
+        else:                      # 🔊 every line (and her clip's sound) at the common level, plus the line's own ± from the Cue Map
+            gain = level_gain(f) + max(-6.0, min(6.0, float(cue.get("gain") or 0)))
         inputs += ["-i", str(f)]
         ms = int(round(float(cue["time"]) * 1000))
-        gain = _match_gain(f, cue.get("match"))
         parts.append(f"[{k}:a:0]{AUDIO_FMT}," + (f"volume={gain:.1f}dB," if abs(gain) >= 0.5 else "") + f"adelay={ms}:all=1[c{k}]")
     out = tmp_dir / name
     mix = "".join(f"[c{k}]" for k in range(len(cues)))
     run(["ffmpeg", "-y", *inputs, "-filter_complex",
-         ";".join(parts) + f";{mix}amix=inputs={len(cues)}:normalize=0:duration=longest,volume={E.VOICE_LEVEL:.3f}[a]",
+         ";".join(parts) + f";{mix}amix=inputs={len(cues)}:normalize=0:duration=longest,volume={E.VOICE_LEVEL:.3f},"
+         "alimiter=limit=0.95:level=0[a]",
          "-map", "[a]", "-t", f"{total:.3f}", str(out)])
     return out
 
@@ -364,7 +405,7 @@ def _sound_cues(edge: dict, shows: list) -> list:
         key = round(s["time"], 3)
         if s["sound"]:
             by_time[key] = {"time": s["time"], "profile": s["profile"], "file": s["sound"],
-                            "match": (by_time.get(key) or {}).get("file")}
+                            "match": (by_time.get(key) or {}).get("file"), "gain": (by_time.get(key) or {}).get("gain", 0)}
         elif key not in by_time:
             by_time[key] = {"time": s["time"], "profile": s["profile"], "file": None}
     return [by_time[k] for k in sorted(by_time)]
@@ -399,7 +440,8 @@ def _card(spec: dict, tmp_dir: Path, run, frame: tuple, name: str):
         ci = probe(c) if c and Path(c).exists() else None
         has_clip = bool(ci and ci["video"] and ci["seconds"] > 0)
         secs = (ci["seconds"] if has_clip else (probe(f)["seconds"] if f and Path(f).exists() else 0.0)) or float(ln.get("seconds") or 2.0)
-        cues.append({"time": t, "profile": "wait", "file": c if has_clip and ci["audio"] else f, "match": f})
+        cues.append({"time": t, "profile": "wait", "file": c if has_clip and ci["audio"] else f, "match": f,
+                     "gain": ln.get("gain", 0)})
         if has_clip:
             shows.append({"time": t, "seconds": secs, "clip": c})
         t += secs + E.LINE_GAP
