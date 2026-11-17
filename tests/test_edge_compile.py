@@ -32,8 +32,8 @@ def test_compile_without_a_song_and_with_a_playlist(monkeypatch):
         assert all(c["file"] is None for c in vo["cues"]) and "Now stop" in vo["lines_missing"]      # no files here: tones
         assert not edge["intro"]["on"] and edge["intro"]["lines"] == []          # the intro screen only when switched on
         shown = PE.compile_edge([], VIDS, "chill", 3, voiceover=True, intro=True)["plan"]["edge"]["intro"]
-        assert shown["on"] and [x["line"] for x in shown["lines"]] == ["Intro to NNN"]      # (16 Nov map: Welcome has no cue)
-        assert edge["outro"]["on"] and [x["line"] for x in edge["outro"]["lines"]] == ["I hope not"]
+        assert shown["on"] and [x["line"] for x in shown["lines"]] == ["Welcome", "Intro to NNN"]      # (17 Nov map: Welcome first)
+        assert edge["outro"]["on"] and [x["line"] for x in edge["outro"]["lines"]] == ["I hope not", "You can survive 30 days"]
         assert res["voice_clashes"] and {"line", "with", "round", "where", "result"} <= set(res["voice_clashes"][0])
         quiet = PE.compile_edge([], VIDS, "chill", 3)["plan"]["edge"]
         assert not quiet["intro"]["on"] and quiet["voiceover"]["cues"] == []

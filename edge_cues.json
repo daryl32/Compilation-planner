@@ -1,8 +1,11 @@
 {
  "version": 1,
- "source": "Edge Mode Cue Map (claude.ai artifact), as saved 16 Nov 2026 02:18 (57 lines, 12 new on 16 Nov)",
+ "source": "Edge Mode Cue Map — sent by Claude 2026-11-17 (New folder lines mapped)",
  "drive_folder": "scene-labeling/Edge_voiceover",
- "note": "seconds are estimated from the MP3 size at 192 kbps; the app measures the real file when it has it",
+ "subfolders": [
+  "New"
+ ],
+ "note": "seconds: measured in the Cue Map, or estimated from the file size; the app measures the real file when it has it",
  "lines": [
   {
    "name": "I love edging you",
@@ -10,19 +13,25 @@
    "seconds": 2.74,
    "cues": [
     {
-     "type": "phase",
+     "at": "during",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "stop"
      ],
-     "at": "during",
-     "offset": 0,
      "roundList": [
       "4"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Dont you dare cum-whisper",
@@ -30,19 +39,25 @@
    "seconds": 2.25,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 3,
      "phases": [
       "extra"
      ],
-     "at": "start",
-     "offset": 3,
      "roundList": [
       "last"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Did you cum",
@@ -50,20 +65,26 @@
    "seconds": 2.17,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "stop"
      ],
-     "at": "end",
-     "offset": 0,
      "roundList": [
       "6",
       "last"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Control yourself",
@@ -71,19 +92,25 @@
    "seconds": 1.93,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 3,
      "phases": [
       "stop"
      ],
-     "at": "end",
-     "offset": 3,
      "roundList": [
       "2"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Dont you dare cum",
@@ -91,19 +118,25 @@
    "seconds": 1.86,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 3,
      "phases": [
       "extra"
      ],
-     "at": "end",
-     "offset": 3,
      "roundList": [
       "2"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "you are so hard",
@@ -111,19 +144,25 @@
    "seconds": 2.35,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "Start of wait",
+     "offset": 0,
      "phases": [
       "wait"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "2"
      ],
-     "diffs": [],
-     "note": "Start of wait"
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Moan",
@@ -131,19 +170,25 @@
    "seconds": 1.49,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 3,
      "phases": [
       "medium"
      ],
-     "at": "end",
-     "offset": 3,
      "roundList": [
       "last"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Faster",
@@ -151,25 +196,51 @@
    "seconds": 1.65,
    "cues": [
     {
-     "type": "phase",
+     "at": "during",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "extra"
      ],
-     "at": "during",
-     "offset": 0,
      "roundList": [
       "1"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Just stroke",
    "file": "Just stroke.mp3",
    "seconds": 2.43,
-   "cues": []
+   "cues": [
+    {
+     "at": "end",
+     "diffs": [],
+     "note": "Claude 17 Nov: end of Slow, round 2 — finishes just as Medium starts (Stroke faster)",
+     "offset": 2.8,
+     "phases": [
+      "slow"
+     ],
+     "roundList": [
+      "2"
+     ],
+     "type": "phase"
+    }
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Relax for a sec",
@@ -177,19 +248,25 @@
    "seconds": 1.94,
    "cues": [
     {
-     "type": "phase",
+     "at": "during",
+     "diffs": [],
+     "note": "Round 2",
+     "offset": 0,
      "phases": [
       "stop"
      ],
-     "at": "during",
-     "offset": 0,
      "roundList": [
       "1"
      ],
-     "diffs": [],
-     "note": "Round 2"
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "And dont cum",
@@ -197,19 +274,25 @@
    "seconds": 1.73,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "stop"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "5"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Stroke it",
@@ -217,19 +300,25 @@
    "seconds": 1.44,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "medium"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "1"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Just sit there",
@@ -237,19 +326,25 @@
    "seconds": 1.7,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "wait"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "3"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Now stop",
@@ -257,25 +352,47 @@
    "seconds": 1.57,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "stop"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "1"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Did i get you",
    "file": "Did i get you.mp3",
    "seconds": 1.73,
-   "cues": []
+   "cues": [
+    {
+     "at": "start",
+     "diffs": [],
+     "kind": "override",
+     "length": "",
+     "note": "Claude 16 Nov: as an override starts",
+     "roundList": [],
+     "type": "surprise"
+    }
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "You can survive",
@@ -283,25 +400,52 @@
    "seconds": 1.81,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "Round 5 only: every round was a mistake. Claude picked round 5 (its start of Slow was free); change the round if you meant another.",
+     "offset": 0,
      "phases": [
       "slow"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "5"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "showing me you can do this",
    "file": "showing me you can do this.mp3",
    "seconds": 2.96,
-   "cues": []
+   "cues": [
+    {
+     "at": "during",
+     "diffs": [],
+     "note": "Claude 16 Nov: fills During Extra in round 2 and the last round",
+     "offset": 0,
+     "phases": [
+      "extra"
+     ],
+     "roundList": [
+      "2",
+      "last"
+     ],
+     "type": "phase"
+    }
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Now stop (2)",
@@ -309,32 +453,38 @@
    "seconds": 1.31,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 3,
      "phases": [
       "extra"
      ],
-     "at": "end",
-     "offset": 3,
      "roundList": [
       "5"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     },
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "stop"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "last"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Keep stroking faster",
@@ -342,19 +492,25 @@
    "seconds": 2.36,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "fast"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "1"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Keep stroking harder",
@@ -362,20 +518,26 @@
    "seconds": 2.22,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "medium"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "6",
       "last"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Keep going",
@@ -383,12 +545,13 @@
    "seconds": 1.57,
    "cues": [
     {
-     "type": "phase",
+     "at": "during",
+     "diffs": [],
+     "note": "Filler: once a round, in a free silence during Medium or Fast",
+     "offset": 0,
      "phases": [
       "medium"
      ],
-     "at": "during",
-     "offset": 0,
      "roundList": [
       "1",
       "2",
@@ -397,10 +560,15 @@
       "5",
       "6"
      ],
-     "diffs": [],
-     "note": "Filler: once a round, in a free silence during Medium or Fast"
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Ok stroke again",
@@ -408,25 +576,47 @@
    "seconds": 1.99,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "wait"
      ],
-     "at": "end",
-     "offset": 0,
      "roundList": [
       "3"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Stop again",
    "file": "Stop again.mp3",
    "seconds": 1.44,
-   "cues": []
+   "cues": [
+    {
+     "at": "start",
+     "diffs": [],
+     "kind": "handsoff",
+     "length": "3",
+     "note": "Claude 16 Nov: a 3-second hands off (Chill)",
+     "roundList": [],
+     "type": "surprise"
+    }
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Harder-again",
@@ -434,25 +624,51 @@
    "seconds": 2.07,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 3,
      "phases": [
       "fast"
      ],
-     "at": "end",
-     "offset": 3,
      "roundList": [
       "2"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Stroke again - faster",
    "file": "Stroke again - faster.mp3",
    "seconds": 2.15,
-   "cues": []
+   "cues": [
+    {
+     "at": "end",
+     "diffs": [],
+     "note": "Claude 17 Nov: end of Medium, round 1 (ends just as Fast starts); round 2's Medium is full",
+     "offset": 2.5,
+     "phases": [
+      "medium"
+     ],
+     "roundList": [
+      "1"
+     ],
+     "type": "phase"
+    }
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "I know you can do it",
@@ -460,25 +676,45 @@
    "seconds": 2.43,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "wait"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "4"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "You can survive 30 days",
    "file": "You can survive 30 days.mp3",
    "seconds": 3.77,
-   "cues": []
+   "cues": [
+    {
+     "diffs": [],
+     "note": "Claude 16 Nov: sign-off after “I hope not”",
+     "order": 100,
+     "roundList": [],
+     "type": "outro"
+    }
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "I hope not",
@@ -486,12 +722,18 @@
    "seconds": 13.64,
    "cues": [
     {
-     "type": "outro",
-     "roundList": [],
      "diffs": [],
-     "note": ""
+     "note": "",
+     "roundList": [],
+     "type": "outro"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "relax-fingertips",
@@ -499,19 +741,25 @@
    "seconds": 8.21,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "slow"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "4"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Its so much fun watching you shake",
@@ -519,19 +767,25 @@
    "seconds": 15.31,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "wait"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "last"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Again - really hard and really fast - you need to show me",
@@ -539,32 +793,38 @@
    "seconds": 11.65,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 3,
      "phases": [
       "fast"
      ],
-     "at": "end",
-     "offset": 3,
      "roundList": [
       "5"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     },
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "extra"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "1"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Balls bursting",
@@ -572,19 +832,25 @@
    "seconds": 17.87,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "wait"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "5"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "How stroke even more",
@@ -592,19 +858,25 @@
    "seconds": 3.61,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "medium"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "4"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "I want every last drop",
@@ -612,19 +884,25 @@
    "seconds": 9.7,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 3,
      "phases": [
       "extra"
      ],
-     "at": "end",
-     "offset": 3,
      "roundList": [
       "last"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Now Stroke",
@@ -632,43 +910,116 @@
    "seconds": 7.03,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "slow"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "last"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Do you want to see my tits again",
    "file": "Do you want to see my tits again.mp3",
    "seconds": 4.73,
-   "cues": []
+   "cues": [
+    {
+     "at": "during",
+     "diffs": [],
+     "note": "Claude 16 Nov: fills During Stop in round 2 (fits between “Stop hands off punish you” and “Control yourself”)",
+     "offset": 0,
+     "phases": [
+      "stop"
+     ],
+     "roundList": [
+      "2"
+     ],
+     "type": "phase"
+    }
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "show me how much - now stop",
    "file": "show me how much - now stop.mp3",
    "seconds": 6.67,
-   "cues": []
+   "cues": [
+    {
+     "at": "end",
+     "diffs": [],
+     "note": "Claude 16 Nov: fills the end of Extra in rounds 3 and 4 (“now stop” lands as Stop starts)",
+     "offset": 7.1,
+     "phases": [
+      "extra"
+     ],
+     "roundList": [
+      "3",
+      "4"
+     ],
+     "type": "phase"
+    }
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Stop - look at my tits",
    "file": "Stop - look at my tits.mp3",
    "seconds": 19.15,
-   "cues": []
+   "cues": [],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Slow",
    "file": "Slow.mp3",
    "seconds": 10.56,
-   "cues": []
+   "cues": [
+    {
+     "diffs": [
+      "hard"
+     ],
+     "note": "Claude 16 Nov: Hard's drop back to Slow — once a round, in a Slow phase",
+     "per": "round",
+     "phases": [
+      "slow"
+     ],
+     "roundList": [],
+     "times": 1,
+     "type": "random"
+    }
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Get hard for me",
@@ -676,19 +1027,25 @@
    "seconds": 16.75,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "wait"
      ],
-     "at": "end",
-     "offset": 0,
      "roundList": [
       "1"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Start-Round 1",
@@ -696,19 +1053,25 @@
    "seconds": 19.86,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "wait"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "1"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Intro to NNN",
@@ -716,18 +1079,38 @@
    "seconds": 19.86,
    "cues": [
     {
-     "type": "intro",
-     "roundList": [],
      "diffs": [],
-     "note": "2nd audio of the video"
+     "note": "2nd audio of the video",
+     "roundList": [],
+     "type": "intro"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Welcome",
    "file": "Welcome.mp3",
    "seconds": 3.19,
-   "cues": []
+   "cues": [
+    {
+     "diffs": [],
+     "note": "Claude 16 Nov: first on the intro screen, before “Intro to NNN”",
+     "order": 1,
+     "roundList": [],
+     "type": "intro"
+    }
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Show me how bad",
@@ -735,19 +1118,25 @@
    "seconds": 5.41,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "extra"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "2"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Stroke faster",
@@ -755,19 +1144,25 @@
    "seconds": 16.7,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "medium"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "2"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Are you ready babe",
@@ -775,32 +1170,38 @@
    "seconds": 1.59,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "slow"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "1"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     },
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "fast"
      ],
-     "at": "end",
-     "offset": 0,
      "roundList": [
       "1"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "Added 16 Nov (new line, no cue yet)",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Are you ready for round 2",
@@ -808,25 +1209,47 @@
    "seconds": 2.39,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "wait"
      ],
-     "at": "end",
-     "offset": 0,
      "roundList": [
       "2"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "Added 16 Nov (new line, no cue yet)",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Almost there babe 321",
    "file": "Almost there babe 321.mp3",
    "seconds": 3.84,
-   "cues": []
+   "cues": [
+    {
+     "at": "before",
+     "diffs": [],
+     "kind": "falsefinish",
+     "length": "",
+     "note": "Claude 16 Nov: the false finish's countdown — ends on “one” as the timer hits zero",
+     "roundList": [],
+     "type": "surprise"
+    }
+   ],
+   "notes": "Added 16 Nov (new line, no cue yet)",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Don’t you dare slow down- rush",
@@ -834,19 +1257,25 @@
    "seconds": 5.76,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "fast"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "last"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "Added 16 Nov (new line, no cue yet)",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Final round prepare yourself",
@@ -854,19 +1283,25 @@
    "seconds": 8.05,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "wait"
      ],
-     "at": "end",
-     "offset": 0,
      "roundList": [
       "last"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "Added 16 Nov (new line, no cue yet)",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Scratch that - gasping",
@@ -874,19 +1309,34 @@
    "seconds": 8.59,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "fast"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "2"
      ],
+     "type": "phase"
+    },
+    {
+     "at": "start",
      "diffs": [],
-     "note": ""
+     "kind": "falsefinish",
+     "length": "",
+     "note": "Claude 16 Nov: the false finish's reveal (NOT YET)",
+     "roundList": [],
+     "type": "surprise"
     }
-   ]
+   ],
+   "notes": "Added 16 Nov (new line, no cue yet)",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Look into my eyes",
@@ -894,19 +1344,25 @@
    "seconds": 9.06,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "slow"
      ],
-     "at": "end",
-     "offset": 0,
      "roundList": [
       "last"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "Added 16 Nov (new line, no cue yet)",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Stop hands off punish you",
@@ -914,25 +1370,52 @@
    "seconds": 10.25,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "stop"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "2"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "Added 16 Nov (new line, no cue yet)",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "You think you gonna finish today laughing",
    "file": "You think you gonna finish today laughing.mp3",
    "seconds": 11.68,
-   "cues": []
+   "cues": [
+    {
+     "at": "during",
+     "diffs": [],
+     "note": "Claude 17 Nov: During Stop in rounds 3 and 5 (the last round's Stop is full)",
+     "offset": 0,
+     "phases": [
+      "stop"
+     ],
+     "roundList": [
+      "3",
+      "5"
+     ],
+     "type": "phase"
+    }
+   ],
+   "notes": "Added 16 Nov (new line, no cue yet)",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Listen to my voice, just the tip",
@@ -940,19 +1423,25 @@
    "seconds": 11.78,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "slow"
      ],
-     "at": "end",
-     "offset": 0,
      "roundList": [
       "1"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "Added 16 Nov (new line, no cue yet)",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Completely at my mercy 2 fingers on head",
@@ -960,19 +1449,25 @@
    "seconds": 12.76,
    "cues": [
     {
-     "type": "phase",
+     "at": "start",
+     "diffs": [],
+     "note": "",
+     "offset": 0,
      "phases": [
       "slow"
      ],
-     "at": "start",
-     "offset": 0,
      "roundList": [
       "2"
      ],
-     "diffs": [],
-     "note": ""
+     "type": "phase"
     }
-   ]
+   ],
+   "notes": "Added 16 Nov (new line, no cue yet)",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   },
   {
    "name": "Get ready wank off fast",
@@ -980,19 +1475,739 @@
    "seconds": 13.28,
    "cues": [
     {
-     "type": "phase",
+     "at": "end",
+     "diffs": [],
+     "note": "",
+     "offset": 3,
      "phases": [
       "fast"
+     ],
+     "roundList": [
+      "last"
+     ],
+     "type": "phase"
+    }
+   ],
+   "notes": "Added 16 Nov (new line, no cue yet)",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Hands off 3 A",
+   "file": "Hands off 3 A.mp3",
+   "seconds": 3.02,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "handsoff",
+     "at": "start",
+     "length": "3",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 hands off 3 s"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Hands off 3 B",
+   "file": "Hands off 3 B.mp3",
+   "seconds": 2.76,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "handsoff",
+     "at": "start",
+     "length": "3",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 hands off 3 s"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Hands off 5 A",
+   "file": "Hands off 5 A.mp3",
+   "seconds": 3.98,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "handsoff",
+     "at": "start",
+     "length": "5",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 hands off 5 s"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Hands off 5 B",
+   "file": "Hands off 5 B.mp3",
+   "seconds": 3.88,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "handsoff",
+     "at": "start",
+     "length": "5",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 hands off 5 s"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Hands off 8 A",
+   "file": "Hands off 8 A.mp3",
+   "seconds": 5.37,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "handsoff",
+     "at": "start",
+     "length": "8",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 hands off 8 s"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Hands off 8 B",
+   "file": "Hands off 8 B.mp3",
+   "seconds": 6.02,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "handsoff",
+     "at": "start",
+     "length": "8",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 hands off 8 s"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Hands off 12 A",
+   "file": "Hands off 12 A.mp3",
+   "seconds": 7.55,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "handsoff",
+     "at": "start",
+     "length": "12",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 hands off 12 s"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Hands off 12 B",
+   "file": "Hands off 12 B.mp3",
+   "seconds": 9.43,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "handsoff",
+     "at": "start",
+     "length": "12",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 hands off 12 s"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Override 5a",
+   "file": "Override 5a.mp3",
+   "seconds": 2.33,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "override",
+     "at": "start",
+     "length": "5",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 override +5 s"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Override 5b",
+   "file": "Override 5b.mp3",
+   "seconds": 3.4,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "override",
+     "at": "start",
+     "length": "5",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 override +5 s"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Override 10a",
+   "file": "Override 10a.mp3",
+   "seconds": 3.46,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "override",
+     "at": "start",
+     "length": "10",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 override +10 s"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Override 10b",
+   "file": "Override 10b.mp3",
+   "seconds": 3.61,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "override",
+     "at": "start",
+     "length": "10",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 override +10 s"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Override 15a",
+   "file": "Override 15a.mp3",
+   "seconds": 4.26,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "override",
+     "at": "start",
+     "length": "15",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 override +15 s"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Override 15 B",
+   "file": "Override 15 B.mp3",
+   "seconds": 4.36,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "override",
+     "at": "start",
+     "length": "15",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 override +15 s"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Almost there… 321",
+   "file": "Almost there… 321.mp3",
+   "seconds": 3.67,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "falsefinish",
+     "at": "before",
+     "length": "",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 false finish countdown (takes turns with “Almost there babe 321”)"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Scratch that B",
+   "file": "Scratch that B.mp3",
+   "seconds": 4.99,
+   "cues": [
+    {
+     "type": "surprise",
+     "kind": "falsefinish",
+     "at": "start",
+     "length": "",
+     "roundList": [],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): 🎲 false finish reveal (takes turns with “Scratch that – gasping”)"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Ready for round 3",
+   "file": "Ready for round 3.mp3",
+   "seconds": 1.96,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "wait"
      ],
      "at": "end",
      "offset": 3,
      "roundList": [
-      "last"
+      "3"
      ],
      "diffs": [],
-     "note": ""
+     "note": "Claude 17 Nov (New folder): end of Wait, round 3 (ends as Slow starts)"
     }
-   ]
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Round 4",
+   "file": "Round 4.mp3",
+   "seconds": 2.55,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "wait"
+     ],
+     "at": "end",
+     "offset": 3,
+     "roundList": [
+      "4"
+     ],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): end of Wait, round 4"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Round 5",
+   "file": "Round 5.mp3",
+   "seconds": 3.18,
+   "cues": [
+    {
+     "type": "phase",
+     "phases": [
+      "wait"
+     ],
+     "at": "end",
+     "offset": 3,
+     "roundList": [
+      "5"
+     ],
+     "diffs": [],
+     "note": "Claude 17 Nov (New folder): end of Wait, round 5"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Drop back A",
+   "file": "Drop back A.mp3",
+   "seconds": 3.56,
+   "cues": [
+    {
+     "type": "random",
+     "times": 1,
+     "per": "round",
+     "phases": [
+      "slow"
+     ],
+     "roundList": [
+      "1",
+      "3",
+      "5",
+      "last"
+     ],
+     "diffs": [
+      "hard"
+     ],
+     "note": "Claude 17 Nov (New folder): 💀 Hard drop-back, odd rounds and the last"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Drop back B",
+   "file": "Drop back B.mp3",
+   "seconds": 3.02,
+   "cues": [
+    {
+     "type": "random",
+     "times": 1,
+     "per": "round",
+     "phases": [
+      "slow"
+     ],
+     "roundList": [
+      "2",
+      "4",
+      "6"
+     ],
+     "diffs": [
+      "hard"
+     ],
+     "note": "Claude 17 Nov (New folder): 💀 Hard drop-back, even rounds"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Filler slower",
+   "file": "Filler slower.mp3",
+   "seconds": 2.87,
+   "cues": [
+    {
+     "type": "random",
+     "times": 1,
+     "per": "round",
+     "phases": [
+      "slow"
+     ],
+     "roundList": [],
+     "diffs": [
+      "medium",
+      "hard"
+     ],
+     "note": "Claude 17 Nov (New folder): 🔁 filler, once a round in a free silence (Medium and Hard)"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Filler moans",
+   "file": "Filler moans.mp3",
+   "seconds": 2.5,
+   "cues": [
+    {
+     "type": "random",
+     "times": 1,
+     "per": "round",
+     "phases": [
+      "fast",
+      "extra"
+     ],
+     "roundList": [],
+     "diffs": [
+      "medium",
+      "hard"
+     ],
+     "note": "Claude 17 Nov (New folder): 🔁 filler, once a round in a free silence (Medium and Hard)"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Filler just like that",
+   "file": "Filler just like that.mp3",
+   "seconds": 2.71,
+   "cues": [
+    {
+     "type": "random",
+     "times": 1,
+     "per": "round",
+     "phases": [
+      "medium",
+      "fast"
+     ],
+     "roundList": [],
+     "diffs": [
+      "medium",
+      "hard"
+     ],
+     "note": "Claude 17 Nov (New folder): 🔁 filler, once a round in a free silence (Medium and Hard)"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Filler don’t stop",
+   "file": "Filler don’t stop.mp3",
+   "seconds": 2.55,
+   "cues": [
+    {
+     "type": "random",
+     "times": 1,
+     "per": "round",
+     "phases": [
+      "fast",
+      "extra"
+     ],
+     "roundList": [],
+     "diffs": [
+      "medium",
+      "hard"
+     ],
+     "note": "Claude 17 Nov (New folder): 🔁 filler, once a round in a free silence (Medium and Hard)"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Filler follow the bar babe",
+   "file": "Filler follow the bar babe.mp3",
+   "seconds": 2.22,
+   "cues": [
+    {
+     "type": "random",
+     "times": 1,
+     "per": "round",
+     "phases": [
+      "medium",
+      "fast"
+     ],
+     "roundList": [],
+     "diffs": [
+      "medium",
+      "hard"
+     ],
+     "note": "Claude 17 Nov (New folder): 🔁 filler, once a round in a free silence (Medium and Hard)"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Filler not yet",
+   "file": "Filler not yet.mp3",
+   "seconds": 1.91,
+   "cues": [
+    {
+     "type": "random",
+     "times": 1,
+     "per": "round",
+     "phases": [
+      "fast",
+      "extra"
+     ],
+     "roundList": [],
+     "diffs": [
+      "medium",
+      "hard"
+     ],
+     "note": "Claude 17 Nov (New folder): 🔁 filler, once a round in a free silence (Medium and Hard)"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Filler good boy",
+   "file": "Filler good boy.mp3",
+   "seconds": 1.65,
+   "cues": [
+    {
+     "type": "random",
+     "times": 1,
+     "per": "round",
+     "phases": [
+      "medium",
+      "fast"
+     ],
+     "roundList": [],
+     "diffs": [
+      "medium",
+      "hard"
+     ],
+     "note": "Claude 17 Nov (New folder): 🔁 filler, once a round in a free silence (Medium and Hard)"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
+  },
+  {
+   "name": "Filler eyes on me",
+   "file": "Filler eyes on me.mp3",
+   "seconds": 1.58,
+   "cues": [
+    {
+     "type": "random",
+     "times": 1,
+     "per": "round",
+     "phases": [
+      "slow",
+      "medium"
+     ],
+     "roundList": [],
+     "diffs": [
+      "medium",
+      "hard"
+     ],
+     "note": "Claude 17 Nov (New folder): 🔁 filler, once a round in a free silence (Medium and Hard)"
+    }
+   ],
+   "notes": "In Drive: Edge_voiceover/New",
+   "avatar": {
+    "mode": "",
+    "file": "",
+    "after": ""
+   }
   }
  ]
 }

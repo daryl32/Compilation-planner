@@ -16,7 +16,8 @@ from tests.edge_support import (DATA, VIDS, E_CARD_LEAD, _check_plan, _emap, _le
 def test_the_cue_map_gives_every_line_its_moment_and_never_two_at_once():
     import edge_mode as E
     cm = E.load_cue_map()
-    assert len(cm["lines"]) == 57 and sum(1 for ln in cm["lines"] if ln["cues"]) == 44          # the 16 Nov map
+    assert len(cm["lines"]) == 86 and sum(1 for ln in cm["lines"] if ln["cues"]) == 85          # the 17 Nov map (New folder lines)
+    assert cm.get("subfolders") == ["New"]
     assert E.PROFILES["extra"]["bpm"] == 200                                       # a little faster than at first (180)
     for diff in E.DIFFICULTIES:
         for rounds in (3, 4, 5, 6):
@@ -27,7 +28,7 @@ def test_the_cue_map_gives_every_line_its_moment_and_never_two_at_once():
                 assert pl and all(0 <= p["time"] and p["time"] + p["seconds"] <= E.total_seconds(sched) + 1e-6 for p in pl)
                 for a, b in zip(pl, pl[1:]):
                     assert b["time"] >= a["time"] + a["seconds"] + E.LINE_GAP - 1e-3, (diff, rounds, a, b)
-                assert got["intro"] == ["Intro to NNN"] and got["outro"] == ["I hope not"]
+                assert got["intro"] == ["Welcome", "Intro to NNN"] and got["outro"] == ["I hope not", "You can survive 30 days"]
     got = E.resolve_lines(E.schedule("chill", 6), cm, "chill")
     at = {(p["line"], p["round"]): p for p in got["plays"]}
     assert at[("Start-Round 1", 1)]["time"] == 0.0 and at[("Now stop", 1)]["time"] == 100.0
@@ -134,7 +135,7 @@ def test_the_avatar_follows_the_cue_map(monkeypatch, tmp_path):
         av, vo = edge["avatar"]["cues"], edge["voiceover"]["cues"]
         assert [(c["time"], c["line"]) for c in av] == [(c["time"], c["line"]) for c in vo]      # she appears with every line
         assert {c["line"] for c in av if c["clip"]} == {"Now stop"} and "Get hard for me" in edge["avatar"]["placeholders"]
-        assert [x.get("clip") is not None for x in edge["intro"]["lines"]] == [True]      # her intro clip
+        assert [x.get("clip") is not None for x in edge["intro"]["lines"]] == [False, True]      # her intro clip (Welcome: none)
         assert edge["music"]["still_volume"] == 0.25
     finally:
         shutil.rmtree(out, ignore_errors=True)
@@ -224,6 +225,16 @@ def test_the_newest_cue_map_sent_from_the_page_is_fetched_and_its_lines_too(tmp_
     assert not errs and got[0].endswith("edge_cues_2026-11-16T12-00.json")
     assert "scene-labeling/Edge_voiceover/New one.mp3" in got                # a line only the sent map has is fetched too
     assert PE.cue_map_path() == tmp_path / "edge_voiceover" / "edge_cues.json" and PE.load_cue_map()["lines"][0]["name"] == "New one"
+    # 📁 a line whose file sits in the New subfolder is fetched from there (the top folder is looked in first)
+    got.clear()
+    sent["lines"].append({"name": "Hands off 8 A", "file": "Hands off 8 A.mp3", "seconds": 5.4, "cues": []})
+    fake.list_drive_folder = lambda rel: (([{"name": "edge_cues_2026-11-17T01-00.json", "modifiedTime": "2026-11-17T01:00:00Z"},
+                                            {"name": "Old one.mp3"}, {"name": "New one.mp3"}], None) if rel.endswith("Edge_voiceover")
+                                          else ([{"name": "Hands off 8 A.mp3"}, {"name": "Old one.mp3"}], None) if rel.endswith("/New")
+                                          else ([], None))
+    errs = PE.fetch_lines({"lines": []}, avatar=False)
+    assert not errs and "scene-labeling/Edge_voiceover/New/Hands off 8 A.mp3" in got
+    assert "scene-labeling/Edge_voiceover/Old one.mp3" in got and (PE.lines_dir() / "Hands off 8 A.mp3").exists()
 
 
 def test_surprise_lines_play_at_their_surprise_and_fit_its_length():
