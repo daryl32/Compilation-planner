@@ -122,6 +122,24 @@ def line_durations(cue_map: dict, with_avatar: bool = False) -> dict:
     return out
 
 
+def avatar_clip_folders(folder: str) -> list:
+    """👩 Where her speaking clips are, below the voiceover folder: "avatar_clips", then an "avatar_clips" inside any
+    of its other folders (e.g. "sitting/avatar_clips" — clips in another position; Daryl, 18 Nov)."""
+    out = ["avatar_clips"]
+    try:
+        from drive_sync import list_drive_subfolders
+    except ImportError:
+        return out
+    subs, err = list_drive_subfolders(folder)
+    for sub in ([] if err else subs):
+        if sub == "avatar_clips" or sub.startswith("_"):
+            continue
+        inner, err_ = list_drive_subfolders(f"{folder}/{sub}")
+        if not err_ and "avatar_clips" in inner:
+            out.append(f"{sub}/avatar_clips")
+    return out
+
+
 VOICE_SUBFOLDERS = ("New",)                            # 📁 subfolders of Edge_voiceover whose lines the cue map may use
 
 
@@ -172,12 +190,19 @@ def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing:
         if err:
             errors.append(f"{name}: {err}")
     if avatar:                                             # 👩 her clips: whichever of the lines (and takes) have one on Drive so far
-        files, err = list_drive_folder(f"{folder}/avatar_clips")
-        if err:
-            errors.append(f"avatar_clips: {err}")
         want = {st_.lower(): st_ for st_ in stems}
-        have = [f for f in files if Path(f["name"]).suffix.lower() in E.VIDEO_EXT
-                and (Path(f["name"]).stem.lower() in want or is_take(f["name"]))]
+        have, seen = [], set()
+        for sub in avatar_clip_folders(folder):            # avatar_clips first, then e.g. sitting/avatar_clips (Daryl, 18 Nov)
+            files, err = list_drive_folder(f"{folder}/{sub}")
+            if err:
+                if sub == "avatar_clips":
+                    errors.append(f"avatar_clips: {err}")
+                continue
+            for f in files:
+                if (Path(f["name"]).suffix.lower() in E.VIDEO_EXT and f["name"].lower() not in seen
+                        and (Path(f["name"]).stem.lower() in want or is_take(f["name"]))):
+                    seen.add(f["name"].lower())             # the same name in two folders: the first folder's clip
+                    have.append(dict(f, folder=sub))
         for k, f in enumerate(have, 1):
             stem = Path(f["name"]).stem
             dest = avatar_dir() / "lines" / (want.get(stem.lower(), stem) + ".mp4")      # named as the line's own file
@@ -185,7 +210,7 @@ def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing:
                 continue
             if progress:
                 progress(k, len(have), f["name"])
-            err = download_source_video(f"{folder}/avatar_clips/{f['name']}", dest)
+            err = download_source_video(f"{folder}/{f['folder']}/{f['name']}", dest)
             if err:
                 errors.append(f"{f['name']}: {err}")
     return errors

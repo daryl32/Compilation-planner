@@ -467,6 +467,23 @@ def list_drive_folder(drive_rel_path: str) -> tuple:
         return [], str(e)
 
 
+def list_drive_subfolders(drive_rel_path: str) -> tuple:
+    """([names of the folders directly in it], None) for a folder below My Drive, or ([], error string)."""
+    try:
+        service = _get_service()
+        parent_id = None
+        for name in [p for p in drive_rel_path.replace("\\", "/").split("/") if p]:
+            parent_id = _find_folder(service, name, parent_id)
+            if not parent_id:
+                return [], f"Folder '{name}' not found in Drive"
+        resp = service.files().list(
+            q=f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            fields="files(name)", pageSize=200).execute(num_retries=DRIVE_RETRIES)
+        return sorted({f["name"] for f in resp.get("files", [])}), None
+    except Exception as e:
+        return [], str(e)
+
+
 def download_drive_file(file_id: str, dest: Path) -> None:
     """Download one Drive file by id (raises on failure)."""
     _download_file(_get_service(), file_id, Path(dest))

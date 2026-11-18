@@ -235,6 +235,26 @@ def test_the_newest_cue_map_sent_from_the_page_is_fetched_and_its_lines_too(tmp_
     errs = PE.fetch_lines({"lines": []}, avatar=False)
     assert not errs and "scene-labeling/Edge_voiceover/New/Hands off 8 A.mp3" in got
     assert "scene-labeling/Edge_voiceover/Old one.mp3" in got and (PE.lines_dir() / "Hands off 8 A.mp3").exists()
+    # 👩 her clips: from avatar_clips and from an avatar_clips in another folder (sitting/avatar_clips — 18 Nov);
+    # the same name in both: the top avatar_clips one
+    got.clear()
+    sent["lines"].append({"name": "Strong erection", "file": "Strong erection.mp3", "seconds": 8.5, "cues": []})
+    fake.list_drive_subfolders = lambda rel: ((["avatar_clips", "sitting", "transitions", "_studio_previews"], None)
+                                              if rel.endswith("Edge_voiceover") else
+                                              (["avatar_clips"], None) if rel.endswith("/sitting") else ([], None))
+    fake.list_drive_folder = lambda rel: (([{"name": "edge_cues_2026-11-18T01-00.json", "modifiedTime": "2026-11-18T01:00:00Z"},
+                                            {"name": "Old one.mp3"}, {"name": "New one.mp3"}, {"name": "Strong erection.mp3"}], None)
+                                          if rel.endswith("Edge_voiceover")
+                                          else ([{"name": "Old one.mp4"}, {"name": "Unrelated.mp4"}], None) if rel.endswith("Edge_voiceover/avatar_clips")
+                                          else ([{"name": "Strong erection.mp4"}, {"name": "Old one.mp4"}], None) if rel.endswith("sitting/avatar_clips")
+                                          else ([], None))
+    assert PE.avatar_clip_folders("scene-labeling/Edge_voiceover") == ["avatar_clips", "sitting/avatar_clips"]
+    errs = PE.fetch_lines({"lines": []}, avatar=True)
+    assert not errs, errs
+    clips = [g for g in got if g.endswith(".mp4")]
+    assert clips == ["scene-labeling/Edge_voiceover/avatar_clips/Old one.mp4",
+                     "scene-labeling/Edge_voiceover/sitting/avatar_clips/Strong erection.mp4"]
+    assert (PE.avatar_dir() / "lines" / "Strong erection.mp4").exists()
 
 
 def test_surprise_lines_play_at_their_surprise_and_fit_its_length():
