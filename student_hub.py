@@ -95,8 +95,8 @@ def send(items: list, remote_dir: str) -> None:
         with tarfile.open(fileobj=proc.stdin, mode="w|") as tar:
             for local, arc in items:
                 tar.add(str(local), arcname=str(arc).replace("\\", "/"), recursive=False)
-        proc.stdin.close()
-    except BrokenPipeError:
+        proc.stdin.flush()            # communicate() closes it — closing it here first made newer Pythons fail with
+    except BrokenPipeError:           # "flush of closed file" (GitHub tests, 18 Nov)
         pass
     out, err = proc.communicate()
     if proc.returncode != 0:

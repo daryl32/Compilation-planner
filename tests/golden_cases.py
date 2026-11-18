@@ -21,6 +21,7 @@ ROUND = 9
 
 
 _DATA_STR = str(DATA)
+_ORIGINALS_STR = str(DATA / "originals")       # tests/support.py's ORIGINALS_ROOT — written as the server's /root/data
 
 
 def plain(x):
@@ -28,7 +29,7 @@ def plain(x):
     the test library's folder written as <DATA> so snapshots don't depend on
     where the repo is checked out."""
     if isinstance(x, str) and _DATA_STR in x:
-        return x.replace(_DATA_STR, "<DATA>")
+        return x.replace(_ORIGINALS_STR, "/root/data").replace(_DATA_STR, "<DATA>")
     if isinstance(x, dict):
         return {str(k): plain(v) for k, v in sorted(x.items(), key=lambda kv: str(kv[0]))}
     if isinstance(x, (list, tuple)):

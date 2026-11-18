@@ -35,6 +35,10 @@ from config import DRIVE_ROOT, CATALOGUE_DIR, AUDIO_DIR
 PROXY_DIR = Path(getattr(config, "PROXY_DIR", Path(CATALOGUE_DIR).parent / "proxies"))    # as auto_sync.PROXY_DIR
 RENDER_WORKERS = 4         # segments rendered at once
 
+# 📁 Where Drive originals land on Linux (the server: /root/data). A config can move it — the test suite does, so it
+# never touches /root (GitHub's test machine can't read it).
+ORIGINALS_ROOT = Path(getattr(config, "ORIGINALS_ROOT", "/root/data"))
+
 PREVIEW_WIDTH = 640
 PREVIEW_HEIGHT = 360
 
@@ -42,7 +46,7 @@ PREVIEW_HEIGHT = 360
 def colab_to_local(colab_path: str) -> str:
     import os
     
-    if colab_path.startswith("/root/data"):
+    if colab_path.startswith(str(ORIGINALS_ROOT)) or colab_path.startswith("/root/data"):
         return colab_path
     
     marker = "MyDrive/"
@@ -55,7 +59,7 @@ def colab_to_local(colab_path: str) -> str:
         return str(DRIVE_ROOT / rel.replace("/", "\\"))
     else:
         clean_rel = rel.replace("\\", "/").replace("//", "/")
-        return str(Path("/root/data") / clean_rel)
+        return str(ORIGINALS_ROOT / clean_rel)
 
 
 _video_source_cache = {}
