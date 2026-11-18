@@ -289,3 +289,37 @@ def test_surprise_lines_play_at_their_surprise_and_fit_its_length():
                                               "cues": [{"type": "phase", "phases": ["extra"], "at": "end", "roundList": [ov["round"]]}]}]},
                           "medium")
     assert abs(got["plays"][0]["time"] - ov["end"]) < 1e-6
+
+
+def test_fetch_lines_finds_lines_in_any_look_folder(monkeypatch, tmp_path):
+    """📁 The sent map says "Lying Back" but the folder is now "Nude - Lying Back": the line is still found (18 Nov)."""
+    import sys
+    import types
+    import planner.edge as PE
+    monkeypatch.setattr(PE, "voice_dir", lambda: tmp_path / "edge_voiceover")
+    monkeypatch.setattr(PE, "avatar_dir", lambda: tmp_path / "edge_avatar")
+    got = []
+
+    def download(rel, dest, **kw):
+        got.append(rel)
+        dest = __import__("pathlib").Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("x")
+        return None
+    files = {"Edge_voiceover": [{"name": "Welcome.mp3"}],
+             "Edge_voiceover/Nude - Lying Back": [{"name": "Hands off 5 B.mp3"}, {"name": "Hands off 5 B (2).mp3"}],
+             "Edge_voiceover/December": [{"name": "Hands off 5 B.mp3"}]}
+    fake = types.SimpleNamespace(
+        credentials_available=lambda: True, download_source_video=download,
+        list_drive_folder=lambda rel: (files.get(rel.split("scene-labeling/")[-1], []), None),
+        list_drive_subfolders=lambda rel: ((["December", "Nude - Lying Back", "_cuemap_live", "avatar_clips", "transitions"], None)
+                                           if rel.endswith("Edge_voiceover") else ([], None)))
+    monkeypatch.setitem(sys.modules, "drive_sync", fake)
+    cm = {"subfolders": ["Lying Back"], "lines": [{"name": "Hands off 5 B", "file": "Hands off 5 B.mp3", "cues": []},
+                                                  {"name": "Welcome", "file": "Welcome.mp3", "cues": []}]}
+    assert PE.voice_folders("scene-labeling/Edge_voiceover", cm) == ["Lying Back", "New", "Nude - Lying Back"]
+    errs = PE.fetch_lines(cm, avatar=False)
+    assert not errs
+    assert "scene-labeling/Edge_voiceover/Nude - Lying Back/Hands off 5 B.mp3" in got
+    assert "scene-labeling/Edge_voiceover/Welcome.mp3" in got
+    assert not any("December" in g for g in got)
