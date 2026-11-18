@@ -27,9 +27,12 @@ No Streamlit here — render_preview.py (also run from the command line) uses it
 
 import datetime
 import json
+import os
 import re
 import shutil
 import subprocess
+import threading
+import uuid
 from collections import Counter
 from pathlib import Path
 
@@ -77,9 +80,14 @@ def thumb_path(mp4: Path) -> Path:
 
 
 def _write_json(path: Path, data: dict) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2))
-    tmp.replace(path)
+    # its own temp name per write: two writes at once (the render job and the page) shared one ".tmp", and the second
+    # replace found it gone ("No such file", GitHub tests 18 Nov)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:6]}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2))
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------

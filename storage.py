@@ -39,7 +39,7 @@ except Exception:
     PROXY_DIR = CATALOGUE_DIR.parent / "proxies"
 
 # render_preview.colab_to_local puts every Drive original under here on Linux.
-ORIGINALS_ROOT = Path("/root/data")
+ORIGINALS_ROOT = Path(getattr(config, "ORIGINALS_ROOT", "/root/data"))
 
 
 def _exists(path: Path) -> bool:
