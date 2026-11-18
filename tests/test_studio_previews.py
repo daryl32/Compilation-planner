@@ -65,3 +65,35 @@ def test_job_skips_done_clips_and_uploads_both_files(tmp_path, monkeypatch):
     out = SP.run(J(), {"t": 1})
     assert out == {"clips": 2, "made": 1, "skipped": 1, "errors": []}
     assert sent == [("B2.mp4", SP.PREVIEW_FOLDER), ("B2.jpg", SP.PREVIEW_FOLDER)]
+
+
+def test_clips_scans_every_pose_folder_but_not_underscore_ones(monkeypatch):
+    import drive_sync
+    tree = {"root": [("ev", "Edge_voiceover")],
+            "ev": [("t", "transitions"), ("lb", "Lying Back"), ("pv", "_studio_previews")],
+            "lb": [("lbac", "avatar_clips")], "t": [], "pv": [], "lbac": []}
+    files = {"t": [{"id": "T1", "name": "a.mp4"}], "lbac": [{"id": "L1", "name": "Strong erection.mp4"},
+                                                            {"id": "L2", "name": "line.mp3"}],
+             "pv": [{"id": "P1", "name": "x.mp4"}]}
+
+    def find_folder(service, name, parent):
+        return next((i for i, n in tree.get(parent or "root", []) if n == name), None)
+
+    class Req:
+        def __init__(self, r): self.r = r
+        def execute(self, **k): return self.r
+
+    class Files:
+        def list(self, q, **k):
+            pid = q.split("'")[1]
+            return Req({"files": [{"id": i, "name": n} for i, n in tree.get(pid, [])]})
+
+    class Svc:
+        def files(self): return Files()
+    monkeypatch.setattr(drive_sync, "_get_service", lambda: Svc())
+    monkeypatch.setattr(drive_sync, "_find_folder", find_folder)
+    monkeypatch.setattr(drive_sync, "_list_files", lambda s, fid: files.get(fid, []))
+    monkeypatch.setattr(SP, "ROOT", "Edge_voiceover")
+    got, err = SP.clips()
+    assert err is None
+    assert sorted((c["id"], c["folder"]) for c in got) == [("L1", "Lying Back/avatar_clips"), ("T1", "transitions")]
