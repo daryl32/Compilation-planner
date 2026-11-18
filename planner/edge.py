@@ -143,6 +143,27 @@ def avatar_clip_folders(folder: str) -> list:
 VOICE_SUBFOLDERS = ("New",)                            # 📁 subfolders of Edge_voiceover whose lines the cue map may use
 
 
+NOT_VOICE_FOLDERS = {"avatar_clips", "december", "transitions"}   # 📁 never searched for the cue map's lines
+
+
+def voice_folders(folder: str, cue_map: dict) -> list:
+    """📁 The subfolders of the voiceover folder to look in for lines, in order: the ones the cue map lists, then
+    VOICE_SUBFOLDERS, then every other folder on Drive (not "_…", avatar_clips, December or transitions)."""
+    out = []
+    for sub in list(cue_map.get("subfolders") or []) + list(VOICE_SUBFOLDERS):
+        if sub and sub not in out:
+            out.append(sub)
+    try:
+        from drive_sync import list_drive_subfolders
+        subs, err = list_drive_subfolders(folder)
+    except ImportError:
+        subs, err = [], "no drive"
+    for sub in ([] if err else sorted(subs)):
+        if sub not in out and not sub.startswith("_") and sub.lower() not in NOT_VOICE_FOLDERS:
+            out.append(sub)
+    return out
+
+
 def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing: bool = False) -> list:
     """Download the cue map's lines from Google Drive (its "drive_folder") to lines_dir(), and — avatar — her clips
     from its avatar_clips folder (same names, .mp4) to <data>/edge_avatar/lines/. only_missing: leave what is here
@@ -171,15 +192,16 @@ def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing:
 
     def is_take(name: str) -> bool:
         return any(E.take_stem(Path(name).stem, st_) for st_ in stems)
-    takes = [f["name"] for f in on_drive if Path(f["name"]).suffix.lower() in E.VOICE_EXT and is_take(f["name"])]
     names = [str(ln.get("file") or (ln["name"] + ".mp3")) for ln in lines]
     # 📁 a line's file may sit in a subfolder of the voiceover folder (e.g. "New" — Daryl, 17 Nov): the folder itself
-    # first, then each of VOICE_SUBFOLDERS (and any the map lists under "subfolders")
+    # first, then each of VOICE_SUBFOLDERS (and any the map lists under "subfolders"), then every other look folder
+    # ("Nude - Lying Back"…), so a renamed or new folder never hides a line (Daryl, 18 Nov)
     where = {f["name"]: folder for f in on_drive}
-    for sub in list(cue_map.get("subfolders") or []) + [x for x in VOICE_SUBFOLDERS if x not in (cue_map.get("subfolders") or [])]:
+    for sub in voice_folders(folder, cue_map):
         got, err_ = list_drive_folder(f"{folder}/{sub}")
         for f in ([] if err_ else got):
             where.setdefault(f["name"], f"{folder}/{sub}")
+    takes = [n for n in where if Path(n).suffix.lower() in E.VOICE_EXT and is_take(n)]
     for k, name in enumerate(names + takes, 1):            # the lines, then 🎲 their other takes
         dest = lines_dir() / name
         if only_missing and dest.exists() and dest.stat().st_size > 0:
