@@ -104,11 +104,14 @@ def auto_music(mode: str, va: list, vb: list, progress=None) -> tuple:
     best six for a tempo near A's (smoother switches)."""
     notes = []
     if mode == "shared":
+        import footage_timeline as FT
         cands = _suggest(va + vb, 15, progress)
+        sig = FT.signature()
+        tfa, tfb = PC._type_fits(tuple(va), sig), PC._type_fits(tuple(vb), sig)      # each side's fits worked out once
         best, best_score = None, -1.0
         for c in cands:
             track = PC._load_track(c["track_id"])
-            fa, fb = PC.track_fit(va, track), PC.track_fit(vb, track)
+            fa, fb = PC.track_fit(va, track, type_fits=tfa), PC.track_fit(vb, track, type_fits=tfb)
             if not fa or not fb:
                 continue
             score = min(fa["fit"], fb["fit"])
@@ -169,7 +172,7 @@ def compile_verses(settings: dict, seed: int, progress=None, pool: dict = None) 
     if not va or not vb:
         raise ValueError(f"{a if not va else b} has no video of her own with a 🧭 footage timeline.")
     mode = settings.get("music", "shared")
-    notes = []
+    notes, took, t0 = [], {}, time.time()
     prog(0.02, "picking the music")
     ta, tb = settings.get("track_a") or None, settings.get("track_b") or None
     if mode == "shared":
@@ -178,6 +181,7 @@ def compile_verses(settings: dict, seed: int, progress=None, pool: dict = None) 
         sa, sb, n = auto_music(mode, va, vb, lambda k, n_, tid: prog(0.02 + 0.13 * k / max(n_, 1), f"scoring songs · {tid}"))
         ta, tb = ta or sa, tb or sb
         notes += n
+    took["music"] = round(time.time() - t0, 1)
     tracks = {"A": ta, "B": tb}
     durs = {tid: float(PC._load_track(tid)["duration_sec"]) for tid in set(tracks.values())}
     total = min(durs[ta], durs[tb])
@@ -194,8 +198,10 @@ def compile_verses(settings: dict, seed: int, progress=None, pool: dict = None) 
     for k, (s, vids) in enumerate((("A", va), ("B", vb))):
         def cb(d, t, _k=k, _s=s):
             prog(0.15 + 0.4 * (_k + d / max(t, 1)), f"matching {settings[_s.lower()]} to {tracks[_s]} · block {d} of {t}")
+        t0 = time.time()
         res = PC.compile_plan(tracks[s], vids, movement_only=True, cuts="lines",
                               max_videos=int(settings.get("max_videos") or 0), progress=cb)
+        took[settings[s.lower()]] = round(time.time() - t0, 1)
         results[s] = res
         timelines[s] = res["plan"]["timeline"]
         for n in res.get("notes") or []:
@@ -230,7 +236,7 @@ def compile_verses(settings: dict, seed: int, progress=None, pool: dict = None) 
     })
     import core.story_matcher as SMX
     return {"plan": plan, "summary": SMX.plan_summary(timeline), "notes": notes, "names": names,
-            "rounds": VB.describe(windows), "tracks": tracks, "video_ids": va + vb,
+            "rounds": VB.describe(windows), "tracks": tracks, "video_ids": va + vb, "took": took,
             "shortfall": sum(r.get("shortfall") or 0 for r in results.values()), "made": time.strftime("%H:%M:%S")}
 
 
@@ -259,7 +265,8 @@ def _render(res: dict, settings: dict, token, prog) -> tuple:
     return RJ.render(plan, stream=settings["stream"], quick=settings["quick"], label=settings.get("label", ""),
                      token=token, prog=prog, extra_raw=[x for x in extra if x],
                      extra_meta={"project_name": f"⚔️ {v['actors']['A']['name']} vs {v['actors']['B']['name']}",
-                                 "compile_note": used_line(res),
+                                 "compile_note": used_line(res) + ("" if not res.get("took") else " · compile " + ", ".join(
+                                     f"{k} {format_mmss(v)}" for k, v in res["took"].items())),
                                  "verses_setup": {k: x for k, x in settings.items() if k != "label"}})
 
 
@@ -487,6 +494,9 @@ def _result(res: dict) -> None:
     st.caption(f"{len(plan['timeline'])} clips · {summary.get('videos', 0)} different videos"
                + (f" · 🎯 movement sync {summary['sync']:.0%}" if summary.get("sync") is not None else "")
                + (f" · ⚠️ {res['shortfall']} slot(s) unfilled" if res.get("shortfall") else ""))
+    if res.get("took"):                                   # ⏱️ where the compile's time went
+        st.caption("⏱️ Compile: " + " · ".join(f"{'🎵 music pick' if k == 'music' else '🎯 ' + k} {format_mmss(v)}"
+                                               for k, v in res["took"].items()))
     _strip(res)
     for line in res["rounds"]:
         st.caption("🥊 " + line)

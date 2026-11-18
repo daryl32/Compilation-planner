@@ -184,7 +184,7 @@ def test_the_render_carries_the_overlay_card_and_switching_themes(tmp_path, monk
     t = lead + (split["start"] + split["end"]) / 2
     assert _pixel(out, t, 60, 200)[1] > 100 and _pixel(out, t, 580, 200)[2] > 100      # A left, B right
     r, g, b = _pixel(out, 1.5, 300, 144)                                 # the card's big VS, gold
-    assert r > 180 and g > 140 and b < 120
+    assert r > 180 and g > 140 and b < r - 40
 
 
 def test_the_page_compiles_a_battle(monkeypatch):

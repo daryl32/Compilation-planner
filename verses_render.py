@@ -133,7 +133,7 @@ def card_picture(plan: dict, tmp_dir: Path, size: tuple) -> Path | None:
 
 
 def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, frame_height: int,
-           frame_width: int = 640) -> dict:
+           frame_width: int = 640, progress=None) -> dict:
     """combined_video (the battle's picture, no sound) → output_path: the card in front, the overlay on top, the sound
     mixed. Returns what each step took and the length check: {"edge_sound", "edge_picture", "edge_check"} (the
     keys the render page already reports)."""
@@ -142,6 +142,8 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
     v = plan["verses"]
     total = float(v["total_seconds"])
     took, t0 = {}, time.time()
+    if progress:
+        progress(0.0, "mixing the battle's sound")
     sound = mix(plan, sources, tmp_dir, run)
     took["edge_sound"] = round(time.time() - t0, 1)
     t0 = time.time()
@@ -169,9 +171,12 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
     delay = int(round(card_sec * 1000))
     filt.append(f"[{n_in}:a:0]{AUDIO_FMT}" + (f",adelay={delay}:all=1" if delay else "") + f",apad[a]")
     length = total + card_sec
-    run(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filt), "-map", "[v]", "-map", "[a]",
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-r", str(FPS),
-         "-c:a", "aac", "-b:a", "192k", "-t", f"{length:.3f}", "-movflags", "+faststart", str(output_path)])
+    # one pass, watched: progress about once a second, and stopped (with ffmpeg's own words) if it stands still
+    from edge_render import run_watched
+    run_watched(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filt), "-map", "[v]", "-map", "[a]",
+                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p", "-r", str(FPS),
+                 "-c:a", "aac", "-b:a", "192k", "-t", f"{length:.3f}", "-movflags", "+faststart", str(output_path)],
+                length, (lambda f: progress(f, "adding the overlay and the card")) if progress else None)
     took["edge_picture"] = round(time.time() - t0, 1)
     try:
         from edge_render import _lengths
