@@ -2,7 +2,8 @@
 
 The Avatar Studio (a page on claude.ai) reads clips through the Google Drive connector, which refuses files over
 10 MB, and an iPhone can't play the old transparent .webm clips. So the server makes, for every avatar clip in
-Edge_voiceover (transitions, avatar_clips, sitting — and their subfolders):
+Edge_voiceover (every folder in it — transitions, avatar_clips and the pose folders such as "Lying Back" — and their
+subfolders; folders whose name starts with "_" are skipped):
 
   Edge_voiceover/_studio_previews/<drive id>.mp4   a small H.264 copy (≤540 px wide, sound kept) — plays anywhere
   Edge_voiceover/_studio_previews/<drive id>.jpg   a strip of three frames: first | middle | last
@@ -18,7 +19,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = "scene-labeling/Edge_voiceover"
-FOLDERS = ("transitions", "avatar_clips", "sitting")
+FOLDERS = ("transitions", "avatar_clips", "sitting")   # (kept for reference — every folder is scanned since 18 Nov)
 PREVIEW_FOLDER = f"{ROOT}/_studio_previews"
 VIDEO_EXT = (".mp4", ".mov", ".webm", ".m4v")
 WIDTH = 540            # preview width (px)
@@ -37,10 +38,11 @@ def clips() -> tuple:
             if not root:
                 return [], f"Folder '{part}' not found in Drive"
         out, todo = [], []
-        for name in FOLDERS:
-            fid = _find_folder(service, name, root)
-            if fid:
-                todo.append((fid, name))
+        resp = service.files().list(           # every folder in Edge_voiceover: the pose folders too (Daryl, 18 Nov)
+            q=f"'{root}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+            fields="files(id, name)", pageSize=200).execute()
+        todo += sorted(((s["id"], s["name"]) for s in resp.get("files", []) if not s["name"].startswith("_")),
+                       key=lambda t: t[1].lower())
         while todo:
             fid, rel = todo.pop(0)
             for f in _list_files(service, fid):
