@@ -294,6 +294,8 @@ def render_segment(entry: dict, idx: int, tmp_dir: Path, sources: SourceResolver
         return out_path
 
     cells = AUTO_LAYOUTS.get(n) or _grid(4, (n + 3) // 4)
+    if entry.get("cells") and len(entry["cells"]) == n:     # ⚔️ Verses Battle: its own panels (a spotlight split)
+        cells = [tuple(c) for c in entry["cells"]]
     inputs = []
     filter_parts = [f"color=c=black:s={PREVIEW_WIDTH}x{PREVIEW_HEIGHT}:d={duration}:r=25[base0]"]
     input_idx = 0
@@ -365,9 +367,13 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
             notice(notices.pop(0))
 
     edge = plan.get("edge")            # ⏱️ Edge Mode: a playlist (or none — a generated beat), an overlay, a voiceover
+    verses = plan.get("verses")        # ⚔️ Verses Battle: one song or two themes, an overlay, the tale of the tape
     if edge:
         import edge_render
         track_raws = edge_render.playlist_raws(plan)
+    elif verses:
+        import verses_render
+        track_raws = verses_render.playlist_raws(plan)
     else:
         track_raws = [get_track_raw_source(plan["track_id"])]
     all_raw = set(track_raws)
@@ -460,6 +466,11 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
             said = (lambda f: notice(f"⏱️ Adding the timer and mixing the sound… {int(f * 100)} %")) if notice else None
             stages.update(edge_render.finish(plan, combined_video, output_path, sources, tmp_dir, run,
                                              PREVIEW_HEIGHT, PREVIEW_WIDTH, progress=said) or {})
+        elif verses:                   # ⚔️ the battle's sound, overlay and card (verses_render.py)
+            if notice:
+                notice("⚔️ Mixing the battle's sound and adding the overlay…")
+            stages.update(verses_render.finish(plan, combined_video, output_path, sources, tmp_dir, run,
+                                               PREVIEW_HEIGHT, PREVIEW_WIDTH) or {})
         else:
             # Mux in the track's audio
             print("Muxing audio...")
