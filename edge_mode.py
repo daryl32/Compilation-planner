@@ -1194,7 +1194,7 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
     in_round = lambda c, r: _cue_in_round(c, r, n_rounds, has_last)          # noqa: E731
 
     def secs(line):
-        return float(durations.get(line["name"]) or line.get("seconds") or 2.0)
+        return float(durations.get(line["name"]) or line.get("play_seconds") or line.get("seconds") or 2.0)
 
     for li, line in enumerate(cue_map.get("lines") or []):
         d = secs(line)

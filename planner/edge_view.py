@@ -44,13 +44,13 @@ def _take_finished_job() -> bool:
 def _lines_panel(cue_map: dict) -> None:
     """🎙️ The cue map's lines: how many are on this machine, and a button to fetch them from Google Drive."""
     lines = cue_map["lines"]
-    here = sum(1 for ln in lines if line_file(ln) is not None)
+    here = sum(1 for ln in lines if line_file(ln, cut=False) is not None)
     mapped = sum(1 for ln in lines if ln.get("cues"))
     with st.expander(f"🎙️ Voiceover lines — {mapped} of {len(lines)} have a cue · {here} of {len(lines)} are on the server",
                      expanded=here < len(lines)):
         st.caption("Which line plays when comes from your cue map; no two lines ever play at once. A line whose file "
                    "isn't here yet plays as a placeholder tone. The button also brings the avatar's clips made so far "
-                   f"({sum(1 for ln in lines if avatar_line_clip(ln) is not None)} here); Compile fetches whatever is missing by itself.")
+                   f"({sum(1 for ln in lines if avatar_line_clip(ln, cut=False) is not None)} here); Compile fetches whatever is missing by itself.")
         if st.button("⬇️ Get the lines from Google Drive", key="edge_lines_fetch", type="primary" if here < len(lines) else "secondary"):
             bar = st.progress(0.0, text="Fetching the lines…")
             errs = fetch_lines(cue_map, lambda k, n, name: bar.progress(k / max(n, 1), text=f"Fetching {name} ({k}/{n})…"))
@@ -61,7 +61,7 @@ def _lines_panel(cue_map: dict) -> None:
             else:
                 st.session_state["edge_msg"] = ("success", f"All {len(lines)} lines are on the server.")
             st.rerun()
-        missing = [ln["name"] for ln in lines if line_file(ln) is None]
+        missing = [ln["name"] for ln in lines if line_file(ln, cut=False) is None]
         if missing and here:
             st.caption("Not here yet: " + " · ".join(missing))
         extra = {ln["name"]: len(line_takes(ln, True)) - 1 for ln in lines}
@@ -69,9 +69,15 @@ def _lines_panel(cue_map: dict) -> None:
             st.caption("🎲 Other takes (they take turns): " + " · ".join(f"{n} +{k}" for n, k in extra.items() if k))
         st.caption("🎲 More than one take of a line: name the file \"<line> take 2.mp3\" (or \"(2)\") beside it on "
                    "Drive, her clip the same name in avatar_clips.")
-        st.caption(f"🗺️ Cue map in use: {'the one last sent from the Cue Map (or uploaded here)' if cue_map_path() != E.CUE_MAP_FILE else 'the one built into the app'}"
-                   " — press 📤 Send to the app on the Cue Map page: every compile with voiceover or the avatar on picks "
-                   "up the newest one from Google Drive. No Drive? The page downloads the file; upload it here.")
+        import cue_store as CS
+        st.caption("🗺️ " + ("The cue map is kept in the app — edit it on the 🎙️ Cue Map page (every save is kept as a "
+                            "version)." if CS.managed() else
+                            "The cue map still follows the newest file sent to Drive from the old Cue Map page — open "
+                            "🎙️ Cue Map and keep it in the app instead."))
+        try:
+            st.page_link("pages/8_Cue_Map.py", label="🎙️ Open the Cue Map →")
+        except Exception:                                  # noqa: BLE001 — (headless tests run the page on its own)
+            pass
         n = st.session_state.get("edge_cue_up_n", 0)
         up = st.file_uploader("🗺️ Replace the cue map", type=["json"], key=f"edge_cue_up_{n}")
         if up is not None:

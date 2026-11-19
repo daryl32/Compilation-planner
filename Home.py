@@ -56,3 +56,8 @@ with col7:
     st.subheader("🧩 Join Lab")
     st.write("See how the avatar's clips join, and which idles or bridges are really needed.")
     st.page_link("pages/7_Join_Lab.py", label="Open Join Lab →")
+
+with _c8:
+    st.subheader("🎙️ Cue Map")
+    st.write("Edge Mode's voiceover lines: when each one plays, its length, and a timeline of a sample compile.")
+    st.page_link("pages/8_Cue_Map.py", label="Open Cue Map →")

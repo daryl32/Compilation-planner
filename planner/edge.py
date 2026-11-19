@@ -42,10 +42,62 @@ def lines_dir() -> Path:
     return voice_dir() / "lines"
 
 
-def line_file(line: dict) -> Path | None:
-    """The line's audio on this machine, or None when it hasn't been fetched yet."""
+def line_file(line: dict, cut: bool = True) -> Path | None:
+    """The line's audio on this machine, or None when it hasn't been fetched yet. cut: as it plays — trimmed / sped up
+    as set in the 🎙️ Cue Map (a cached copy), else the whole file."""
     f = lines_dir() / str(line.get("file") or (line["name"] + ".mp3"))
-    return f if f.exists() and f.stat().st_size > 0 else None
+    if not (f.exists() and f.stat().st_size > 0):
+        return None
+    return cut_copy(f, line) if cut else f
+
+
+def cut_copy(src, line: dict) -> Path:
+    """✂ The line's file (or her clip of it) as it plays: from trim_in to trim_out (0 = the end), at its speed (pitch
+    kept). Cached beside the lines by what it was cut from, so it is made once. The file itself when uncut, or when
+    cutting fails (the whole line then plays, as before 19 Nov)."""
+    import cue_store as CS
+    src = Path(src)
+    if not CS.is_cut(line):
+        return src
+    a = max(float(line.get("trim_in") or 0.0), 0.0)
+    b = float(line.get("trim_out") or 0.0)
+    sp = min(max(float(line.get("speed") or 1.0) or 1.0, 0.5), 2.0)
+    st_ = src.stat()
+    video = src.suffix.lower() in E.VIDEO_EXT
+    alpha = video and _is_vpx(src)
+    ext = ".webm" if alpha else (".mp4" if video else ".mp3")
+    key = f"{src.stem}__{a:.3f}_{b:.3f}_{sp:.3f}_{int(st_.st_mtime)}_{st_.st_size}{ext}"
+    out = src.parent / "_cut" / key
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    out.parent.mkdir(parents=True, exist_ok=True)
+    import subprocess
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y"]
+    if alpha:
+        cmd += ["-c:v", "libvpx-vp9"]                     # the decoder that keeps her cut-out
+    cmd += ["-ss", f"{a:.3f}"] + (["-to", f"{b:.3f}"] if b > a else []) + ["-i", str(src)]
+    af = f"atempo={sp:.4f}" if abs(sp - 1) > 0.005 else "anull"
+    if video:
+        vf = f"setpts=PTS/{sp:.4f}" if abs(sp - 1) > 0.005 else "null"
+        cmd += ["-vf", vf, "-af", af]
+        cmd += (["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", "30", "-c:a", "libopus"] if alpha
+                else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k"])
+    else:
+        cmd += ["-vn", "-af", af, "-c:a", "libmp3lame", "-b:a", "192k"]
+    tmp = out.with_name("tmp_" + out.name)
+    r = subprocess.run(cmd + [str(tmp)], capture_output=True, text=True)
+    if r.returncode or not tmp.exists() or tmp.stat().st_size == 0:
+        tmp.unlink(missing_ok=True)
+        return src
+    tmp.replace(out)
+    return out
+
+
+def _is_vpx(path) -> bool:
+    import subprocess
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of",
+                        "csv=p=0", str(path)], capture_output=True, text=True)
+    return r.stdout.strip().lower() in ("vp8", "vp9")
 
 
 def cue_map_path() -> Path:
@@ -77,8 +129,11 @@ def save_cue_map(raw: bytes) -> str | None:
     if not isinstance(got, dict) or not isinstance(got.get("lines"), list) or not all(
             isinstance(ln, dict) and ln.get("name") for ln in got["lines"]):
         return "That file has no list of lines with names — is it the cue map's export?"
-    voice_dir().mkdir(parents=True, exist_ok=True)
-    (voice_dir() / "edge_cues.json").write_text(json.dumps(got, indent=1), encoding="utf-8")
+    import cue_store as CS                              # kept as a new revision; the one it replaces stays a version
+    try:
+        CS.import_raw(raw, int(CS.load().get("rev") or 0), "uploaded on the Edge page")
+    except (CS.Stale, ValueError) as e:
+        return str(e)
     return None
 
 
@@ -100,10 +155,13 @@ def line_takes(line: dict, with_avatar: bool = False) -> list:
     return [own] + [found[n] for n in sorted(found)]
 
 
-def avatar_line_clip(line: dict) -> Path | None:
-    """The avatar's video for a line (her voice in it), on this machine: <data>/edge_avatar/lines/<line>.mp4."""
+def avatar_line_clip(line: dict, cut: bool = True) -> Path | None:
+    """The avatar's video for a line (her voice in it), on this machine: <data>/edge_avatar/lines/<line>.mp4 — cut as
+    the line is (✂ cut_copy) unless cut=False."""
     f = avatar_dir() / "lines" / (Path(str(line.get("file") or line["name"])).stem + ".mp4")
-    return f if f.exists() and f.stat().st_size > 0 else None
+    if not (f.exists() and f.stat().st_size > 0):
+        return None
+    return cut_copy(f, line) if cut else f
 
 
 def line_durations(cue_map: dict, with_avatar: bool = False) -> dict:
@@ -122,7 +180,7 @@ def line_durations(cue_map: dict, with_avatar: bool = False) -> dict:
             for look in local_looks():
                 f = look_clip(stem, look)
                 if f:
-                    secs = max(secs, probe(f)["seconds"])
+                    secs = max(secs, probe(cut_copy(f, line))["seconds"])
         if secs > 0:
             out[line["name"]] = secs
     return out
@@ -185,7 +243,10 @@ def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing:
     errors = []
     on_drive, err = list_drive_folder(folder)
     on_drive = [] if err else on_drive
-    sent = newest_cue_map(on_drive)                       # 🗺️ the mapping last sent from the Cue Map wins over the app's copy
+    import cue_store as CS
+    # 🗺️ the mapping last sent from the old Cue Map artifact won over the app's copy — not once the cue map is kept in
+    # the app (🎙️ Cue Map page, 19 Nov): then Drive's sent files are left alone
+    sent = None if CS.managed() else newest_cue_map(on_drive)
     if sent:
         voice_dir().mkdir(parents=True, exist_ok=True)
         err = download_source_video(f"{folder}/{sent}", voice_dir() / "edge_cues.json")
@@ -676,12 +737,16 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                 for x in xs:
                     x["look"] = look_for(part, n_rounds, looks)
                     x["clip"], x["look_used"] = pick_look_clip(stem_of(x["line"]), x["look"], vid(x["line"]))
+                    if x["look_used"] == "look":
+                        x["clip"] = str(cut_copy(x["clip"], by_name[x["line"]]))
             line_avatar = []
             for c in cues:
                 stand_in = c.get("clip") or (vid(c["line"]) if c.get("take", 1) == 1 else None)
                 stem = Path(str(c.get("clip") or c.get("file") or stem_of(c["line"]))).stem
                 c["look"] = look_for(c.get("round"), n_rounds, looks)
                 c["clip"], c["look_used"] = pick_look_clip(stem, c["look"], stand_in)
+                if c["look_used"] == "look" and c.get("take", 1) == 1:      # ✂ cut as the line is
+                    c["clip"] = str(cut_copy(c["clip"], by_name[c["line"]]))
                 line_avatar.append({"time": c["time"], "profile": c["profile"], "clip": c["clip"], "line": c["line"],
                                     "seconds": c["seconds"], "look": c["look"], "look_used": c["look_used"]})
             every = line_avatar + (intro_lines if intro else []) + outro_lines
