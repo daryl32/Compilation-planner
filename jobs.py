@@ -584,6 +584,19 @@ def run_nightly() -> dict:
         info["calibration"] = {k: RL.calibration(rescore=True).get(k) for k in ("n", "n_rated")}
     except Exception as e:   # never fail the nightly run over it
         info["calibration_error"] = str(e)[:200]
+    # 🌙 one Edge and one Verses compilation, drawn at random, compiled and rendered (nightly_modes.py) — waiting
+    # on 🔮 Recommendations → 🌙 Overnight in the morning. OVERNIGHT_RENDERS = False in config.py turns it off.
+    import config as _cfg
+    if getattr(_cfg, "OVERNIGHT_RENDERS", True) and not is_paused():
+        try:
+            from heavy_slot import heavy_slot
+            import nightly_modes as NM
+            with heavy_slot("overnight renders"):
+                night = NM.run(log=lambda s: print(time.strftime("%H:%M:%S"), s, flush=True))
+            info["overnight"] = {k: (night.get(k) or {}).get("render") or (night.get(k) or {}).get("error")
+                                 for k in ("edge", "verses")}
+        except Exception as e:   # never fail the nightly run over it
+            info["overnight_error"] = str(e)[:300]
     info["finished"] = time.time()
     _write_json(p["nightly"], info)
     return info

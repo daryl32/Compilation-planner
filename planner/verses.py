@@ -524,10 +524,50 @@ def _result(res: dict) -> None:
             st.caption(f"{name} — see 📁 Media Library → 🎞️ Renders.")
 
 
+SETUP_KEYS = {"a": "vs_a", "b": "vs_b", "draft": "vs_draft", "style": "vs_style", "music": "vs_music",
+              "track_a": "vs_track_a", "track_b": "vs_track_b", "layout": "vs_layout", "winner": "vs_winner",
+              "length": "vs_length", "max_videos": "vs_max_videos", "intro": "vs_intro", "overlay": "vs_overlay",
+              "quick": "vs_quick", "stream": "vs_stream"}
+
+
+def reopen(ro: dict) -> None:
+    """↩️ A battle render reopened (📁 Media Library → Renders, 🔮 → 🌙 Overnight): the setup it was made with, and
+    its plan on show as the result (🎬 Render again, ⬇️ Download, ↻ Rematch)."""
+    import core.story_matcher as SMX
+    plan = ro["plan"]
+    v = plan["verses"]
+    setup = dict(ro.get("setup") or {})
+    if not setup:                                          # worked out from the plan
+        setup = {"a": v["actors"]["A"]["name"], "b": v["actors"]["B"]["name"], "music": v["music"]["mode"],
+                 "layout": v.get("layout", "mixed"), "winner": v.get("winner_setting", "surprise"),
+                 "intro": bool((v.get("intro") or {}).get("on", True)), "overlay": bool((v.get("overlay") or {}).get("on", True))}
+        if not v["music"].get("auto"):
+            setup.update(track_a=v["music"]["tracks"]["A"], track_b=v["music"]["tracks"]["B"])
+    ss = st.session_state
+    for k, key in SETUP_KEYS.items():
+        if k in setup:
+            ss[key] = setup[k]
+    ss["vs_auto_music"] = not (setup.get("track_a") or "")
+    if setup.get("a") and setup.get("b"):
+        ss["vs_draft"] = "choice"                         # the same two fighters, not a new draw
+    if v.get("seed") is not None:
+        ss["vs_seed"] = int(v["seed"])
+    ss[RESULT_KEY] = {
+        "plan": plan, "summary": SMX.plan_summary(plan.get("timeline") or []), "shortfall": 0,
+        "notes": [f"↩️ Reopened from render {ro.get('label', '')} — the plan as it was rendered; ↻ Rematch draws again."],
+        "names": {s: v["actors"][s]["name"] for s in ("A", "B")}, "rounds": VB.describe(v["windows"]),
+        "tracks": dict(v["music"]["tracks"]), "video_ids": list(plan.get("selected_videos") or []),
+        "made": time.strftime("%H:%M:%S")}
+    ss.pop("vs_render", None)
+
+
 def render() -> None:
     import render_jobs as RJ
     import settings_store as SSTORE
     SSTORE.keep(KEPT)
+    ro = st.session_state.pop("_reopen_verses", None)
+    if ro:
+        reopen(ro)
     msg = st.session_state.pop("vs_msg", None)
     if msg:
         getattr(st, msg[0])(msg[1])
