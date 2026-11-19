@@ -21,9 +21,11 @@ if msg:
 
 top = st.columns([4, 1])
 lines = cm.get("lines") or []
-top[0].caption(f"Revision {cm.get('rev', 0)} · {len(lines)} lines, {sum(1 for ln in lines if ln.get('cues'))} with cues"
-               + (f" · saved {cm['saved_at']}" if cm.get("saved_at") else f" · from: {cm.get('source') or 'the app'}"))
-if top[1].button("🔄 Reload", use_container_width=True, help="Read the cue map again (e.g. after saving on another device)."):
+saved = V.saved()
+top[0].caption(f"Revision {saved.get('rev', 0)} · {len(lines)} lines, {sum(1 for ln in lines if ln.get('cues'))} with cues"
+               + (f" · saved {saved['saved_at']}" if saved.get("saved_at") else f" · from: {saved.get('source') or 'the app'}"))
+if top[1].button("🔄 Reload", use_container_width=True, help="Read the cue map again (e.g. after saving on another "
+                                                              "device). Unsaved changes are kept."):
     V.current(reload=True)
     V.select(ss.get(V.SS_SEL))
     st.rerun()
@@ -33,17 +35,26 @@ if not CS.managed():
             "Google Drive, and that copy can overwrite your work. Keep it in the app from now on: compiles then use "
             "only what is saved here, and every save is kept as a version.")
     if st.button("✅ Keep the cue map in the app from now on", type="primary"):
-        V.save_map(cm, "now kept in the app")
+        V.save_map(V.saved(), "now kept in the app")
+        V.current(reload=True)
         st.rerun()
 
-names = [ln["name"] for ln in lines]
-t1, t2, t3 = st.tabs(["🕒 Timeline", "🎙️ Lines", "🗂️ Versions"])
-with t1:
-    V.timeline(cm)
-with t2:
-    V.lines_tab(cm)
-with t3:
-    V.versions_tab(cm)
-
+bar = st.container()          # filled last: the 💾 bar and the tabs show this run's edits
+tabs_box = st.container()
 st.divider()
+names = [ln["name"] for ln in lines]
 V.editor(names)
+if ss.get(V.SS_SEL):
+    st.divider()
+    V.save_bar_bottom()
+cm = V.current()
+with tabs_box:
+    t1, t2, t3 = st.tabs(["🕒 Timeline", "🎙️ Lines", "🗂️ Versions"])
+    with t1:
+        V.timeline(cm)
+    with t2:
+        V.lines_tab(cm)
+    with t3:
+        V.versions_tab(cm)
+with bar:
+    V.save_bar()

@@ -80,41 +80,72 @@ def test_a_cut_line_plays_cut_in_the_compile(voice):
     assert a == pytest.approx(0.92, abs=0.1) and b == 0.0
 
 
-def test_the_page_takes_over_edits_a_line_and_refuses_a_stale_save(voice):
+def test_the_page_takes_over_edits_pile_up_until_one_save_and_a_stale_save_is_refused(voice):
+    import copy
     import cue_store as CS
     import cue_map_view as V
     from tests.apptest_util import errors, page_app
     at = page_app("pages/8_Cue_Map.py").run()
     assert not errors(at)
-    assert any("Keep the cue map in the app" in b.label for b in at.button)
     next(b for b in at.button if "Keep the cue map in the app" in b.label).click().run()
     assert not errors(at) and CS.managed() and CS.load()["rev"] == 1
-    at.session_state[V.SS_SEL] = None
-    V_line = "Start-Round 1"
+    save = lambda: next(b for b in at.button if b.label == "💾 Save the cue map")      # noqa: E731
+    assert save().disabled                                    # nothing to save
+    cm = V.current() if False else CS.load()
+    # open a line (as a tap does): opening alone changes nothing
+    at.session_state[V.SS_SEL] = "Start-Round 1"
+    at.session_state[V.SS_DRAFT] = V._draft_of(next(ln for ln in cm["lines"] if ln["name"] == "Start-Round 1"))
     at.run()
-    # open a line through the session (as a tap does), change its note, save
-    cm = CS.load()
-    import copy
-    at.session_state[V.SS_MAP] = cm
-    at.session_state[V.SS_SEL] = V_line
-    at.session_state[V.SS_DRAFT] = V._draft_of(next(ln for ln in cm["lines"] if ln["name"] == V_line))
+    assert not errors(at) and save().disabled and CS.load_draft() is None
+    # edit two lines: nothing is saved until the one 💾
+    next(t for t in at.text_area if t.label.startswith("Notes")).input("Say it slower").run()
+    assert not save().disabled and CS.load()["rev"] == 1 and CS.load_draft() is not None
+    at.session_state[V.SS_SEL] = "Keep going"
+    at.session_state[V.SS_DRAFT] = V._draft_of(next(ln for ln in V.CS.load_draft()["map"]["lines"] if ln["name"] == "Keep going"))
     at.run()
+    next(t for t in at.text_area if t.label.startswith("Notes")).input("Use more").run()
+    assert any("2 changed" in (m.value or "") for m in at.markdown)
+    save().click().run()
     assert not errors(at)
-    ta = next(t for t in at.text_area if t.label.startswith("Notes"))
-    ta.input("Say it slower").run()
-    save = next(b for b in at.button if b.label == "💾 Save")
-    save.click().run()
-    assert not errors(at)
-    got = next(ln for ln in CS.load()["lines"] if ln["name"] == V_line)
-    assert got["notes"] == "Say it slower" and CS.load()["rev"] == 2
-    # another device saves in between: this page's next save is refused, nothing lost
-    other = copy.deepcopy(CS.load())
-    CS.save(other, 2, "other device")
-    ta = next(t for t in at.text_area if t.label.startswith("Notes"))
-    ta.input("Mine").run()
-    next(b for b in at.button if b.label == "💾 Save").click().run()
+    got = {ln["name"]: ln for ln in CS.load()["lines"]}
+    assert got["Start-Round 1"]["notes"] == "Say it slower" and got["Keep going"]["notes"] == "Use more"
+    assert CS.load()["rev"] == 2 and CS.load_draft() is None and save().disabled
+    # with nothing unsaved, the page follows a newer save made elsewhere
+    CS.save(copy.deepcopy(CS.load()), 2, "other device")
+    at.run()
+    assert V.CS.load()["rev"] == 3 and at.session_state[V.SS_MAP]["rev"] == 3
+    # unsaved changes made on revision 3, then the map is replaced elsewhere (e.g. an import): the save is refused
+    next(t for t in at.text_area if t.label.startswith("Notes")).input("Mine").run()
+    base = CS.load_draft()
+    CS.save(copy.deepcopy(CS.load()), 3, "imported elsewhere")
+    CS.save_draft(base["map"])
+    save().click().run()
     assert any("Not saved" in e.value for e in at.error)
-    assert next(ln for ln in CS.load()["lines"] if ln["name"] == V_line)["notes"] == "Say it slower"
+    assert {ln["name"]: ln for ln in CS.load()["lines"]}["Keep going"]["notes"] == "Use more"
+    assert {ln["name"]: ln for ln in CS.load_draft()["map"]["lines"]}["Keep going"]["notes"] == "Mine"
+    # ✖ Discard (with a confirm) goes back to the saved map
+    next(b for b in at.button if b.label == "✖ Discard").click().run()
+    next(b for b in at.button if b.label == "Yes, discard").click().run()
+    assert not errors(at) and CS.load_draft() is None
+
+
+def test_lines_can_be_added_and_filtered_by_category(voice, monkeypatch):
+    import cue_store as CS
+    import cue_map_view as V
+    from tests.apptest_util import errors, page_app
+    CS.save(CS.load(), 0, "taken over")
+    monkeypatch.setattr(V, "new_on_drive", lambda cm: [{"name": "Brand new.mp3", "folder": "New", "seconds": 2.5}])
+    at = page_app("pages/8_Cue_Map.py").run()
+    assert not errors(at)
+    assert any("1 new on Google Drive" in e.label for e in at.expander)
+    next(b for b in at.button if b.label == "➕ Add").click().run()
+    assert not errors(at)
+    assert at.session_state[V.SS_SEL] == "Brand new" and CS.changes(CS.load(), CS.load_draft()["map"])["added"] == ["Brand new"]
+    assert not any("new on Google Drive" in e.label and "1 new" in e.label for e in at.expander)
+    next(b for b in at.button if b.label == "💾 Save the cue map").click().run()
+    assert any(ln["name"] == "Brand new" for ln in CS.load()["lines"])
+    pills = at.get("button_group") or []
+    assert pills, "category pills shown"
 
 
 def test_end_cues_keep_their_finish_when_the_length_changes():

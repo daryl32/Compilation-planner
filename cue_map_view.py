@@ -35,16 +35,53 @@ PH_LABEL = {p: E.PROFILES[p]["label"].title() for p in PHASES}
 # State
 # ---------------------------------------------------------------------------
 
+def saved() -> dict:
+    """The cue map as saved on the server."""
+    return CS.load()
+
+
 def current(reload: bool = False) -> dict:
-    """The cue map as last loaded into this session (reloaded after every save and on 🔄)."""
+    """The working copy: the saved cue map plus any unsaved changes (kept in cue_draft.json, so they survive the page
+    being dropped). reload: read both from disk again."""
     ss = st.session_state
-    if reload or SS_MAP not in ss:
+    d = CS.load_draft()
+    if d:                                                 # the unsaved changes, wherever they were made
+        ss[SS_MAP] = d["map"]
+    elif reload or SS_MAP not in ss or int(ss[SS_MAP].get("rev") or 0) != int(CS.load().get("rev") or 0) and not d:
         ss[SS_MAP] = CS.load()
     return ss[SS_MAP]
 
 
+def _disk_work() -> dict:
+    d = CS.load_draft()
+    return d["map"] if d else CS.load()
+
+
+def changed(cm: dict, line: dict) -> None:
+    """Put an edited / new line into the unsaved changes. Merged line by line into the draft file as it is on disk, so
+    another device's unsaved edits to other lines are kept (the unsaved changes follow Daryl between devices)."""
+    work = _disk_work()
+    if any(ln["name"] == line["name"] for ln in work["lines"]):
+        work["lines"] = [line if ln["name"] == line["name"] else ln for ln in work["lines"]]
+    else:
+        work["lines"].append(line)
+    CS.save_draft(work)
+    st.session_state[SS_MAP] = work
+
+
+def removed(name: str) -> None:
+    work = _disk_work()
+    work["lines"] = [ln for ln in work["lines"] if ln["name"] != name]
+    CS.save_draft(work)
+    st.session_state[SS_MAP] = work
+
+
+def pending() -> dict:
+    return CS.changes(saved(), current())
+
+
 def select(name: str | None) -> None:
-    """Open a line in the editor (a fresh draft of it)."""
+    """Open a line in the editor (a fresh draft of it, from the working copy)."""
     ss = st.session_state
     ss[SS_SEL] = name
     ss.pop(SS_DRAFT, None)
@@ -77,24 +114,71 @@ def _commit(draft: dict) -> dict:
 
 
 def save_map(cm: dict, note: str) -> bool:
-    """Save with the revision check; tells the user what happened. True when saved."""
+    """💾 Save the working copy as the cue map (revision check); tells the user what happened. True when saved."""
     try:
         got = CS.save(cm, int(cm.get("rev") or 0), note)
     except CS.Stale as e:
-        st.session_state["cm_msg"] = ("error", f"⚠️ Not saved — {e} Press 🔄 Reload to see the newer map, then make your "
-                                               "change again.")
+        st.session_state["cm_msg"] = ("error", f"⚠️ Not saved — {e} Your changes are still here: ⬇️ export them in "
+                                               "🗂️ Versions if you need them, then ✖ Discard and redo them on the newer map.")
         return False
+    CS.clear_draft()
     st.session_state[SS_MAP] = got
     st.session_state["cm_msg"] = ("success", f"💾 Saved (revision {got['rev']}) — {note}")
+    st.session_state["cm_gen"] = st.session_state.get("cm_gen", 0) + 1
+    if st.session_state.get(SS_SEL):
+        select(st.session_state[SS_SEL])
     return True
 
 
-def save_line(draft: dict, old_name: str) -> None:
-    cm = copy.deepcopy(current())
-    new = _commit(draft)
-    cm["lines"] = [new if ln["name"] == old_name else ln for ln in cm["lines"]]
-    if save_map(cm, f"{new['name']} edited"):
-        select(new["name"])
+def discard() -> None:
+    CS.clear_draft()
+    st.session_state[SS_MAP] = CS.load()
+    st.session_state["cm_gen"] = st.session_state.get("cm_gen", 0) + 1
+    select(st.session_state.get(SS_SEL))
+
+
+def save_bar_bottom() -> None:
+    """A second 💾 under the editor, so it's in reach after a long edit."""
+    ch = pending()
+    n = sum(len(v) for v in ch.values())
+    c = st.columns([4, 2])
+    c[0].caption(f"{n} unsaved change(s)." if n else "✅ Everything is saved.")
+    if c[1].button("💾 Save the cue map", type="primary", disabled=not n, use_container_width=True, key="cm_save_all_b"):
+        names = ch["changed"] + ch["added"] + ch["deleted"]
+        save_map(current(), f"{n} change(s): " + ", ".join(names[:8]))
+        st.rerun()
+
+
+def save_bar() -> None:
+    """The one save: what's unsaved, 💾 Save the cue map, ✖ Discard."""
+    ch = pending()
+    names = ch["changed"] + ch["added"] + ch["deleted"]
+    n = len(names)
+    box = st.container(border=True)
+    c = box.columns([4, 2, 1])
+    bits = ([f"✎ {len(ch['changed'])} changed"] if ch["changed"] else []) + \
+           ([f"➕ {len(ch['added'])} added"] if ch["added"] else []) + ([f"🗑 {len(ch['deleted'])} deleted"] if ch["deleted"] else [])
+    if not n:
+        c[0].caption("✅ Everything is saved.")
+    else:
+        c[0].markdown("**Not saved yet:** " + " · ".join(bits))
+        c[0].caption(", ".join(names[:12]) + (" …" if n > 12 else ""))
+    if c[1].button("💾 Save the cue map", type="primary", disabled=not n, use_container_width=True, key="cm_save_all"):
+        save_map(current(), " · ".join(bits) + ": " + ", ".join(names[:8]))
+        st.rerun()
+    if c[2].button("✖ Discard", disabled=not n, use_container_width=True, key="cm_discard",
+                   help="Throw away every unsaved change and go back to the saved cue map."):
+        st.session_state["cm_confirm_discard"] = True
+    if st.session_state.get("cm_confirm_discard") and n:
+        w = box.columns([4, 1, 1])
+        w[0].warning(f"Throw away {n} unsaved change(s)?")
+        if w[1].button("Yes, discard", key="cm_discard_yes"):
+            st.session_state.pop("cm_confirm_discard", None)
+            discard()
+            st.rerun()
+        if w[2].button("Keep them", key="cm_discard_no"):
+            st.session_state.pop("cm_confirm_discard", None)
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -164,8 +248,9 @@ def editor(names: list) -> None:
         st.info("Pick a line — tap one on the 🕒 Timeline or in 🎙️ Lines.")
         return
     old = ss.get(SS_SEL)
-    k = f"{re.sub(r'[^A-Za-z0-9]', '_', old)}_{current().get('rev', 0)}"
-    orig = next((ln for ln in current()["lines"] if ln["name"] == old), None)
+    k = f"{re.sub(r'[^A-Za-z0-9]', '_', old)}_{st.session_state.get('cm_gen', 0)}"       # not the saved rev: another
+    # device saving must never reset what's being typed here
+    orig = next((ln for ln in saved()["lines"] if ln["name"] == old), None)
     head_box = st.container()                           # filled last: it shows whether the fields below changed the line
     path = line_path(draft)
     full = float(draft.get("seconds") or 0.0)
@@ -188,8 +273,6 @@ def editor(names: list) -> None:
                                         value=min([0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.25],
                                                   key=lambda v: abs(v - float(draft.get("speed") or 1))), key=f"cm_sp_{k}")
     draft["gain"] = c[3].slider("Volume ± dB", -12, 12, int(draft.get("gain") or 0), key=f"cm_g_{k}")
-    if full:
-        draft["seconds"] = round(full, 3)
     s = st.columns([2, 1, 1])
     s[0].caption(f"⏱ Plays **{CS.played_seconds(draft, full):.2f} s** of {full:.2f} s.")
     if path and s[1].button("✂ Cut the silence", key=f"cm_cut_{k}", use_container_width=True):
@@ -221,24 +304,25 @@ def editor(names: list) -> None:
         draft.setdefault("cues", []).append(copy.deepcopy(pre[pick]))
         ss.pop(f"cm_add_{k}", None)
         st.rerun()
-    dirty = orig is None or _commit(draft) != _commit(_draft_of(orig))
+    work = next((ln for ln in current()["lines"] if ln["name"] == old), None)
+    if work is not None and CS.norm(_commit(draft)) != CS.norm(work):      # a real change → the working copy (unsaved)
+        changed(current(), _commit(draft))
+    dirty = orig is None or CS.norm(_commit(draft)) != CS.norm(orig)
     with head_box:
-        head = st.columns([4, 1, 1])
-        head[0].markdown(f"### ✎ {draft['name']}" + ("  ·  *unsaved changes*" if dirty else ""))
-        if head[1].button("💾 Save", key=f"cm_save_{k}", type="primary", disabled=not dirty, use_container_width=True):
-            save_line(draft, old)
-            st.rerun()
-        if head[2].button("↺ Undo", key=f"cm_undo_{k}", disabled=not dirty, use_container_width=True,
-                          help="Back to the saved line."):
+        head = st.columns([5, 1])
+        head[0].markdown(f"### ✎ {draft['name']}" + ("  ·  *new line — not saved yet*" if orig is None else
+                                                     "  ·  *changed — not saved yet*" if dirty else ""))
+        if orig is not None and head[1].button("↺ Undo", key=f"cm_undo_{k}", disabled=not dirty, use_container_width=True,
+                                               help="Put this line back as it is in the saved cue map."):
+            changed(current(), copy.deepcopy(orig))
+            st.session_state["cm_gen"] = st.session_state.get("cm_gen", 0) + 1
             select(old)
             st.rerun()
     with st.expander("🗑 Delete this line"):
-        st.caption("It goes from the cue map (the MP3 stays on Drive). The version before stays in 🗂️ Versions.")
+        st.caption("It goes from the cue map when you 💾 Save (the MP3 stays on Drive).")
         if st.checkbox("Yes, delete it", key=f"cm_delc_{k}") and st.button("🗑 Delete", key=f"cm_del_{k}"):
-            cm = copy.deepcopy(current())
-            cm["lines"] = [ln for ln in cm["lines"] if ln["name"] != old]
-            if save_map(cm, f"{old} deleted"):
-                select(None)
+            removed(old)
+            select(None)
             st.rerun()
 
 
@@ -410,20 +494,33 @@ def timeline(cm: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def lines_tab(cm: dict) -> None:
-    c = st.columns([2, 2, 1, 1])
+    add_lines(cm)
+    c = st.columns([3, 1, 1])
     q = c[0].text_input("🔍 Search", key="cm_q")
-    cats = c[1].multiselect("Categories", CS.categories(cm), key="cm_fcats")
-    nocue = c[2].toggle("No cue only", key="cm_nocue")
-    order = c[3].selectbox("Sort", ["Name", "Shortest", "Longest"], key="cm_sort")
-    rows = [ln for ln in cm["lines"] if (not q or q.lower() in ln["name"].lower())
-            and (not cats or set(cats) & set(ln.get("cats") or [])) and (not nocue or not ln.get("cues"))]
+    nocue = c[1].toggle("No cue only", key="cm_nocue")
+    order = c[2].selectbox("Sort", ["Name", "Shortest", "Longest"], key="cm_sort")
+    allcats = CS.categories(cm)
+    counts = {x: sum(1 for ln in cm["lines"] if x in (ln.get("cats") or [])) for x in allcats}
+    none_n = sum(1 for ln in cm["lines"] if not ln.get("cats"))
+    opts = [x for x in allcats if counts[x]] + (["(none)"] if none_n else [])
+    cats = st.pills("Categories (tap to filter — more than one shows lines in any of them)", opts, selection_mode="multi",
+                    key="cm_fcats", format_func=lambda x: f"{x} {counts.get(x, none_n)}") or []
+    want = set(cats) - {"(none)"}
+
+    def in_cats(ln):
+        have = set(ln.get("cats") or [])
+        return not cats or bool(want & have) or ("(none)" in cats and not have)
+    rows = [ln for ln in cm["lines"] if (not q or q.lower() in ln["name"].lower() or q.lower() in (ln.get("notes") or "").lower())
+            and in_cats(ln) and (not nocue or not ln.get("cues"))]
     if order == "Name":
         rows.sort(key=lambda ln: ln["name"].lower())
     else:
         rows.sort(key=lambda ln: CS.played_seconds(ln), reverse=order == "Longest")
-    table = [{"Line": ln["name"], "Plays (s)": round(CS.played_seconds(ln), 2), "✂": "✂" if CS.is_cut(ln) else "",
-              "Categories": ", ".join(ln.get("cats") or []), "Cues": len(ln.get("cues") or []),
-              "First cue": CS.describe(ln["cues"][0]) if ln.get("cues") else "—",
+    ch = pending()
+    mark = {n: "✎" for n in ch["changed"]} | {n: "➕" for n in ch["added"]}
+    table = [{"": mark.get(ln["name"], ""), "Line": ln["name"], "Plays (s)": round(CS.played_seconds(ln), 2),
+              "✂": "✂" if CS.is_cut(ln) else "", "Categories": ", ".join(ln.get("cats") or []),
+              "Cues": len(ln.get("cues") or []), "First cue": CS.describe(ln["cues"][0]) if ln.get("cues") else "—",
               "On server": "✅" if line_path(ln) else "—"} for ln in rows]
     ev = st.dataframe(table, hide_index=True, use_container_width=True, on_select="rerun", selection_mode="single-row",
                       key=f"cm_lines_{len(rows)}_{q}_{'_'.join(cats)}_{nocue}_{order}", height=360)
@@ -434,30 +531,95 @@ def lines_tab(cm: dict) -> None:
         if tok[1] != st.session_state.get(SS_SEL):
             select(tok[1])
             st.rerun()
-    st.caption(f"{len(rows)} of {len(cm['lines'])} lines · tap a row to edit it.")
-    with st.expander("➕ New lines on Google Drive"):
-        st.caption("MP3s in Edge_voiceover and its folders (not December, avatar_clips, transitions or \"_…\") that aren't "
-                   "in the cue map yet.")
-        if st.button("🔎 Look on Drive", key="cm_scan"):
-            st.session_state["cm_new"] = new_on_drive(cm)
-        for f in st.session_state.get("cm_new") or []:
+    st.caption(f"{len(rows)} of {len(cm['lines'])} lines · tap a row to edit it · ✎ changed / ➕ added, not saved yet.")
+
+
+def _add(cm: dict, name: str, file: str, seconds: float, folder: str) -> None:
+    changed(cm, CS.new_line(name, file, seconds, folder))
+    select(name)
+
+
+def add_lines(cm: dict) -> None:
+    """➕ Lines not in the cue map yet: MP3s found on Drive (looked for once a session, 🔎 again on demand), or an MP3
+    uploaded here (kept on the server and, when Drive is connected, put in Edge_voiceover/New). Added lines are unsaved
+    until 💾 Save."""
+    ss = st.session_state
+    if "cm_new" not in ss:
+        ss["cm_new"] = new_on_drive(cm)
+    have = {ln["name"].lower() for ln in cm["lines"]}
+    new = [f for f in ss["cm_new"] if Path(f["name"]).stem.lower() not in have]
+    with st.expander(f"➕ Add lines — {len(new)} new on Google Drive", expanded=bool(new)):
+        top = st.columns([3, 1, 1])
+        top[0].caption("MP3s in Edge_voiceover and its folders (not December, avatar_clips, transitions or \"_…\") "
+                       "that aren't in the cue map yet.")
+        if top[1].button("🔎 Look again", key="cm_scan", use_container_width=True):
+            ss["cm_new"] = new_on_drive(cm)
+            st.rerun()
+        if new and top[2].button(f"➕ Add all {len(new)}", key="cm_add_all", use_container_width=True):
+            for f in new:
+                changed(cm, CS.new_line(Path(f["name"]).stem, f["name"], f["seconds"], f["folder"]))
+            ss["cm_msg"] = ("info", f"➕ {len(new)} lines added — give them cues, then 💾 Save the cue map.")
+            st.rerun()
+        for f in new:
             cols = st.columns([4, 1])
             cols[0].write(f"**{Path(f['name']).stem}** · {f['folder'] or 'Edge_voiceover'} · ~{f['seconds']:.1f} s")
-            if cols[1].button("➕ Add", key=f"cm_new_{f['folder']}_{f['name']}"):
-                cm2 = copy.deepcopy(current())
-                cm2["lines"].append(CS.new_line(Path(f["name"]).stem, f["name"], f["seconds"], f["folder"]))
-                if save_map(cm2, f"{Path(f['name']).stem} added"):
-                    st.session_state["cm_new"] = [x for x in st.session_state["cm_new"] if x is not f]
-                    select(Path(f["name"]).stem)
+            if cols[1].button("➕ Add", key=f"cm_new_{f['folder']}_{f['name']}", use_container_width=True):
+                _add(cm, Path(f["name"]).stem, f["name"], f["seconds"], f["folder"])
                 st.rerun()
+        if not new:
+            st.caption("Nothing new on Drive.")
+        st.markdown("**Or upload an MP3**")
+        n = ss.get("cm_mp3_n", 0)
+        ups = st.file_uploader("MP3 (the file name becomes the line's name)", type=["mp3"], accept_multiple_files=True,
+                               key=f"cm_mp3_{n}")
+        if ups:
+            ss["cm_mp3_n"] = n + 1
+            from planner.edge import lines_dir
+            import edge_render as R
+            done, notes = [], []
+            for up in ups:
+                stem = Path(up.name).stem
+                if stem.lower() in have:
+                    notes.append(f"{stem}: already a line")
+                    continue
+                dest = lines_dir() / up.name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(up.getvalue())
+                err = _to_drive(dest, cm)
+                if err:
+                    notes.append(f"{stem}: on the server, not on Drive ({err})")
+                changed(cm, CS.new_line(stem, up.name, R.probe(dest)["seconds"], "New" if not err else ""))
+                done.append(stem)
+            if done:
+                select(done[-1])
+            ss["cm_msg"] = ("info" if not notes else "warning",
+                            (f"➕ Added {', '.join(done)} — not saved yet. " if done else "") + " · ".join(notes))
+            st.rerun()
+
+
+def _to_drive(path: Path, cm: dict) -> str | None:
+    """An uploaded line also goes to Drive (Edge_voiceover/New), so every machine and Colab can find it."""
+    try:
+        from page_setup import drive_token
+        from drive_oauth import upload_file_with_oauth
+        token = drive_token()
+        if not token:
+            return "Google Drive isn't connected on this page"
+        root = str(cm.get("drive_folder") or "scene-labeling/Edge_voiceover").strip("/")
+        _, err = upload_file_with_oauth(token, path, f"{root}/New")
+        return err
+    except Exception as e:                                # noqa: BLE001
+        return str(e)
 
 
 def new_on_drive(cm: dict) -> list:
     """[{"name", "folder", "seconds"}] — MP3s on Drive with no line in the cue map (seconds estimated at 192 kbps)."""
     try:
-        from drive_sync import list_drive_folder
+        from drive_sync import credentials_available, list_drive_folder
         from planner.edge import voice_folders
-    except ImportError:
+        if not credentials_available():
+            return []
+    except Exception:                                     # noqa: BLE001 — no Drive here: nothing to offer
         return []
     root = str(cm.get("drive_folder") or "scene-labeling/Edge_voiceover").strip("/")
     have = {str(ln.get("file") or "").lower() for ln in cm["lines"]} | {ln["name"].lower() + ".mp3" for ln in cm["lines"]}
@@ -478,6 +640,9 @@ def new_on_drive(cm: dict) -> list:
 
 def versions_tab(cm: dict) -> None:
     st.caption("Every save keeps the map it replaced. Restoring makes a new revision, so nothing is ever lost.")
+    unsaved = any(pending().values())
+    if unsaved:
+        st.warning("You have unsaved changes — 💾 Save or ✖ Discard them before restoring or importing.")
     vs = CS.versions()
     if not vs:
         st.info("No earlier versions yet.")
@@ -485,7 +650,7 @@ def versions_tab(cm: dict) -> None:
         cols = st.columns([4, 1])
         cols[0].write(f"**r{v['rev']}** · {v['saved_at']} · {v['lines']} lines ({v['cued']} with cues)"
                       + (f" · {v['note']}" if v["note"] else ""))
-        if cols[1].button("↩ Restore", key=f"cm_rs_{v['file']}"):
+        if cols[1].button("↩ Restore", key=f"cm_rs_{v['file']}", disabled=unsaved):
             try:
                 got = CS.restore(v["file"], int(cm.get("rev") or 0))
                 st.session_state[SS_MAP] = got
@@ -495,10 +660,11 @@ def versions_tab(cm: dict) -> None:
                 st.session_state["cm_msg"] = ("error", f"⚠️ {e} Press 🔄 Reload first.")
             st.rerun()
     st.divider()
-    st.download_button("⬇️ Export the cue map (JSON)", json.dumps(cm, indent=1, ensure_ascii=False).encode("utf-8"),
+    st.download_button("⬇️ Export the cue map (JSON" + (", with your unsaved changes)" if unsaved else ")"), json.dumps(cm, indent=1, ensure_ascii=False).encode("utf-8"),
                        file_name=f"edge_cues_r{cm.get('rev', 0)}.json", mime="application/json", key="cm_export")
     n = st.session_state.get("cm_up_n", 0)
-    up = st.file_uploader("⬆️ Import a cue map file (replaces this one; it stays a version)", type=["json"], key=f"cm_up_{n}")
+    up = st.file_uploader("⬆️ Import a cue map file (replaces this one; it stays a version)", type=["json"], key=f"cm_up_{n}",
+                          disabled=unsaved)
     if up is not None:
         st.session_state["cm_up_n"] = n + 1
         try:

@@ -122,6 +122,67 @@ def import_raw(raw: bytes, rev: int, note: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 📝 Unsaved changes (Daryl, 19 Nov: one manual save once he's finished editing)
+# ---------------------------------------------------------------------------
+# Edits pile up in a draft beside the cue map (cue_draft.json), so they survive the iPad dropping the page; the cue
+# map itself only changes on 💾 Save the cue map (with the revision check above).
+
+def draft_path() -> Path:
+    return voice_dir() / "cue_draft.json"
+
+
+def load_draft() -> dict | None:
+    """{"base_rev", "at", "map"} or None."""
+    try:
+        d = json.loads(draft_path().read_text(encoding="utf-8"))
+        return d if isinstance(d.get("map"), dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def save_draft(cm: dict) -> None:
+    voice_dir().mkdir(parents=True, exist_ok=True)
+    tmp = draft_path().with_suffix(".tmp")
+    tmp.write_text(json.dumps({"base_rev": int(cm.get("rev") or 0), "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                               "map": cm}, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, draft_path())
+
+
+def norm(x):
+    """A line as far as it matters: empty values dropped, numbers rounded, the derived play_seconds / seconds left
+    out — so opening a line in the editor never counts as a change."""
+    if isinstance(x, dict):
+        out = {}
+        for k, v in x.items():
+            if k in ("play_seconds", "seconds") or k.startswith("_"):
+                continue
+            v = norm(v)
+            if v in ("", [], {}, None) or (k in ("offset", "gain", "trim_in", "trim_out") and v == 0) or (k == "speed" and v == 1):
+                continue
+            out[k] = v
+        return out
+    if isinstance(x, list):
+        return [norm(v) for v in x]
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, (int, float)):
+        return round(float(x), 3)
+    return x
+
+
+def clear_draft() -> None:
+    draft_path().unlink(missing_ok=True)
+
+
+def changes(saved: dict, work: dict) -> dict:
+    """{"changed": [names], "added": [names], "deleted": [names]} between the saved map and the draft."""
+    a = {ln["name"]: ln for ln in saved.get("lines") or []}
+    b = {ln["name"]: ln for ln in work.get("lines") or []}
+    return {"changed": sorted((n for n in a.keys() & b.keys() if norm(a[n]) != norm(b[n])), key=str.lower),
+            "added": sorted(b.keys() - a.keys(), key=str.lower), "deleted": sorted(a.keys() - b.keys(), key=str.lower)}
+
+
+# ---------------------------------------------------------------------------
 # A line's length
 # ---------------------------------------------------------------------------
 
