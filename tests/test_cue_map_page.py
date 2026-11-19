@@ -137,7 +137,9 @@ def test_lines_can_be_added_and_filtered_by_category(voice, monkeypatch):
     from tests.apptest_util import errors, page_app
     CS.save(CS.load(), 0, "taken over")
     monkeypatch.setattr(V, "new_on_drive", lambda cm: [{"name": "Brand new.mp3", "folder": "New", "seconds": 2.5}])
-    at = page_app("pages/8_Cue_Map.py").run()
+    at = page_app("pages/8_Cue_Map.py")
+    at.session_state["cm_view"] = "🎙️ Lines"
+    at.run()
     assert not errors(at)
     assert any("1 new on Google Drive" in e.label for e in at.expander)
     next(b for b in at.button if b.label == "➕ Add").click().run()
@@ -236,7 +238,9 @@ def test_copy_chill_to_medium_turns_and_the_gaps_tab(voice):
     assert cue["turn"] == 2 and cue["phases"] == ["medium"] and cue["diffs"] == ["medium"] and cue["offset"] == 3.0
     # the page: the Gaps tab with the copy button, then the grid
     CS.save(cm, 0, "taken over")
-    at = page_app("pages/8_Cue_Map.py").run()
+    at = page_app("pages/8_Cue_Map.py")
+    at.session_state["cm_view"] = "🔍 Gaps"
+    at.run()
     assert not errors(at)
     next(b for b in at.button if "Wipe Medium and copy Chill" in b.label).click().run()
     assert not errors(at) and CS.is_split(CS.load_draft()["map"]) and CS.load()["rev"] == 1
@@ -267,6 +271,7 @@ def test_easy_wins_for_an_empty_section(voice):
     assert [g["name"] for g in good] == [pick]
     assert any(o["name"] == "Just stroke" and "Nude" in o["where"] for o in other)
     at = page_app("pages/8_Cue_Map.py")
+    at.session_state["cm_view"] = "🔍 Gaps"
     at.session_state["cm_gp_grid_medium_6_False"] = {"selection": {"rows": [], "columns": [], "cells": [(0, "Slow 2")]}}
     at.run()
     assert not errors(at)

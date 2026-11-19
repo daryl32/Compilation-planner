@@ -594,14 +594,14 @@ def timeline(cm: dict) -> None:
     ev = cue_timeline(timeline_data(cm, sched, got), key="cm_tl")
     if isinstance(ev, dict) and ev.get("nonce") and ev["nonce"] != st.session_state.get("cm_tl_nonce"):
         st.session_state["cm_tl_nonce"] = ev["nonce"]
-        if ev.get("act") == "open":
-            select(ev.get("line"))
+        if ev.get("act") == "open":                     # opens in this same run (the page calls the pop-up last) —
+            select(ev.get("line"))                      # no second reload of the whole page (Daryl, 19 Nov: slow)
             st.session_state["cm_dialog"] = True
         else:
             msg = apply_action(cm, ev, sched, diff)
             if msg:
                 st.session_state["cm_msg"] = ("info", msg)
-        st.rerun()
+            st.rerun()
     if diff != "chill":
         st.caption("Medium and Hard repeat phases in a round: a line you drop is cued from the start of that phase's "
                    "first turn in the round (the app's rule), so it may show on the first turn.")
@@ -683,6 +683,7 @@ def add_lines(cm: dict) -> None:
         top[0].caption("MP3s in Edge_voiceover and its folders (not December, avatar_clips, transitions or \"_…\") "
                        "that aren't in the cue map yet.")
         if top[1].button("🔎 Look again", key="cm_scan", use_container_width=True):
+            _drive_mp3s.clear()
             ss["cm_new"] = new_on_drive(cm)
             st.rerun()
         if new and top[2].button(f"➕ Add all {len(new)}", key="cm_add_all", use_container_width=True):
@@ -754,10 +755,20 @@ def _picked(ev, what: str):
             return None
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _drive_mp3s(root: str, subs: tuple) -> list:
+    from drive_sync import list_drive_folder
+    out = []
+    for sub in ("",) + subs:
+        files, err = list_drive_folder(f"{root}/{sub}".rstrip("/"))
+        out += [{"name": f["name"], "folder": sub, "size": int(f.get("size") or 0)} for f in ([] if err else files)]
+    return out
+
+
 def new_on_drive(cm: dict) -> list:
     """[{"name", "folder", "seconds"}] — MP3s on Drive with no line in the cue map (seconds estimated at 192 kbps)."""
     try:
-        from drive_sync import credentials_available, list_drive_folder
+        from drive_sync import credentials_available
         from planner.edge import voice_folders
         if not credentials_available():
             return []
@@ -766,13 +777,11 @@ def new_on_drive(cm: dict) -> list:
     root = str(cm.get("drive_folder") or "scene-labeling/Edge_voiceover").strip("/")
     have = {str(ln.get("file") or "").lower() for ln in cm["lines"]} | {ln["name"].lower() + ".mp3" for ln in cm["lines"]}
     out, seen = [], set()
-    for sub in [""] + voice_folders(root, cm):
-        files, err = list_drive_folder(f"{root}/{sub}".rstrip("/"))
-        for f in ([] if err else files):
-            n = f["name"]
-            if n.lower().endswith(".mp3") and n.lower() not in have and n.lower() not in seen and not E.take_stem(Path(n).stem, ""):
-                seen.add(n.lower())
-                out.append({"name": n, "folder": sub, "seconds": round(int(f.get("size") or 0) / 24000, 1)})
+    for f in _drive_mp3s(root, tuple(voice_folders(root, cm))):
+        n = f["name"]
+        if n.lower().endswith(".mp3") and n.lower() not in have and n.lower() not in seen and not E.take_stem(Path(n).stem, ""):
+            seen.add(n.lower())
+            out.append({"name": n, "folder": f["folder"], "seconds": round(int(f.get("size") or 0) / 24000, 1)})
     return sorted(out, key=lambda f: f["name"].lower())
 
 
@@ -985,9 +994,14 @@ def _cand_list(rows: list, sec: dict, n: int, diff: str, sched: list, tag: str) 
             changed(current(), line)
             st.session_state["cm_msg"] = ("info", f"➕ {r['name']}: {CS.describe(cue)} — not saved yet.")
             st.rerun()
-        f = line_file(r["line"], cut=False)
-        if f is not None and tag == "g":
-            with cols[0]:
-                st.audio(str(f), start_time=float(r["line"].get("trim_in") or 0),
-                         end_time=float(r["line"].get("trim_out") or 0) or None)
+        pk = f"{tag}_{sec['round']}_{sec['i']}_{r['name']}"
+        if tag == "g" and line_file(r["line"], cut=False) is not None:
+            if st.session_state.get("cm_gp_play") == pk:     # one player at a time, only when asked for
+                f = line_file(r["line"], cut=False)
+                with cols[0]:
+                    st.audio(str(f), start_time=float(r["line"].get("trim_in") or 0),
+                             end_time=float(r["line"].get("trim_out") or 0) or None, autoplay=True)
+            elif cols[0].button("▶ Listen", key=f"cm_gp_pl_{tag}_{k}_{sec['round']}_{sec['i']}"):
+                st.session_state["cm_gp_play"] = pk
+                st.rerun()
     st.caption("★★ already used in this kind of section · ★ its category fits.")

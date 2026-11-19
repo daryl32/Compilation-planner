@@ -41,15 +41,10 @@ if not CS.managed():
 
 bar = st.container()          # filled last, so it counts this run's edits
 names = [ln["name"] for ln in lines]
-t1, t4, t2, t3 = st.tabs(["🕒 Timeline", "🔍 Gaps", "🎙️ Lines", "🗂️ Versions"])
-with t1:
-    V.timeline(cm)
-with t4:
-    V.gaps_tab(cm)
-with t2:
-    V.lines_tab(cm)
-with t3:
-    V.versions_tab(cm)
+# only the view that's open is built and sent (tabs built all four on every tap — Daryl, 19 Nov: opening a line was slow)
+VIEWS = {"🕒 Timeline": V.timeline, "🔍 Gaps": V.gaps_tab, "🎙️ Lines": V.lines_tab, "🗂️ Versions": V.versions_tab}
+view = st.segmented_control("View", list(VIEWS), default="🕒 Timeline", key="cm_view", label_visibility="collapsed") or "🕒 Timeline"
+VIEWS[view](cm)
 if ss.get("cm_dialog") and ss.get(V.SS_SEL):
     V.line_dialog(names)
 with bar:
