@@ -651,11 +651,168 @@ def _shot_gains(videos: dict) -> dict:
     return gains
 
 
-def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1, max_clips: int = 1,
+def _video_candidates(v: _Video, vid_: str, spans: list, penalty: float, p: dict) -> list:
+    """One video's candidate windows for a block (its usable spans joined into runs, the best-fitting windows of each
+    run, scored with the block's bonuses and penalties). p: the block's settings (see _match_story's search)."""
+    dd, nn, key = p["dd"], p["nn"], p["key"]
+    prev_shot, smooth, beat_ = p["prev_shot"], p["smooth"], p["beat"]
+    role, rec_roles, pref = p["role"], p["rec_roles"], p["pref"]
+    out = []
+    spans = sorted(spans, key=_abs_start)
+    runs = [[spans[0]]]
+    for sp in spans[1:]:
+        if not p["sequential"] and _joined(runs[-1][-1], sp, v.cuts):
+            runs[-1].append(sp)
+        else:
+            runs.append([sp])
+    cache = None
+    for run in runs:
+        ra, rb = _abs_start(run[0]), _abs_end(run[-1])
+        if rb - ra < dd - 1e-6:
+            continue
+        starts = _window_starts(v, ra, rb, dd, nn)
+        if not len(starts):
+            continue
+        if cache is None:
+            cache = v._cum.get(("fit", key))
+            if cache is None:
+                # (a block may bring its own tempo — ⏱️ Edge Mode's generated beat changes speed by phase)
+                cache = v._cum[("fit", key)] = _score_video_x(v, *p["sargs"], **p["skw"])
+        fit, base, story, sync, slide = cache
+        starts = starts[starts < len(fit)]
+        if not len(starts):
+            continue
+        keep = min(TOP_PER_RUN, TOP_PER_SPAN * len(run))
+        for s_ in _top_spread(starts, fit, keep, max(MIN_GAP_POINTS, nn // 2)):
+            ws = min(max(float(v.times[s_]) + float(slide[s_]), ra), rb - dd)     # slid onto the hits
+            we = ws + dd
+            pieces, over = [], []
+            for sp in run:
+                lo, hi = max(ws, _abs_start(sp)), min(we, _abs_end(sp))
+                if hi - lo > 1e-6:
+                    pieces.append((sp["scene_id"], lo - sp["scene_start_sec"], hi - lo))
+                    over.append(sp)
+            if not pieces or (len(pieces) > 1 and min(p_[2] for p_ in pieces) < MIN_PIECE_SEC):
+                continue
+            over_tags = {str(x).lower() for sp in over for x in sp.get("tags") or []}
+            prefer = PREFER_BONUS if any(t in over_tags for t in pref) else 0.0
+            role_b = ROLE_BONUS if any((role and has_role(sp, role)) or any(has_role(sp, rr) for rr in rec_roles)
+                                       for sp in over) else 0.0
+            total = float(fit[s_]) + prefer + role_b - penalty
+            start_shot = _shot_at(v, s_)
+            if not math.isnan(prev_shot) and not math.isnan(start_shot):
+                jump = abs(start_shot - prev_shot)
+                total -= p["shot_w"] * jump
+                lean_ = max(0.0, 1.0 - smooth - 0.5) * 2          # 0 at the slider's middle, 1 fully at Contrast
+                if beat_ is not None:
+                    # 🎯 Movement only: a change of shot size is welcome where the music has no beat — at
+                    # a change point or in any beatless block — and worth more the bigger the jump
+                    if (p["change_ok"] or p["off"]) and jump >= 1.0:
+                        total += CONTRAST_QUIET * lean_ * (1.0 - beat_) * min(jump, 2.0)
+                elif p["change_ok"] and jump >= 1.0:
+                    total += CONTRAST_BONUS * lean_
+            if p["prev_pov"] is not None and smooth > 0 and bool(v.pov[s_]) != p["prev_pov"]:
+                total -= POV_PENALTY * smooth * (0.5 if p["change_ok"] else 1.0)
+            out.append({"total": total, "fit": float(fit[s_]), "base": float(base[s_]), "story": float(story[s_]),
+                        "sync": float(sync[s_]), "slide": round(ws - float(v.times[s_]), 3),
+                        "video_id": vid_, "pieces": pieces, "shot": start_shot,
+                        "end_shot": _shot_at(v, min(s_ + nn - 1, v.n - 1)), "pov": bool(v.pov[s_]),
+                        **({"follows": p["lead"]} if p["lead"] else {}),
+                        **({"phrase": True} if p["phrase"] and v.mover_slow is not None else {})})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# ⚡ Every core (Daryl, 19 Nov: a compile ran on one core of four, ~5 s a block with ~210 videos). Each block scores
+# every video's windows against the music — independent work, so it is spread over worker processes. They are
+# forked once the videos are fully prepared, so each works on an exact copy of them and the plan comes out the same
+# as one core would make it. Linux only (fork); elsewhere (the Windows laptop), or for a handful of videos, one core.
+# ---------------------------------------------------------------------------
+
+PAR_MIN_VIDEOS = 12            # fewer videos than this: not worth the workers
+PAR_MAX_WORKERS = 8
+_FORKED_VIDEOS = None          # the videos, as the workers see them (set just before they are forked)
+
+
+def _par_workers() -> int:
+    import os
+    import sys
+    if sys.platform.startswith("win") or os.environ.get("PLANNER_ONE_CORE"):
+        return 0
+    try:
+        n = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        n = os.cpu_count() or 1
+    return min(n, PAR_MAX_WORKERS) if n > 1 else 0
+
+
+def _cands_remote(job: tuple) -> list:
+    vid, spans, penalty, p = job
+    return _video_candidates(_FORKED_VIDEOS[vid], vid, spans, penalty, p)
+
+
+class _Scorer:
+    """The worker processes for one plan (started on first use, stopped when the plan is done)."""
+
+    def __init__(self):
+        self.pool, self.workers = None, 0
+
+    def start(self, videos: dict) -> None:
+        global _FORKED_VIDEOS
+        n = _par_workers()
+        if n < 2 or len(videos) < PAR_MIN_VIDEOS:
+            return
+        import multiprocessing as mp
+        import warnings
+        from concurrent.futures import ProcessPoolExecutor
+        _FORKED_VIDEOS = videos
+        try:
+            with warnings.catch_warnings():            # (fork from a threaded server: the workers only run numpy)
+                warnings.simplefilter("ignore", DeprecationWarning)
+                self.pool = ProcessPoolExecutor(max_workers=n, mp_context=mp.get_context("fork"))
+                self.pool.submit(int, 0).result(timeout=60)      # the workers are up (forked now, videos as they are)
+            self.workers = n
+        except Exception:          # noqa: BLE001 — no workers: one core, as before
+            self.stop()
+
+    def candidates(self, jobs: list, p: dict) -> list | None:
+        """[(video id, its spans, its penalty)] → each video's candidates (in the same order), or None (find them
+        here instead)."""
+        if self.pool is None or len(jobs) < 2:
+            return None
+        try:
+            chunk = max(1, len(jobs) // (self.workers * 3))
+            return list(self.pool.map(_cands_remote, [(vid, spans, pen, p) for vid, spans, pen in jobs], chunksize=chunk))
+        except Exception:          # noqa: BLE001 — a worker failed: carry on with one core
+            self.stop()
+            return None
+
+    def stop(self) -> None:
+        global _FORKED_VIDEOS
+        if self.pool is not None:
+            try:
+                self.pool.shutdown(wait=True, cancel_futures=True)
+            except Exception:          # noqa: BLE001
+                pass
+        self.pool, self.workers = None, 0
+        _FORKED_VIDEOS = None
+
+
+def match_story(*args, **kwargs) -> tuple:
+    """The 🤖 Auto story plan (see _match_story) — its video scoring spread over every core (_Scorer)."""
+    scorer = _Scorer()
+    try:
+        return _match_story(*args, scorer=scorer, **kwargs)
+    finally:
+        scorer.stop()
+
+
+def _match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1, max_clips: int = 1,
                 ramp_start: float = 0.2, ramp_end: float = 0.85, allow_same_video: bool = False,
                 sequential: bool = False, segment_exclusions: dict = None, segment_clip_reduction: dict = None,
                 global_excluded: set = None, vary_count: bool = False, seed: int = 0, min_clip_len_sec: float = 1.0,
-                block_roles: list = None, options: StoryOptions = None, ctx: PlanContext = None) -> tuple:
+                block_roles: list = None, options: StoryOptions = None, ctx: PlanContext = None,
+                scorer: _Scorer = None) -> tuple:
     """The 🤖 Auto story plan: (timeline, clip_count_shortfall, duration_shortfall_sec) — Classic's shape.
     Blocks where no timeline window fits fall back to Classic's chain fill."""
     import random
@@ -833,6 +990,8 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
                 uses[link["video_id"]] = uses.get(link["video_id"], 0) + 1
 
     max_videos = int(options.max_videos or 0)
+    if scorer is not None:
+        scorer.start(videos)           # ⚡ forked here: the videos are as prepared as they'll be
     for i, seg in enumerate(segments):
         if i in merged_away:
             continue
@@ -895,75 +1054,18 @@ def match_story(segments: list, queues: dict, track: dict, *, min_clips: int = 1
                     if not all(t in have for t in req):
                         continue
                 by_vid.setdefault(vid_, []).append(span)
-            out = []
-            for vid_, spans in by_vid.items():
-                v = videos[vid_]
-                spans.sort(key=_abs_start)
-                runs = [[spans[0]]]
-                for sp in spans[1:]:
-                    if not sequential and _joined(runs[-1][-1], sp, v.cuts):
-                        runs[-1].append(sp)
-                    else:
-                        runs.append([sp])
-                penalty = USE_PENALTY * uses.get(vid_, 0) + (REPEAT_PENALTY if vid_ in prev_videos else 0.0)
-                cache = None
-                for run in runs:
-                    ra, rb = _abs_start(run[0]), _abs_end(run[-1])
-                    if rb - ra < dd - 1e-6:
-                        continue
-                    starts = _window_starts(v, ra, rb, dd, nn)
-                    if not len(starts):
-                        continue
-                    if cache is None:
-                        cache = v._cum.get(("fit", key))
-                        if cache is None:
-                            # (a block may bring its own tempo — ⏱️ Edge Mode's generated beat changes speed by phase)
-                            cache = v._cum[("fit", key)] = _score_video_x(v, nn, recipe, aud,
-                                                                          float(seg.get("bpm") or track_bpm), ms, dd,
-                                                                          music_level(t0, t1), only, beat_,
-                                                                          music_speed(t0, t1), phrase=phrase_,
-                                                                          shot_fix=lab_shot)
-                    fit, base, story, sync, slide = cache
-                    starts = starts[starts < len(fit)]
-                    if not len(starts):
-                        continue
-                    keep = min(TOP_PER_RUN, TOP_PER_SPAN * len(run))
-                    for s_ in _top_spread(starts, fit, keep, max(MIN_GAP_POINTS, nn // 2)):
-                        ws = min(max(float(v.times[s_]) + float(slide[s_]), ra), rb - dd)     # slid onto the hits
-                        we = ws + dd
-                        pieces, over = [], []
-                        for sp in run:
-                            lo, hi = max(ws, _abs_start(sp)), min(we, _abs_end(sp))
-                            if hi - lo > 1e-6:
-                                pieces.append((sp["scene_id"], lo - sp["scene_start_sec"], hi - lo))
-                                over.append(sp)
-                        if not pieces or (len(pieces) > 1 and min(p_[2] for p_ in pieces) < MIN_PIECE_SEC):
-                            continue
-                        over_tags = {str(x).lower() for sp in over for x in sp.get("tags") or []}
-                        prefer = PREFER_BONUS if any(t in over_tags for t in pref) else 0.0
-                        role_b = ROLE_BONUS if any((role and has_role(sp, role)) or any(has_role(sp, rr) for rr in rec_roles)
-                                                   for sp in over) else 0.0
-                        total = float(fit[s_]) + prefer + role_b - penalty
-                        start_shot = _shot_at(v, s_)
-                        if not math.isnan(prev_shot) and not math.isnan(start_shot):
-                            jump = abs(start_shot - prev_shot)
-                            total -= shot_w * jump
-                            lean_ = max(0.0, 1.0 - smooth - 0.5) * 2          # 0 at the slider's middle, 1 fully at Contrast
-                            if beat_ is not None:
-                                # 🎯 Movement only: a change of shot size is welcome where the music has no beat — at
-                                # a change point or in any beatless block — and worth more the bigger the jump
-                                if (change_ok or off_) and jump >= 1.0:
-                                    total += CONTRAST_QUIET * lean_ * (1.0 - beat_) * min(jump, 2.0)
-                            elif change_ok and jump >= 1.0:
-                                total += CONTRAST_BONUS * lean_
-                        if prev_pov is not None and smooth > 0 and bool(v.pov[s_]) != prev_pov:
-                            total -= POV_PENALTY * smooth * (0.5 if change_ok else 1.0)
-                        out.append({"total": total, "fit": float(fit[s_]), "base": float(base[s_]), "story": float(story[s_]),
-                                    "sync": float(sync[s_]), "slide": round(ws - float(v.times[s_]), 3),
-                                    "video_id": vid_, "pieces": pieces, "shot": start_shot,
-                                    "end_shot": _shot_at(v, min(s_ + nn - 1, v.n - 1)), "pov": bool(v.pov[s_]),
-                                    **({"follows": lead_} if lead_ else {}),
-                                    **({"phrase": True} if phrase_ and v.mover_slow is not None else {})})
+            sargs = (nn, recipe, aud, float(seg.get("bpm") or track_bpm), ms, dd, music_level(t0, t1), only, beat_,
+                     music_speed(t0, t1))
+            prm = {"sargs": sargs, "skw": {"phrase": phrase_, "shot_fix": lab_shot}, "key": key, "dd": dd, "nn": nn,
+                   "sequential": sequential, "pref": pref, "role": role, "rec_roles": rec_roles, "prev_shot": prev_shot,
+                   "shot_w": shot_w, "smooth": smooth, "beat": beat_, "change_ok": change_ok, "off": off_,
+                   "prev_pov": prev_pov, "lead": lead_, "phrase": phrase_}
+            jobs = [(vid_, spans, USE_PENALTY * uses.get(vid_, 0) + (REPEAT_PENALTY if vid_ in prev_videos else 0.0))
+                    for vid_, spans in by_vid.items()]
+            got = scorer.candidates(jobs, prm) if scorer is not None else None      # ⚡ over every core
+            if got is None:
+                got = [_video_candidates(videos[vid_], vid_, spans, pen, prm) for vid_, spans, pen in jobs]
+            out = [c for cs in got for c in cs]
             out.sort(key=lambda c: -c["total"])
             return out
 
