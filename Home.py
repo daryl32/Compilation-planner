@@ -61,3 +61,8 @@ with _c8:
     st.subheader("🎙️ Cue Map")
     st.write("Edge Mode's voiceover lines: when each one plays, its length, and a timeline of a sample compile.")
     st.page_link("pages/8_Cue_Map.py", label="Open Cue Map →")
+
+with _c9:
+    st.subheader("🧍 Avatar Studio")
+    st.write("What to record next for the avatar: per look, per line, the wrong-look clips and the Colab lists.")
+    st.page_link("pages/9_Avatar_Studio.py", label="Open Avatar Studio →")
