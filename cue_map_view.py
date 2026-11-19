@@ -507,6 +507,18 @@ def _phase_cue_at(sched: list, rnd: int, t: float, n_rounds: int, diff: str = ""
     return cue
 
 
+def _cue_rounds(cue: dict):
+    """The round labels ("1"…"6", "last") a cue plays in, or None when its rounds can't be listed that way."""
+    t = cue.get("type")
+    if t in ("phase", "random", "interval", "time"):
+        rl = {str(x) for x in cue.get("roundList") or []}
+        return set(ROUND_OPTS) if not rl or {"1", "2", "3", "4", "5", "6"} <= rl else rl
+    if t == "round":
+        which = cue.get("which") or "every"
+        return {"first": {"1"}, "last": {"last"}}.get(which) or ({str(int(cue.get("number") or 1))} if which == "number" else None)
+    return None
+
+
 def apply_action(cm: dict, act: dict, sched: list, diff: str = "") -> str | None:
     """A timeline action into the unsaved changes. Returns what to tell the user."""
     n = max((ph["round"] for ph in sched), default=0)
@@ -538,18 +550,19 @@ def apply_action(cm: dict, act: dict, sched: list, diff: str = "") -> str | None
         if i is None:
             line.setdefault("cues", []).append(new)
         else:
+            # 🔧 (19 Nov) a drag moves only the round it was dragged from: a cue set for several / every round keeps
+            # its other rounds, and the moved round gets a cue of its own — before, the whole cue moved, so a line
+            # set for every round turned up at the new spot in every round
             old = line["cues"][i]
-            rl = [str(x) for x in old.get("roundList") or []]
             frm = "last" if int(act.get("from") or 0) == n else str(act.get("from"))
-            to = new["roundList"][0]
-            if rl and frm in rl:                             # moved to another round: that round instead of this one
-                rl = list(dict.fromkeys(to if x == frm else x for x in rl))
-            elif rl:
-                rl = list(dict.fromkeys(rl + [to]))
+            covers = _cue_rounds(old)
             keep = {k: v for k, v in old.items() if k in ("diffs", "note")}
-            line["cues"][i] = {**{k: v for k, v in new.items() if k != "turn"}, **keep, "roundList": rl}
-            if "turn" in new:
-                line["cues"][i]["turn"] = new["turn"]
+            moved = {**new, **keep}
+            if covers == {frm} or covers is None:          # it only played in that round (or can't be split): moved
+                line["cues"][i] = moved
+            else:
+                line["cues"][i] = {**old, "roundList": sorted(covers - {frm}, key=ROUND_OPTS.index)}
+                line["cues"].append(moved)
         changed(cm, line)
         return f"↔ {name} moved — not saved yet."
     if a in ("screen_add", "screen_remove"):

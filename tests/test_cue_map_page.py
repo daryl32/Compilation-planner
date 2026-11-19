@@ -275,3 +275,37 @@ def test_easy_wins_for_an_empty_section(voice):
     assert not errors(at)
     line = next(ln for ln in CS.load_draft()["map"]["lines"] if ln["name"] == pick)
     assert line["cues"][-1]["turn"] == 2 and line["cues"][-1]["diffs"] == ["medium"] and line["cues"][-1]["phases"] == ["slow"]
+
+
+def test_dragging_moves_only_the_round_it_came_from(voice):
+    import edge_mode as E
+    import cue_store as CS
+    import cue_map_view as V
+    cm = CS.load()
+    CS.save(cm, 0, "taken over")
+    cm = V.current(reload=True)
+    sch = E.schedule("chill", 3, 0)
+    name = "Keep going"
+    line = next(ln for ln in cm["lines"] if ln["name"] == name)
+    line["cues"] = [{"type": "phase", "phases": ["fast"], "at": "start", "offset": 2, "roundList": [], "diffs": [], "note": ""}]
+    V.changed(cm, line)
+    before = [p for p in E.resolve_lines(sch, V.current(), "chill", 0)["plays"] if p["line"] == name]
+    assert 1 in {p["round"] for p in before}
+    V.apply_action(V.current(), {"act": "move", "line": name, "key": [name, 0], "from": 1, "round": 1, "time": 60 + 6}, sch)
+    got = [p for p in E.resolve_lines(sch, V.current(), "chill", 0)["plays"] if p["line"] == name]
+    r1 = [p for p in got if p["round"] == 1]
+    assert len(r1) == 1 and abs(r1[0]["time"] - 66) < 0.01                       # round 1 moved to Fast +6 s
+    assert sorted(p["round"] for p in got) == sorted(p["round"] for p in before)   # other rounds untouched, no copies
+    cues = next(ln for ln in V.current()["lines"] if ln["name"] == name)["cues"]
+    assert cues[0]["roundList"] == ["2", "3", "4", "5", "6", "last"] and cues[1]["roundList"] == ["1"]
+    # a round-1-only cue just moves
+    V.apply_action(V.current(), {"act": "move", "line": name, "key": [name, 1], "from": 1, "round": 1, "time": 60 + 8}, sch)
+    cues = next(ln for ln in V.current()["lines"] if ln["name"] == name)["cues"]
+    assert len(cues) == 2 and cues[1]["phases"] == ["fast"] and cues[1]["offset"] == 8.0
+    # a "start of the first round" cue becomes a round-1 phase cue — not every round
+    line = next(ln for ln in V.current()["lines"] if ln["name"] == name)
+    line["cues"] = [{"type": "round", "which": "first", "at": "start"}]
+    V.changed(V.current(), line)
+    V.apply_action(V.current(), {"act": "move", "line": name, "key": [name, 0], "from": 1, "round": 1, "time": 70}, sch)
+    got = [p for p in E.resolve_lines(sch, V.current(), "chill", 0)["plays"] if p["line"] == name]
+    assert [p["round"] for p in got] == [1]
