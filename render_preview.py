@@ -473,7 +473,7 @@ def render_plan_dict(plan: dict, output_path: str, progress_callback=None, strea
         elif verses:                   # ⚔️ the battle's sound, overlay and card (verses_render.py)
             if notice:
                 notice("⚔️ Mixing the battle's sound and adding the overlay…")
-            said = (lambda f, what: notice(f"⚔️ Last step — {what}… {int(f * 100)} %")) if notice else None
+            said = (lambda f, what: notice(f"⚔️ {what}… {int(f * 100)} %")) if notice else None
             stages.update(verses_render.finish(plan, combined_video, output_path, sources, tmp_dir, run,
                                                PREVIEW_HEIGHT, PREVIEW_WIDTH, progress=said) or {})
         else:

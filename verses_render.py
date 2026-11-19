@@ -5,6 +5,8 @@ The rules are in verses_battle.py."""
 
 from __future__ import annotations
 
+import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -76,19 +78,17 @@ def mix(plan: dict, sources, tmp_dir: Path, run) -> Path:
     return out
 
 
-def overlay_frames(plan: dict, tmp_dir: Path, size: tuple) -> Path:
-    """The overlay as a list of see-through pictures with their durations (an ffmpeg concat list): a new picture
-    whenever the window or the meter changes (every 0.5 s at most)."""
+def overlay_spans(plan: dict, size: tuple) -> list:
+    """The overlay as [(start, end, picture)] — a new (see-through RGBA) picture whenever the window or the meter
+    changes (every 0.5 s at most); the same picture is made once and shared."""
     v = plan["verses"]
     names = {s: v["actors"][s]["name"] for s in ("A", "B")}
     windows, meter = v["windows"], v.get("meter") or []
     total = float(v["total_seconds"])
-    folder = tmp_dir / "verses_overlay"
-    folder.mkdir(parents=True, exist_ok=True)
     winner = v.get("winner")
     last_w = windows[-1] if windows else None
     times = sorted({0.0} | {float(w["start"]) for w in windows} | {float(t) for t, _ in meter if t < total})
-    lines, made = [], {}
+    out, made = [], {}
     for k, t in enumerate(times):
         end = times[k + 1] if k + 1 < len(times) else total
         if end - t < 1e-3:
@@ -98,16 +98,19 @@ def overlay_frames(plan: dict, tmp_dir: Path, size: tuple) -> Path:
         show_win = w is last_w and winner in ("A", "B", "draw") and w["start"] > 0
         key = (w["index"], round(share, 2), show_win)
         if key not in made:
-            f = folder / f"o_{len(made):04d}.png"
-            VB.overlay_frame(size, names, w, share, winner, show_win).save(f)
-            made[key] = f
-        lines.append((made[key], end - t))
-    lst = folder / "list.txt"
-    body = "".join(f"file '{f.as_posix()}'\nduration {d:.3f}\n" for f, d in lines)
-    if lines:
-        body += f"file '{lines[-1][0].as_posix()}'\n"           # (the concat demuxer wants the last picture again)
-    lst.write_text(body)
-    return lst
+            made[key] = VB.overlay_frame(size, names, w, share, winner, show_win)
+        out.append((t, end, made[key]))
+    return out
+
+
+def _layer(img) -> tuple:
+    """A see-through picture → (rgb, how solid, x, y) cut to the part that shows (for edge_render._lay)."""
+    import numpy as np
+    box = img.getbbox()
+    if box is None:
+        return None
+    a = np.asarray(img.crop(box), dtype=np.uint8)
+    return a[..., :3].copy(), a[..., 3:4].astype(np.uint16), box[0], box[1]
 
 
 def card_picture(plan: dict, tmp_dir: Path, size: tuple) -> Path | None:
@@ -132,57 +135,137 @@ def card_picture(plan: dict, tmp_dir: Path, size: tuple) -> Path | None:
     return f
 
 
+PIECE_SEC = 20.0                  # the picture is made in pieces this long, several at a time
+
+
+def _piece(combined, a: float, b: float, spans: list, frame: tuple, out: Path, footage: float) -> None:
+    """[a, b) of the battle's footage with the overlay laid on: read as frames, layered here, written as frames
+    (edge_render's way — one input per ffmpeg, so nothing can stall waiting on another)."""
+    import numpy as np
+    from edge_render import FPS as EFPS, _lay, _write_video
+    W, H = frame
+    n_frames = max(int(round((b - a) * EFPS)), 1)
+    size = W * H * 3
+    held = [np.zeros((H, W, 3), dtype=np.uint8)]
+    dec = None
+    if a < footage - 0.05:
+        dec = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(combined),
+                                "-an", "-vf", f"fps={EFPS},scale={W}:{H}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    mine = [(max(x, a), min(y, b), lay) for x, y, lay in spans if y > a and x < b]
+
+    def make(i):
+        buf = dec.stdout.read(size) if dec is not None else b""
+        if len(buf) == size:
+            held[0] = np.frombuffer(buf, dtype=np.uint8).reshape(H, W, 3).copy()
+            pic = held[0]
+        else:
+            pic = held[0].copy()                           # the footage ran short: its last frame is held
+        t = a + (i + 0.5) / EFPS
+        on = next((lay for x, y, lay in mine if x <= t < y), None)
+        if on is not None:
+            pic = pic.copy()
+            _lay(pic, on[2], on[3], on[0], on[1])
+        return pic
+    try:
+        _write_video(out, frame, n_frames, make, [dec] if dec is not None else None)
+    finally:
+        if dec is not None:
+            try:
+                dec.kill()
+            except OSError:
+                pass
+            dec.wait()
+
+
 def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, frame_height: int,
-           frame_width: int = 640, progress=None) -> dict:
+           frame_width: int = 640, progress=None, workers: int = None) -> dict:
     """combined_video (the battle's picture, no sound) → output_path: the card in front, the overlay on top, the sound
-    mixed. Returns what each step took and the length check: {"edge_sound", "edge_picture", "edge_check"} (the
-    keys the render page already reports)."""
+    mixed. The picture is made in PIECE_SEC pieces (several at once) and joined without a second encode, as Edge
+    Mode does since 14 Nov (one big ffmpeg with several inputs could stall at 0 % CPU on the server).
+    Returns what each step took and the length check: {"edge_sound", "edge_screens", "edge_picture", "edge_join",
+    "edge_check"} (the keys the render page already reports)."""
+    import numpy as np
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from edge_render import _lengths, _run, _write_video, ffmpeg_version, probe
     tmp_dir = Path(tmp_dir)
     W, H = int(frame_width), int(frame_height)
     v = plan["verses"]
     total = float(v["total_seconds"])
-    took, t0 = {}, time.time()
-    if progress:
-        progress(0.0, "mixing the battle's sound")
-    sound = mix(plan, sources, tmp_dir, run)
+    took, t0 = {"ffmpeg": ffmpeg_version()}, time.time()
+    say = progress or (lambda f, what: None)
+
+    # 1 · the sound
+    say(0.0, "mixing the battle's sound")
+    sound = mix(plan, sources, tmp_dir, lambda cmd: _run(cmd, timeout=600))      # (stopped, not left waiting)
     took["edge_sound"] = round(time.time() - t0, 1)
+
+    # 2 · the tale-of-the-tape card (a still, silent)
     t0 = time.time()
     card = card_picture(plan, tmp_dir, (W, H))
     card_sec = VB.INTRO_SEC if card else 0.0
-    inputs, n_in = ["-i", str(combined_video)], 1
-    filt = [f"[0:v]fps={FPS},scale={W}:{H},setsar=1,format=yuv420p[base]"]
-    pic = "[base]"
-    if (v.get("overlay") or {}).get("on", True):
-        lst = overlay_frames(plan, tmp_dir, (W, H))
-        inputs += ["-f", "concat", "-safe", "0", "-i", str(lst)]
-        filt.append(f"[{n_in}:v]fps={FPS},format=rgba[ov]")
-        n_in += 1
-        filt.append("[base][ov]overlay=0:0:format=auto:eof_action=repeat,format=yuv420p[main]")
-        pic = "[main]"
+    card_files = None
     if card:
-        inputs += ["-loop", "1", "-t", f"{card_sec:.3f}", "-framerate", str(FPS), "-i", str(card)]
-        filt.append(f"[{n_in}:v]scale={W}:{H},setsar=1,fps={FPS},format=yuv420p,"
-                    f"fade=t=out:st={card_sec - 0.4:.3f}:d=0.4[card]")
-        filt.append(f"[card]{pic}concat=n=2:v=1:a=0[v]")
-        n_in += 1
-    else:
-        filt.append(f"{pic}null[v]")
-    inputs += ["-i", str(sound)]
-    delay = int(round(card_sec * 1000))
-    filt.append(f"[{n_in}:a:0]{AUDIO_FMT}" + (f",adelay={delay}:all=1" if delay else "") + f",apad[a]")
-    length = total + card_sec
-    # one pass, watched: progress about once a second, and stopped (with ffmpeg's own words) if it stands still
-    from edge_render import run_watched
-    run_watched(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filt), "-map", "[v]", "-map", "[a]",
-                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p", "-r", str(FPS),
-                 "-c:a", "aac", "-b:a", "192k", "-t", f"{length:.3f}", "-movflags", "+faststart", str(output_path)],
-                length, (lambda f: progress(f, "adding the overlay and the card")) if progress else None)
+        from PIL import Image
+        still = np.asarray(Image.open(card).convert("RGB").resize((W, H)), dtype=np.uint8)
+        n = int(round(card_sec * FPS))
+        fade = int(0.4 * FPS)
+        card_mp4 = tmp_dir / "verses_card.mp4"
+        _write_video(card_mp4, (W, H), n, lambda i: still if i < n - fade else
+                     (still.astype(np.float32) * ((n - i) / fade)).astype(np.uint8))
+        card_wav = tmp_dir / "verses_card.wav"
+        _run(["ffmpeg", "-y", "-f", "lavfi", "-t", f"{card_sec:.3f}", "-i", "anullsrc=r=44100:cl=stereo",
+              "-c:a", "pcm_s16le", str(card_wav)])
+        card_files = (card_mp4, card_wav)
+    took["edge_screens"] = round(time.time() - t0, 1)
+
+    # 3 · the picture with its overlay, a piece at a time
+    t0 = time.time()
+    spans = []
+    if (v.get("overlay") or {}).get("on", True):
+        cache = {}
+        for a, b, img in overlay_spans(plan, (W, H)):
+            if id(img) not in cache:
+                cache[id(img)] = _layer(img)
+            spans.append((a, b, cache[id(img)]))
+    footage = probe(combined_video)["seconds"] or total
+    cuts = [0.0]
+    while cuts[-1] < total - 1e-3:
+        cuts.append(min(cuts[-1] + PIECE_SEC, total))
+    pieces = [tmp_dir / f"verses_{k:03d}.mp4" for k in range(len(cuts) - 1)]
+    n = max(1, min(int(workers or min(4, os.cpu_count() or 2)), len(pieces)))
+    say(0.0, "adding the overlay")
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        jobs = [pool.submit(_piece, combined_video, a, b, spans, (W, H), out, footage)
+                for a, b, out in zip(cuts, cuts[1:], pieces)]
+        try:
+            for done, job in enumerate(as_completed(jobs), 1):
+                job.result()                               # raises here if a piece failed
+                say(done / len(jobs), "adding the overlay")
+        except BaseException:
+            for job in jobs:
+                job.cancel()
+            raise
     took["edge_picture"] = round(time.time() - t0, 1)
-    try:
-        from edge_render import _lengths
-        got = _lengths(output_path)
-        off = [f"{w} {got[k]:.1f} s" for k, w in (("video", "picture"), ("audio", "sound")) if abs(got[k] - length) > 0.5]
-        took["edge_check"] = "ok" if not off else f"expected {length:.1f} s — " + ", ".join(off)
-    except Exception:          # noqa: BLE001
-        pass
+
+    # 4 · joined as they are (no second encode), the sound added
+    t0 = time.time()
+    say(1.0, "joining")
+    order = ([card_files[0]] if card_files else []) + pieces
+    lst = tmp_dir / "verses_pieces.txt"
+    lst.write_text("".join(f"file '{Path(f).as_posix()}'\n" for f in order))
+    sounds = ([card_files[1]] if card_files else []) + [sound]
+    length = total + card_sec
+    inputs = ["-f", "concat", "-safe", "0", "-i", str(lst)]
+    for f in sounds:
+        inputs += ["-i", str(f)]
+    af = "".join(f"[{k + 1}:a:0]{AUDIO_FMT}[s{k}];" for k in range(len(sounds)))
+    af += "".join(f"[s{k}]" for k in range(len(sounds))) + f"concat=n={len(sounds)}:v=0:a=1[a]"
+    _run(["ffmpeg", "-y", *inputs, "-filter_complex", af, "-map", "0:v:0", "-map", "[a]", "-c:v", "copy",
+          "-c:a", "aac", "-b:a", "192k", "-t", f"{length:.3f}", "-movflags", "+faststart", str(output_path)], timeout=900)
+    took["edge_join"] = round(time.time() - t0, 1)
+
+    got = _lengths(output_path)
+    off = [f"{w} {got[k]:.1f} s" for k, w in (("video", "picture"), ("audio", "sound")) if abs(got[k] - length) > 0.5]
+    took["edge_check"] = "ok" if not off else f"expected {length:.1f} s — " + ", ".join(off)
     return took
