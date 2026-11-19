@@ -616,9 +616,14 @@ with st.expander("📏 What the % mean", expanded=False):
         with st.spinner("Scoring rated renders…"):
             _CAL = RL.calibration(rescore=True)
         st.caption(f"Done — {_CAL['n_rated']} rated render(s) with scores.")
-tabs = st.tabs(["🎵 For this track", "🏆 Top plans", "💥 Best action", "🆕 New videos", "🧩 Hidden gems", "🕳️ Gaps"])
+tabs = st.tabs(["🎵 For this track", "🌙 Overnight", "🏆 Top plans", "💥 Best action", "🆕 New videos", "🧩 Hidden gems",
+                "🕳️ Gaps"])
 with tabs[0]:
     for_this_track(tracks)
+with tabs[1]:                                   # 🌙 last night's Edge and Verses renders (nightly_modes.py)
+    import overnight_view
+    overnight_view.render()
+tabs = tabs[:1] + tabs[2:]
 stored = RL.all_results()
 _from = (f"From the background searches of {len(stored)} of your {len(tracks)} tracks "
          f"({DEFAULT_VIDEOS} videos per plan, normal order)." if stored else "")

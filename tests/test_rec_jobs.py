@@ -248,7 +248,7 @@ def test_page_feeds_and_open_from_top_plans(nightly):
     at.session_state["rec_track"] = "song_full"
     at.run()
     assert not errors(at), errors(at)
-    assert [t.label for t in at.tabs] == ["🎵 For this track", "🏆 Top plans", "💥 Best action", "🆕 New videos",
+    assert [t.label for t in at.tabs] == ["🎵 For this track", "🌙 Overnight", "🏆 Top plans", "💥 Best action", "🆕 New videos",
                                          "🧩 Hidden gems", "🕳️ Gaps"]
     assert any("fits well on" in m.value for m in at.markdown)            # 🕳️ Gaps → 🎬 videos that rarely fit
     # the nightly results show on 🎵 For this track straight away (default settings)

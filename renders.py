@@ -734,6 +734,8 @@ def reopen_state(meta: dict) -> tuple:
         # ⏱️ an Edge render reopens in ⏱️ Edge Mode: its plan, and the setup it was made with (saved with renders
         # from 16 Nov; for older ones the page works it out from the plan)
         return {"plan": plan, "setup": meta.get("edge_setup")}, "edge"
+    if plan and plan.get("matching_mode") == "Verses" and isinstance(plan.get("verses"), dict):
+        return {"plan": plan, "setup": meta.get("verses_setup")}, "verses"      # ⚔️ back to Verses Battle, on its result
     if plan and plan.get("matching_mode") == "Auto story":
         return {"plan": plan}, "compose"                   # 🤖 a new-matcher render reopens there, on its result
     if isinstance(meta.get("plan"), dict) and meta["plan"].get("track_id"):

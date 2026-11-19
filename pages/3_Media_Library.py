@@ -1629,9 +1629,9 @@ def _reopen_in_planner(r: dict) -> None:
     if data is None:
         st.warning("This render has no saved plan, so it can't be reopened.")
         return
-    if kind in ("edge", "compose"):                       # ⏱️ / 🤖: back to the planner that made it, on its result
+    if kind in ("edge", "compose", "verses"):             # ⏱️ / 🤖 / ⚔️: back to the planner that made it, on its result
         st.session_state["_reopen_" + kind] = {**data, "label": Path(r["path"]).name}
-        st.session_state["planner_mode"] = "⏱️ Edge Mode" if kind == "edge" else "🤖 New matcher"
+        st.session_state["planner_mode"] = {"edge": "⏱️ Edge Mode", "verses": "⚔️ Verses Battle"}.get(kind, "🤖 New matcher")
         st.switch_page("pages/1_Compilation_Planner.py")
         return
     track_id = data.get("track_id")
