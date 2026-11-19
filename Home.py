@@ -49,3 +49,10 @@ with col6:
     st.subheader("🎯 Training Labels")
     st.write("Hand-check random frames and scene changes to train the new tagging models.")
     st.page_link("pages/6_Training_Labels.py", label="Open Training Labels →")
+
+col7, _c8, _c9 = st.columns(3)
+
+with col7:
+    st.subheader("🧩 Join Lab")
+    st.write("See how the avatar's clips join, and which idles or bridges are really needed.")
+    st.page_link("pages/7_Join_Lab.py", label="Open Join Lab →")
