@@ -93,6 +93,7 @@ def test_the_page_takes_over_edits_pile_up_until_one_save_and_a_stale_save_is_re
     assert save().disabled                                    # nothing to save
     cm = V.current() if False else CS.load()
     # open a line (as a tap does): opening alone changes nothing
+    at.session_state["cm_dialog"] = True
     at.session_state[V.SS_SEL] = "Start-Round 1"
     at.session_state[V.SS_DRAFT] = V._draft_of(next(ln for ln in cm["lines"] if ln["name"] == "Start-Round 1"))
     at.run()
@@ -100,6 +101,7 @@ def test_the_page_takes_over_edits_pile_up_until_one_save_and_a_stale_save_is_re
     # edit two lines: nothing is saved until the one 💾
     next(t for t in at.text_area if t.label.startswith("Notes")).input("Say it slower").run()
     assert not save().disabled and CS.load()["rev"] == 1 and CS.load_draft() is not None
+    at.session_state["cm_dialog"] = True
     at.session_state[V.SS_SEL] = "Keep going"
     at.session_state[V.SS_DRAFT] = V._draft_of(next(ln for ln in V.CS.load_draft()["map"]["lines"] if ln["name"] == "Keep going"))
     at.run()
@@ -157,3 +159,42 @@ def test_end_cues_keep_their_finish_when_the_length_changes():
     d["trim_out"] = 4.0
     out = V._commit(d)
     assert out["cues"][0]["offset"] == 6.0 and "_finish" not in out["cues"][0] and out["play_seconds"] == 4.0
+
+
+def test_timeline_actions_drop_move_and_the_screens(voice):
+    import json
+    import edge_mode as E
+    import cue_store as CS
+    import cue_map_view as V
+    import streamlit as st
+    CS.save(CS.load(), 0, "taken over")
+    cm = V.current(reload=True)
+    sched = E.schedule("chill", 3, 0)
+    got = E.resolve_lines(sched, cm, "chill", 0)
+    data = V.timeline_data(cm, sched, got)
+    json.dumps(data)
+    assert [r["label"] for r in data["rounds"]] == ["Round 1", "Round 2", "Last round"]
+    assert data["plays"] and all(p["key"] for p in data["plays"] if not p["cls"].startswith("auto"))
+    assert data["intro"][0]["line"] == "Welcome"
+    # drop a line with no cue into round 2, 47 s in (Medium starts at 40 s): a start-of-Medium cue +7 s, round 2
+    line = "Do you want to see my tits again"
+    V.apply_action(cm, {"act": "drop", "line": line, "round": 2, "time": 120 + 47}, sched)
+    cue = next(ln for ln in V.current()["lines"] if ln["name"] == line)["cues"][-1]
+    assert cue == {"type": "phase", "phases": ["medium"], "at": "start", "offset": 7.0, "roundList": ["2"], "diffs": [], "note": ""}
+    got = E.resolve_lines(sched, V.current(), "chill", 0)
+    assert any(c["line"] == line and c["where"] == "round 2, start of Medium +7 s" for c in got["clashes"])   # taken there
+    # move it to the last round's Fast, 5 s in (its cue is the line's last one)
+    n_cues = len(next(ln for ln in V.current()["lines"] if ln["name"] == line)["cues"])
+    V.apply_action(V.current(), {"act": "move", "line": line, "key": [line, n_cues - 1], "from": 2, "round": 3,
+                                 "time": 240 + 60 + 5}, sched)
+    cue = next(ln for ln in V.current()["lines"] if ln["name"] == line)["cues"][-1]
+    assert cue["phases"] == ["fast"] and cue["offset"] == 5.0 and cue["roundList"] == ["last"]
+    # screens: add to the outro, reorder the intro, take one off
+    V.apply_action(V.current(), {"act": "screen_add", "which": "outro", "line": "Keep going"}, sched)
+    V.apply_action(V.current(), {"act": "screen_order", "which": "intro", "order": ["Intro to NNN", "Welcome"]}, sched)
+    got = E.resolve_lines(sched, V.current(), "chill", 0)
+    assert got["intro"] == ["Intro to NNN", "Welcome"] and got["outro"][-1] == "Keep going"
+    V.apply_action(V.current(), {"act": "screen_remove", "which": "outro", "line": "Keep going"}, sched)
+    assert "Keep going" not in E.resolve_lines(sched, V.current(), "chill", 0)["outro"]
+    assert CS.load()["rev"] == 1                               # all of it unsaved until 💾
+    st.session_state.clear()

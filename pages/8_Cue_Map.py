@@ -39,22 +39,16 @@ if not CS.managed():
         V.current(reload=True)
         st.rerun()
 
-bar = st.container()          # filled last: the 💾 bar and the tabs show this run's edits
-tabs_box = st.container()
-st.divider()
+bar = st.container()          # filled last, so it counts this run's edits
 names = [ln["name"] for ln in lines]
-V.editor(names)
-if ss.get(V.SS_SEL):
-    st.divider()
-    V.save_bar_bottom()
-cm = V.current()
-with tabs_box:
-    t1, t2, t3 = st.tabs(["🕒 Timeline", "🎙️ Lines", "🗂️ Versions"])
-    with t1:
-        V.timeline(cm)
-    with t2:
-        V.lines_tab(cm)
-    with t3:
-        V.versions_tab(cm)
+t1, t2, t3 = st.tabs(["🕒 Timeline", "🎙️ Lines", "🗂️ Versions"])
+with t1:
+    V.timeline(cm)
+with t2:
+    V.lines_tab(cm)
+with t3:
+    V.versions_tab(cm)
+if ss.get("cm_dialog") and ss.get(V.SS_SEL):
+    V.line_dialog(names)
 with bar:
     V.save_bar()

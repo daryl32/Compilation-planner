@@ -1315,7 +1315,7 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
                 continue
             label = {"handsoff": "hands off", "override": "override", "falsefinish": "false finish"}[kind]
             plays.append({"time": round(t, 3), "seconds": round(c["seconds"], 3), "line": c["line"], "file": c["file"],
-                          "profile": ph["profile"], "round": ph["round"], "why": f"🎲 {label} ({n:g} s), {at}",
+                          "profile": ph["profile"], "round": ph["round"], "key": c.get("key"), "why": f"🎲 {label} ({n:g} s), {at}",
                           "moved": 0.0})
             seen_cue[c["key"]] = True
     for c in sorted(fixed, key=lambda c: (c["time"], c["breadth"], c["line"])):
@@ -1341,7 +1341,7 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
                 clashes.append({"line": c["line"], "with": hit["line"], "round": c["round"], "where": where(c), "result": "left out"})
             continue
         plays.append({"time": round(t, 3), "seconds": round(c["seconds"], 3), "line": c["line"], "file": c["file"],
-                      "profile": c["profile"], "round": c["round"], "why": c["why"], "moved": moved})
+                      "profile": c["profile"], "round": c["round"], "why": c["why"], "moved": moved, "key": c.get("key")})
         seen_cue[c["key"]] = True
     for _pass in range(3):                                 # 🔗 joined lines, after the lines they follow (chains: up to 3 deep)
         for a in after:
@@ -1362,7 +1362,7 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
                     clashes.append({"line": a["line"], "with": hit["line"], "round": tp["round"], "where": where_, "result": "left out"})
                     continue
                 plays.append({"time": round(t, 3), "seconds": round(a["seconds"], 3), "line": a["line"], "file": a["file"],
-                              "profile": tp["profile"], "round": tp["round"], "why": f"straight after {a['target']}", "moved": 0.0})
+                              "profile": tp["profile"], "round": tp["round"], "why": f"straight after {a['target']}", "moved": 0.0, "key": a.get("key")})
                 seen_cue[a["key"]] = True
     for p in plays:
         p.pop("_joined", None)
@@ -1385,7 +1385,7 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
             continue
         lo, hi = rng.choices(spans, [max(h - l, 0.05) for l, h in spans])[0]
         plays.append({"time": round(rng.uniform(lo, hi), 3), "seconds": round(c["seconds"], 3), "line": c["line"],
-                      "file": c["file"], "profile": c["profile"], "round": c["round"], "why": c["why"], "moved": 0.0})
+                      "file": c["file"], "profile": c["profile"], "round": c["round"], "why": c["why"], "moved": 0.0, "key": c.get("key")})
         seen_cue[c["key"]] = True
     if difficulty in FILL_DIFFS:
         _fill_silences(sched, cue_map, difficulty, plays, secs, rng, total)

@@ -1,0 +1,312 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0e1117; --panel:#1a1c24; --ink:#eeeaf3; --muted:#9d97ab; --line:#353040; --accent:#f0b95a; --accent-ink:#1b1408;
+          --bad:#f2776f; --sur:#7b4bc4; --handsoff:#8b8b96; --override:#8e1016;
+          --wait:#467abe; --slow:#28a05a; --medium:#d99614; --fast:#e65f14; --extra:#e11419; --stop:#55555c; }
+  @media (prefers-color-scheme: light) { :root { --bg:#ffffff; --panel:#f4f2ee; --ink:#1d1b22; --muted:#6b6676; --line:#d9d5cf;
+          --accent:#b8791a; --accent-ink:#ffffff; --bad:#b3261e; } }
+  * { box-sizing:border-box; }
+  html, body { margin:0; padding:0; background:transparent; color:var(--ink);
+               font-family:"Source Sans Pro", -apple-system, system-ui, sans-serif; font-size:14px;
+               -webkit-tap-highlight-color:transparent; }
+  .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:4px 0; }
+  .note { color:var(--muted); font-size:12.5px; }
+  button, select, input { font:inherit; color:inherit; }
+  .btn { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px 11px; min-height:34px; cursor:pointer; }
+  .btn.small { min-height:28px; padding:3px 9px; font-size:13px; }
+  select, input[type=text] { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px 9px; min-height:34px; }
+  .legend { display:flex; flex-wrap:wrap; gap:10px; font-size:12px; color:var(--muted); margin:4px 0 8px; }
+  .legend i { display:inline-block; width:18px; height:10px; border-radius:3px; margin-right:4px; vertical-align:middle; }
+  /* pick a line */
+  .pick { border:1px solid var(--line); border-radius:10px; padding:10px; margin:8px 0 12px; background:var(--panel); }
+  .pick h4 { margin:0; font-size:15px; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .chip { border:1px solid var(--line); background:var(--bg); border-radius:999px; padding:4px 11px; font-size:13px; font-weight:600;
+          cursor:pointer; min-height:30px; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; touch-action:none; }
+  .chip small { font-weight:400; color:var(--muted); margin-left:4px; }
+  .chip.cat[aria-pressed="true"] { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
+  .chip.cat[aria-pressed="true"] small { color:var(--accent-ink); }
+  .chip.line.nocue::before { content:"○ "; }
+  /* screens */
+  .screen { border:1.5px dashed var(--line); border-radius:10px; padding:8px 10px; margin:6px 0 14px; }
+  .screen.drop, .track.drop { outline:2px dashed var(--accent); outline-offset:2px; }
+  .screen .head { display:flex; align-items:center; gap:8px; justify-content:space-between; }
+  .screen .seq { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:6px; }
+  .scl { display:inline-flex; align-items:center; gap:2px; border-radius:999px; background:var(--accent); color:var(--accent-ink);
+         padding:2px 4px 2px 10px; font-size:12.5px; }
+  .scl button { background:none; border:0; color:inherit; cursor:pointer; min-width:26px; min-height:26px; font-size:13px; }
+  .scl .nm { cursor:pointer; padding:3px 2px; }
+  /* rounds */
+  .round { margin:6px 0 14px; }
+  .round h3 { margin:0 0 4px; font-size:14px; }
+  .round h3 small { color:var(--muted); font-weight:400; }
+  .scroll { overflow-x:auto; padding-bottom:4px; }
+  .track { position:relative; border-left:1px solid var(--line); cursor:copy; touch-action:pan-x; }
+  .phases { position:relative; height:22px; }
+  .ph { position:absolute; top:0; height:22px; color:#fff; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+        display:flex; align-items:center; justify-content:center; border-right:1px solid var(--bg); overflow:hidden; }
+  .ph.sur { background-image:repeating-linear-gradient(135deg, transparent 0 5px, rgba(255,255,255,.25) 5px 8px); }
+  .lanes { position:relative; }
+  .gridl { position:absolute; top:0; bottom:0; width:0; border-left:1px dotted var(--line); }
+  .b { position:absolute; height:24px; border-radius:5px; background:var(--accent); color:var(--accent-ink); font-size:11px; line-height:24px;
+       padding:0 5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; border:0; cursor:grab; text-align:left;
+       -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+  .b.clash { background:var(--bad); color:#fff; }
+  .b.sur { background:var(--sur); color:#fff; }
+  .b.flex { background:transparent; color:var(--muted); border:1px dashed var(--muted); }
+  .b.auto { background:transparent; color:var(--muted); border:1px dotted var(--muted); opacity:.8; }
+  .b.after { box-shadow:inset 3px 0 0 var(--ink); }
+  .b.cut { background-image:repeating-linear-gradient(135deg, transparent 0 6px, rgba(255,255,255,.18) 6px 9px); }
+  .b.sel { outline:3px solid var(--ink); outline-offset:1px; }
+  .b.moving { opacity:.35; }
+  .mark { position:absolute; top:0; bottom:0; width:2px; background:var(--ink); pointer-events:none; z-index:3; }
+  .ghost { position:fixed; z-index:50; pointer-events:none; background:var(--accent); color:var(--accent-ink); border-radius:999px;
+           padding:5px 12px; font-size:13px; font-weight:600; transform:translate(-50%,-140%); box-shadow:0 4px 12px rgba(0,0,0,.3); white-space:nowrap; }
+  .say { color:var(--accent); font-size:13px; min-height:18px; }
+  .sheet { border:1px solid var(--accent); border-radius:10px; padding:10px; margin:6px 0; background:var(--panel); }
+</style>
+</head>
+<body>
+<div class="bar">
+  <label class="note">Zoom <select id="zoom"><option value="fit">Fit the width</option><option value="10">Close</option><option value="16">Closer</option></select></label>
+  <span class="note" id="hint">Tap a line to open it · drag it to move its cue (hold a moment on a phone / iPad) · drag a line from “Pick a line” onto the timeline, or tap an empty spot to add one there.</span>
+</div>
+<div class="legend">
+  <span><i style="background:var(--accent)"></i>a line</span><span><i style="background:var(--bad)"></i>starts late (clash)</span>
+  <span><i style="border:1px dashed var(--muted)"></i>placed in a free silence</span><span><i style="border:1px dotted var(--muted)"></i>filler / callout the app adds</span>
+  <span><i style="background:var(--accent);box-shadow:inset 3px 0 0 var(--ink)"></i>straight after another line</span>
+  <span><i style="background:var(--sur)"></i>🎲 surprise line</span><span><i style="background:var(--handsoff)"></i>✋ hands off</span>
+  <span><i style="background:var(--override)"></i>⏩ override</span>
+</div>
+<div class="say" id="say"></div>
+<div id="sheet"></div>
+<div class="pick" id="pick"></div>
+<div id="intro"></div>
+<div id="rounds"></div>
+<div id="outro"></div>
+
+<script>
+"use strict";
+/* 🎙️ Cue Map timeline (19 Nov 2026) — the artifact's timeline, in the app. Everything placed comes from the app's own
+   engine (edge_mode.resolve_lines), so what's shown is what a compile does. Returns {"act", ..., "nonce"}:
+     open {line} · drop {line, round, time} (a new start-of-phase cue there) · move {line, key, round, from, time} ·
+     screen_add / screen_remove {which, line} · screen_order {which, order:[lines]} — cue_map_view.timeline handles them. */
+function post(type, extra) { window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra || {}), "*"); }
+function setHeight() { post("streamlit:setFrameHeight", {height: document.body.scrollHeight + 8}); }
+function send(v) { v.nonce = Date.now() + Math.random(); post("streamlit:setComponentValue", {value: v, dataType: "json"}); }
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = t => { t = Math.max(0, t); const m = Math.floor(t / 60), s = Math.round(t - m * 60); return m + ":" + (s < 10 ? "0" : "") + s; };
+let D = null, zoomSel = "fit", zoom = 6, pickCat = "", pickShow = "nocue", pickQ = "", addAt = null, drag = null;
+try { zoomSel = localStorage.getItem("cm-zoom2") || "fit"; pickShow = localStorage.getItem("cm-pickshow") || "nocue"; } catch (e) {}
+$("zoom").value = zoomSel;
+$("zoom").onchange = () => { zoomSel = $("zoom").value; try { localStorage.setItem("cm-zoom2", zoomSel); } catch (e) {} draw(); };
+function setZoom() {               // "fit": the longest round fills the width (as the artifact's Normal did)
+  if (zoomSel !== "fit") { zoom = +zoomSel; return; }
+  const longest = Math.max(1, ...D.rounds.map(R => R.end - R.start));
+  zoom = Math.max(2, (document.body.clientWidth - 6) / longest);
+}
+function theme(t) {                // the app's light / dark theme, not the device's
+  if (!t) return;
+  const r = document.documentElement.style;
+  if (t.textColor) r.setProperty("--ink", t.textColor);
+  if (t.backgroundColor) r.setProperty("--bg", t.backgroundColor);
+  if (t.secondaryBackgroundColor) r.setProperty("--panel", t.secondaryBackgroundColor);
+  const light = (t.base || "").toLowerCase() === "light";
+  r.setProperty("--muted", light ? "#6b6676" : "#9d97ab");
+  r.setProperty("--line", light ? "#d9d5cf" : "#353040");
+  r.setProperty("--accent", light ? "#d9921f" : "#f0b95a");
+  r.setProperty("--accent-ink", "#1b1408");
+}
+
+function say(t) { $("say").textContent = t || ""; }
+
+function drawPick() {
+  const lines = D.pick || [];
+  const cats = D.cats || [];
+  const shown = lines.filter(l => (pickShow === "all" || !l.cued) && (!pickCat || (pickCat === "(none)" ? !l.cats.length : l.cats.includes(pickCat)))
+                                  && (!pickQ || l.name.toLowerCase().includes(pickQ.toLowerCase())));
+  $("pick").innerHTML =
+    `<div class="bar"><h4>🔎 Pick a line</h4>
+       <select id="pshow"><option value="nocue">No cue yet (${lines.filter(l => !l.cued).length})</option><option value="all">All lines (${lines.length})</option></select>
+       <input type="text" id="pq" placeholder="Find a line" value="${esc(pickQ)}" style="flex:1 1 140px"></div>
+     <div class="chips">${[["", "All", lines.length]].concat(cats.map(c => [c.name, c.name, c.n])).map(([v, lab, n]) =>
+        `<button class="chip cat" data-cat="${esc(v)}" aria-pressed="${pickCat === v}">${esc(lab)}<small>${n}</small></button>`).join("")}</div>
+     <div class="chips">${shown.map(l => `<button class="chip line${l.cued ? "" : " nocue"}" data-line="${esc(l.name)}" data-drag="1">${esc(l.name)}<small>${l.seconds.toFixed(1)} s</small></button>`).join("")
+        || `<span class="note">No lines here.</span>`}</div>
+     <div class="note">${addAt ? `Pick a line to put at ${fmt(addAt.time - addAt.r0)} in ${esc(addAt.label)} — <a href="#" id="cancel-add">cancel</a>` :
+        "Drag a line onto the timeline (or intro / outro) to cue it there; tap it to open it. ○ = no cue yet."}</div>`;
+  $("pshow").value = pickShow;
+  $("pshow").onchange = e => { pickShow = e.target.value; try { localStorage.setItem("cm-pickshow", pickShow); } catch (x) {} drawPick(); setHeight(); };
+  $("pq").oninput = e => { pickQ = e.target.value; const pos = e.target.selectionStart; drawPick(); $("pq").focus(); $("pq").setSelectionRange(pos, pos); setHeight(); };
+  $("pick").querySelectorAll(".chip.cat").forEach(b => b.onclick = () => { pickCat = b.dataset.cat; drawPick(); setHeight(); });
+  const c = $("cancel-add"); if (c) c.onclick = e => { e.preventDefault(); addAt = null; drawPick(); };
+  $("pick").querySelectorAll(".chip.line").forEach(b => armDrag(b, {line: b.dataset.line}, () => {
+    if (addAt) { send({act: "drop", line: b.dataset.line, round: addAt.round, time: addAt.time}); addAt = null; return; }
+    send({act: "open", line: b.dataset.line});
+  }));
+}
+
+function drawScreen(which) {
+  const s = D[which] || [];
+  const title = which === "intro" ? "🎬 Intro screen" : "🏁 Outro";
+  const total = s.reduce((a, x) => a + x.seconds, 0);
+  $(which).innerHTML = `<div class="screen" data-screen="${which}"><div class="head"><span><b>${title}</b>
+      <span class="note">${s.length} line${s.length === 1 ? "" : "s"} · ${total.toFixed(1)} s, played in this order</span></span>
+      <button class="btn small" data-addscreen="${which}">+ Add a line</button></div>
+      <div class="seq">${s.map((x, i) => `${i ? '<span class="note">→</span>' : ""}<span class="scl">
+        <span class="nm" data-open="${esc(x.line)}">${esc(x.line)} · ${x.seconds.toFixed(1)} s</span>
+        <button data-mv="${i}" data-d="-1" title="Earlier">←</button><button data-mv="${i}" data-d="1" title="Later">→</button>
+        <button data-rm="${esc(x.line)}" title="Take off the ${which}">✕</button></span>`).join("")
+        || `<span class="note">No lines — drag one here or + Add a line.</span>`}</div></div>`;
+  const box = $(which);
+  box.querySelectorAll("[data-open]").forEach(b => b.onclick = () => send({act: "open", line: b.dataset.open}));
+  box.querySelectorAll("[data-rm]").forEach(b => b.onclick = () => send({act: "screen_remove", which, line: b.dataset.rm}));
+  box.querySelectorAll("[data-mv]").forEach(b => b.onclick = () => {
+    const order = s.map(x => x.line), i = +b.dataset.mv, j = i + (+b.dataset.d);
+    if (j < 0 || j >= order.length) return;
+    [order[i], order[j]] = [order[j], order[i]];
+    send({act: "screen_order", which, order});
+  });
+  box.querySelector("[data-addscreen]").onclick = () => showSheet({screen: which});
+}
+
+function lanesFor(items) {          // stack bars so none overlap on screen
+  const ends = [];
+  items.forEach(it => {
+    let k = ends.findIndex(e => e <= it.x0 - 2);
+    if (k < 0) { k = ends.length; ends.push(0); }
+    ends[k] = it.x1; it.lane = k;
+  });
+  return ends.length;
+}
+
+function drawRounds() {
+  const out = [];
+  D.rounds.forEach(R => {
+    const w = Math.max(200, (R.end - R.start) * zoom);
+    const plays = D.plays.filter(p => p.round === R.r).map(p => Object.assign({}, p, {x0: (p.time - R.start) * zoom, x1: (p.time - R.start + p.seconds) * zoom}));
+    plays.sort((a, b) => a.x0 - b.x0);
+    const n = Math.max(1, lanesFor(plays));
+    const grid = [];
+    for (let t = 30; t < R.end - R.start; t += 30) grid.push(`<div class="gridl" style="left:${t * zoom}px"></div>`);
+    out.push(`<div class="round"><h3>${esc(R.label)} <small>${fmt(R.end - R.start)}</small></h3><div class="scroll">
+      <div class="track" data-round="${R.r}" style="width:${w}px">
+        <div class="phases">${R.phases.map(ph => `<div class="ph${ph.kind !== "phase" ? " sur" : ""}" style="left:${(ph.start - R.start) * zoom}px;width:${(ph.end - ph.start) * zoom}px;background:${ph.colour}"
+             title="${esc(ph.label)} ${fmt(ph.start - R.start)}–${fmt(ph.end - R.start)}">${ph.kind === "handsoff" ? "✋" : ph.kind === "override" ? "⏩" : esc(ph.label)}</div>`).join("")}</div>
+        <div class="lanes" style="height:${n * 28 + 6}px">${grid.join("")}${plays.map(p => `<button class="b ${p.cls}${p.line === D.selected ? " sel" : ""}"
+             style="left:${p.x0}px;width:${Math.max(p.x1 - p.x0, 10)}px;top:${p.lane * 28 + 3}px" data-line="${esc(p.line)}" data-key='${esc(JSON.stringify(p.key || null))}'
+             data-round="${R.r}" title="${esc(p.line)} · ${fmt(p.time - R.start)} · ${p.seconds.toFixed(1)} s · ${esc(p.why)}">${esc(p.line)}</button>`).join("")}</div>
+      </div></div></div>`);
+  });
+  $("rounds").innerHTML = out.join("");
+  document.querySelectorAll(".b").forEach(b => {
+    const movable = !b.classList.contains("auto");
+    armDrag(b, movable ? {line: b.dataset.line, key: JSON.parse(b.dataset.key), from: +b.dataset.round, bar: b} : null,
+            () => send({act: "open", line: b.dataset.line}));
+  });
+  document.querySelectorAll(".track").forEach(tr => tr.addEventListener("click", e => {
+    if (e.target.closest(".b") || Date.now() < (drag && drag.until || 0)) return;
+    const R = D.rounds.find(x => x.r === +tr.dataset.round), rect = tr.getBoundingClientRect();
+    const t = R.start + Math.max(0, (e.clientX - rect.left) / zoom);
+    addAt = {round: R.r, time: t, r0: R.start, label: R.label};
+    showSheet({at: addAt});
+  }));
+}
+
+function showSheet(opts) {
+  const lines = D.pick || [];
+  const title = opts.screen ? `Add a line to the ${opts.screen === "intro" ? "intro screen" : "outro"}` :
+                `Put a line at ${fmt(opts.at.time - opts.at.r0)} in ${esc(opts.at.label)}`;
+  $("sheet").innerHTML = `<div class="sheet"><div class="bar"><b>${title}</b><span style="flex:1"></span><button class="btn small" id="sheet-x">✕ Close</button></div>
+     <input type="text" id="sq" placeholder="Find a line" style="width:100%">
+     <div class="chips" id="sl">${lines.map(l => `<button class="chip line${l.cued ? "" : " nocue"}" data-line="${esc(l.name)}">${esc(l.name)}<small>${l.seconds.toFixed(1)} s</small></button>`).join("")}</div></div>`;
+  $("sheet-x").onclick = () => { $("sheet").innerHTML = ""; addAt = null; drawPick(); setHeight(); };
+  $("sq").oninput = e => { const q = e.target.value.toLowerCase(); $("sl").querySelectorAll(".chip").forEach(c => c.hidden = !c.dataset.line.toLowerCase().includes(q)); setHeight(); };
+  $("sl").querySelectorAll(".chip").forEach(c => c.onclick = () => {
+    if (opts.screen) send({act: "screen_add", which: opts.screen, line: c.dataset.line});
+    else send({act: "drop", line: c.dataset.line, round: opts.at.round, time: opts.at.time});
+    $("sheet").innerHTML = ""; addAt = null;
+  });
+  drawPick(); setHeight();
+  $("sheet").scrollIntoView({block: "nearest"});
+}
+
+/* drag: mouse — move 6 px; touch / pen — hold 300 ms, then drag. A tap (no drag) calls onTap. */
+function armDrag(el, what, onTap) {
+  el.addEventListener("pointerdown", e => {
+    if (e.button && e.button !== 0) return;
+    const st = {x: e.clientX, y: e.clientY, t: Date.now(), on: false, id: e.pointerId, touch: e.pointerType !== "mouse", timer: null};
+    const start = () => {
+      if (!what) return;
+      st.on = true; drag = {what, until: 0};
+      st.ghost = document.createElement("div"); st.ghost.className = "ghost"; st.ghost.textContent = what.line; document.body.appendChild(st.ghost);
+      if (what.bar) what.bar.classList.add("moving");
+      try { el.setPointerCapture(st.id); } catch (x) {}
+      if (navigator.vibrate) try { navigator.vibrate(15); } catch (x) {}
+    };
+    if (st.touch) st.timer = setTimeout(start, 300);
+    const move = ev => {
+      const dx = ev.clientX - st.x, dy = ev.clientY - st.y;
+      if (!st.on) {
+        if (!st.touch && Math.hypot(dx, dy) > 6) start();
+        else if (st.touch && Math.hypot(dx, dy) > 10) { clearTimeout(st.timer); cleanup(); }
+        return;
+      }
+      ev.preventDefault();
+      st.ghost.style.left = ev.clientX + "px"; st.ghost.style.top = ev.clientY + "px";
+      document.querySelectorAll(".drop").forEach(x => x.classList.remove("drop"));
+      document.querySelectorAll(".mark").forEach(x => x.remove());
+      const over = document.elementFromPoint(ev.clientX, ev.clientY);
+      const tr = over && over.closest(".track"), sc = over && over.closest(".screen");
+      if (tr) {
+        tr.classList.add("drop");
+        const R = D.rounds.find(x => x.r === +tr.dataset.round), rect = tr.getBoundingClientRect();
+        const t = Math.max(0, (ev.clientX - rect.left) / zoom);
+        const m = document.createElement("div"); m.className = "mark"; m.style.left = (t * zoom) + "px"; tr.appendChild(m);
+        st.ghost.textContent = what.line + " · " + fmt(t);
+        st.drop = {round: R.r, time: R.start + t};
+      } else if (sc) { sc.classList.add("drop"); st.drop = {screen: sc.dataset.screen}; st.ghost.textContent = what.line; }
+      else st.drop = null;
+    };
+    const up = () => {
+      clearTimeout(st.timer);
+      if (st.on && st.drop) {
+        if (st.drop.screen) send({act: "screen_add", which: st.drop.screen, line: what.line});
+        else if (what.key || what.from) send({act: "move", line: what.line, key: what.key, from: what.from, round: st.drop.round, time: st.drop.time});
+        else send({act: "drop", line: what.line, round: st.drop.round, time: st.drop.time});
+        say("Moving " + what.line + "…");
+      } else if (!st.on && Date.now() - st.t < 600) onTap();
+      if (st.on) drag = {until: Date.now() + 400};
+      cleanup();
+    };
+    const cleanup = () => {
+      el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up); el.removeEventListener("pointercancel", cleanup);
+      window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
+      if (st.ghost) st.ghost.remove();
+      if (what && what.bar) what.bar.classList.remove("moving");
+      document.querySelectorAll(".drop").forEach(x => x.classList.remove("drop"));
+      document.querySelectorAll(".mark").forEach(x => x.remove());
+    };
+    window.addEventListener("pointermove", move, {passive: false}); window.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", cleanup);
+  });
+  el.addEventListener("contextmenu", e => e.preventDefault());
+}
+
+function draw() { if (!D) return; setZoom(); drawPick(); drawScreen("intro"); drawRounds(); drawScreen("outro"); setHeight(); }
+
+window.addEventListener("message", ev => {
+  const d = ev.data; if (!d || d.type !== "streamlit:render") return;
+  D = d.args.data; theme(d.theme); say(""); draw();
+});
+let rw = 0;
+window.addEventListener("resize", () => { if (D && zoomSel === "fit" && Math.abs(document.body.clientWidth - rw) > 4) { rw = document.body.clientWidth; drawRounds(); } setHeight(); });
+post("streamlit:componentReady", {apiVersion: 1});
+</script>
+</body>
+</html>

@@ -323,7 +323,30 @@ def editor(names: list) -> None:
         if st.checkbox("Yes, delete it", key=f"cm_delc_{k}") and st.button("🗑 Delete", key=f"cm_del_{k}"):
             removed(old)
             select(None)
+            st.session_state["cm_dialog"] = False
             st.rerun()
+
+
+def _close_dialog():
+    st.session_state["cm_dialog"] = False
+
+
+@st.dialog("✎ Line", width="large", on_dismiss=_close_dialog)
+def line_dialog(names: list) -> None:
+    """The line editor as a pop-up (like the artifact's sheet). Changes go into the unsaved changes as you make them."""
+    editor(names)
+    st.divider()
+    c = st.columns(2)
+    if c[0].button("✓ Done", key="cm_dlg_done", use_container_width=True, help="Close — the change stays unsaved until 💾."):
+        _close_dialog()
+        st.rerun()
+    if c[1].button("💾 Save the cue map", key="cm_dlg_save", type="primary", use_container_width=True,
+                   disabled=not any(pending().values())):
+        ch = pending()
+        names_ = ch["changed"] + ch["added"] + ch["deleted"]
+        if save_map(current(), f"{len(names_)} change(s): " + ", ".join(names_[:8])):
+            _close_dialog()
+        st.rerun()
 
 
 def _cue_editor(draft: dict, i: int, cue: dict, names: list, k: str) -> None:
@@ -408,85 +431,163 @@ def _show(cue: dict, draft: dict) -> dict:
 # 🕒 Timeline
 # ---------------------------------------------------------------------------
 
-def _rgb(p, a=1.0):
+def _hex(p):
     r, g, b = E.PROFILES[p]["colour"]
-    return f"rgba({r},{g},{b},{a})"
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
-CAT_COLOURS = {"Filler": "#7a6ff0", "Surprise": "#b04ad8", "Rounds": "#2f8fd8", "React": "#e0629a", "Start": "#2fb39a",
-               "Stop": "#888", "Slow": "#3fae6a", "Fast": "#e8772a", "Speed": "#e8772a"}
+SUR_COLOUR = {"handsoff": "#8b8b96", "override": "#8e1016"}
+
+
+def _cls(p: dict, cut: set) -> str:
+    why = str(p.get("why") or "")
+    out = []
+    if why.startswith(("callout", "fills")):
+        out.append("auto")
+    elif why.startswith("🎲"):
+        out.append("sur")
+    elif why.startswith(("during", "at random", "every")):
+        out.append("flex")
+    if float(p.get("moved") or 0) > 0.05:
+        out.append("clash")
+    if why.startswith("straight after"):
+        out.append("after")
+    if p["line"] in cut:
+        out.append("cut")
+    return " ".join(out)
+
+
+def timeline_data(cm: dict, sched: list, got: dict) -> dict:
+    """What the component draws: rounds (phases, surprises), every play, the intro / outro, the lines to pick."""
+    n = max((ph["round"] for ph in sched), default=0)
+    rounds = []
+    for r in range(1, n + 1):
+        phs = [ph for ph in sched if ph["round"] == r]
+        rounds.append({"r": r, "label": "Last round" if r == n else f"Round {r}", "start": phs[0]["start"], "end": phs[-1]["end"],
+                       "phases": [{"profile": ph["profile"], "label": PH_LABEL[ph["profile"]], "start": ph["start"],
+                                   "end": ph["end"], "kind": ph.get("kind", "phase"),
+                                   "colour": SUR_COLOUR.get(ph.get("kind"), _hex(ph["profile"]))} for ph in phs]})
+    by_name = {ln["name"]: ln for ln in cm["lines"]}
+    cut = {ln["name"] for ln in cm["lines"] if CS.is_cut(ln)}
+    secs = lambda n_: round(CS.played_seconds(by_name[n_]), 2) if n_ in by_name else 0.0          # noqa: E731
+    plays = [{"line": p["line"], "time": p["time"], "seconds": p["seconds"], "round": p["round"], "why": p["why"],
+              "key": list(p["key"]) if p.get("key") else None, "cls": _cls(p, cut)} for p in got["plays"]]
+    cats = CS.categories(cm)
+    counts = [{"name": c, "n": sum(1 for ln in cm["lines"] if c in (ln.get("cats") or []))} for c in cats]
+    counts = [c for c in counts if c["n"]]
+    none_n = sum(1 for ln in cm["lines"] if not ln.get("cats"))
+    if none_n:
+        counts.append({"name": "(none)", "n": none_n})
+    pick = [{"name": ln["name"], "seconds": round(CS.played_seconds(ln), 2), "cats": list(ln.get("cats") or []),
+             "cued": bool(ln.get("cues"))} for ln in sorted(cm["lines"], key=lambda ln: ln["name"].lower())]
+    return {"rounds": rounds, "plays": plays, "pick": pick, "cats": counts, "selected": st.session_state.get(SS_SEL),
+            "intro": [{"line": n_, "seconds": secs(n_)} for n_ in got["intro"]],
+            "outro": [{"line": n_, "seconds": secs(n_)} for n_ in got["outro"]]}
+
+
+def _phase_cue_at(sched: list, rnd: int, t: float, n_rounds: int) -> dict:
+    """A start-of-phase cue that plays a line at compile time t (in round rnd): the phase there, seconds into it."""
+    stretch = [ph for ph in sched if ph["round"] == rnd and ph.get("kind", "phase") == "phase"]
+    ph = next((x for x in stretch if x["start"] <= t < x["end"]), None) or (stretch[-1] if t >= stretch[-1]["end"] else stretch[0])
+    first = next(x for x in stretch if x["profile"] == ph["profile"])          # the engine counts from the phase's first turn
+    return {"type": "phase", "phases": [ph["profile"]], "at": "start", "offset": round(max(t - first["start"], 0.0), 1),
+            "roundList": ["last" if rnd == n_rounds else str(rnd)], "diffs": [], "note": ""}
+
+
+def apply_action(cm: dict, act: dict, sched: list) -> str | None:
+    """A timeline action into the unsaved changes. Returns what to tell the user."""
+    n = max((ph["round"] for ph in sched), default=0)
+    by_name = {ln["name"]: ln for ln in cm["lines"]}
+    name = act.get("line")
+    a = act.get("act")
+    if a == "screen_order":
+        which = act.get("which")
+        for k, nm in enumerate(act.get("order") or []):
+            if nm in by_name:
+                ln = copy.deepcopy(by_name[nm])
+                for c in ln.get("cues") or []:
+                    if c.get("type") == which:
+                        c["order"] = k + 1
+                changed(cm, ln)
+        return f"↔ {str(which).title()} order changed — not saved yet."
+    line = copy.deepcopy(by_name.get(name)) if name in by_name else None
+    if line is None:
+        return None
+    if a == "drop":
+        cue = _phase_cue_at(sched, int(act["round"]), float(act["time"]), n)
+        line.setdefault("cues", []).append(cue)
+        changed(cm, line)
+        return f"➕ {name}: {CS.describe(cue)} — not saved yet."
+    if a == "move":
+        key = act.get("key")
+        i = int(key[1]) if key and key[0] == name and int(key[1]) < len(line.get("cues") or []) else None
+        new = _phase_cue_at(sched, int(act["round"]), float(act["time"]), n)
+        if i is None:
+            line.setdefault("cues", []).append(new)
+        else:
+            old = line["cues"][i]
+            rl = [str(x) for x in old.get("roundList") or []]
+            frm = "last" if int(act.get("from") or 0) == n else str(act.get("from"))
+            to = new["roundList"][0]
+            if rl and frm in rl:                             # moved to another round: that round instead of this one
+                rl = list(dict.fromkeys(to if x == frm else x for x in rl))
+            elif rl:
+                rl = list(dict.fromkeys(rl + [to]))
+            keep = {k: v for k, v in old.items() if k in ("diffs", "note")}
+            line["cues"][i] = {**new, **keep, "roundList": rl}
+        changed(cm, line)
+        return f"↔ {name} moved — not saved yet."
+    if a in ("screen_add", "screen_remove"):
+        which = act.get("which")
+        if a == "screen_add":
+            orders = [int(c.get("order") or 0) for ln in cm["lines"] for c in ln.get("cues") or [] if c.get("type") == which]
+            if not any(c.get("type") == which for c in line.get("cues") or []):
+                line.setdefault("cues", []).append({"type": which, "order": max(orders, default=0) + 1, "roundList": [],
+                                                    "diffs": [], "note": ""})
+                changed(cm, line)
+            return f"➕ {name} on the {which} — not saved yet."
+        if a == "screen_remove":
+            line["cues"] = [c for c in line.get("cues") or [] if c.get("type") != which]
+            changed(cm, line)
+            return f"✕ {name} off the {which} — not saved yet."
+    return None
 
 
 def timeline(cm: dict) -> None:
-    import plotly.graph_objects as go
-    c = st.columns([2, 1, 1, 1, 1])
+    from cue_timeline import cue_timeline
+    c = st.columns([2, 1, 1, 1])
     diff = c[0].selectbox("Difficulty", DIFF_OPTS, format_func=E.DIFFICULTIES.get, key="cm_tl_diff")
-    rounds = c[1].selectbox("Rounds", [3, 4, 5, 6], index=3, key="cm_tl_rounds")
+    rounds = c[1].selectbox("Rounds", [3, 4, 5, 6], index=0, key="cm_tl_rounds")
     seed = int(c[2].number_input("Draw", 0, 9999, 0, key="cm_tl_seed", help="Another random draw (Hard's phases, "
                                                                              "surprises, random lines)."))
     surp = c[3].toggle("🎲 Surprises", key="cm_tl_surp", disabled=diff == "hard")
-    show = c[4].selectbox("Show", ["All"] + [f"Round {r}" for r in range(1, rounds + 1)], key="cm_tl_show")
     sched = E.schedule(diff, rounds, seed, surprises=surp and diff != "hard")
     got = E.resolve_lines(sched, cm, diff, seed)
-    lo, hi = 0.0, E.total_seconds(sched)
-    if show != "All":
-        r = int(show.split()[1])
-        lo = min(ph["start"] for ph in sched if ph["round"] == r)
-        hi = max(ph["end"] for ph in sched if ph["round"] == r)
-    by_name = {ln["name"]: ln for ln in cm["lines"]}
-    fig = go.Figure()
-    for ph in sched:
-        if ph["end"] <= lo or ph["start"] >= hi:
-            continue
-        kind = ph.get("kind", "phase")
-        fig.add_trace(go.Bar(y=["⏱ Phases"], x=[ph["end"] - ph["start"]], base=[ph["start"]], orientation="h",
-                             marker=dict(color=_rgb(ph["profile"], 0.85 if kind == "phase" else 0.45),
-                                         pattern=dict(shape="" if kind == "phase" else "/")),
-                             text=[PH_LABEL[ph["profile"]] if kind == "phase" else ("✋" if kind == "handsoff" else "⏩")],
-                             textposition="inside", insidetextanchor="middle", hovertemplate=(
-                                 f"Round {ph['round']} · {PH_LABEL[ph['profile']]}" + (f" · {kind}" if kind != "phase" else "")
-                                 + f"<br>{ph['start']:.0f}–{ph['end']:.0f} s<extra></extra>"),
-                             showlegend=False, customdata=[""]))
-    lanes = {"main": "🎙 Lines", "auto": "🔁 Fillers / callouts"}
-    for p in got["plays"]:
-        if p["time"] + p["seconds"] <= lo or p["time"] >= hi:
-            continue
-        lane = lanes["auto"] if str(p["why"]).startswith(("callout", "fills")) else lanes["main"]
-        cat = next(iter(by_name.get(p["line"], {}).get("cats") or []), "")
-        fig.add_trace(go.Bar(y=[lane], x=[p["seconds"]], base=[p["time"]], orientation="h",
-                             marker=dict(color=CAT_COLOURS.get(cat, "#5b7fa6"), line=dict(color="white", width=1)),
-                             text=[p["line"]], textposition="inside", insidetextanchor="start",
-                             hovertemplate=f"<b>{p['line']}</b><br>{p['time']:.1f} s, {p['seconds']:.1f} s long<br>"
-                                           f"{p['why']} (round {p['round']})<extra></extra>",
-                             customdata=[p["line"]], showlegend=False))
-    fig.update_layout(barmode="overlay", height=260, margin=dict(l=10, r=10, t=10, b=30), bargap=0.25,
-                      xaxis=dict(range=[lo, hi], title="seconds"), yaxis=dict(categoryorder="array",
-                                                                                categoryarray=list(lanes.values())[::-1] + ["⏱ Phases"]))
-    ev = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points", key="cm_tl_chart")
-    pts = (ev or {}).get("selection", {}).get("points") if isinstance(ev, dict) else getattr(getattr(ev, "selection", None), "points", None)
-    names = [n[0] if isinstance(n, list) else n for n in (pt.get("customdata") for pt in pts or [])]
-    names = [n for n in names if n and n in by_name]
-    tok = ("tl", tuple(names))
-    if names and tok != st.session_state.get("cm_tl_tok"):          # act on a new tap only
-        st.session_state["cm_tl_tok"] = tok
-        if names[0] != st.session_state.get(SS_SEL):
-            select(names[0])
-            st.rerun()
-    n_auto = sum(1 for p in got["plays"] if str(p["why"]).startswith(("callout", "fills")))
-    st.caption(f"{len(got['plays'])} lines heard ({n_auto} fillers / callouts added by the app) · "
-               f"{len(got['clashes'])} clash(es) · intro: {', '.join(got['intro']) or '—'} · outro: {', '.join(got['outro']) or '—'}"
-               " · Tap a line to edit it.")
+    ev = cue_timeline(timeline_data(cm, sched, got), key="cm_tl")
+    if isinstance(ev, dict) and ev.get("nonce") and ev["nonce"] != st.session_state.get("cm_tl_nonce"):
+        st.session_state["cm_tl_nonce"] = ev["nonce"]
+        if ev.get("act") == "open":
+            select(ev.get("line"))
+            st.session_state["cm_dialog"] = True
+        else:
+            msg = apply_action(cm, ev, sched)
+            if msg:
+                st.session_state["cm_msg"] = ("info", msg)
+        st.rerun()
+    if diff != "chill":
+        st.caption("Medium and Hard repeat phases in a round: a line you drop is cued from the start of that phase's "
+                   "first turn in the round (the app's rule), so it may show on the first turn.")
     if got["clashes"]:
         with st.expander(f"⚠️ {len(got['clashes'])} clash(es) in this draw"):
-            for x in got["clashes"]:
+            for k, x in enumerate(got["clashes"]):
                 cols = st.columns([5, 1])
                 cols[0].write(f"**{x['line']}** — {x['where']}: {x['result']} (with {x['with']})")
-                if x["line"] in by_name and cols[1].button("✎", key=f"cm_clash_{x['line']}_{x['where']}"):
+                if cols[1].button("✎", key=f"cm_clash_{k}"):
                     select(x["line"])
+                    st.session_state["cm_dialog"] = True
                     st.rerun()
-    nocue = [ln["name"] for ln in cm["lines"] if not ln.get("cues")]
-    if nocue:
-        st.caption("No cue yet: " + " · ".join(nocue))
+    else:
+        st.caption("Clashes: none — no two lines meet.")
 
 
 # ---------------------------------------------------------------------------
@@ -528,15 +629,16 @@ def lines_tab(cm: dict) -> None:
     tok = ("df", rows[sel[0]]["name"]) if sel and sel[0] < len(rows) else None
     if tok and tok != st.session_state.get("cm_df_tok"):            # act on a new tap only
         st.session_state["cm_df_tok"] = tok
-        if tok[1] != st.session_state.get(SS_SEL):
-            select(tok[1])
-            st.rerun()
+        select(tok[1])
+        st.session_state["cm_dialog"] = True
+        st.rerun()
     st.caption(f"{len(rows)} of {len(cm['lines'])} lines · tap a row to edit it · ✎ changed / ➕ added, not saved yet.")
 
 
 def _add(cm: dict, name: str, file: str, seconds: float, folder: str) -> None:
     changed(cm, CS.new_line(name, file, seconds, folder))
     select(name)
+    st.session_state["cm_dialog"] = True
 
 
 def add_lines(cm: dict) -> None:
@@ -592,6 +694,7 @@ def add_lines(cm: dict) -> None:
                 done.append(stem)
             if done:
                 select(done[-1])
+                ss["cm_dialog"] = True
             ss["cm_msg"] = ("info" if not notes else "warning",
                             (f"➕ Added {', '.join(done)} — not saved yet. " if done else "") + " · ".join(notes))
             st.rerun()
