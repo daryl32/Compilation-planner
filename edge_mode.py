@@ -1064,6 +1064,106 @@ def _free_spans(a: float, b: float, busy: list) -> list:
     return spans
 
 
+# 🔁 Medium / Hard coverage (19 Nov 2026 check: Medium 51 % voiced with 65 s silences, Hard 31 % with 2½ min ones)
+FILL_DIFFS = ("medium", "hard")
+FILL_GAP = {"medium": 18.0, "hard": 18.0}  # the longest silence left inside Slow / Medium / Fast / Extra
+FILL_PHASES = ("slow", "medium", "fast", "extra")
+CALLOUT_MAX_SEC = 3.0                     # 💀 a short line already cued at a phase's start doubles as that phase's callout
+CALLOUT_CHANCE = 0.5                      # 💀 Hard: of the phase turns with no line at their start, about half get one
+NO_REPEAT_SEC = 60.0                      # the same filler / callout never twice within this
+# lines with no cue that fit a phase as callouts (the check found them never played)
+CALLOUT_EXTRA = {"slow": ("Just stroke",), "fast": ("Stroke again - faster", "showing me you can do this"),
+                 "extra": ("showing me you can do this",)}
+
+
+def _phase_pools(cue_map: dict, difficulty: str, secs) -> tuple:
+    """({phase: [line]} fillers — lines with an "at random" cue for this difficulty in that phase; {phase: [line]}
+    callouts — short lines cued at the start of that phase, plus CALLOUT_EXTRA)."""
+    fill, call = {}, {}
+    by_name = {ln["name"]: ln for ln in cue_map.get("lines") or []}
+    for ln in cue_map.get("lines") or []:
+        for c in ln.get("cues") or []:
+            if c.get("diffs") and difficulty not in c["diffs"]:
+                continue
+            for ph in c.get("phases") or []:
+                if ph not in FILL_PHASES:
+                    continue
+                if c.get("type") == "random" and ln not in fill.setdefault(ph, []):
+                    fill[ph].append(ln)
+                if c.get("type") == "phase" and (c.get("at") or "start") == "start" and secs(ln) <= CALLOUT_MAX_SEC \
+                        and ln not in call.setdefault(ph, []):
+                    call[ph].append(ln)
+    for ph, names in CALLOUT_EXTRA.items():
+        for n in names:
+            if n in by_name and by_name[n] not in call.setdefault(ph, []):
+                call[ph].append(by_name[n])
+    for ph in FILL_PHASES:                                # a phase's fillers also serve as its callouts
+        for ln in fill.get(ph, []):
+            if ln not in call.setdefault(ph, []):
+                call[ph].append(ln)
+    return fill, call
+
+
+def _fill_silences(sched, cue_map, difficulty, plays, secs, rng, total) -> None:
+    """🔁 Medium / Hard: 💀 (Hard) a callout at about half the phase turns that start in silence, then a filler into
+    every silence longer than FILL_GAP inside Slow / Medium / Fast / Extra. A line is never heard twice within
+    NO_REPEAT_SEC; the least heard of the pool goes first. Adds to `plays` (why: "callout" / "fills a silence")."""
+    fill, call = _phase_pools(cue_map, difficulty, secs)
+    heard = {}
+    for p in plays:
+        heard.setdefault(p["line"], []).append(p["time"])
+
+    def busy(a, b):
+        return any(a < p["time"] + p["seconds"] + LINE_GAP and b > p["time"] - LINE_GAP for p in plays)
+
+    def pick(pool, t):
+        ok = [ln for ln in pool if all(abs(t - x) >= NO_REPEAT_SEC for x in heard.get(ln["name"], []))]
+        if not ok:
+            return None
+        rng.shuffle(ok)
+        return min(ok, key=lambda ln: len(heard.get(ln["name"], [])))
+
+    def add(ln, t, ph, why):
+        plays.append({"time": round(t, 3), "seconds": round(secs(ln), 3), "line": ln["name"], "file": ln.get("file"),
+                      "profile": ph["profile"], "round": ph["round"], "why": why, "moved": 0.0})
+        heard.setdefault(ln["name"], []).append(t)
+
+    turns = [ph for ph in sched if ph.get("kind", "phase") == "phase" and ph["profile"] in FILL_PHASES]
+    if difficulty == "hard":
+        for ph in turns:
+            t = float(ph["start"]) + 0.3
+            if any(ph["start"] - 0.5 <= p["time"] < ph["start"] + 3.0 for p in plays) or rng.random() >= CALLOUT_CHANCE:
+                continue
+            ln = pick(call.get(ph["profile"], []), t)
+            if ln and t + secs(ln) <= ph["end"] and not busy(t, t + secs(ln)):
+                add(ln, t, ph, f"callout at the start of {PROFILES[ph['profile']]['label'].title()}")
+    gap = FILL_GAP[difficulty]
+    for ph in turns:
+        pool = list({ln["name"]: ln for ln in fill.get(ph["profile"], []) + call.get(ph["profile"], [])}.values())
+        if not pool:
+            continue
+        for _ in range(12):
+            spans = _free_spans(float(ph["start"]), min(float(ph["end"]), total),
+                                [(p["time"], p["time"] + p["seconds"]) for p in plays])
+            # the silence a line makes: inside this phase, joined to whatever silence runs on either side of it
+            long_ = [(a, b) for a, b in spans if _silence_around(plays, a, b, total) > gap and b - a >= 3.0]
+            if not long_:
+                break
+            a, b = max(long_, key=lambda s_: s_[1] - s_[0])
+            t = a + min(max((b - a) * 0.4, 1.0), gap * 0.6)
+            ln = pick(pool, t)
+            if ln is None or t + secs(ln) > b:
+                break
+            add(ln, t, ph, f"fills a silence in {PROFILES[ph['profile']]['label'].title()}")
+
+
+def _silence_around(plays, a, b, total) -> float:
+    """How long the silence holding [a, b) runs, from the end of the line before to the start of the line after."""
+    before = max([p["time"] + p["seconds"] for p in plays if p["time"] + p["seconds"] <= a + LINE_GAP + 1e-6], default=0.0)
+    after = min([p["time"] for p in plays if p["time"] >= b - LINE_GAP - 1e-6], default=total)
+    return after - before
+
+
 def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, durations: dict = None) -> dict:
     """The cue map played against one compilation's phases → when every line is heard, with no two overlapping.
 
@@ -1178,9 +1278,12 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
                 groups = ([[ph] for ph in ok] if per == "phase" else [ok] if per == "compilation"
                           else [[ph for ph in ok if ph["round"] == r] for r in by_round])
                 for g in groups:
-                    for ph in (rng.sample(g, min(times, len(g))) if g else []):
+                    picked = rng.sample(g, min(times, len(g))) if g else []
+                    for ph in picked:
+                        # 🔁 the round's other turns of the phase: tried when this one has no room (19 Nov coverage check)
+                        alts = [(o["start"], o["end"], o["profile"], o["round"]) for o in g if o not in picked]
                         flex.append({**base, "round": ph["round"], "profile": ph["profile"], "lo": ph["start"], "hi": ph["end"],
-                                     "why": f"at random in {PROFILES[ph['profile']]['label'].title()}"})
+                                     "alts": alts, "why": f"at random in {PROFILES[ph['profile']]['label'].title()}"})
     plays, clashes = [], []
 
     def blocker(a, b):
@@ -1263,10 +1366,18 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
                 seen_cue[a["key"]] = True
     for p in plays:
         p.pop("_joined", None)
+    def room(lo_, hi_, need):
+        return [(lo, hi - need) for lo, hi in _free_spans(lo_, min(hi_, total), [(p["time"], p["time"] + p["seconds"])
+                                                                                for p in plays]) if hi - lo >= need]
     for c in flex:
-        spans = [(lo, hi - c["seconds"]) for lo, hi in _free_spans(c["lo"], min(c["hi"], total),
-                                                                   [(p["time"], p["time"] + p["seconds"]) for p in plays])
-                 if hi - lo >= c["seconds"]]
+        spans = room(c["lo"], c["hi"], c["seconds"])
+        if not spans and c.get("alts"):                    # 🔁 A: another turn of the phase this round, the emptiest first
+            for lo_, hi_, prof, rnd in sorted(c["alts"], key=lambda a: -sum(h - l for l, h in room(a[0], a[1], 0.0))):
+                spans = room(lo_, hi_, c["seconds"])
+                if spans:
+                    c = {**c, "lo": lo_, "hi": hi_, "profile": prof, "round": rnd,
+                         "why": f"at random in {PROFILES[prof]['label'].title()}"}
+                    break
         if not spans:
             inside = [p["line"] for p in plays if p["time"] < c["hi"] and p["time"] + p["seconds"] > c["lo"]]
             clashes.append({"line": c["line"], "with": ", ".join(inside) or "the phase's length", "round": c["round"],
@@ -1276,6 +1387,8 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
         plays.append({"time": round(rng.uniform(lo, hi), 3), "seconds": round(c["seconds"], 3), "line": c["line"],
                       "file": c["file"], "profile": c["profile"], "round": c["round"], "why": c["why"], "moved": 0.0})
         seen_cue[c["key"]] = True
+    if difficulty in FILL_DIFFS:
+        _fill_silences(sched, cue_map, difficulty, plays, secs, rng, total)
     plays.sort(key=lambda p: p["time"])
     return {"plays": plays, "intro": [n for _, _, n in sorted(intro)], "outro": [n for _, _, n in sorted(outro)],
             "clashes": clashes, "unused": sorted({k[0] for k, v in seen_cue.items() if not v})}

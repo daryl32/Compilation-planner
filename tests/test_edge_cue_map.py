@@ -378,3 +378,37 @@ def test_her_clips_are_fetched_per_look_and_the_round_plan_picks_them(monkeypatc
     PE.save_looks({**looks, "1": "Nude - Lying Back"})
     assert PE.load_looks()["1"] == "Nude - Lying Back"
     assert PE.pick_look_clip("Round 4", PE.load_looks()["1"], stand)[1] == "look"
+
+
+def test_medium_and_hard_have_no_long_silences_and_fillers_find_room():
+    """🔁 19 Nov coverage check: a filler that can't fit its turn tries the round's other turns (A), Hard gets callouts
+    at phase starts (C) and every silence over FILL_GAP inside a speaking phase gets a line (B) — never two at once,
+    never the same filler / callout twice within NO_REPEAT_SEC."""
+    import edge_mode as E
+    cm = E.load_cue_map()
+    for diff in ("medium", "hard"):
+        for seed in range(6):
+            sched = E.schedule(diff, 5, seed, surprises=diff == "medium")
+            got = E.resolve_lines(sched, cm, diff, seed)
+            pl, T = got["plays"], E.total_seconds(sched)
+            for a, b in zip(pl, pl[1:]):
+                assert b["time"] >= a["time"] + a["seconds"] + E.LINE_GAP - 1e-3, (diff, a, b)
+            t, worst = 0.0, 0.0
+            for p in pl + [{"time": T, "seconds": 0}]:
+                mid = (t + p["time"]) / 2
+                ph = E.phase_at(sched, mid)
+                if ph and ph["profile"] in E.FILL_PHASES and p["time"] > t:
+                    worst = max(worst, p["time"] - t)
+                t = max(t, p["time"] + p["seconds"])
+            assert worst < 40, (diff, seed, worst)
+            added = [p for p in pl if p["why"].startswith(("callout", "fills"))]
+            assert added and all(p["profile"] in E.FILL_PHASES for p in added)
+            by = {}
+            for p in added:
+                by.setdefault(p["line"], []).append(p["time"])
+            for times in by.values():
+                assert all(b - a >= E.NO_REPEAT_SEC - 1e-6 for a, b in zip(sorted(times), sorted(times)[1:]))
+            if diff == "medium":
+                assert not any(p["why"].startswith("callout") for p in pl)      # callouts are Hard's
+    chill = E.resolve_lines(E.schedule("chill", 4, 1), cm, "chill", 1)["plays"]
+    assert not any(p["why"].startswith(("callout", "fills")) for p in chill)      # Chill untouched
