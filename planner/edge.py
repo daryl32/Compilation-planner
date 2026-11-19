@@ -408,12 +408,26 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     beat_on = bool(beat) or not track_ids
     notes, timeline, parts, shortfall = [], [], [], 0
     base = None
+    # ⏱️ where the compile's time goes (Daryl, 19 Nov): each song's matching (every play is a match of its own),
+    # the energy mix's section pick, and the rest (cues, voiceover, avatar, screens)
+    took, t_start = {"matching": {}}, time.time()
+
+    def _cp(tid, *a, **kw):
+        t0 = time.time()
+        try:
+            return PC.compile_plan(tid, *a, **kw)
+        finally:
+            m = took["matching"].setdefault(str(tid), [0.0, 0])
+            m[0] += time.time() - t0
+            m[1] += 1
     if track_ids and energy_mix:                           # ⚡ a section of a song for every phase
         import edge_energy as EE
         tracks_ = {tid: PC._load_track(tid) for tid in dict.fromkeys(track_ids)}
         maps = {tid: EE.energy_map(t) for tid, t in tracks_.items()}
         allowed = (lambda ph: [track_ids[(ph["round"] - 1) % len(track_ids)]]) if song_per_round else None
+        t0 = time.time()
         parts = EE.pick_sections(sched, maps, allowed, jump_fit=_jump_fit(tracks_))
+        took["energy_pick"] = round(time.time() - t0, 1)
         order = list(dict.fromkeys(p["track_id"] for p in parts))
         used, matched = set(), {}
         for k, tid in enumerate(order):                    # each song matched once, later songs leaving out earlier clips
@@ -427,9 +441,9 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                 return hit[1] + t - hit[0] if hit else None
             kw = dict(movement_only=True, cuts="lines", max_videos=int(max_videos or 0), progress=prog,
                       **_phase_hooks(sched, to_comp, phase_tags))
-            res = PC.compile_plan(tid, video_ids, excluded=set(used), **kw)
+            res = _cp(tid, video_ids, excluded=set(used), **kw)
             if used and (res.get("shortfall") or float(res.get("unfilled") or 0.0) > 0.5):
-                again = PC.compile_plan(tid, video_ids, **kw)
+                again = _cp(tid, video_ids, **kw)
                 if float(again.get("unfilled") or 0.0) < float(res.get("unfilled") or 0.0):
                     res = again
             base = base or res
@@ -462,9 +476,9 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             kw = dict(movement_only=True, cuts="lines", max_videos=int(max_videos or 0), progress=prog,
                       **_phase_hooks(sched, lambda t, _o=part["offset"], _p=part["play"]: _o + t if t < _p else None,
                                      phase_tags))
-            res = PC.compile_plan(part["track_id"], video_ids, excluded=set(used), **kw)
+            res = _cp(part["track_id"], video_ids, excluded=set(used), **kw)
             if used and (res.get("shortfall") or float(res.get("unfilled") or 0.0) > 0.5):
-                again = PC.compile_plan(part["track_id"], video_ids, **kw)        # not enough fresh footage left
+                again = _cp(part["track_id"], video_ids, **kw)        # not enough fresh footage left
                 if float(again.get("unfilled") or 0.0) < float(res.get("unfilled") or 0.0) or (
                         res.get("shortfall") and not again.get("shortfall")):
                     res = again
@@ -499,9 +513,9 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                       given_segments=E.beat_segments(sub), progress=prog,
                       **_phase_hooks(sub, lambda t: t, phase_tags),
                       lab={"stem": False, "phrase": False})       # a beat has no lead layer or phrases to follow
-            res = PC.compile_plan(E.TRACK_ID, video_ids, excluded=set(used), **kw)
+            res = _cp(E.TRACK_ID, video_ids, excluded=set(used), **kw)
             if used and (res.get("shortfall") or float(res.get("unfilled") or 0.0) > 0.5):
-                again = PC.compile_plan(E.TRACK_ID, video_ids, **kw)          # not enough fresh footage left
+                again = _cp(E.TRACK_ID, video_ids, **kw)          # not enough fresh footage left
                 if float(again.get("unfilled") or 0.0) < float(res.get("unfilled") or 0.0) or (
                         res.get("shortfall") and not again.get("shortfall")):
                     res = again
@@ -635,7 +649,9 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     return {"plan": plan, "summary": SMX.plan_summary(timeline), "notes": notes, "shortfall": shortfall,
             "schedule": sched, "parts": parts, "video_ids": list(video_ids), "track_ids": track_ids,
             "missing_voice": missing_voice, "voice_clashes": clashes, "lines_missing": lines_missing, "missing_avatar": missing_avatar,
-            "lines_unused": lines_unused, "lines_no_cue": lines_no_cue, "made": time.strftime("%H:%M:%S")}
+            "lines_unused": lines_unused, "lines_no_cue": lines_no_cue, "made": time.strftime("%H:%M:%S"),
+            "took": {**took, "matching": {t: [round(x, 1), k] for t, (x, k) in took["matching"].items()},
+                     "total": round(time.time() - t_start, 1)}}
 
 
 # ---------------------------------------------------------------------------
@@ -665,6 +681,7 @@ def _job(job, settings: dict, video_ids: list, seed: int, render: bool, token, r
     when asked. Runs in a server thread (mix_jobs), so it finishes even when the phone leaves the page."""
     out = {"notes_first": []}
     if res is None:
+        t_fetch = time.time()
         job.progress(0.0, "getting the voiceover lines")
         if settings["voiceover"] or settings["avatar"]:     # the lines (and her clips) not here yet are fetched first
             cm = load_cue_map()
@@ -684,6 +701,7 @@ def _job(job, settings: dict, video_ids: list, seed: int, render: bool, token, r
                            phase_tags=settings.get("phase_tags"),
                            progress=lambda d, t, txt: job.progress(share * min(d / max(t, 1), 1.0), f"compiling · {txt}"))
         res["notes"] = out["notes_first"] + list(res.get("notes") or [])
+        res.setdefault("took", {})["fetch"] = round(time.time() - t_fetch - float(res["took"].get("total") or 0.0), 1)
     out["res"] = res
     if render:
         base = job.frac
@@ -733,9 +751,29 @@ def _render(res: dict, settings: dict, token, prog) -> tuple:
     return RJ.render(plan, stream=settings["stream"], quick=settings["quick"], label=settings.get("label", ""), token=token,
                      prog=prog, extra_raw=[p.get("source_path") for p in e.get("playlist") or []],
                      extra_meta={"project_name": f"⏱️ Edge · {E.DIFFICULTIES[e['difficulty']]} · {e['rounds']} rounds",
-                                 "compile_note": _used_line(res),
+                                 "compile_note": _used_line(res) + (" · " + took_line(res) if res.get("took") else ""),
                                  # ↩️ so 📁 Media Library → Renders can reopen it in ⏱️ Edge Mode as it was set
                                  "edge_setup": {k: v for k, v in settings.items() if k != "label"}})
+
+
+def took_line(res: dict) -> str:
+    """⏱️ Where the compile's time went: "fetching lines 0:40 · song A 3:10 (×8) · … · section pick 0:05 · the rest 0:20"."""
+    t = res.get("took") or {}
+    if not t:
+        return ""
+    bits = []
+    if t.get("fetch", 0) >= 1:
+        bits.append(f"📥 fetching lines {format_mmss(t['fetch'])}")
+    match = t.get("matching") or {}
+    for tid, (secs, n) in sorted(match.items(), key=lambda kv: -kv[1][0]):
+        bits.append(f"🎯 {tid} {format_mmss(secs)}" + (f" (×{n})" if n > 1 else ""))
+    if t.get("energy_pick"):
+        bits.append(f"⚡ section pick {format_mmss(t['energy_pick'])}")
+    rest = float(t.get("total") or 0) - sum(x for x, _ in match.values()) - float(t.get("energy_pick") or 0)
+    if rest >= 1:
+        bits.append(f"the rest {format_mmss(rest)}")
+    total = float(t.get("total") or 0) + float(t.get("fetch") or 0)
+    return f"⏱️ Compile {format_mmss(total)}: " + " · ".join(bits)
 
 
 def _used_line(res: dict) -> str:

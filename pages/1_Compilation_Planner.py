@@ -617,11 +617,16 @@ import ui_mode
 from page_setup import menu_css as _menu_css
 st.markdown(f"<style>{_menu_css()}</style>", unsafe_allow_html=True)
 with st.container(key="mainnav_planner"):
-    planner_mode = st.radio("Planner", ["🎛️ Classic", "🤖 New matcher", "⏱️ Edge Mode"], horizontal=True,
+    planner_mode = st.radio("Planner", ["🎛️ Classic", "🤖 New matcher", "⏱️ Edge Mode", "⚔️ Verses Battle"], horizontal=True,
                             key="planner_mode", label_visibility="collapsed")
 if planner_mode == "⏱️ Edge Mode":       # a timer-run compilation on the new matcher (planner/edge.py)
     import planner.edge as _edge
     _edge.render()
+    _record_page_run()
+    st.stop()
+if planner_mode == "⚔️ Verses Battle":   # two actors battling for your attention (planner/verses.py)
+    import planner.verses as _verses
+    _verses.render()
     _record_page_run()
     st.stop()
 if planner_mode == "🤖 New matcher":
