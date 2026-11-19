@@ -137,6 +137,15 @@ def test_the_avatar_follows_the_cue_map(monkeypatch, tmp_path):
         assert {c["line"] for c in av if c["clip"]} == {"Now stop"} and "Get hard for me" in edge["avatar"]["placeholders"]
         assert [x.get("clip") is not None for x in edge["intro"]["lines"]] == [False, True]      # her intro clip (Welcome: none)
         assert edge["music"]["still_volume"] == 0.25
+        assert {c["look_used"] for c in av if c["line"] == "Now stop"} == {"stand-in"}
+        # 👗 her recording in round 1's planned look wins over the stand-in (19 Nov)
+        look = PE.load_looks(PE.load_cue_map())["1"]
+        (tmp_path / "avatar" / "looks" / look).mkdir(parents=True)
+        (tmp_path / "avatar" / "looks" / look / "Now stop.mp4").write_bytes(b"x")
+        edge = PE.compile_edge([], VIDS, "chill", 3, voiceover=True, avatar=True, intro=True)["plan"]["edge"]
+        now = [c for c in edge["avatar"]["cues"] if c["line"] == "Now stop"]
+        assert now and all(c["look_used"] == "look" and f"/looks/{look}/" in c["clip"] for c in now)
+        assert edge["avatar"]["looks"]["1"] == look
     finally:
         shutil.rmtree(out, ignore_errors=True)
 
@@ -323,3 +332,49 @@ def test_fetch_lines_finds_lines_in_any_look_folder(monkeypatch, tmp_path):
     assert "scene-labeling/Edge_voiceover/Nude - Lying Back/Hands off 5 B.mp3" in got
     assert "scene-labeling/Edge_voiceover/Welcome.mp3" in got
     assert not any("December" in g for g in got)
+
+
+def test_her_clips_are_fetched_per_look_and_the_round_plan_picks_them(monkeypatch, tmp_path):
+    """👗 The planned-look fix (19 Nov): each look folder's clips are kept by look; a line plays in the look planned for
+    its round, else the stand-in (avatar_clips first), else voice only. "Last round" takes the final round."""
+    import sys
+    import types
+    import planner.edge as PE
+    monkeypatch.setattr(PE, "voice_dir", lambda: tmp_path / "edge_voiceover")
+    monkeypatch.setattr(PE, "avatar_dir", lambda: tmp_path / "edge_avatar")
+
+    def download(rel, dest, **kw):
+        dest = __import__("pathlib").Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(rel)
+        return None
+    files = {"Edge_voiceover": [{"name": "Round 4.mp3"}, {"name": "Slow.mp3"}],
+             "Edge_voiceover/avatar_clips": [{"name": "Round 4.mp4"}, {"name": "Slow.mp4"}],
+             "Edge_voiceover/Nude - Lying Back/avatar_clips": [{"name": "Round 4.mp4"}],
+             "Edge_voiceover/Black Panties - Sitting on Bed1/avatar_clips": [{"name": "Round 4.mp4"}]}
+    subs = {"Edge_voiceover": ["avatar_clips", "Nude - Lying Back", "Black Panties - Sitting on Bed1", "sitting"],
+            "Edge_voiceover/Nude - Lying Back": ["avatar_clips"],
+            "Edge_voiceover/Black Panties - Sitting on Bed1": ["avatar_clips"], "Edge_voiceover/sitting": ["avatar_clips"]}
+    fake = types.SimpleNamespace(
+        credentials_available=lambda: True, download_source_video=download,
+        list_drive_folder=lambda rel: (files.get(rel.split("scene-labeling/")[-1], []), None),
+        list_drive_subfolders=lambda rel: (subs.get(rel.split("scene-labeling/")[-1], []), None))
+    monkeypatch.setitem(sys.modules, "drive_sync", fake)
+    cm = {"lines": [{"name": "Round 4", "file": "Round 4.mp3", "cues": []}, {"name": "Slow", "file": "Slow.mp3", "cues": []}]}
+    assert not PE.fetch_lines(cm)
+    stand = tmp_path / "edge_avatar" / "lines" / "Round 4.mp4"
+    assert stand.read_text().endswith("Edge_voiceover/avatar_clips/Round 4.mp4")          # the stand-in: avatar_clips first
+    assert PE.local_looks() == {"Black Panties - Sitting on Bed1": 1, "Nude - Lying Back": 1}
+    looks = PE.load_looks()
+    assert looks == PE.DEFAULT_LOOKS
+    assert PE.look_for(3, 6, looks) == "Black Panties - Sitting on Bed1"
+    assert PE.look_for(3, 3, looks) == "Nude - Lying Back"                                 # the final round = "Last round"
+    assert PE.look_for("outro", 3, looks) == "Nude - Lying on Back"
+    clip, how = PE.pick_look_clip("Round 4", PE.look_for(4, 6, looks), stand)
+    assert how == "look" and "Black Panties" in clip
+    clip, how = PE.pick_look_clip("Round 4", PE.look_for(1, 6, looks), stand)
+    assert how == "stand-in" and clip == str(stand)                                        # no Default clip yet
+    assert PE.pick_look_clip("Nothing", "Nude - Lying Back", None) == (None, "voice")
+    PE.save_looks({**looks, "1": "Nude - Lying Back"})
+    assert PE.load_looks()["1"] == "Nude - Lying Back"
+    assert PE.pick_look_clip("Round 4", PE.load_looks()["1"], stand)[1] == "look"

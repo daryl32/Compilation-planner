@@ -117,6 +117,12 @@ def line_durations(cue_map: dict, with_avatar: bool = False) -> dict:
             for f in (take["file"], take["clip"]):
                 if f:
                     secs = max(secs, probe(f)["seconds"])
+        if with_avatar:                                    # 👗 and her recordings in each look
+            stem = Path(str(line.get("file") or line["name"])).stem
+            for look in local_looks():
+                f = look_clip(stem, look)
+                if f:
+                    secs = max(secs, probe(f)["seconds"])
         if secs > 0:
             out[line["name"]] = secs
     return out
@@ -220,18 +226,23 @@ def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing:
                 if sub == "avatar_clips":
                     errors.append(f"avatar_clips: {err}")
                 continue
+            look = sub.split("/")[0] if is_look_folder(sub.split("/")[0]) else None
             for f in files:
-                if (Path(f["name"]).suffix.lower() in E.VIDEO_EXT and f["name"].lower() not in seen
+                if (Path(f["name"]).suffix.lower() in E.VIDEO_EXT
                         and (Path(f["name"]).stem.lower() in want or is_take(f["name"]))):
-                    seen.add(f["name"].lower())             # the same name in two folders: the first folder's clip
-                    have.append(dict(f, folder=sub))
+                    stem = Path(f["name"]).stem
+                    if f["name"].lower() not in seen:     # the same name in two folders: the first folder's clip
+                        seen.add(f["name"].lower())         # is the stand-in for any round
+                        have.append(dict(f, folder=sub, dest=avatar_dir() / "lines" / (want.get(stem.lower(), stem) + ".mp4")))
+                    if look:                                # 👗 and every look folder's clip, kept by look (Daryl, 19 Nov)
+                        have.append(dict(f, folder=sub, dest=looks_root() / look / (want.get(stem.lower(), stem) + ".mp4")))
         for k, f in enumerate(have, 1):
-            stem = Path(f["name"]).stem
-            dest = avatar_dir() / "lines" / (want.get(stem.lower(), stem) + ".mp4")      # named as the line's own file
+            dest = f["dest"]
             if only_missing and dest.exists() and dest.stat().st_size > 0:
                 continue
             if progress:
                 progress(k, len(have), f["name"])
+            dest.parent.mkdir(parents=True, exist_ok=True)
             err = download_source_video(f"{folder}/{f['folder']}/{f['name']}", dest)
             if err:
                 errors.append(f"{f['name']}: {err}")
@@ -241,6 +252,102 @@ def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing:
 def avatar_dir() -> Path:
     """Where the avatar's clips live: <data>/edge_avatar/intro/ and <data>/edge_avatar/<phase>/."""
     return Path(CATALOGUE_DIR).parent / "edge_avatar"
+
+
+# ---------------------------------------------------------------------------
+# 👗 Her look per round (Daryl, 19 Nov): the round plan from the Avatar Studio decides which recording of a line plays
+# ---------------------------------------------------------------------------
+
+LOOK_PARTS = ("intro", "1", "2", "3", "4", "5", "6", "last", "outro")
+LOOK_PART_LABELS = {"intro": "Intro", "last": "Last round", "outro": "Outro", **{str(r): f"Round {r}" for r in range(1, 7)}}
+# the Studio's round plan as Daryl set it on 18 Nov (one look per part) — a look is its Drive folder's name
+DEFAULT_LOOKS = {"intro": "Default - Lying on bed 1", "1": "Default - Lying on bed 1", "2": "Default - Lying on bed 1",
+                 "3": "Black Panties - Sitting on Bed1", "4": "Black Panties - Sitting on Bed1",
+                 "5": "Nude - Lying Back", "6": "Nude - Lying Back", "last": "Nude - Lying Back",
+                 "outro": "Nude - Lying on Back"}
+
+
+def is_look_folder(name: str) -> bool:
+    """A look folder on Drive is named "<Outfit> - <Pose>" (e.g. "Nude - Lying Back"); "sitting", "New"… aren't."""
+    return " - " in str(name or "") and not str(name).startswith("_")
+
+
+def looks_root() -> Path:
+    """Her clips sorted by look: <data>/edge_avatar/looks/<Outfit - Pose>/<line>.mp4."""
+    return avatar_dir() / "looks"
+
+
+def looks_path() -> Path:
+    return voice_dir() / "edge_looks.json"
+
+
+def load_looks(cue_map: dict | None = None) -> dict:
+    """{part: look folder name or ""}: the plan saved in the app (👗 Round looks), else one the Cue Map / Studio sent
+    inside the cue map ("round_looks"), else the 18 Nov plan."""
+    got = {}
+    try:
+        if looks_path().exists():
+            got = json.loads(looks_path().read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        got = {}
+    if not got and isinstance((cue_map or {}).get("round_looks"), dict):
+        got = cue_map["round_looks"]
+    if not got:
+        got = DEFAULT_LOOKS
+    return {p: str(got.get(p) or "") for p in LOOK_PARTS}
+
+
+def save_looks(looks: dict) -> None:
+    voice_dir().mkdir(parents=True, exist_ok=True)
+    looks_path().write_text(json.dumps({p: str(looks.get(p) or "") for p in LOOK_PARTS}, indent=1), encoding="utf-8")
+
+
+def look_for(part, n_rounds: int, looks: dict) -> str:
+    """The planned look for a round number (or "intro" / "outro"). The final round takes "Last round" whatever its
+    number, as the cue map's "last" does; a part left empty falls back to the round's own number."""
+    if part in ("intro", "outro"):
+        return looks.get(part) or ""
+    try:
+        r = int(part)
+    except (TypeError, ValueError):
+        return ""
+    if r == n_rounds and looks.get("last"):
+        return looks["last"]
+    return looks.get(str(r)) or ""
+
+
+def local_looks() -> dict:
+    """{look folder name: number of clips on this machine}."""
+    root = looks_root()
+    if not root.is_dir():
+        return {}
+    return {d.name: sum(1 for f in d.iterdir() if f.suffix.lower() in E.VIDEO_EXT and f.stat().st_size > 0)
+            for d in sorted(root.iterdir()) if d.is_dir()}
+
+
+def look_clip(stem: str, look: str) -> Path | None:
+    """Her clip of a line (or one of its takes — by file stem) recorded in that look, on this machine."""
+    if not look or not stem:
+        return None
+    d = looks_root() / look
+    if not d.is_dir():
+        return None
+    want = stem.lower()
+    for f in d.iterdir():
+        if f.stem.lower() == want and f.suffix.lower() in E.VIDEO_EXT and f.stat().st_size > 0:
+            return f
+    return None
+
+
+def pick_look_clip(stem: str, look: str, stand_in) -> tuple:
+    """👗 Which recording of a line she plays: (clip path or None, how) — how is "look" (recorded in the round's planned
+    look), "stand-in" (any other recording of the line: old transparent clips, another look) or "voice" (none yet)."""
+    got = look_clip(stem, look)
+    if got:
+        return str(got), "look"
+    if stand_in:
+        return str(stand_in), "stand-in"
+    return None, "voice"
 
 
 # ---------------------------------------------------------------------------
@@ -560,11 +667,32 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
         intro_lines, outro_lines = named(got["intro"]), named(got["outro"])
         if avatar:                                         # 👩 she reads the lines: her clip where there is one
             vid = lambda n: (str(avatar_line_clip(by_name[n])) if avatar_line_clip(by_name[n]) else None)       # noqa: E731
-            for x in intro_lines + outro_lines:
-                x["clip"] = vid(x["line"])
-            line_avatar = [{"time": c["time"], "profile": c["profile"],
-                            "clip": c.get("clip") or (vid(c["line"]) if c.get("take", 1) == 1 else None),
-                            "line": c["line"], "seconds": c["seconds"]} for c in cues]
+            # 👗 the recording in the look planned for the round first, then any recording of the line as a stand-in,
+            # then voice only (Daryl, 19 Nov)
+            looks = load_looks(cue_map)
+            n_rounds = int(sched[-1]["round"]) if sched else 0
+            stem_of = lambda n: Path(str(by_name[n].get("file") or n)).stem                                # noqa: E731
+            for part, xs in (("intro", intro_lines), ("outro", outro_lines)):
+                for x in xs:
+                    x["look"] = look_for(part, n_rounds, looks)
+                    x["clip"], x["look_used"] = pick_look_clip(stem_of(x["line"]), x["look"], vid(x["line"]))
+            line_avatar = []
+            for c in cues:
+                stand_in = c.get("clip") or (vid(c["line"]) if c.get("take", 1) == 1 else None)
+                stem = Path(str(c.get("clip") or c.get("file") or stem_of(c["line"]))).stem
+                c["look"] = look_for(c.get("round"), n_rounds, looks)
+                c["clip"], c["look_used"] = pick_look_clip(stem, c["look"], stand_in)
+                line_avatar.append({"time": c["time"], "profile": c["profile"], "clip": c["clip"], "line": c["line"],
+                                    "seconds": c["seconds"], "look": c["look"], "look_used": c["look_used"]})
+            every = line_avatar + (intro_lines if intro else []) + outro_lines
+            n_look = sum(1 for x in every if x["look_used"] == "look")
+            standins = sorted({x["line"] for x in every if x["look_used"] == "stand-in"}, key=str.lower)
+            n_voice = sum(1 for x in every if x["look_used"] == "voice")
+            if every:
+                notes.append(f"👗 Her looks: {n_look} of {len(every)} lines in the round's planned look · "
+                             f"{len(every) - n_look - n_voice} stand-ins" + (f" ({', '.join(standins[:6])}"
+                             + (" …" if len(standins) > 6 else "") + ")" if standins else "")
+                             + f" · {n_voice} voice only.")
         lines_missing = sorted({c["line"] for c in cues + (intro_lines if intro else []) + outro_lines if not c["file"]}, key=str.lower)
     else:
         cues = []                                          # (the cue map ships with the app, so this is only an empty map)
@@ -632,7 +760,8 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             "surprises": {"on": surprises, "list": E.surprise_list(sched)},
             "phase_tags": {p: list(v) for p, v in (phase_tags or {}).items() if v},
             "avatar": {"on": bool(avatar), "mode": avatar_mode if avatar_mode in E.AVATAR_MODES else "corner",
-                       "corner": avatar_corner, "cues": av_cues, "placeholders": missing_avatar},
+                       "corner": avatar_corner, "cues": av_cues, "placeholders": missing_avatar,
+                       "looks": load_looks(cue_map) if avatar else {}},
             # (the outro screen closes every compilation, whatever is switched on — Daryl, 14 Nov; its lines when there are any)
             "outro": {"on": True, "lines": outro_lines, "title": "EDGE MODE", "figure": bool(avatar),
                       "stats": [["Difficulty", E.DIFFICULTIES[difficulty].split(" ", 1)[-1]],

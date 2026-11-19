@@ -17,7 +17,7 @@ from config import PLANS_DIR, PREVIEW_DIR
 from library_common import format_mmss
 from planner.edge import (JOB_KEY, KEPT, KEPT_IF_SET, RESULT_KEY, SETUP_KEYS, _missing_sources, _setup_from_plan, _start,
                           _used_line, avatar_line_clip, took_line, cue_map_path, fetch_lines, line_file, line_takes, load_cue_map,
-                          save_cue_map)
+                          save_cue_map, LOOK_PARTS, LOOK_PART_LABELS, load_looks, save_looks, local_looks)
 
 
 def _take_finished_job() -> bool:
@@ -105,6 +105,38 @@ def _loudness(lines: list) -> None:
                    "Cue Map 🔊": f"{gains.get(n, 0):+.0f}" if gains.get(n) else "",
                    "": "⚠️ very quiet — maybe re-record" if g >= R.LEVEL_UP_MAX - 0.05 else ""} for n, d, g in got],
                  hide_index=True, use_container_width=True)
+
+
+def _looks_panel() -> None:
+    """👗 Her look per round: the Studio's round plan. A line plays in the round's planned look when that recording is
+    on the server, otherwise any recording of it stands in (old transparent clips, another look), otherwise voice only."""
+    looks = load_looks(load_cue_map())
+    here = local_looks()
+    planned = {v for v in looks.values() if v}
+    with st.expander("👗 Her look per round — " + " · ".join(f"{LOOK_PART_LABELS[p]}: {looks[p] or '—'}"
+                                                            for p in ("intro", "1", "3", "last")) + " …"):
+        st.caption("Each line plays in the look planned for the round it lands in: the clip from that look's "
+                   "Drive folder (\"<Outfit> - <Pose>/avatar_clips\") when there is one, otherwise any other recording "
+                   "of the line stands in, otherwise her voice only. \"Last round\" is used for the final round "
+                   "whatever its number. ⬇️ Get the lines from Google Drive (above) brings every look's clips.")
+        if here:
+            st.caption("On the server: " + " · ".join(f"{k} ({n})" for k, n in here.items()))
+        else:
+            st.caption("No look's clips are on the server yet — press ⬇️ Get the lines from Google Drive.")
+        missing = sorted(p for p in planned if p not in here)
+        if missing:
+            st.warning("No clips on the server for: " + " · ".join(missing) + " — lines there use stand-ins.")
+        options = [""] + sorted(set(here) | planned)
+        cols = st.columns(3)
+        new = {}
+        for k, part in enumerate(LOOK_PARTS):
+            cur = looks.get(part) or ""
+            new[part] = cols[k % 3].selectbox(LOOK_PART_LABELS[part], options, index=options.index(cur),
+                                              key=f"edge_look_{part}", format_func=lambda v: v or "— stand-ins only —")
+        if new != looks and st.button("💾 Save the round looks", key="edge_looks_save", type="primary"):
+            save_looks(new)
+            st.session_state["edge_msg"] = ("success", "Round looks saved — the next compile uses them.")
+            st.rerun()
 
 
 STUDIO_JOB = "studio:previews"
@@ -248,6 +280,7 @@ def _setup(rows: dict, have_tl: set) -> None:
                 help="Before the compilation: the avatar giving her intro, beside the difficulty, rounds, total time "
                      "and thumbnails of the videos used. It lasts as long as her intro clip (8 s with the stand-in).")
     if st.session_state.get("edge_avatar"):
+        _looks_panel()
         _studio_panel()
         m = st.columns(2)
         mode = m[0].radio("She appears", list(E.AVATAR_MODES), key="edge_avatar_mode", horizontal=True,
