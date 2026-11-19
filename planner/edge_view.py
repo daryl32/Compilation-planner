@@ -16,7 +16,7 @@ import settings_store as SSTORE
 from config import PLANS_DIR, PREVIEW_DIR
 from library_common import format_mmss
 from planner.edge import (JOB_KEY, KEPT, KEPT_IF_SET, RESULT_KEY, SETUP_KEYS, _missing_sources, _setup_from_plan, _start,
-                          _used_line, avatar_line_clip, cue_map_path, fetch_lines, line_file, line_takes, load_cue_map,
+                          _used_line, avatar_line_clip, took_line, cue_map_path, fetch_lines, line_file, line_takes, load_cue_map,
                           save_cue_map)
 
 
@@ -329,6 +329,8 @@ def _result(res: dict) -> None:
     c[0].subheader("⏱️ Edge Mode")
     c[1].button("← Change", key="edge_back", width="stretch", on_click=lambda: st.session_state.pop(RESULT_KEY, None))
     st.caption(_used_line(res) + f" · made {res['made']}")
+    if res.get("took"):
+        st.caption(took_line(res))
     st.caption(f"{len(plan['timeline'])} clips · {summary.get('videos', 0)} different videos used"
                + (f" · 🎯 movement sync {summary['sync']:.0%}" if summary.get("sync") is not None else "")
                + (f" · clips {summary['clip_sec'][0]:g}–{summary['clip_sec'][2]:g} s" if summary.get("clip_sec") else "")
