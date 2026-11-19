@@ -386,6 +386,8 @@ def test_medium_and_hard_have_no_long_silences_and_fillers_find_room():
     never the same filler / callout twice within NO_REPEAT_SEC."""
     import edge_mode as E
     cm = E.load_cue_map()
+    assert not E.autofill_on(cm, "medium") and E.autofill_on(cm, "hard") and not E.autofill_on(cm, "chill")
+    cm["autofill"] = {"medium": True}                                    # Medium's is off by default (19 Nov)
     for diff in ("medium", "hard"):
         for seed in range(6):
             sched = E.schedule(diff, 5, seed, surprises=diff == "medium")

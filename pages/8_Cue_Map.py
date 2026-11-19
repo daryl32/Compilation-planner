@@ -41,9 +41,11 @@ if not CS.managed():
 
 bar = st.container()          # filled last, so it counts this run's edits
 names = [ln["name"] for ln in lines]
-t1, t2, t3 = st.tabs(["🕒 Timeline", "🎙️ Lines", "🗂️ Versions"])
+t1, t4, t2, t3 = st.tabs(["🕒 Timeline", "🔍 Gaps", "🎙️ Lines", "🗂️ Versions"])
 with t1:
     V.timeline(cm)
+with t4:
+    V.gaps_tab(cm)
 with t2:
     V.lines_tab(cm)
 with t3:

@@ -1066,6 +1066,15 @@ def _free_spans(a: float, b: float, busy: list) -> list:
 
 # 🔁 Medium / Hard coverage (19 Nov 2026 check: Medium 51 % voiced with 65 s silences, Hard 31 % with 2½ min ones)
 FILL_DIFFS = ("medium", "hard")
+AUTOFILL_DEFAULT = {"medium": False, "hard": True}    # Medium off while Daryl plans it by hand (19 Nov)
+
+
+def autofill_on(cue_map: dict, difficulty: str) -> bool:
+    """🔁 The automatic fillers / callouts for this difficulty: the cue map's own setting ("autofill"), else the default."""
+    if difficulty not in FILL_DIFFS:
+        return False
+    got = (cue_map or {}).get("autofill") or {}
+    return bool(got.get(difficulty, AUTOFILL_DEFAULT.get(difficulty, False)))
 FILL_GAP = {"medium": 18.0, "hard": 18.0}  # the longest silence left inside Slow / Medium / Fast / Extra
 FILL_PHASES = ("slow", "medium", "fast", "extra")
 CALLOUT_MAX_SEC = 3.0                     # 💀 a short line already cued at a phase's start doubles as that phase's callout
@@ -1226,7 +1235,17 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
                         occ = [ph for ph in phases if ph["profile"] == p and ph.get("kind", "phase") == "phase"]
                         if not occ:
                             continue
-                        ph = occ[-1] if at == "end" else occ[0]
+                        turn = cue.get("turn")         # 1st / 2nd … turn of the phase in the round (Medium repeats
+                        if turn:                         # Slow / Medium / Fast — Daryl, 19 Nov); none = start → first,
+                            try:                         # end → last, as before
+                                k_ = int(turn) - 1
+                            except (TypeError, ValueError):
+                                k_ = 0
+                            if k_ >= len(occ):           # this difficulty hasn't that many turns: the line isn't here
+                                continue
+                            ph = occ[k_]
+                        else:
+                            ph = occ[-1] if at == "end" else occ[0]
                         if at == "end":                    # (⏩ an override is still this phase: its end is the end)
                             u = ph.get("unit", ph["index"])
                             ph = {**ph, "end": max(q["end"] for q in phases if q.get("unit", q["index"]) == u)}
@@ -1387,7 +1406,7 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
         plays.append({"time": round(rng.uniform(lo, hi), 3), "seconds": round(c["seconds"], 3), "line": c["line"],
                       "file": c["file"], "profile": c["profile"], "round": c["round"], "why": c["why"], "moved": 0.0, "key": c.get("key")})
         seen_cue[c["key"]] = True
-    if difficulty in FILL_DIFFS:
+    if autofill_on(cue_map, difficulty):
         _fill_silences(sched, cue_map, difficulty, plays, secs, rng, total)
     plays.sort(key=lambda p: p["time"])
     return {"plays": plays, "intro": [n for _, _, n in sorted(intro)], "outro": [n for _, _, n in sorted(outro)],

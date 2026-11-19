@@ -198,3 +198,80 @@ def test_timeline_actions_drop_move_and_the_screens(voice):
     assert "Keep going" not in E.resolve_lines(sched, V.current(), "chill", 0)["outro"]
     assert CS.load()["rev"] == 1                               # all of it unsaved until 💾
     st.session_state.clear()
+
+
+def test_copy_chill_to_medium_turns_and_the_gaps_tab(voice):
+    import edge_mode as E
+    import cue_store as CS
+    import cue_map_view as V
+    from tests.apptest_util import errors, page_app
+    cm = CS.load()
+    new, rep = CS.copy_chill_to_medium(cm)
+    assert rep["copied"] > 40 and CS.is_split(new) and not CS.is_split(cm)
+    for d in ("chill", "hard"):                                   # Chill and Hard play exactly as before
+        for seed in range(3):
+            sch = E.schedule(d, 4, seed)
+            a, b = E.resolve_lines(sch, cm, d, seed), E.resolve_lines(sch, new, d, seed)
+            assert [(p["line"], p["time"]) for p in a["plays"]] == [(p["line"], p["time"]) for p in b["plays"]]
+    sch = E.schedule("medium", 3, 0)
+    got = E.resolve_lines(sch, new, "medium", 0)
+    secs = V.sections(sch, got)
+    r1 = [x for x in secs if x["round"] == 1]
+    assert [x["profile"] for x in r1] == ["wait", "slow", "medium", "fast", "slow", "medium", "fast", "extra", "stop"]
+    assert all(not x["lines"] for x in r1[4:7])                   # the 2nd Slow / Medium / Fast start empty
+    assert not any(p["why"].startswith(("callout", "fills")) for p in got["plays"])   # Medium's auto fillers off
+    # a cue on the 2nd Slow plays there
+    line = next(ln for ln in new["lines"] if ln["name"] == "Keep going")
+    line["cues"].append({"type": "phase", "phases": ["slow"], "at": "start", "offset": 2, "turn": 2,
+                         "roundList": ["1"], "diffs": ["medium"]})
+    got = E.resolve_lines(sch, new, "medium", 0)
+    slow2 = [x for x in V.sections(sch, got) if x["round"] == 1][4]
+    assert any(p["line"] == "Keep going" and abs(p["time"] - (slow2["start"] + 2)) < 0.01 for p in got["plays"])
+    assert "2nd Slow" in CS.describe(line["cues"][-1])
+    assert not any(p["line"] == "Keep going" and p["round"] == 1 and p["why"].startswith("start of Slow")
+                   for p in E.resolve_lines(E.schedule("chill", 3, 0), new, "chill", 0)["plays"])   # Chill has no 2nd turn
+    # dropping on the 2nd Medium of round 2 makes a Medium-only, 2nd-turn cue
+    r2 = [x for x in V.sections(sch, got) if x["round"] == 2]
+    cue = V._phase_cue_at(sch, 2, r2[5]["start"] + 3.0, 3, "medium", True)
+    assert cue["turn"] == 2 and cue["phases"] == ["medium"] and cue["diffs"] == ["medium"] and cue["offset"] == 3.0
+    # the page: the Gaps tab with the copy button, then the grid
+    CS.save(cm, 0, "taken over")
+    at = page_app("pages/8_Cue_Map.py").run()
+    assert not errors(at)
+    next(b for b in at.button if "Wipe Medium and copy Chill" in b.label).click().run()
+    assert not errors(at) and CS.is_split(CS.load_draft()["map"]) and CS.load()["rev"] == 1
+    assert any("Medium now has its own copy" in i.value for i in at.info)
+
+
+def test_easy_wins_for_an_empty_section(voice):
+    import json
+    import edge_mode as E
+    import cue_store as CS
+    import cue_map_view as V
+    import studio as SD
+    from tests.apptest_util import errors, page_app
+    new, _ = CS.copy_chill_to_medium(CS.load())
+    CS.save(new, 0, "split")
+    sch = E.schedule("medium", 6, 0)
+    r1 = {p["line"] for p in E.resolve_lines(sch, new, "medium", 0)["plays"] if p["round"] == 1}
+    pick = next(ln["name"] for ln in new["lines"] if ln["name"] not in r1 and ln.get("cues") and CS.played_seconds(ln) < 5
+                and not any(c["type"] in ("intro", "outro", "surprise") for c in ln["cues"]) and ln["name"] != "Just stroke")
+    clips = [{"id": "1", "name": pick + ".mp4", "size": 1, "folder": "Default - Lying on bed 1/avatar_clips"},
+             {"id": "2", "name": "Just stroke.mp4", "size": 1, "folder": "Nude - Lying Back/avatar_clips"}]
+    SD.cache_path().parent.mkdir(parents=True, exist_ok=True)
+    SD.cache_path().write_text(json.dumps({"at": "now", "clips": clips}))
+    got = E.resolve_lines(sch, CS.load(), "medium", 0)
+    sec = [x for x in V.sections(sch, got) if x["round"] == 1][4]          # Round 1, Slow 2 — empty
+    assert not sec["lines"]
+    good, other = V.candidates(CS.load(), sec, got, "Default - Lying on bed 1", SD.recordings(clips))
+    assert [g["name"] for g in good] == [pick]
+    assert any(o["name"] == "Just stroke" and "Nude" in o["where"] for o in other)
+    at = page_app("pages/8_Cue_Map.py")
+    at.session_state["cm_gp_grid_medium_6_False"] = {"selection": {"rows": [], "columns": [], "cells": [(0, "Slow 2")]}}
+    at.run()
+    assert not errors(at)
+    assert any("Round 1 · Slow 2" in (m.value or "") for m in at.markdown)
+    next(b for b in at.button if b.label == "➕ Here").click().run()
+    assert not errors(at)
+    line = next(ln for ln in CS.load_draft()["map"]["lines"] if ln["name"] == pick)
+    assert line["cues"][-1]["turn"] == 2 and line["cues"][-1]["diffs"] == ["medium"] and line["cues"][-1]["phases"] == ["slow"]

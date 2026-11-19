@@ -224,6 +224,8 @@ def describe(cue: dict) -> str:
         at = cue.get("at") or "start"
         off = float(cue.get("offset") or 0)
         where = {"start": "Start of", "during": "During", "end": "End of"}.get(at, at)
+        if cue.get("turn"):
+            where += " " + {1: "1st", 2: "2nd", 3: "3rd"}.get(int(cue["turn"]), f"{cue['turn']}th")
         extra = f" (+{off:g} s)" if off and at != "end" else ""
         return f"{where} {phases}{extra} · round {rounds} · {diffs}"
     if t == "random":
@@ -246,3 +248,70 @@ def describe(cue: dict) -> str:
         ln = f" {cue.get('length')} s" if cue.get("length") else ""
         return f"🎲 {cue.get('kind') or 'handsoff'}{ln} · at its {cue.get('at') or 'start'} · {diffs}"
     return str(t)
+
+
+# ---------------------------------------------------------------------------
+# 📋 Chill → Medium (Daryl, 19 Nov): Medium gets its own copy of Chill's cues to plan by hand
+# ---------------------------------------------------------------------------
+PER_DIFF_TYPES = ("phase", "round", "time", "interval")    # these get a copy per difficulty; intro / outro /
+REPEATED = ("slow", "medium", "fast")                       # surprise / straight-after cues stay shared
+
+
+def _plays_in(cue: dict, diff: str) -> bool:
+    return not cue.get("diffs") or diff in cue["diffs"]
+
+
+def copy_chill_to_medium(cm: dict) -> tuple:
+    """Wipe Medium's own cues and give it a copy of Chill's. Returns (new map, report).
+    - a cue Chill plays (none picked = every difficulty) is split into one per difficulty — Chill, Medium and Hard
+      (Hard keeps playing exactly as before, and has its own copy to plan later);
+    - the Medium copy of a Slow / Medium / Fast cue is set to the round's 1st turn, so the 2nd Slow / Medium / Fast
+      start empty;
+    - cues only Medium played (not Chill) are taken out; "at random" fillers stop playing in Medium (they still play
+      in Hard) — they're candidates to place by hand;
+    - intro / outro / surprise / straight-after cues stay shared."""
+    out = copy.deepcopy(cm)
+    rep = {"copied": 0, "wiped": 0, "fillers": 0, "lines": set()}
+    for ln in out.get("lines") or []:
+        new = []
+        for c in ln.get("cues") or []:
+            t = c.get("type")
+            if t == "random" and _plays_in(c, "medium"):
+                diffs = [d for d in (c.get("diffs") or ["chill", "medium", "hard"]) if d != "medium"]
+                if diffs:
+                    new.append({**c, "diffs": diffs})
+                rep["fillers"] += 1
+                rep["lines"].add(ln["name"])
+                continue
+            if t not in PER_DIFF_TYPES:
+                new.append(c)
+                continue
+            chill, med = _plays_in(c, "chill"), _plays_in(c, "medium")
+            if med and not chill:                              # Medium's own: wiped
+                rest = [d for d in c.get("diffs") or [] if d != "medium"]
+                if rest:
+                    new.append({**c, "diffs": rest})
+                rep["wiped"] += 1
+                rep["lines"].add(ln["name"])
+                continue
+            if not chill:
+                new.append(c)
+                continue
+            new.append({**copy.deepcopy(c), "diffs": ["chill"]})
+            if _plays_in(c, "hard"):
+                new.append({**copy.deepcopy(c), "diffs": ["hard"]})
+            m = {**copy.deepcopy(c), "diffs": ["medium"]}
+            if t == "phase" and set(m.get("phases") or []) & set(REPEATED) and not m.get("turn"):
+                m["turn"] = 1
+            new.append(m)
+            rep["copied"] += 1
+            rep["lines"].add(ln["name"])
+        ln["cues"] = new
+    rep["lines"] = sorted(rep["lines"], key=str.lower)
+    return out, rep
+
+
+def is_split(cm: dict) -> bool:
+    """True once the cue map has per-difficulty copies (new cues then belong to the difficulty they're made in)."""
+    return any(c.get("type") in PER_DIFF_TYPES and c.get("diffs") == ["medium"]
+               for ln in cm.get("lines") or [] for c in ln.get("cues") or [])

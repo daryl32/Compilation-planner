@@ -363,6 +363,15 @@ def _cue_editor(draft: dict, i: int, cue: dict, names: list, k: str) -> None:
             if at == "end" and "_finish" not in cue:
                 cue["_finish"] = 0.0
             cue["at"] = at
+            turns = [0, 1, 2, 3]
+            tv = int(cue.get("turn") or 0)
+            tsel = st.selectbox("Which turn in the round (Medium / Hard repeat phases)", turns,
+                                index=turns.index(tv) if tv in turns else 0, key=f"cm_turn_{k}",
+                                format_func=lambda v: {0: "auto — start: 1st · end: last", 1: "1st", 2: "2nd", 3: "3rd"}[v])
+            if tsel:
+                cue["turn"] = tsel
+            else:
+                cue.pop("turn", None)
             if at == "end":
                 cue["_finish"] = c[2].number_input("Finishes this many s before it ends (0 = as it ends)", 0.0, 60.0,
                                                    float(cue.get("_finish") or 0), 0.1, key=f"cm_fin_{k}")
@@ -485,16 +494,20 @@ def timeline_data(cm: dict, sched: list, got: dict) -> dict:
             "outro": [{"line": n_, "seconds": secs(n_)} for n_ in got["outro"]]}
 
 
-def _phase_cue_at(sched: list, rnd: int, t: float, n_rounds: int) -> dict:
-    """A start-of-phase cue that plays a line at compile time t (in round rnd): the phase there, seconds into it."""
+def _phase_cue_at(sched: list, rnd: int, t: float, n_rounds: int, diff: str = "", split: bool = False) -> dict:
+    """A start-of-phase cue that plays a line at compile time t (in round rnd): the phase there, seconds into it — and,
+    when the phase comes round more than once in the round (Medium's Slow / Medium / Fast), which turn."""
     stretch = [ph for ph in sched if ph["round"] == rnd and ph.get("kind", "phase") == "phase"]
     ph = next((x for x in stretch if x["start"] <= t < x["end"]), None) or (stretch[-1] if t >= stretch[-1]["end"] else stretch[0])
-    first = next(x for x in stretch if x["profile"] == ph["profile"])          # the engine counts from the phase's first turn
-    return {"type": "phase", "phases": [ph["profile"]], "at": "start", "offset": round(max(t - first["start"], 0.0), 1),
-            "roundList": ["last" if rnd == n_rounds else str(rnd)], "diffs": [], "note": ""}
+    occ = [x for x in stretch if x["profile"] == ph["profile"]]
+    cue = {"type": "phase", "phases": [ph["profile"]], "at": "start", "offset": round(max(t - ph["start"], 0.0), 1),
+           "roundList": ["last" if rnd == n_rounds else str(rnd)], "diffs": [diff] if split and diff else [], "note": ""}
+    if len(occ) > 1:
+        cue["turn"] = occ.index(ph) + 1
+    return cue
 
 
-def apply_action(cm: dict, act: dict, sched: list) -> str | None:
+def apply_action(cm: dict, act: dict, sched: list, diff: str = "") -> str | None:
     """A timeline action into the unsaved changes. Returns what to tell the user."""
     n = max((ph["round"] for ph in sched), default=0)
     by_name = {ln["name"]: ln for ln in cm["lines"]}
@@ -514,14 +527,14 @@ def apply_action(cm: dict, act: dict, sched: list) -> str | None:
     if line is None:
         return None
     if a == "drop":
-        cue = _phase_cue_at(sched, int(act["round"]), float(act["time"]), n)
+        cue = _phase_cue_at(sched, int(act["round"]), float(act["time"]), n, diff, CS.is_split(cm))
         line.setdefault("cues", []).append(cue)
         changed(cm, line)
         return f"➕ {name}: {CS.describe(cue)} — not saved yet."
     if a == "move":
         key = act.get("key")
         i = int(key[1]) if key and key[0] == name and int(key[1]) < len(line.get("cues") or []) else None
-        new = _phase_cue_at(sched, int(act["round"]), float(act["time"]), n)
+        new = _phase_cue_at(sched, int(act["round"]), float(act["time"]), n, diff, CS.is_split(cm))
         if i is None:
             line.setdefault("cues", []).append(new)
         else:
@@ -534,7 +547,9 @@ def apply_action(cm: dict, act: dict, sched: list) -> str | None:
             elif rl:
                 rl = list(dict.fromkeys(rl + [to]))
             keep = {k: v for k, v in old.items() if k in ("diffs", "note")}
-            line["cues"][i] = {**new, **keep, "roundList": rl}
+            line["cues"][i] = {**{k: v for k, v in new.items() if k != "turn"}, **keep, "roundList": rl}
+            if "turn" in new:
+                line["cues"][i]["turn"] = new["turn"]
         changed(cm, line)
         return f"↔ {name} moved — not saved yet."
     if a in ("screen_add", "screen_remove"):
@@ -570,7 +585,7 @@ def timeline(cm: dict) -> None:
             select(ev.get("line"))
             st.session_state["cm_dialog"] = True
         else:
-            msg = apply_action(cm, ev, sched)
+            msg = apply_action(cm, ev, sched, diff)
             if msg:
                 st.session_state["cm_msg"] = ("info", msg)
         st.rerun()
@@ -625,7 +640,7 @@ def lines_tab(cm: dict) -> None:
               "On server": "✅" if line_path(ln) else "—"} for ln in rows]
     ev = st.dataframe(table, hide_index=True, use_container_width=True, on_select="rerun", selection_mode="single-row",
                       key=f"cm_lines_{len(rows)}_{q}_{'_'.join(cats)}_{nocue}_{order}", height=360)
-    sel = (ev or {}).get("selection", {}).get("rows") if isinstance(ev, dict) else getattr(getattr(ev, "selection", None), "rows", None)
+    sel = _picked(ev, "rows")
     tok = ("df", rows[sel[0]]["name"]) if sel and sel[0] < len(rows) else None
     if tok and tok != st.session_state.get("cm_df_tok"):            # act on a new tap only
         st.session_state["cm_df_tok"] = tok
@@ -715,6 +730,17 @@ def _to_drive(path: Path, cm: dict) -> str | None:
         return str(e)
 
 
+def _picked(ev, what: str):
+    """The dataframe's selection (rows / cells), whichever way this Streamlit returns it."""
+    try:
+        return ev.selection[what]
+    except Exception:                                  # noqa: BLE001
+        try:
+            return ev["selection"][what]
+        except Exception:                              # noqa: BLE001
+            return None
+
+
 def new_on_drive(cm: dict) -> list:
     """[{"name", "folder", "seconds"}] — MP3s on Drive with no line in the cue map (seconds estimated at 192 kbps)."""
     try:
@@ -778,3 +804,177 @@ def versions_tab(cm: dict) -> None:
         except (CS.Stale, ValueError) as e:
             st.session_state["cm_msg"] = ("error", str(e))
         st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# 🔍 Gaps — plan Medium (and later Hard) section by section (Daryl, 19 Nov)
+# ---------------------------------------------------------------------------
+CAT_PHASES = {"slow": {"slow"}, "fast": {"fast", "extra"}, "speed": {"medium", "fast", "extra"}, "stop": {"stop"},
+              "start": {"wait", "slow"}, "rounds": {"wait"}, "finish": {"extra", "stop"}}
+
+
+def sections(sched: list, got: dict) -> list:
+    """Every phase turn: {"round", "i", "profile", "turn", "start", "end", "lines", "silent", "longest": (a, b)}."""
+    out, count, units = [], {}, {}
+    for ph in sched:                                     # a phase split by a ✋ hands off / ⏩ override is still one section
+        if ph.get("kind", "phase") != "phase" and ph.get("kind") != "override":
+            continue
+        u = ph.get("unit", ph["index"])
+        if u in units:
+            units[u]["end"] = max(units[u]["end"], ph["end"])
+        else:
+            units[u] = {**ph, "kind": "phase"}
+    for ph in units.values():
+        k = (ph["round"], ph["profile"])
+        count[k] = count.get(k, 0) + 1
+        a, b = float(ph["start"]), float(ph["end"])
+        inside = [p for p in got["plays"] if p["time"] < b and p["time"] + p["seconds"] > a]
+        spans = E._free_spans(a, b, [(p["time"], p["time"] + p["seconds"]) for p in inside])
+        longest = max(spans, key=lambda s_: s_[1] - s_[0], default=(a, a))
+        out.append({"round": ph["round"], "i": sum(1 for x in out if x["round"] == ph["round"]), "profile": ph["profile"],
+                    "turn": count[k], "start": a, "end": b, "lines": [p["line"] for p in inside if p["time"] >= a - 0.01],
+                    "silent": round(sum(y - x for x, y in spans), 1), "longest": longest})
+    return out
+
+
+def _sec_name(sec: dict, repeated: set) -> str:
+    return PH_LABEL[sec["profile"]] + (f" {sec['turn']}" if sec["profile"] in repeated else "")
+
+
+def candidates(cm: dict, sec: dict, got: dict, look: str, recs: dict) -> tuple:
+    """💡 Lines that could fill the section's longest silence: (recorded with a background in the round's look,
+    recorded elsewhere / transparent only). Not already heard in that round; not intro / outro / surprise lines;
+    short enough. Best first: used in this kind of section before, then a matching category, then longest."""
+    import studio as SD
+    room = sec["longest"][1] - sec["longest"][0] - 2 * E.LINE_GAP
+    in_round = {p["line"] for p in got["plays"] if p["round"] == sec["round"]}
+    good, other = [], []
+    for ln in cm["lines"]:
+        cues = ln.get("cues") or []
+        if ln["name"] in in_round or any(c.get("type") in ("intro", "outro", "surprise") for c in cues):
+            continue
+        secs = CS.played_seconds(ln)
+        if secs > room:
+            continue
+        used = any(sec["profile"] in (c.get("phases") or []) for c in cues)
+        cat = any(sec["profile"] in CAT_PHASES.get(str(x).lower(), set()) for x in ln.get("cats") or [])
+        score = 2 if used else 1 if cat else 0
+        have = recs.get(SD._key(Path(str(ln.get("file") or ln["name"])).stem), [])
+        row = {"name": ln["name"], "seconds": round(secs, 1), "score": score, "line": ln,
+               "where": ", ".join(sorted({x["look"] + ("" if x["background"] else " (transparent)") for x in have})) or "not recorded"}
+        (good if any(x["look"] == look and x["background"] for x in have) else other).append(row)
+    key = lambda r: (-r["score"], -r["seconds"])                                    # noqa: E731
+    return sorted(good, key=key), sorted(other, key=key)
+
+
+def gaps_tab(cm: dict) -> None:
+    import studio as SD
+    from planner.edge import load_looks
+    ss = st.session_state
+    c = st.columns([2, 1, 1, 1])
+    diff = c[0].selectbox("Difficulty", DIFF_OPTS, index=1, format_func=E.DIFFICULTIES.get, key="cm_gp_diff")
+    rounds = c[1].selectbox("Rounds", [3, 4, 5, 6], index=3, key="cm_gp_rounds",
+                            help="6 shows every round number; the 6th is the Last round.")
+    flag = c[2].number_input("A gap is silence of (s)", 4, 30, 10, key="cm_gp_flag")
+    surp = c[3].toggle("🎲 Surprises", key="cm_gp_surp", disabled=diff == "hard",
+                       help="Surprise lines always play and push others aside — check with them on.")
+    split = CS.is_split(cm)
+    with st.expander("📋 Medium's own copy · automatic fillers", expanded=not split):
+        st.caption("Medium starts as a copy of Chill: every cue Chill plays gets its own Medium copy (Slow / Medium / Fast "
+                   "cues on the round's 1st turn, so the 2nd turns start empty) and a Hard copy (Hard plays as before, "
+                   "ready to plan later). Medium-only cues are wiped; the \"at random\" fillers stop playing in Medium (they "
+                   "still play in Hard) and show up below as candidates. Intro, outro, surprise and straight-after cues stay "
+                   "shared. It all goes into your unsaved changes — 💾 to keep it.")
+        if st.button("📋 Wipe Medium and copy Chill into it", key="cm_gp_copy", type="secondary" if split else "primary"):
+            new, rep = CS.copy_chill_to_medium(_disk_work())
+            CS.save_draft(new)
+            ss[SS_MAP] = new
+            ss["cm_msg"] = ("info", f"📋 Medium now has its own copy of {rep['copied']} Chill cues ({len(rep['lines'])} lines); "
+                                    f"{rep['fillers']} fillers taken out of Medium, {rep['wiped']} Medium-only cues wiped — "
+                                    "not saved yet.")
+            st.rerun()
+        af = dict(cm.get("autofill") or {})
+        cols = st.columns(2)
+        for k, d in enumerate(("medium", "hard")):
+            on = cols[k].toggle(f"🔁 Automatic fillers in {E.DIFFICULTIES[d]}", value=E.autofill_on(cm, d), key=f"cm_gp_af_{d}",
+                                help="The app drops a filler / callout into any silence over 18 s (Hard also gets callouts). "
+                                     "Off while you plan by hand, so the real gaps show.")
+            if on != E.autofill_on(cm, d):
+                work = _disk_work()
+                work["autofill"] = {**(work.get("autofill") or {}), d: on}
+                CS.save_draft(work)
+                ss[SS_MAP] = work
+                st.rerun()
+    sched = E.schedule(diff, rounds, 0, surprises=surp and diff != "hard")
+    got = E.resolve_lines(sched, cm, diff, 0)
+    secs = sections(sched, got)
+    n = rounds
+    repeated = {p for p in PHASES if sum(1 for x in secs if x["round"] == 1 and x["profile"] == p) > 1}
+    cols = [_sec_name(x, repeated) for x in secs if x["round"] == 1]
+    table = []
+    for r in range(1, n + 1):
+        row = {"Round": "Last" if r == n else str(r)}
+        for x in (x for x in secs if x["round"] == r):
+            lng = x["longest"][1] - x["longest"][0]
+            icon = "🔴" if not x["lines"] or lng >= flag else "🟡" if lng >= flag * 0.6 else "🟢"
+            row[_sec_name(x, repeated)] = f"{icon} {len(x['lines'])} · {lng:.0f}s"
+        table.append(row)
+    st.caption("Each cell: lines in that section · its longest silence. 🔴 empty or a silence over your gap · 🟡 getting "
+               "there · 🟢 fine. Tap a cell to see what could fill it." + (" Hard's phases are random each draw — plan it "
+                                                                          "differently." if diff == "hard" else ""))
+    ev = st.dataframe(table, hide_index=True, use_container_width=True, on_select="rerun", selection_mode="single-cell",
+                      key=f"cm_gp_grid_{diff}_{rounds}_{surp}")
+    cells = _picked(ev, "cells")
+    reds = [(r, x) for r in range(1, n + 1) for x in secs if x["round"] == r and
+            (not x["lines"] or x["longest"][1] - x["longest"][0] >= flag)]
+    st.caption(f"🔴 {len(reds)} gap(s) of {len(secs)} sections.")
+    sel = None
+    if cells:
+        cell = cells[0]
+        ri, colname = (cell[0], cell[1]) if isinstance(cell, (list, tuple)) else (cell.get("row"), cell.get("column"))
+        if colname in cols and ri is not None and ri < n:
+            sel = next((x for x in secs if x["round"] == ri + 1 and _sec_name(x, repeated) == colname), None)
+    if sel:
+        looks = load_looks(cm)
+        part = "last" if sel["round"] == n else str(sel["round"])
+        look = looks.get(part) or ""
+        a, b = sel["longest"]
+        st.markdown(f"#### {'Last round' if sel['round'] == n else 'Round ' + str(sel['round'])} · {_sec_name(sel, repeated)} "
+                    f"— longest silence {b - a:.1f} s (from {a - sel['start']:.1f} s in) · look: {look or '—'}")
+        st.caption("In it now: " + (", ".join(sel["lines"]) or "nothing"))
+        recs = SD.recordings(SD.load_clips()["clips"])
+        good, other = candidates(cm, sel, got, look, recs)
+        if not SD.load_clips()["clips"]:
+            st.warning("The Avatar Studio hasn't read Drive yet — open it and press 🔄 Read Drive, so recorded clips can be found.")
+        st.markdown(f"**💡 Easy wins — recorded with a background in {look or 'this look'}** ({len(good)})")
+        _cand_list(good[:15], sel, n, diff, sched, "g")
+        with st.expander(f"Not recorded in this look yet ({len(other)}) — would need recording"):
+            _cand_list(other[:25], sel, n, diff, sched, "o")
+    if reds:
+        txt = "\n".join(f"{'Last' if r == n else 'Round ' + str(r)} · {_sec_name(x, repeated)}: "
+                        f"{x['longest'][1] - x['longest'][0]:.0f} s silent, {len(x['lines'])} line(s)" for r, x in reds)
+        st.download_button("📋 The gaps as text", txt.encode("utf-8"), file_name=f"{diff}_gaps.txt", key="cm_gp_dl")
+
+
+def _cand_list(rows: list, sec: dict, n: int, diff: str, sched: list, tag: str) -> None:
+    from planner.edge import line_file
+    if not rows:
+        st.caption("None that fit.")
+    for k, r in enumerate(rows):
+        cols = st.columns([4, 2, 1])
+        stars = "★★" if r["score"] == 2 else "★" if r["score"] == 1 else ""
+        cols[0].write(f"**{r['name']}** · {r['seconds']} s {stars}")
+        cols[1].caption(r["where"])
+        if cols[2].button("➕ Here", key=f"cm_gp_add_{tag}_{k}_{sec['round']}_{sec['i']}"):
+            line = copy.deepcopy(r["line"])
+            cue = _phase_cue_at(sched, sec["round"], sec["longest"][0] + E.LINE_GAP, n, diff, CS.is_split(current()))
+            line.setdefault("cues", []).append(cue)
+            changed(current(), line)
+            st.session_state["cm_msg"] = ("info", f"➕ {r['name']}: {CS.describe(cue)} — not saved yet.")
+            st.rerun()
+        f = line_file(r["line"], cut=False)
+        if f is not None and tag == "g":
+            with cols[0]:
+                st.audio(str(f), start_time=float(r["line"].get("trim_in") or 0),
+                         end_time=float(r["line"].get("trim_out") or 0) or None)
+    st.caption("★★ already used in this kind of section · ★ its category fits.")
