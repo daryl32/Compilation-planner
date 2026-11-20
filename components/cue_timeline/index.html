@@ -73,6 +73,12 @@
   .menu .mb { display:flex; gap:6px; }
   .menu .btn { min-height:44px; min-width:44px; font-weight:600; }
   .ph[data-r] { cursor:pointer; }
+  .ph.unf { box-shadow: inset 0 0 0 3px #f2776f; }
+  .ph.unf::after { content:"!"; position:absolute; right:3px; top:2px; font-size:11px; color:#fff; background:#c0392b; border-radius:50%; width:14px; height:14px; line-height:14px; text-align:center; }
+  .b.pchill { background:#4fb3c8; color:#04212a; }
+  .b.pmed { background:#f0b95a; color:#1b1408; }
+  .b.anchor { background:#c9c3d6; color:#1b1626; }
+  .split { position:absolute; top:-22px; bottom:0; width:0; border-left:2px dashed var(--ink); opacity:.7; z-index:3; pointer-events:none; }
   .ph.phsel { outline:3px solid var(--ink); outline-offset:-3px; z-index:2; }
   .sheet { border:1px solid var(--accent); border-radius:10px; padding:10px; margin:6px 0; background:var(--panel); }
 </style>
@@ -203,9 +209,9 @@ function drawRounds() {
     for (let t = 30; t < R.end - R.start; t += 30) grid.push(`<div class="gridl" style="left:${t * zoom}px"></div>`);
     out.push(`<div class="round"><h3>${esc(R.label)} <small>${fmt(R.end - R.start)}</small></h3><div class="scroll">
       <div class="track" data-round="${R.r}" style="width:${w}px">
-        <div class="phases">${R.phases.map(ph => `<div class="ph${ph.kind !== "phase" ? " sur" : ""}${isSel(R.r, ph) ? " phsel" : ""}" data-r="${R.r}" data-t="${ph.start}" style="left:${(ph.start - R.start) * zoom}px;width:${(ph.end - ph.start) * zoom}px;background:${ph.colour}"
+        <div class="phases">${R.phases.map(ph => `<div class="ph${ph.kind !== "phase" ? " sur" : ""}${ph.unf ? " unf" : ""}${isSel(R.r, ph) ? " phsel" : ""}" data-r="${R.r}" data-t="${ph.start}" style="left:${(ph.start - R.start) * zoom}px;width:${(ph.end - ph.start) * zoom}px;background:${ph.colour}"
              title="${esc(ph.label)} ${fmt(ph.start - R.start)}–${fmt(ph.end - R.start)}">${ph.kind === "handsoff" ? "✋" : ph.kind === "override" ? "⏩" : esc(ph.label)}</div>`).join("")}</div>
-        <div class="lanes" style="height:${n * 28 + 6}px">${grid.join("")}${plays.map(p => `<button class="b ${p.cls}${p.line === D.selected ? " sel" : ""}"
+        <div class="lanes" style="height:${n * 28 + 6}px">${grid.join("")}${R.split ? `<div class="split" style="left:${(R.split - R.start) * zoom}px" title="Chill pool ← | → Medium pool"></div>` : ""}${plays.map(p => `<button class="b ${p.cls}${p.line === D.selected ? " sel" : ""}"
              style="left:${p.x0}px;width:${Math.max(p.x1 - p.x0, 10)}px;top:${p.lane * 28 + 3}px" data-line="${esc(p.line)}" data-key='${esc(JSON.stringify(p.key || null))}'
              data-round="${R.r}" title="${esc(p.line)} · ${fmt(p.time - R.start)} · ${p.seconds.toFixed(1)} s · ${esc(p.why)}">${esc(p.line)}</button>`).join("")}</div>
       </div></div></div>`);

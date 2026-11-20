@@ -43,8 +43,9 @@ bar = st.container()          # filled last, so it counts this run's edits
 names = [ln["name"] for ln in lines]
 # only the view that's open is built and sent (tabs built all four on every tap — Daryl, 19 Nov: opening a line was slow)
 import cue_sections as CSEC
-VIEWS = {"✨ Improved timeline": CSEC.improved_view, "🔲 Sections": CSEC.view, "🕒 Timeline preview": V.timeline,
-         "🎙️ Lines": V.lines_tab, "🗂️ Versions": V.versions_tab}
+import hard_lab as HLAB
+VIEWS = {"✨ Improved timeline": CSEC.improved_view, "🧪 Hard lab": HLAB.view, "🔲 Sections": CSEC.view,
+         "🕒 Timeline preview": V.timeline, "🎙️ Lines": V.lines_tab, "🗂️ Versions": V.versions_tab}
 if ss.get("cm_view_next"):                            # a tap on the timeline preview opens its section (set before the switch)
     ss["cm_view"] = ss.pop("cm_view_next")
 view = st.segmented_control("View", list(VIEWS), default="✨ Improved timeline", key="cm_view",

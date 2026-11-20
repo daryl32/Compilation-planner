@@ -1173,7 +1173,8 @@ def _silence_around(plays, a, b, total) -> float:
     return after - before
 
 
-def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, durations: dict = None) -> dict:
+def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, durations: dict = None,
+                  _raw: bool = False) -> dict:
     """The cue map played against one compilation's phases → when every line is heard, with no two overlapping.
 
     Returns {"plays": [{"time", "seconds", "line", "file", "profile", "round", "why", "moved"}] in time order,
@@ -1190,6 +1191,9 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
     - two lines wanting the same moment: the one set for fewer rounds keeps it; the other starts straight after if
       that is within MAX_DELAY seconds, and is left out otherwise. Either way it is listed in "clashes".
     durations: {line name: real seconds} for the lines whose files have been measured (else the map's estimate)."""
+    if difficulty == "hard" and not _raw and ((cue_map or {}).get("hard_rules") or {}).get("on"):
+        import hard_rules as HR                       # 💀 Hard follows Chill and Medium by rules (20 Nov)
+        return HR.resolve(sched, cue_map, seed, durations, cue_map["hard_rules"])
     rng = random.Random(seed + 4243)
     durations = durations or {}
     total = total_seconds(sched)
