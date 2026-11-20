@@ -34,9 +34,9 @@ DARK_TEXT = {"slow", "medium", "fast"}
 # The model
 # ---------------------------------------------------------------------------
 
-def model(cm: dict, diff: str, rounds: int, surp: bool) -> dict:
-    sched = E.schedule(diff, rounds, 0, surprises=surp and diff != "hard")
-    got = E.resolve_lines(sched, cm, diff, 0)
+def model(cm: dict, diff: str, rounds: int, surp: bool, seed: int = 0) -> dict:
+    sched = E.schedule(diff, rounds, seed, surprises=surp and diff != "hard")
+    got = E.resolve_lines(sched, cm, diff, seed)
     secs = V.sections(sched, got)
     repeated = {p for p in V.PHASES if sum(1 for x in secs if x["round"] == 1 and x["profile"] == p) > 1}
     return {"sched": sched, "got": got, "secs": secs, "repeated": repeated, "n": rounds, "diff": diff}
@@ -176,6 +176,7 @@ def add_here(cm: dict, M: dict, sec: dict, name: str) -> str:
 
 def view(cm: dict) -> None:
     ss = st.session_state
+    ss["cs_active_sel"] = SS_SEL
     c = st.columns([2, 1, 1, 1])
     diff = c[0].selectbox("Difficulty", V.DIFF_OPTS, index=1, format_func=E.DIFFICULTIES.get, key="cs_diff")
     rounds = c[1].selectbox("Rounds", [3, 4, 5, 6], index=3, key="cs_rounds", help="6 shows every round; the 6th is the Last round.")
@@ -209,8 +210,13 @@ def view(cm: dict) -> None:
             panel(cm, M, find(M, *sel), flag)
 
 
+def _sel_key() -> str:
+    """Which view's selection the panel works on (🔲 Sections: cs_sel · ✨ Improved timeline: it_sel)."""
+    return st.session_state.get("cs_active_sel") or SS_SEL
+
+
 def _goto(r: int, i: int) -> None:
-    st.session_state[SS_SEL] = (r, i)
+    st.session_state[_sel_key()] = (r, i)
     st.session_state[SS_MODE] = "section"
 
 
@@ -233,7 +239,7 @@ def panel(cm: dict, M: dict, sec: dict, flag: float) -> None:
             _goto(sec["round"], same[k + 1]["i"])
             st.rerun()
         if h[3].button("✕", key="cs_close", help="Close the panel"):
-            ss[SS_SEL] = None
+            ss[_sel_key()] = None
             st.rerun()
         from planner.edge import load_looks
         look = load_looks(cm).get("last" if sec["round"] == n else str(sec["round"])) or "—"
@@ -414,17 +420,19 @@ def add_panel(cm: dict, M: dict, sec: dict, look: str) -> None:
     good, other = V.candidates(cm, sec, M["got"], look, SD.recordings(clips))
     show = st.segmented_control("Show", [f"Easy wins {len(good)}", f"Needs recording {len(other)}", "All lines"],
                                 default=f"Easy wins {len(good)}", key="cs_add_show", label_visibility="collapsed") or "Easy"
+    # 🏷 the Cue Map's categories on every list, easy wins too (Daryl, 20 Nov)
+    counts = {c: sum(1 for ln in cm["lines"] if c in (ln.get("cats") or [])) for c in CS.categories(cm)}
+    pick = st.pills("Categories", [c for c in counts if counts[c]], selection_mode="multi", key="cs_add_cats",
+                    format_func=lambda c: f"{c} {counts[c]}") or []
+    q = st.text_input("Find a line", key="cs_add_q", placeholder="Find a line")
+    keep = lambda ln: (not q or q.lower() in ln["name"].lower()) and (not pick or set(pick) & set(ln.get("cats") or []))   # noqa: E731
     if show.startswith("All"):
-        q = st.text_input("Find a line", key="cs_add_q")
-        cats = CS.categories(cm)
-        pick = st.pills("Category", cats, selection_mode="multi", key="cs_add_cats") or []
         in_round = {p["line"] for p in M["got"]["plays"] if p["round"] == sec["round"]}
         rows = [{"name": ln["name"], "seconds": round(CS.played_seconds(ln), 1), "score": 0, "line": ln,
                  "where": "already in this round" if ln["name"] in in_round else ""}
-                for ln in sorted(cm["lines"], key=lambda ln: ln["name"].lower())
-                if (not q or q.lower() in ln["name"].lower()) and (not pick or set(pick) & set(ln.get("cats") or []))]
+                for ln in sorted(cm["lines"], key=lambda ln: ln["name"].lower()) if keep(ln)]
     else:
-        rows = good if show.startswith("Easy") else other
+        rows = [r for r in (good if show.startswith("Easy") else other) if keep(r["line"])]
     for k, r in enumerate(rows[:30]):
         cols = st.columns([5, 1])
         stars = "★★" if r["score"] == 2 else "★" if r["score"] == 1 else ""
@@ -441,3 +449,80 @@ def add_panel(cm: dict, M: dict, sec: dict, look: str) -> None:
     if st.button("← Back to the section", key="cs_add_back"):
         ss[SS_MODE] = "section"
         st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# ✨ Improved timeline (Daryl, 20 Nov): the zoomable timeline he likes + the phase panel on the right
+# ---------------------------------------------------------------------------
+
+def audio_map(cm: dict, names) -> dict:
+    """{line: {"url", "start", "end", "speed"}} so the timeline plays a clip itself (▶ Hear) — the line's own file,
+    played from its cut start to its cut end at its speed."""
+    from cut_editor import media_url
+    from planner.edge import line_file
+    out = {}
+    by = {ln["name"]: ln for ln in cm["lines"]}
+    for n in dict.fromkeys(names):
+        ln = by.get(n)
+        f = line_file(ln, cut=False) if ln else None
+        if f is None:
+            continue
+        url = media_url(f, "audio/mpeg", "cue_timeline_audio")
+        if url:
+            out[n] = {"url": url, "start": float(ln.get("trim_in") or 0), "end": float(ln.get("trim_out") or 0),
+                      "speed": float(ln.get("speed") or 1) or 1}
+    return out
+
+
+def improved_view(cm: dict) -> None:
+    from cue_timeline import cue_timeline
+    ss = st.session_state
+    ss["cs_active_sel"] = "it_sel"
+    c = st.columns([2, 1, 1, 1, 1])
+    diff = c[0].selectbox("Difficulty", V.DIFF_OPTS, index=1, format_func=E.DIFFICULTIES.get, key="it_diff")
+    rounds = c[1].selectbox("Rounds", [3, 4, 5, 6], index=3, key="it_rounds", help="6 shows every round; the 6th is the Last round.")
+    seed = int(c[2].number_input("Draw", 0, 9999, 0, key="it_seed", help="Another random draw (Hard's phases, surprises, random lines)."))
+    surp = c[3].toggle("🎲 Surprises", key="it_surp", disabled=diff == "hard")
+    flag = c[4].number_input("Gap = silence of (s)", 4, 30, 10, key="it_flag")
+    V.medium_tools(cm)
+    M = model(cm, diff, rounds, surp, seed)
+    sel = ss.get("it_sel")
+    sec = find(M, *sel) if sel and sel[0] <= rounds else None
+    if sel and sec is None:
+        ss["it_sel"] = None
+    if sec:
+        left, right = st.columns([3, 2], gap="medium")
+    else:
+        left, right = st.container(), None
+    with left:
+        got = M["got"]
+        data = V.timeline_data(cm, M["sched"], got)
+        data.update(readonly=True, mode="improved",
+                    audio=audio_map(cm, [p["line"] for p in got["plays"]] + got["intro"] + got["outro"]),
+                    selPhase={"round": sec["round"], "start": sec["start"], "end": sec["end"]} if sec else None)
+        ev = cue_timeline(data, key=f"it_tl_{diff}")
+        if isinstance(ev, dict) and ev.get("nonce") and ev["nonce"] != ss.get("it_nonce"):
+            ss["it_nonce"] = ev["nonce"]
+            act = ev.get("act")
+            if act == "open":                                # ✎ Open — the line's full card (opens in this same run)
+                V.select(ev.get("line"))
+                ss["cm_dialog"] = True
+            elif act == "phase":                             # a phase → its panel on the right
+                t, r = float(ev.get("time") or 0), int(ev.get("round") or 1)
+                hit = next((x for x in M["secs"] if x["round"] == r and x["start"] <= t < x["end"]), None)
+                if hit:
+                    ss["it_sel"] = (hit["round"], hit["i"])
+                    ss[SS_MODE] = "section"
+                st.rerun()
+            else:                                            # intro / outro order, add, take off
+                msg = V.apply_action(cm, ev, M["sched"], diff)
+                if msg:
+                    ss["cm_msg"] = ("info", msg)
+                st.rerun()
+        if got["clashes"]:
+            with st.expander(f"⚠️ {len(got['clashes'])} clash(es) in this draw"):
+                for x in got["clashes"]:
+                    st.write(f"**{x['line']}** — {x['where']}: {x['result']} (with {x['with']})")
+    if right is not None:
+        with right:
+            panel(cm, M, sec, flag)

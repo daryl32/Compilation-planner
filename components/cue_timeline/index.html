@@ -67,6 +67,13 @@
   .ghost { position:fixed; z-index:50; pointer-events:none; background:var(--accent); color:var(--accent-ink); border-radius:999px;
            padding:5px 12px; font-size:13px; font-weight:600; transform:translate(-50%,-140%); box-shadow:0 4px 12px rgba(0,0,0,.3); white-space:nowrap; }
   .say { color:var(--accent); font-size:13px; min-height:18px; }
+  .menu { position:absolute; z-index:40; background:var(--panel); border:1px solid var(--accent); border-radius:10px; padding:8px;
+          box-shadow:0 6px 18px rgba(0,0,0,.35); min-width:220px; }
+  .menu .mt { font-weight:700; font-size:13px; margin:0 0 6px; max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .menu .mb { display:flex; gap:6px; }
+  .menu .btn { min-height:44px; min-width:44px; font-weight:600; }
+  .ph[data-r] { cursor:pointer; }
+  .ph.phsel { outline:3px solid var(--ink); outline-offset:-3px; z-index:2; }
   .sheet { border:1px solid var(--accent); border-radius:10px; padding:10px; margin:6px 0; background:var(--panel); }
 </style>
 </head>
@@ -196,7 +203,7 @@ function drawRounds() {
     for (let t = 30; t < R.end - R.start; t += 30) grid.push(`<div class="gridl" style="left:${t * zoom}px"></div>`);
     out.push(`<div class="round"><h3>${esc(R.label)} <small>${fmt(R.end - R.start)}</small></h3><div class="scroll">
       <div class="track" data-round="${R.r}" style="width:${w}px">
-        <div class="phases">${R.phases.map(ph => `<div class="ph${ph.kind !== "phase" ? " sur" : ""}" style="left:${(ph.start - R.start) * zoom}px;width:${(ph.end - ph.start) * zoom}px;background:${ph.colour}"
+        <div class="phases">${R.phases.map(ph => `<div class="ph${ph.kind !== "phase" ? " sur" : ""}${isSel(R.r, ph) ? " phsel" : ""}" data-r="${R.r}" data-t="${ph.start}" style="left:${(ph.start - R.start) * zoom}px;width:${(ph.end - ph.start) * zoom}px;background:${ph.colour}"
              title="${esc(ph.label)} ${fmt(ph.start - R.start)}–${fmt(ph.end - R.start)}">${ph.kind === "handsoff" ? "✋" : ph.kind === "override" ? "⏩" : esc(ph.label)}</div>`).join("")}</div>
         <div class="lanes" style="height:${n * 28 + 6}px">${grid.join("")}${plays.map(p => `<button class="b ${p.cls}${p.line === D.selected ? " sel" : ""}"
              style="left:${p.x0}px;width:${Math.max(p.x1 - p.x0, 10)}px;top:${p.lane * 28 + 3}px" data-line="${esc(p.line)}" data-key='${esc(JSON.stringify(p.key || null))}'
@@ -204,6 +211,20 @@ function drawRounds() {
       </div></div></div>`);
   });
   $("rounds").innerHTML = out.join("");
+  if (D.mode === "improved") {      // ✨ improved timeline (20 Nov): a clip → ▶ Hear / ✎ Open; a phase → its panel
+    document.querySelectorAll(".b").forEach(b => b.onclick = e => { e.stopPropagation(); showMenu(b); });
+    document.querySelectorAll(".ph").forEach(ph => ph.onclick = e => {
+      e.stopPropagation(); hideMenu();
+      send({act: "phase", round: +ph.dataset.r, time: +ph.dataset.t + 0.01});
+    });
+    document.querySelectorAll(".track").forEach(tr => tr.addEventListener("click", e => {
+      if (e.target.closest(".b") || e.target.closest(".ph")) return;
+      hideMenu();
+      const R = D.rounds.find(x => x.r === +tr.dataset.round), rect = tr.getBoundingClientRect();
+      send({act: "phase", round: R.r, time: R.start + Math.max(0, (e.clientX - rect.left) / zoom)});
+    }));
+    return;
+  }
   if (D.readonly) {                 // 🔲 a preview (20 Nov): a tap opens that section in the Sections view — no dragging
     document.querySelectorAll(".b").forEach(b => b.onclick = e => {
       e.stopPropagation();
@@ -230,6 +251,41 @@ function drawRounds() {
     showSheet({at: addAt});
   }));
 }
+
+function isSel(r, ph) {
+  const S = D.selPhase;
+  return !!S && S.round === r && ph.start >= S.start - 0.01 && ph.start < S.end - 0.01;
+}
+const player = new Audio(); player.preload = "none";
+let playing = null, stopAt = 0;
+player.addEventListener("timeupdate", () => { if (stopAt && player.currentTime >= stopAt) stopPlay(); });
+player.addEventListener("ended", () => stopPlay());
+function stopPlay() { player.pause(); playing = null; stopAt = 0; const b = document.getElementById("mn-hear"); if (b) b.textContent = "▶ Hear"; }
+function hear(line) {
+  const a = (D.audio || {})[line];
+  if (!a || !a.url) { say("“" + line + "” isn't on the server yet — get the lines from Google Drive on the Edge page."); return; }
+  if (playing === line) { stopPlay(); return; }
+  player.src = a.url; player.playbackRate = a.speed || 1; playing = line; stopAt = a.end || 0;
+  const go = () => { try { player.currentTime = a.start || 0; } catch (x) {} player.play().catch(() => say("Tap ▶ Hear again to play.")); };
+  if (player.readyState >= 1) go(); else { player.addEventListener("loadedmetadata", go, {once: true}); player.load(); }
+  const b = document.getElementById("mn-hear"); if (b) b.textContent = "■ Stop";
+}
+function hideMenu() { const m = document.getElementById("mn"); if (m) m.remove(); }
+function showMenu(bar) {
+  hideMenu();
+  const line = bar.dataset.line, r = bar.getBoundingClientRect();
+  const m = document.createElement("div"); m.id = "mn"; m.className = "menu";
+  m.innerHTML = `<div class="mt">${esc(line)}</div><div class="mb"><button class="btn" id="mn-hear">${playing === line ? "■ Stop" : "▶ Hear"}</button>
+    <button class="btn" id="mn-open">✎ Open</button><button class="btn" id="mn-x" aria-label="Close">✕</button></div>`;
+  document.body.appendChild(m);
+  const top = r.bottom + window.scrollY + 6, left = Math.min(Math.max(4, r.left + window.scrollX), document.body.clientWidth - m.offsetWidth - 4);
+  m.style.top = top + "px"; m.style.left = left + "px";
+  document.getElementById("mn-hear").onclick = e => { e.stopPropagation(); hear(line); };
+  document.getElementById("mn-open").onclick = e => { e.stopPropagation(); hideMenu(); send({act: "open", line}); };
+  document.getElementById("mn-x").onclick = e => { e.stopPropagation(); hideMenu(); };
+  setHeight();
+}
+document.addEventListener("click", e => { if (!e.target.closest("#mn") && !e.target.closest(".b")) hideMenu(); });
 
 function showSheet(opts) {
   const lines = D.pick || [];
@@ -311,7 +367,8 @@ function armDrag(el, what, onTap) {
   el.addEventListener("contextmenu", e => e.preventDefault());
 }
 
-function draw() { if (!D) return; setZoom(); $("pick").hidden = !!D.readonly; $("hint").textContent = D.readonly ?
+function draw() { if (!D) return; setZoom(); $("pick").hidden = !!D.readonly; $("hint").textContent = D.mode === "improved" ?
+  "Tap a clip to hear it or open its card · tap a phase (or an empty spot) to edit that phase on the right." : D.readonly ?
   "A preview — tap a line or a spot to open that section in the Sections view." : $("hint").textContent; if (!D.readonly) drawPick(); drawScreen("intro"); drawRounds(); drawScreen("outro"); setHeight(); }
 
 window.addEventListener("message", ev => {

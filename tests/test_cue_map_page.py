@@ -270,6 +270,7 @@ def test_easy_wins_for_an_empty_section(voice):
     assert [g["name"] for g in good] == [pick]
     assert any(o["name"] == "Just stroke" and "Nude" in o["where"] for o in other)
     at = page_app("pages/8_Cue_Map.py")
+    at.session_state["cm_view"] = "🔲 Sections"
     at.session_state["cs_sel"] = (1, sec["i"])
     at.session_state["cs_mode"] = "add"
     at.run()
@@ -358,6 +359,7 @@ def test_section_panel_steps_remove_move_and_undo(voice):
     st.session_state.clear()
     # the page with a section open
     at = page_app("pages/8_Cue_Map.py")
+    at.session_state["cm_view"] = "🔲 Sections"
     at.session_state["cs_sel"] = (1, 1)
     at.run()
     assert not errors(at)
@@ -366,4 +368,26 @@ def test_section_panel_steps_remove_move_and_undo(voice):
     next(b for b in at.button if b.label == "✕ Remove from here").click().run()
     assert not errors(at) and CS.load_draft() is not None
     next(b for b in at.button if b.label == "↶ Undo").click().run()
+    assert not errors(at)
+
+
+def test_improved_timeline_opens_a_phase_panel_with_category_filters(voice):
+    import cue_store as CS
+    from tests.apptest_util import errors, page_app
+    new, _ = CS.copy_chill_to_medium(CS.load())
+    CS.save(new, 0, "split")
+    at = page_app("pages/8_Cue_Map.py").run()                       # ✨ Improved timeline is the first view
+    assert not errors(at) and not any("Round 2" in (m.value or "") for m in at.markdown)
+    at.session_state["it_sel"] = (2, 5)                              # Round 2 · Medium 2 (as a tap on that phase does)
+    at.run()
+    assert not errors(at)
+    assert any("Round 2 · Medium 2" in (m.value or "") for m in at.markdown)
+    next(b for b in at.button if b.label == "→").click().run()      # → the next section, in this view
+    assert not errors(at) and at.session_state["it_sel"] == (2, 6)
+    assert any("Round 2 · Fast 2" in (m.value or "") for m in at.markdown)
+    next(b for b in at.button if "Add a line here" in b.label).click().run()
+    assert not errors(at)
+    assert any(getattr(w, "label", "") == "Categories" for w in at.get("button_group"))   # 🏷 categories on the add list
+    next(b for b in at.button if b.label == "✕").click().run() if any(b.label == "✕" for b in at.button) else None
+    at.run()
     assert not errors(at)

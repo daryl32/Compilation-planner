@@ -512,8 +512,19 @@ def timeline_data(cm: dict, sched: list, got: dict) -> dict:
     rounds = []
     for r in range(1, n + 1):
         phs = [ph for ph in sched if ph["round"] == r]
+        units, turn, lab = {}, {}, {}
+        for ph in phs:                                  # Medium's 2nd Slow / Medium / Fast read "Slow 2" … (20 Nov)
+            if ph.get("kind", "phase") == "phase":
+                u = ph.get("unit", ph["index"])
+                if u not in units:
+                    turn[ph["profile"]] = turn.get(ph["profile"], 0) + 1
+                    units[u] = turn[ph["profile"]]
+        rep = {p_ for p_, k_ in turn.items() if k_ > 1}
+        for ph in phs:
+            k_ = units.get(ph.get("unit", ph["index"]), 1)
+            lab[ph["index"]] = PH_LABEL[ph["profile"]] + (f" {k_}" if ph["profile"] in rep else "")
         rounds.append({"r": r, "label": "Last round" if r == n else f"Round {r}", "start": phs[0]["start"], "end": phs[-1]["end"],
-                       "phases": [{"profile": ph["profile"], "label": PH_LABEL[ph["profile"]], "start": ph["start"],
+                       "phases": [{"profile": ph["profile"], "label": lab[ph["index"]], "start": ph["start"],
                                    "end": ph["end"], "kind": ph.get("kind", "phase"),
                                    "colour": SUR_COLOUR.get(ph.get("kind"), _hex(ph["profile"]))} for ph in phs]})
     by_name = {ln["name"]: ln for ln in cm["lines"]}
