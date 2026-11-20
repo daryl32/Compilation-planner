@@ -81,3 +81,24 @@ def test_the_lab_page(tmp_path, monkeypatch):
     next(b for b in at.button if "Bake these rules" in b.label).click().run()
     assert not errors(at)
     assert CS.load_draft()["map"]["hard_rules"]["on"] and not CS.load().get("hard_rules")      # unsaved until 💾
+
+
+def test_last_extra_plays_chill_and_mediums_lines():
+    import edge_mode as E
+    import hard_rules as HR
+    cm = _split_map()
+    FE = HR.final_extras(cm, 5)
+    for seed in range(6):
+        sch = E.schedule("hard", 5, seed)
+        got = HR.resolve(sch, cm, seed, None, {"autofill": False})
+        for r in range(1, 6):
+            ph = HR.final_extra(sch, r)
+            here = [p for p in got["plays"] if ph["start"] <= p["time"] < ph["end"]]
+            assert sorted(p["line"] for p in here) == sorted(x["line"] for x in FE["chill"][r])
+            assert all(p["time"] + p["seconds"] <= ph["end"] + 1e-3 for p in here)
+            countdown = [x for x in FE["chill"][r] if x["off"] >= x["len"] / 2]
+            for x in countdown:                                  # second-half lines keep their distance to the end
+                p = next(p for p in here if p["line"] == x["line"])
+                assert abs((ph["end"] - p["time"]) - (x["len"] - x["off"])) < 1.0
+    own = HR.resolve(E.schedule("hard", 5, 1), cm, 1, None, {"final_extra": "hard", "autofill": False})
+    assert not any(p.get("pool") == "fe" for p in own["plays"])

@@ -23,7 +23,11 @@ import random
 import edge_mode as E
 
 DEFAULTS = {"on": False, "split": 0.5, "first": "chill", "second": "medium", "max_repeat": 2, "per_phase": 1,
-            "offset": 0.5, "fallback": True, "autofill": True, "anchors": True}
+            "offset": 0.5, "fallback": True, "autofill": True, "anchors": True,
+            "final_extra": "chill", "fe_timing": "ends"}
+FE_SOURCES = ("chill", "medium", "hard")
+FE_TIMING = {"ends": "first half from its start, second half from its end",
+             "start": "from the phase start", "stretch": "stretched to the longer phase"}
 SKIP_WHY = ("callout", "fills", "🎲")
 
 
@@ -34,6 +38,32 @@ def rules_of(cm: dict) -> dict:
 def _no_auto(cm: dict) -> dict:
     out = dict(cm)
     out["autofill"] = {**(cm.get("autofill") or {}), "hard": False, "medium": False}
+    return out
+
+
+def final_extra(sched: list, r: int):
+    """The round's last Extra phase (the one before Stop), or None."""
+    ex = [ph for ph in sched if ph["round"] == r and ph.get("kind", "phase") == "phase" and ph["profile"] == "extra"]
+    return ex[-1] if ex else None
+
+
+def final_extras(cm: dict, rounds: int, durations: dict = None) -> dict:
+    """{"chill" | "medium": {round: [{line, off, seconds, len}]}} — the lines each plays in its last Extra of each
+    round, with where they start in that phase (Chill and Medium played with the same number of rounds)."""
+    out = {}
+    for src in ("chill", "medium"):
+        sch = E.schedule(src, rounds, 0)
+        got = E.resolve_lines(sch, _no_auto(cm), src, 0, durations, _raw=True)
+        per = {}
+        for r in range(1, rounds + 1):
+            ph = final_extra(sch, r)
+            if not ph:
+                continue
+            per[r] = [{"line": p["line"], "off": round(p["time"] - ph["start"], 3), "seconds": p["seconds"],
+                       "len": ph["end"] - ph["start"]}
+                      for p in got["plays"] if ph["start"] <= p["time"] < ph["end"]
+                      and not str(p.get("why") or "").startswith(SKIP_WHY)]
+        out[src] = per
     return out
 
 
@@ -77,11 +107,46 @@ def resolve(sched: list, cm: dict, seed: int = 0, durations: dict = None, rules:
     base = E.resolve_lines(sched, _no_auto(cm), "hard", seed, durations, _raw=True)
     mids = middles(sched)
     in_middle = lambda t, r: any(ph["start"] <= t < ph["end"] for ph in mids.get(r, []))      # noqa: E731
-    plays = [dict(p) for p in base["plays"] if R["anchors"] and not in_middle(p["time"], p["round"])]
+    by_name = {ln["name"]: ln for ln in cm.get("lines") or []}
+    fe_src = R.get("final_extra") or "hard"
+    FE = final_extras(cm, n, durations)
+    fe_ph = {r: final_extra(sched, r) for r in range(1, n + 1)}
+    in_fe = lambda t, r: bool(fe_ph.get(r)) and fe_ph[r]["start"] <= t < fe_ph[r]["end"]      # noqa: E731
+    plays = [dict(p) for p in base["plays"] if R["anchors"] and not in_middle(p["time"], p["round"])
+             and not (fe_src != "hard" and in_fe(p["time"], p["round"]))]
     for p in plays:
         p["pool"] = "anchor"
+    fe_diff = {}
+    if R["anchors"] and fe_src != "hard":
+        for r, ph in fe_ph.items():
+            if not ph:
+                continue
+            a = [(x["line"], x["off"]) for x in FE.get("chill", {}).get(r, [])]
+            b = [(x["line"], x["off"]) for x in FE.get("medium", {}).get(r, [])]
+            if a != b:
+                fe_diff[r] = True
+            L = ph["end"] - ph["start"]
+            for x in FE.get(fe_src, {}).get(r, []):
+                secs_ = float(durations.get(x["line"]) or x["seconds"])
+                mode = R.get("fe_timing", "ends")
+                if mode == "start" or (mode == "ends" and x["off"] < x["len"] / 2):
+                    t = ph["start"] + x["off"]
+                elif mode == "stretch":
+                    t = ph["start"] + x["off"] * L / max(x["len"], 1e-6)
+                else:                                                           # keep its distance to the end
+                    t = ph["end"] - (x["len"] - x["off"])
+                t = max(ph["start"], min(t, ph["end"] - secs_))
+                busy = [(p["time"], p["time"] + p["seconds"]) for p in plays]
+                spans = E._free_spans(ph["start"], ph["end"], busy)
+                fits = [min(max(t, a_), b_ - secs_) for a_, b_ in spans if b_ - a_ >= secs_]
+                if not fits:
+                    continue
+                spot = min(fits, key=lambda v: abs(v - t))                     # as near its timing as there's room
+                plays.append({"time": round(spot, 3), "seconds": round(secs_, 3), "line": x["line"],
+                              "file": by_name.get(x["line"], {}).get("file"), "profile": "extra", "round": r, "key": None,
+                              "moved": round(spot - t, 3), "pool": "fe",
+                              "why": f"⚓ last Extra, as in {fe_src.title()}"})
     P = pools(cm, n, durations)
-    by_name = {ln["name"]: ln for ln in cm.get("lines") or []}
 
     def secs(name):
         ln = by_name.get(name) or {}
@@ -132,7 +197,8 @@ def resolve(sched: list, cm: dict, seed: int = 0, durations: dict = None, rules:
         E._fill_silences(sched, cm, "hard", plays, secs_for(by_name, durations), rng, E.total_seconds(sched))
     plays.sort(key=lambda p: p["time"])
     return {"plays": plays, "intro": base["intro"], "outro": base["outro"], "clashes": base["clashes"],
-            "unused": base.get("unused", []), "hard": {"unfilled": unfilled, "split": split, "pools": P}}
+            "unused": base.get("unused", []), "hard": {"unfilled": unfilled, "split": split, "pools": P, "final_extra": FE,
+                                                         "fe_differs": sorted(fe_diff)}}
 
 
 def secs_for(by_name: dict, durations: dict):

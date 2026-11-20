@@ -47,11 +47,20 @@ def _knobs(R: dict) -> None:
         R["offset"] = d[1].number_input("First line starts (s into the phase)", 0.0, 5.0, float(R["offset"]), 0.25, key="hl_off")
         R["fallback"] = d[2].toggle("Borrow from the other pool when one runs dry", bool(R["fallback"]), key="hl_fb")
         R["anchors"] = d[3].toggle("Keep Hard's Wait / final Extra / Stop lines", bool(R["anchors"]), key="hl_anc")
+        f = st.columns(2)
+        R["final_extra"] = f[0].selectbox("Last Extra of each round plays", list(HR.FE_SOURCES),
+                                          index=list(HR.FE_SOURCES).index(R.get("final_extra", "chill")), key="hl_fe",
+                                          format_func=lambda x: {"chill": "Chill's last Extra lines", "medium": "Medium's last Extra lines",
+                                                                 "hard": "Hard's own cues"}[x],
+                                          help="Chill and Medium play the same lines in each round's last Extra — Hard can play them too.")
+        R["fe_timing"] = f[1].selectbox("Their timing (Hard's last Extra is longer)", list(HR.FE_TIMING),
+                                        index=list(HR.FE_TIMING).index(R.get("fe_timing", "ends")), key="hl_fet",
+                                        format_func=HR.FE_TIMING.get, disabled=R["final_extra"] == "hard")
         e = st.columns([2, 1])
         R["autofill"] = e[0].toggle("🔁 Then fill leftover silence with callouts / fillers", bool(R["autofill"]), key="hl_auto")
         if e[1].button("↺ Back to the defaults", key="hl_reset", use_container_width=True):
             ss[SS_RULES] = {k: v for k, v in HR.DEFAULTS.items() if k != "on"}
-            for k in ("hl_split", "hl_first", "hl_second", "hl_rep", "hl_per", "hl_off", "hl_fb", "hl_anc", "hl_auto"):
+            for k in ("hl_split", "hl_first", "hl_second", "hl_rep", "hl_per", "hl_off", "hl_fb", "hl_anc", "hl_auto", "hl_fe", "hl_fet"):
                 ss.pop(k, None)
             st.rerun()
 
@@ -84,13 +93,17 @@ def view(cm: dict) -> None:
             ph["unf"] = (Rr["r"], ph["start"]) in unf
     for dp, p in zip(data["plays"], got["plays"]):
         pool = p.get("pool")
-        extra = {"chill": "pchill", "medium": "pmed", "anchor": "anchor"}.get(pool, "")
+        extra = {"chill": "pchill", "medium": "pmed", "anchor": "anchor", "fe": "anchor"}.get(pool, "")
         dp["cls"] = (dp["cls"] + " " + extra).strip()
     sel = ss.get("hl_phase")
     data.update(readonly=True, mode="improved",
                 audio=_audio(cm, got), selPhase=sel)
+    if H.get("fe_differs"):
+        st.warning("Chill and Medium don't play the same lines in the last Extra of round(s) "
+                   + ", ".join(map(str, H["fe_differs"])) + f" — Hard follows {R['final_extra'].title()} there.")
     n_mid = sum(len(v) for v in HR.middles(sched).values())
     by_pool = {k: sum(1 for p in got["plays"] if p.get("pool") == k) for k in ("anchor", "chill", "medium")}
+    by_pool["anchor"] += sum(1 for p in got["plays"] if p.get("pool") == "fe")
     auto = sum(1 for p in got["plays"] if str(p.get("why") or "").startswith(("callout", "fills")))
     c[3].markdown(f"**{n_mid - len(H['unfilled'])} of {n_mid}** random phases get a pool line · "
                   f"⚓ {by_pool['anchor']} anchors · 🔵 {by_pool['chill']} Chill · 🟠 {by_pool['medium']} Medium · 🔁 {auto} fillers")
@@ -140,7 +153,12 @@ def _phase_info(cm: dict, sched: list, got: dict, sel: dict, rounds: int) -> Non
         mid = any(ph["start"] == sel["start"] for ph in HR.middles(sched).get(r, []))
         R = _rules(cm)
         if not mid:
-            st.caption("⚓ An anchor phase: it keeps Hard's own cues (Wait, final Extra, Stop).")
+            fe = HR.final_extra(sched, r)
+            if fe and fe["start"] == sel["start"] and R.get("final_extra", "chill") != "hard":
+                st.caption(f"⚓ The round's last Extra: it plays {R['final_extra'].title()}'s last-Extra lines "
+                           f"({HR.FE_TIMING[R.get('fe_timing', 'ends')]}).")
+            else:
+                st.caption("⚓ An anchor phase: it keeps Hard's own cues (Wait, Stop).")
         else:
             src = R["first"] if sel["start"] < H["split"].get(r, 0) else R["second"]
             st.caption(f"In the {'first' if src == R['first'] else 'second'} half → draws from the **{POOL_LABEL[src]}**.")
