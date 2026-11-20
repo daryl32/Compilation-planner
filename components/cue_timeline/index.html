@@ -204,6 +204,19 @@ function drawRounds() {
       </div></div></div>`);
   });
   $("rounds").innerHTML = out.join("");
+  if (D.readonly) {                 // 🔲 a preview (20 Nov): a tap opens that section in the Sections view — no dragging
+    document.querySelectorAll(".b").forEach(b => b.onclick = e => {
+      e.stopPropagation();
+      const p = D.plays.find(q => q.line === b.dataset.line && q.round === +b.dataset.round);
+      send({act: "section", round: +b.dataset.round, time: p ? p.time + 0.01 : 0});
+    });
+    document.querySelectorAll(".track").forEach(tr => tr.addEventListener("click", e => {
+      if (e.target.closest(".b")) return;
+      const R = D.rounds.find(x => x.r === +tr.dataset.round), rect = tr.getBoundingClientRect();
+      send({act: "section", round: R.r, time: R.start + Math.max(0, (e.clientX - rect.left) / zoom)});
+    }));
+    return;
+  }
   document.querySelectorAll(".b").forEach(b => {
     const movable = !b.classList.contains("auto");
     armDrag(b, movable ? {line: b.dataset.line, key: JSON.parse(b.dataset.key), from: +b.dataset.round, bar: b} : null,
@@ -298,7 +311,8 @@ function armDrag(el, what, onTap) {
   el.addEventListener("contextmenu", e => e.preventDefault());
 }
 
-function draw() { if (!D) return; setZoom(); drawPick(); drawScreen("intro"); drawRounds(); drawScreen("outro"); setHeight(); }
+function draw() { if (!D) return; setZoom(); $("pick").hidden = !!D.readonly; $("hint").textContent = D.readonly ?
+  "A preview — tap a line or a spot to open that section in the Sections view." : $("hint").textContent; if (!D.readonly) drawPick(); drawScreen("intro"); drawRounds(); drawScreen("outro"); setHeight(); }
 
 window.addEventListener("message", ev => {
   const d = ev.data; if (!d || d.type !== "streamlit:render") return;

@@ -239,8 +239,7 @@ def test_copy_chill_to_medium_turns_and_the_gaps_tab(voice):
     # the page: the Gaps tab with the copy button, then the grid
     CS.save(cm, 0, "taken over")
     at = page_app("pages/8_Cue_Map.py")
-    at.session_state["cm_view"] = "🔍 Gaps"
-    at.run()
+    at.run()                                                     # 🔲 Sections is the first view
     assert not errors(at)
     next(b for b in at.button if "Wipe Medium and copy Chill" in b.label).click().run()
     assert not errors(at) and CS.is_split(CS.load_draft()["map"]) and CS.load()["rev"] == 1
@@ -271,12 +270,12 @@ def test_easy_wins_for_an_empty_section(voice):
     assert [g["name"] for g in good] == [pick]
     assert any(o["name"] == "Just stroke" and "Nude" in o["where"] for o in other)
     at = page_app("pages/8_Cue_Map.py")
-    at.session_state["cm_view"] = "🔍 Gaps"
-    at.session_state["cm_gp_grid_medium_6_False"] = {"selection": {"rows": [], "columns": [], "cells": [(0, "Slow 2")]}}
+    at.session_state["cs_sel"] = (1, sec["i"])
+    at.session_state["cs_mode"] = "add"
     at.run()
     assert not errors(at)
     assert any("Round 1 · Slow 2" in (m.value or "") for m in at.markdown)
-    next(b for b in at.button if b.label == "➕ Here").click().run()
+    next(b for b in at.button if b.label == "Add").click().run()
     assert not errors(at)
     line = next(ln for ln in CS.load_draft()["map"]["lines"] if ln["name"] == pick)
     assert line["cues"][-1]["turn"] == 2 and line["cues"][-1]["diffs"] == ["medium"] and line["cues"][-1]["phases"] == ["slow"]
@@ -314,3 +313,57 @@ def test_dragging_moves_only_the_round_it_came_from(voice):
     V.apply_action(V.current(), {"act": "move", "line": name, "key": [name, 0], "from": 1, "round": 1, "time": 70}, sch)
     got = [p for p in E.resolve_lines(sch, V.current(), "chill", 0)["plays"] if p["line"] == name]
     assert [p["round"] for p in got] == [1]
+
+
+def test_section_panel_steps_remove_move_and_undo(voice):
+    import edge_mode as E
+    import cue_store as CS
+    import cue_map_view as V
+    import cue_sections as SEC
+    import streamlit as st
+    from tests.apptest_util import errors, page_app
+    new, _ = CS.copy_chill_to_medium(CS.load())
+    CS.save(new, 0, "split")
+    cm = V.current(reload=True)
+    M = SEC.model(cm, "medium", 6, False)
+    sec = SEC.find(M, 1, 1)                                        # Round 1 · Slow
+    allp = sorted(M["got"]["plays"], key=lambda q: q["time"])
+    room = lambda q: min([o["time"] for o in allp if o["time"] > q["time"]] or [1e9]) - (q["time"] + q["seconds"])   # noqa: E731
+    p = max((q for q in SEC.sec_plays(M, sec) if SEC.can_edit(cm, q)[0]), key=room)
+    assert room(p) > 0.7
+    # − / + 0.25 s: only this round moves
+    SEC.place(V.current(), M, p, 1, p["time"] + SEC.STEP)
+    M2 = SEC.model(V.current(), "medium", 6, False)
+    moved = [q for q in M2["got"]["plays"] if q["line"] == p["line"] and q["round"] == 1]
+    assert moved and abs(moved[0]["time"] - (p["time"] + 0.25)) < 0.01
+    others_before = sorted((q["round"], q["time"]) for q in M["got"]["plays"] if q["line"] == p["line"] and q["round"] != 1)
+    others_after = sorted((q["round"], q["time"]) for q in M2["got"]["plays"] if q["line"] == p["line"] and q["round"] != 1)
+    assert others_before == others_after
+    # ✕ remove from here: gone from round 1, other rounds kept
+    p2 = next(q for q in SEC.sec_plays(M2, SEC.find(M2, 1, 1)) if q["line"] == p["line"])
+    SEC.remove(V.current(), M2, p2)
+    M3 = SEC.model(V.current(), "medium", 6, False)
+    assert not any(q["line"] == p["line"] and q["round"] == 1 for q in M3["got"]["plays"])
+    assert sorted((q["round"], q["time"]) for q in M3["got"]["plays"] if q["line"] == p["line"]) == others_after
+    # ↶ undo twice: back to the saved map, no unsaved changes
+    assert V.undo() and V.undo()
+    assert CS.load_draft() is None and not any(V.pending().values())
+    # move to the 2nd Slow, every round
+    M = SEC.model(V.current(), "medium", 6, False)
+    p = next(q for q in SEC.sec_plays(M, SEC.find(M, 1, 1)) if SEC.can_edit(V.current(), q)[0])
+    slow2 = SEC.find(M, 1, 4)
+    SEC.move_all(V.current(), M, p, slow2)
+    M4 = SEC.model(V.current(), "medium", 6, False)
+    assert any(q["line"] == p["line"] and q["round"] == 1 and slow2["start"] <= q["time"] < slow2["end"] for q in M4["got"]["plays"])
+    st.session_state.clear()
+    # the page with a section open
+    at = page_app("pages/8_Cue_Map.py")
+    at.session_state["cs_sel"] = (1, 1)
+    at.run()
+    assert not errors(at)
+    assert any("Round 1 · Slow" in (m.value or "") for m in at.markdown)
+    assert any(b.label == "✕ Remove from here" for b in at.button) and any(b.label == "Ends at the end" for b in at.button)
+    next(b for b in at.button if b.label == "✕ Remove from here").click().run()
+    assert not errors(at) and CS.load_draft() is not None
+    next(b for b in at.button if b.label == "↶ Undo").click().run()
+    assert not errors(at)

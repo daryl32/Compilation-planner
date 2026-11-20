@@ -1,0 +1,88 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0e1117; --panel:#1a1c24; --card:#20232c; --ink:#eeeaf3; --muted:#a8a3b5; --line:#343846; --accent:#f0b95a;
+          --accent-ink:#1b1408; --full:#3fbf7f; --room:#f0b95a; --gap:#f2776f; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; padding:0; background:transparent; color:var(--ink);
+               font-family:"Source Sans Pro", -apple-system, system-ui, sans-serif; -webkit-tap-highlight-color:transparent; }
+  .grid { display:grid; gap:5px; }
+  .head { height:28px; border-radius:7px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700;
+          letter-spacing:.04em; text-transform:uppercase; overflow:hidden; white-space:nowrap; padding:0 2px; }
+  .rl { display:flex; align-items:center; font-size:13px; font-weight:600; }
+  .cell { display:flex; flex-direction:column; gap:3px; text-align:left; min-height:92px; padding:6px; border-radius:9px; cursor:pointer;
+          background:var(--panel); border:1px solid var(--line); color:var(--ink); font:inherit; overflow:hidden; touch-action:manipulation; }
+  .cell.compact { min-height:64px; }
+  .cell.sel { border:2px solid var(--accent); box-shadow:0 0 0 3px rgba(240,185,90,.25); }
+  .cell:active { transform:scale(.98); }
+  .st { display:flex; align-items:center; gap:4px; font-size:11px; font-weight:600; }
+  .dot { width:8px; height:8px; border-radius:50%; flex:0 0 8px; }
+  .chip { display:block; font-size:11px; line-height:1.25; color:var(--accent-ink); background:var(--accent); border-radius:5px; padding:2px 5px;
+          white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .chip.more { background:transparent; color:var(--muted); padding:0 2px; }
+  .chip.auto { background:transparent; color:var(--muted); border:1px dotted var(--muted); }
+  .free { font-size:11px; color:var(--muted); margin-top:auto; }
+  .legend { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--muted); margin-top:8px; }
+  .legend span { display:flex; align-items:center; gap:5px; }
+</style>
+</head>
+<body>
+<div class="grid" id="g"></div>
+<div class="legend">
+  <span><i class="dot" style="background:var(--full)"></i>Full</span>
+  <span><i class="dot" style="background:var(--room)"></i>Room</span>
+  <span><i class="dot" style="background:var(--gap)"></i>Gap — empty or long silence</span>
+  <span>Tap a section to open it</span>
+</div>
+<script>
+"use strict";
+/* 🔲 Cue Map sections grid (20 Nov 2026): one card per section, tap to open it in the side panel. Tap only — no dragging
+   (dragging on the iPad wasn't reliable). Returns {"act": "open", "round", "i", "nonce"}. */
+function post(type, extra) { window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra || {}), "*"); }
+function setHeight() { post("streamlit:setFrameHeight", {height: document.body.scrollHeight + 6}); }
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const COL = {full: "var(--full)", room: "var(--room)", gap: "var(--gap)"};
+const LAB = {full: "Full", room: "Room", gap: "Gap"};
+function theme(t) {
+  if (!t) return;
+  const r = document.documentElement.style, light = (t.base || "").toLowerCase() === "light";
+  if (t.textColor) r.setProperty("--ink", t.textColor);
+  if (t.secondaryBackgroundColor) r.setProperty("--panel", t.secondaryBackgroundColor);
+  r.setProperty("--line", light ? "#d9d5cf" : "#343846");
+  r.setProperty("--muted", light ? "#5f5a6b" : "#a8a3b5");
+  r.setProperty("--accent", light ? "#e0a03a" : "#f0b95a");
+}
+function draw(D) {
+  const g = document.getElementById("g");
+  g.style.gridTemplateColumns = `48px repeat(${D.heads.length}, minmax(0, 1fr))`;
+  const max = D.compact ? 1 : 2;
+  let h = `<div></div>` + D.heads.map(x => `<div class="head" style="background:${x.bg};color:${x.fg}" title="${esc(x.label)}">${esc(x.label)}</div>`).join("");
+  D.rounds.forEach(R => {
+    h += `<div class="rl">${esc(R.label)}</div>`;
+    R.cells.forEach(c => {
+      const shown = c.lines.slice(0, max), more = c.lines.length - shown.length;
+      h += `<button class="cell${D.compact ? " compact" : ""}${c.sel ? " sel" : ""}" data-r="${R.r}" data-i="${c.i}"
+              aria-label="${esc(R.label + " " + c.name + ": " + (c.lines.join(", ") || "empty") + ", " + c.free)}">
+        <span class="st" style="color:${COL[c.status]}"><i class="dot" style="background:${COL[c.status]}"></i>${LAB[c.status]} · ${c.lines.length}</span>
+        ${shown.map(l => `<span class="chip${l.auto ? " auto" : ""}">${esc(l.name)}</span>`).join("")}
+        ${more > 0 ? `<span class="chip more">+${more} more</span>` : ""}
+        <span class="free">${esc(c.free)}</span></button>`;
+    });
+  });
+  g.innerHTML = h;
+  g.querySelectorAll(".cell").forEach(b => b.onclick = () =>
+    post("streamlit:setComponentValue", {value: {act: "open", round: +b.dataset.r, i: +b.dataset.i, nonce: Date.now() + Math.random()}, dataType: "json"}));
+  setHeight();
+}
+window.addEventListener("message", ev => {
+  const d = ev.data; if (!d || d.type !== "streamlit:render") return;
+  theme(d.theme); draw(d.args.data);
+});
+window.addEventListener("resize", setHeight);
+post("streamlit:componentReady", {apiVersion: 1});
+</script>
+</body>
+</html>

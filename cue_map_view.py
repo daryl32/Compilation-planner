@@ -57,9 +57,41 @@ def _disk_work() -> dict:
     return d["map"] if d else CS.load()
 
 
+UNDO_KEEP = 40
+
+
+def _remember() -> None:
+    """↶ Undo: the unsaved state before this change (this session's last UNDO_KEEP)."""
+    import json
+    stack = st.session_state.setdefault("cm_undo", [])
+    snap = json.dumps(_disk_work(), sort_keys=True)
+    if not stack or stack[-1] != snap:
+        stack.append(snap)
+        del stack[:-UNDO_KEEP]
+
+
+def undo() -> bool:
+    import json
+    stack = st.session_state.get("cm_undo") or []
+    if not stack:
+        return False
+    prev = json.loads(stack.pop())
+    if CS.norm(prev.get("lines")) == CS.norm(CS.load().get("lines")) and prev.get("autofill") == CS.load().get("autofill"):
+        CS.clear_draft()
+        st.session_state[SS_MAP] = CS.load()
+    else:
+        CS.save_draft(prev)
+        st.session_state[SS_MAP] = prev
+    st.session_state["cm_gen"] = st.session_state.get("cm_gen", 0) + 1
+    if st.session_state.get(SS_SEL):
+        select(st.session_state[SS_SEL])
+    return True
+
+
 def changed(cm: dict, line: dict) -> None:
     """Put an edited / new line into the unsaved changes. Merged line by line into the draft file as it is on disk, so
     another device's unsaved edits to other lines are kept (the unsaved changes follow Daryl between devices)."""
+    _remember()
     work = _disk_work()
     if any(ln["name"] == line["name"] for ln in work["lines"]):
         work["lines"] = [line if ln["name"] == line["name"] else ln for ln in work["lines"]]
@@ -70,6 +102,7 @@ def changed(cm: dict, line: dict) -> None:
 
 
 def removed(name: str) -> None:
+    _remember()
     work = _disk_work()
     work["lines"] = [ln for ln in work["lines"] if ln["name"] != name]
     CS.save_draft(work)
@@ -131,6 +164,7 @@ def save_map(cm: dict, note: str) -> bool:
 
 
 def discard() -> None:
+    st.session_state["cm_undo"] = []
     CS.clear_draft()
     st.session_state[SS_MAP] = CS.load()
     st.session_state["cm_gen"] = st.session_state.get("cm_gen", 0) + 1
@@ -155,7 +189,12 @@ def save_bar() -> None:
     names = ch["changed"] + ch["added"] + ch["deleted"]
     n = len(names)
     box = st.container(border=True)
-    c = box.columns([4, 2, 1])
+    c = box.columns([4, 2, 1, 1])
+    if c[3].button("↶ Undo", key="cm_undo_btn", disabled=not st.session_state.get("cm_undo"), use_container_width=True,
+                   help="Undo the last change (unsaved changes only)."):
+        undo()
+        st.session_state["cm_msg"] = ("info", "↶ Undone.")
+        st.rerun()
     bits = ([f"✎ {len(ch['changed'])} changed"] if ch["changed"] else []) + \
            ([f"➕ {len(ch['added'])} added"] if ch["added"] else []) + ([f"🗑 {len(ch['deleted'])} deleted"] if ch["deleted"] else [])
     if not n:
@@ -164,7 +203,8 @@ def save_bar() -> None:
         c[0].markdown("**Not saved yet:** " + " · ".join(bits))
         c[0].caption(", ".join(names[:12]) + (" …" if n > 12 else ""))
     if c[1].button("💾 Save the cue map", type="primary", disabled=not n, use_container_width=True, key="cm_save_all"):
-        save_map(current(), " · ".join(bits) + ": " + ", ".join(names[:8]))
+        if save_map(current(), " · ".join(bits) + ": " + ", ".join(names[:8])):
+            st.session_state["cm_undo"] = []
         st.rerun()
     if c[2].button("✖ Discard", disabled=not n, use_container_width=True, key="cm_discard",
                    help="Throw away every unsaved change and go back to the saved cue map."):
@@ -591,9 +631,21 @@ def timeline(cm: dict) -> None:
     surp = c[3].toggle("🎲 Surprises", key="cm_tl_surp", disabled=diff == "hard")
     sched = E.schedule(diff, rounds, seed, surprises=surp and diff != "hard")
     got = E.resolve_lines(sched, cm, diff, seed)
-    ev = cue_timeline(timeline_data(cm, sched, got), key="cm_tl")
+    ev = cue_timeline({**timeline_data(cm, sched, got), "readonly": True}, key="cm_tl")
     if isinstance(ev, dict) and ev.get("nonce") and ev["nonce"] != st.session_state.get("cm_tl_nonce"):
         st.session_state["cm_tl_nonce"] = ev["nonce"]
+        if ev.get("act") == "section":                  # 🔲 open that section in the Sections view (20 Nov)
+            secs = sections(sched, got)
+            t, r = float(ev.get("time") or 0), int(ev.get("round") or 1)
+            sec = next((x for x in secs if x["round"] == r and x["start"] <= t < x["end"]), None) or \
+                next((x for x in secs if x["round"] == r), None)
+            if sec:
+                st.session_state["cs_sel"] = (sec["round"], sec["i"])
+                st.session_state["cs_mode"] = "section"
+                st.session_state["cs_diff"] = diff
+                st.session_state["cs_rounds"] = rounds
+                st.session_state["cm_view_next"] = "🔲 Sections"
+            st.rerun()
         if ev.get("act") == "open":                     # opens in this same run (the page calls the pop-up last) —
             select(ev.get("line"))                      # no second reload of the whole page (Daryl, 19 Nov: slow)
             st.session_state["cm_dialog"] = True
@@ -602,9 +654,6 @@ def timeline(cm: dict) -> None:
             if msg:
                 st.session_state["cm_msg"] = ("info", msg)
             st.rerun()
-    if diff != "chill":
-        st.caption("Medium and Hard repeat phases in a round: a line you drop is cued from the start of that phase's "
-                   "first turn in the round (the app's rule), so it may show on the first turn.")
     if got["clashes"]:
         with st.expander(f"⚠️ {len(got['clashes'])} clash(es) in this draw"):
             for k, x in enumerate(got["clashes"]):
@@ -889,17 +938,9 @@ def candidates(cm: dict, sec: dict, got: dict, look: str, recs: dict) -> tuple:
     return sorted(good, key=key), sorted(other, key=key)
 
 
-def gaps_tab(cm: dict) -> None:
-    import studio as SD
-    from planner.edge import load_looks
+def medium_tools(cm: dict) -> None:
+    """📋 Medium's own copy of Chill, and the automatic-filler switches."""
     ss = st.session_state
-    c = st.columns([2, 1, 1, 1])
-    diff = c[0].selectbox("Difficulty", DIFF_OPTS, index=1, format_func=E.DIFFICULTIES.get, key="cm_gp_diff")
-    rounds = c[1].selectbox("Rounds", [3, 4, 5, 6], index=3, key="cm_gp_rounds",
-                            help="6 shows every round number; the 6th is the Last round.")
-    flag = c[2].number_input("A gap is silence of (s)", 4, 30, 10, key="cm_gp_flag")
-    surp = c[3].toggle("🎲 Surprises", key="cm_gp_surp", disabled=diff == "hard",
-                       help="Surprise lines always play and push others aside — check with them on.")
     split = CS.is_split(cm)
     with st.expander("📋 Medium's own copy · automatic fillers", expanded=not split):
         st.caption("Medium starts as a copy of Chill: every cue Chill plays gets its own Medium copy (Slow / Medium / Fast "
@@ -908,6 +949,7 @@ def gaps_tab(cm: dict) -> None:
                    "still play in Hard) and show up below as candidates. Intro, outro, surprise and straight-after cues stay "
                    "shared. It all goes into your unsaved changes — 💾 to keep it.")
         if st.button("📋 Wipe Medium and copy Chill into it", key="cm_gp_copy", type="secondary" if split else "primary"):
+            _remember()
             new, rep = CS.copy_chill_to_medium(_disk_work())
             CS.save_draft(new)
             ss[SS_MAP] = new
@@ -922,11 +964,26 @@ def gaps_tab(cm: dict) -> None:
                                 help="The app drops a filler / callout into any silence over 18 s (Hard also gets callouts). "
                                      "Off while you plan by hand, so the real gaps show.")
             if on != E.autofill_on(cm, d):
+                _remember()
                 work = _disk_work()
                 work["autofill"] = {**(work.get("autofill") or {}), d: on}
                 CS.save_draft(work)
                 ss[SS_MAP] = work
                 st.rerun()
+
+
+def gaps_tab(cm: dict) -> None:
+    import studio as SD
+    from planner.edge import load_looks
+    ss = st.session_state
+    c = st.columns([2, 1, 1, 1])
+    diff = c[0].selectbox("Difficulty", DIFF_OPTS, index=1, format_func=E.DIFFICULTIES.get, key="cm_gp_diff")
+    rounds = c[1].selectbox("Rounds", [3, 4, 5, 6], index=3, key="cm_gp_rounds",
+                            help="6 shows every round number; the 6th is the Last round.")
+    flag = c[2].number_input("A gap is silence of (s)", 4, 30, 10, key="cm_gp_flag")
+    surp = c[3].toggle("🎲 Surprises", key="cm_gp_surp", disabled=diff == "hard",
+                       help="Surprise lines always play and push others aside — check with them on.")
+    medium_tools(cm)
     sched = E.schedule(diff, rounds, 0, surprises=surp and diff != "hard")
     got = E.resolve_lines(sched, cm, diff, 0)
     secs = sections(sched, got)
