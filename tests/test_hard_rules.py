@@ -165,3 +165,22 @@ def test_lab_category_rule_editor(tmp_path, monkeypatch):
     assert not errors(at) and len(at.session_state["hl_rules"]["cat_rules"]) == 1
     next(b for b in at.button if "Bake these rules" in b.label).click().run()
     assert CS.load_draft()["map"]["hard_rules"]["cat_rules"]
+
+
+def test_clashing_fixed_lines_shift():
+    import hard_rules as HR
+    plays = [{"time": 10.0, "seconds": 3.0, "line": "A", "pool": "anchor", "round": 1, "moved": 0.0, "why": "x"}]
+    base = {"clashes": [{"line": "B", "with": "A", "round": 1, "where": "round 1, start of Wait", "result": "left out",
+                         "time": 11.0, "seconds": 2.0, "file": "B.mp3", "profile": "wait"}]}
+    keep = lambda t, r: True                                                       # noqa: E731
+    rep = HR._fix_clashes({**HR.DEFAULTS}, base, list(plays), keep, 300.0)
+    assert not any(c.get("left_out") for c in rep) and any("late" in c["result"] for c in rep)
+    tight = [dict(plays[0]), {"time": 13.4, "seconds": 20.0, "line": "C", "pool": "anchor", "round": 1, "moved": 0.0, "why": "y"}]
+    rep = HR._fix_clashes({**HR.DEFAULTS, "shift_later": 2.0}, base, tight, keep, 300.0)
+    assert rep[0]["left_out"]                                                     # no room within 2 s later / 1 s earlier
+    off = [dict(plays[0])]
+    rep = HR._fix_clashes({**HR.DEFAULTS, "shift_on": False}, base, off, keep, 300.0)
+    assert rep[0]["left_out"] and len(off) == 1                                   # off: only its exact moment
+    free = []
+    rep = HR._fix_clashes({**HR.DEFAULTS, "shift_on": False}, base, free, keep, 300.0)
+    assert not rep and free[0]["time"] == 11.0                                    # the blocker was dropped: back in place

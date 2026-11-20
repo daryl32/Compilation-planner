@@ -143,10 +143,18 @@ def _knobs(R: dict) -> None:
                                         index=list(HR.FE_TIMING).index(R.get("fe_timing", "ends")), key="hl_fet",
                                         format_func=HR.FE_TIMING.get, disabled=R["final_extra"] == "hard")
         e = st.columns([2, 1])
+        g = st.columns([2, 1, 1])
+        R["shift_on"] = g[0].toggle("⇄ Shift clashing lines into the nearest room", bool(R.get("shift_on", True)), key="hl_sh",
+                                    help="Hard's own Wait / last Extra / Stop lines: when one finds its moment taken, move it "
+                                         "a little instead of starting it late or leaving it out.")
+        R["shift_earlier"] = g[1].number_input("Up to … s earlier", 0.0, 10.0, float(R.get("shift_earlier", 1.0)), 0.5,
+                                               key="hl_she", disabled=not R["shift_on"])
+        R["shift_later"] = g[2].number_input("Up to … s later", 0.0, 15.0, float(R.get("shift_later", 4.0)), 0.5,
+                                             key="hl_shl", disabled=not R["shift_on"])
         R["autofill"] = e[0].toggle("🔁 Then fill leftover silence with callouts / fillers", bool(R["autofill"]), key="hl_auto")
         if e[1].button("↺ Back to the defaults", key="hl_reset", use_container_width=True):
             ss[SS_RULES] = {k: v for k, v in HR.DEFAULTS.items() if k != "on"}
-            for k in ("hl_split", "hl_first", "hl_second", "hl_rep", "hl_per", "hl_off", "hl_fb", "hl_anc", "hl_auto", "hl_fe", "hl_fet"):
+            for k in ("hl_split", "hl_first", "hl_second", "hl_rep", "hl_per", "hl_off", "hl_fb", "hl_anc", "hl_auto", "hl_fe", "hl_fet", "hl_sh", "hl_she", "hl_shl"):
                 ss.pop(k, None)
             st.rerun()
 
@@ -178,10 +186,15 @@ def view(cm: dict) -> None:
     for Rr in data["rounds"]:
         Rr["split"] = H["split"].get(Rr["r"])
         for ph in Rr["phases"]:
-            ph["unf"] = (Rr["r"], ph["start"]) in unf
+            ph["unf"] = (Rr["r"], ph["start"]) in unf or any(
+                c.get("left_out") and c["round"] == Rr["r"] and ph["start"] <= c["time"] < ph["end"] for c in got["clashes"])
     for dp, p in zip(data["plays"], got["plays"]):
         pool = p.get("pool")
         extra = {"chill": "pchill", "medium": "pmed", "anchor": "anchor", "fe": "anchor", "cat": "pcat"}.get(pool, "")
+        if pool == "anchor" and abs(float(p.get("moved") or 0)) > 0.05:
+            extra = "clash"                                                  # a fixed line that had to move: red
+        elif "clash" in dp["cls"].split():
+            dp["cls"] = " ".join(x for x in dp["cls"].split() if x != "clash")   # placed in free room, not a clash
         dp["cls"] = (dp["cls"] + " " + extra).strip()
     sel = ss.get("hl_phase")
     data.update(readonly=True, mode="improved",
@@ -272,10 +285,16 @@ def _phase_info(cm: dict, sched: list, got: dict, sel: dict, rounds: int) -> Non
 
 
 def _clashes(got: dict) -> None:
-    if got["clashes"]:
-        with st.expander(f"⚠️ {len(got['clashes'])} clash(es) among the anchors in this draw"):
-            for x in got["clashes"]:
-                st.write(f"**{x['line']}** — {x['where']}: {x['result']} (with {x['with']})")
+    cl = got["clashes"]
+    lost = [x for x in cl if x.get("left_out")]
+    if not cl:
+        st.caption("✅ No clashes in this draw — every line plays where it's meant to.")
+        return
+    with st.expander(f"{'⚠️' if lost else '⇄'} {len(cl)} clash(es) in this draw — {len(lost)} left out, "
+                     f"{len(cl) - len(lost)} moved (red on the timeline)"):
+        for x in cl:
+            st.write(f"{'❌' if x.get('left_out') else '⇄'} **{x['line']}** — {x['where']}: {x['result']}"
+                     + (f" (with {x['with']})" if x.get("with") else ""))
 
 
 def _check(cm: dict, R: dict, rounds: int) -> None:
@@ -293,11 +312,12 @@ def _check(cm: dict, R: dict, rounds: int) -> None:
             stale = r_ != R or n_ != rounds
             st.caption(("⚠️ The rules or rounds have changed since — run it again. " if stale else "")
                        + f"{out['draws']} draws of {n_} rounds")
-            m = st.columns(4)
+            m = st.columns(5)
             m[0].metric("Random phases with a pool line", f"{out['filled_pct']} %")
             m[1].metric("Longest silence (avg / worst)", f"{out['longest_avg']} / {out['longest_max']} s")
             m[2].metric("Lines heard twice in a round, per draw", out["repeats_per_draw"])
             m[3].metric("Category-rule lines per draw", out.get("cat_per_draw", 0))
+            m[4].metric("Clashes per draw (left out / moved)", f"{out.get('left_out_per_draw', 0)} / {out.get('shifted_per_draw', 0)}")
             if out["short"]:
                 st.markdown("**Where it runs short** — the phases that most often got no pool line (worth recording for):")
                 st.dataframe([{"Round": a, "Phase": E.PROFILES[b]["label"].title(), "Draws short": v,

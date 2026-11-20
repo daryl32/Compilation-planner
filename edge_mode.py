@@ -1350,18 +1350,20 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
             first = hit
             t2 = hit["time"] + hit["seconds"] + LINE_GAP
             if t2 - c["time"] > MAX_DELAY or t2 + c["seconds"] > total:
-                clashes.append({"line": c["line"], "with": first["line"], "round": c["round"], "where": where(c), "result": "left out"})
+                clashes.append({"line": c["line"], "with": first["line"], "round": c["round"], "where": where(c), "result": "left out",
+                                "time": c["time"], "seconds": c["seconds"], "file": c["file"], "profile": c["profile"]})
                 t = None
                 break
             t, tries = t2, tries + 1
             hit = blocker(t, t + c["seconds"])
             if hit is None:
                 clashes.append({"line": c["line"], "with": first["line"], "round": c["round"], "where": where(c),
-                                "result": f"starts {t - c['time']:.1f} s late"})
+                                "result": f"starts {t - c['time']:.1f} s late", "time": c["time"], "late": round(t - c["time"], 3)})
                 moved = round(t - c["time"], 2)
         if t is None or hit is not None:
             if t is not None:
-                clashes.append({"line": c["line"], "with": hit["line"], "round": c["round"], "where": where(c), "result": "left out"})
+                clashes.append({"line": c["line"], "with": hit["line"], "round": c["round"], "where": where(c), "result": "left out",
+                                "time": c["time"], "seconds": c["seconds"], "file": c["file"], "profile": c["profile"]})
             continue
         plays.append({"time": round(t, 3), "seconds": round(c["seconds"], 3), "line": c["line"], "file": c["file"],
                       "profile": c["profile"], "round": c["round"], "why": c["why"], "moved": moved, "key": c.get("key")})
@@ -1382,7 +1384,8 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
                 hit = next((p for p in plays if p is not tp and t < p["time"] + p["seconds"] + LINE_GAP - 1e-6
                             and t + a["seconds"] > p["time"] - LINE_GAP + 1e-6), None)
                 if hit is not None:
-                    clashes.append({"line": a["line"], "with": hit["line"], "round": tp["round"], "where": where_, "result": "left out"})
+                    clashes.append({"line": a["line"], "with": hit["line"], "round": tp["round"], "where": where_, "result": "left out",
+                                    "time": t, "seconds": a["seconds"], "file": a["file"], "profile": tp["profile"]})
                     continue
                 plays.append({"time": round(t, 3), "seconds": round(a["seconds"], 3), "line": a["line"], "file": a["file"],
                               "profile": tp["profile"], "round": tp["round"], "why": f"straight after {a['target']}", "moved": 0.0, "key": a.get("key")})
@@ -1404,7 +1407,8 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
         if not spans:
             inside = [p["line"] for p in plays if p["time"] < c["hi"] and p["time"] + p["seconds"] > c["lo"]]
             clashes.append({"line": c["line"], "with": ", ".join(inside) or "the phase's length", "round": c["round"],
-                            "where": where(c), "result": "left out — no silence long enough"})
+                            "where": where(c), "result": "left out — no silence long enough", "time": c["lo"], "hi": c["hi"],
+                            "seconds": c["seconds"], "file": c["file"], "profile": c["profile"]})
             continue
         lo, hi = rng.choices(spans, [max(h - l, 0.05) for l, h in spans])[0]
         plays.append({"time": round(rng.uniform(lo, hi), 3), "seconds": round(c["seconds"], 3), "line": c["line"],

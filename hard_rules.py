@@ -24,7 +24,8 @@ import edge_mode as E
 
 DEFAULTS = {"on": False, "split": 0.5, "first": "chill", "second": "medium", "max_repeat": 2, "per_phase": 1,
             "offset": 0.5, "fallback": True, "autofill": True, "anchors": True,
-            "final_extra": "chill", "fe_timing": "ends", "cat_rules": []}
+            "final_extra": "chill", "fe_timing": "ends", "cat_rules": [],
+            "shift_on": True, "shift_later": 4.0, "shift_earlier": 1.0}
 # 📐 Category rules (20 Nov): "add lines of this category to these phases of Hard, here in the phase". Each one can be
 # changed, switched off or deleted; they run in list order.
 CAT_RULE = {"on": True, "cat": "", "phases": ["medium"], "turns": [], "rounds": [], "where": "start", "per_phase": 1,
@@ -105,6 +106,50 @@ def middles(sched: list) -> dict:
     return out
 
 
+def _place_near(plays: list, t: float, d: float, lo: float, hi: float):
+    """The start nearest t where a line of d seconds fits between lo and hi, or None."""
+    spans = E._free_spans(max(lo, 0.0), hi, [(p["time"], p["time"] + p["seconds"]) for p in plays])
+    fits = [min(max(t, a), b - d) for a, b in spans if b - a >= d - 1e-6]
+    return min(fits, key=lambda v: abs(v - t)) if fits else None
+
+
+def _fix_clashes(R, base, plays, keep, total):
+    """⇄ Clashing lines (Hard's own Wait / Stop / fixed lines): put back where they were meant to be when the line that
+    blocked them was a middle line the rules dropped; with "shift" on, move a line that still clashes up to
+    shift_earlier s earlier / shift_later s later into the nearest room. Returns the clash report."""
+    early = float(R["shift_earlier"]) if R["shift_on"] else 0.0
+    late = float(R["shift_later"]) if R["shift_on"] else 0.0
+    report = []
+    for p in [p for p in plays if p.get("pool") == "anchor" and float(p.get("moved") or 0) > 0.05]:
+        want = p["time"] - p["moved"]
+        plays.remove(p)
+        spot = _place_near(plays, want, p["seconds"], want - early, min(max(p["time"], want + late) + p["seconds"], total))
+        if spot is not None and abs(spot - want) < abs(p["time"] - want) - 1e-3:
+            p["time"], p["moved"] = round(spot, 3), round(spot - want, 3)
+        plays.append(p)
+    for c in base["clashes"]:
+        if "time" not in c or not keep(c["time"], c["round"]) or c.get("late") is not None:
+            continue
+        d = float(c["seconds"])
+        if "hi" in c:                                                     # a line that plays anywhere in a phase
+            spot = _place_near(plays, c["time"], d, c["time"], c["hi"])
+        else:
+            spot = _place_near(plays, c["time"], d, c["time"] - early, min(c["time"] + late + d, total))
+        if spot is None:
+            report.append({**c, "result": "left out", "left_out": True})
+            continue
+        moved = 0.0 if "hi" in c else round(spot - c["time"], 3)
+        plays.append({"time": round(spot, 3), "seconds": round(d, 3), "line": c["line"], "file": c.get("file"),
+                      "profile": c.get("profile"), "round": c["round"], "key": None, "moved": moved, "pool": "anchor",
+                      "why": c["where"].split(", ", 1)[-1]})
+    for p in plays:
+        m = float(p.get("moved") or 0)
+        if p.get("pool") == "anchor" and abs(m) > 0.05:
+            report.append({"line": p["line"], "round": p["round"], "time": p["time"] - m, "where": f"round {p['round']}, {p['why']}",
+                           "result": f"starts {abs(m):.1f} s {'late' if m > 0 else 'early'}", "with": "", "left_out": False})
+    return report
+
+
 def resolve(sched: list, cm: dict, seed: int = 0, durations: dict = None, rules: dict = None) -> dict:
     """resolve_lines for Hard by the rules. Adds "hard": {"unfilled": [{round, profile, start, end, why}],
     "split": {round: time}, "pools": the pools}."""
@@ -154,6 +199,8 @@ def resolve(sched: list, cm: dict, seed: int = 0, durations: dict = None, rules:
                               "file": by_name.get(x["line"], {}).get("file"), "profile": "extra", "round": r, "key": None,
                               "moved": round(spot - t, 3), "pool": "fe",
                               "why": f"⚓ last Extra, as in {fe_src.title()}"})
+    keep = lambda t, r: not in_middle(t, r) and not (fe_src != "hard" and in_fe(t, r))      # noqa: E731
+    clash_report = _fix_clashes(R, base, plays, keep, E.total_seconds(sched)) if R["anchors"] else []
     P = pools(cm, n, durations)
 
     def secs(name):
@@ -208,7 +255,7 @@ def resolve(sched: list, cm: dict, seed: int = 0, durations: dict = None, rules:
     if R["autofill"]:
         E._fill_silences(sched, cm, "hard", plays, secs_for(by_name, durations), rng, E.total_seconds(sched))
     plays.sort(key=lambda p: p["time"])
-    return {"plays": plays, "intro": base["intro"], "outro": base["outro"], "clashes": base["clashes"],
+    return {"plays": plays, "intro": base["intro"], "outro": base["outro"], "clashes": clash_report,
             "unused": base.get("unused", []), "hard": {"unfilled": unfilled, "split": split, "pools": P, "final_extra": FE,
                                                          "fe_differs": sorted(fe_diff)}}
 
@@ -310,7 +357,7 @@ def secs_for(by_name: dict, durations: dict):
 def check(cm: dict, rules: dict, rounds: int = 5, draws: int = 50) -> dict:
     """The rules over many Hard draws: how full the middles are, the longest silences, which phase types run short
     in which rounds (what's worth recording)."""
-    short, longest, filled, total, repeats, cat = {}, [], 0, 0, 0, 0
+    short, longest, filled, total, repeats, cat, lost, moved = {}, [], 0, 0, 0, 0, 0, 0
     for seed in range(draws):
         sch = E.schedule("hard", rounds, seed)
         got = resolve(sch, cm, seed, None, rules)
@@ -329,6 +376,8 @@ def check(cm: dict, rules: dict, rounds: int = 5, draws: int = 50) -> dict:
             t = max(t, p["time"] + p["seconds"])
         longest.append(worst)
         cat += sum(1 for p in got["plays"] if p.get("pool") == "cat")
+        lost += sum(1 for c in got["clashes"] if c.get("left_out"))
+        moved += sum(1 for c in got["clashes"] if not c.get("left_out"))
         per = {}
         for p in got["plays"]:
             per[(p["round"], p["line"])] = per.get((p["round"], p["line"]), 0) + 1
@@ -336,6 +385,7 @@ def check(cm: dict, rules: dict, rounds: int = 5, draws: int = 50) -> dict:
     return {"draws": draws, "filled_pct": round(100 * filled / max(total, 1), 1),
             "longest_avg": round(sum(longest) / max(len(longest), 1), 1), "longest_max": round(max(longest or [0]), 1),
             "repeats_per_draw": round(repeats / max(draws, 1), 1), "cat_per_draw": round(cat / max(draws, 1), 1),
+            "left_out_per_draw": round(lost / max(draws, 1), 1), "shifted_per_draw": round(moved / max(draws, 1), 1),
             "short": sorted(((k[0], k[1], v) for k, v in short.items()), key=lambda x: -x[2])}
 
 
