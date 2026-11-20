@@ -5,7 +5,8 @@ cue_store.py; the engine that turns cues into moments is edge_mode.resolve_lines
 
   🕒 Timeline   a sample compile (difficulty / rounds / seed / surprises): phases, surprises and every line heard,
                 tap a line to edit it; clashes listed
-  🎙️ Lines      search / categories / no-cue filter / length sort; new MP3s on Drive not in the map yet
+  🎙️ Lines      search / categories / no-cue filter / 🎚️ difficulty (plays in it / missing from it) / length sort;
+                new MP3s on Drive not in the map yet
   🗂️ Versions   every save, restorable; export / import
   The line editor: play (as cut), length (start / end / speed, ✂ cut the silence), categories, volume, notes and
   cues (presets + per-type fields). It edits a draft; 💾 Save writes the whole map with a revision check.
@@ -682,6 +683,33 @@ def timeline(cm: dict) -> None:
 # 🎙️ Lines
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 🎚️ Which difficulties a line plays in (Daryl, 20 Nov: a Lines filter to see which lines, and how many, each
+# difficulty uses)
+# ---------------------------------------------------------------------------
+
+def line_diffs(line: dict, by_name: dict, cm: dict | None = None, _seen=None) -> set:
+    """The difficulties a line can play in, from its cues: a cue with no difficulty picked plays in all of them;
+    🎲 surprises only in Chill and Medium (Hard has no surprises); "straight after" follows the line it comes after;
+    Hard's phase callouts (edge_mode.CALLOUT_EXTRA) play in Hard with no cue of their own — while Hard's automatic
+    fillers are on."""
+    every = set(DIFF_OPTS)
+    _seen = set(_seen or ()) | {line["name"]}
+    out = set()
+    for c in line.get("cues") or []:
+        mine = set(c.get("diffs") or []) or every
+        t = c.get("type")
+        if t == "surprise":
+            mine &= {"chill", "medium"}
+        elif t == "after":
+            target = by_name.get(str(c.get("after") or ""))
+            mine &= line_diffs(target, by_name, cm, _seen) if target and target["name"] not in _seen else set()
+        out |= mine
+    if any(line["name"] in names for names in E.CALLOUT_EXTRA.values()) and E.autofill_on(cm or {}, "hard"):
+        out.add("hard")
+    return out
+
+
 def lines_tab(cm: dict) -> None:
     add_lines(cm)
     c = st.columns([3, 1, 1])
@@ -699,8 +727,21 @@ def lines_tab(cm: dict) -> None:
     def in_cats(ln):
         have = set(ln.get("cats") or [])
         return not cats or bool(want & have) or ("(none)" in cats and not have)
+    by_name = {ln["name"]: ln for ln in cm["lines"]}
+    plays = {ln["name"]: line_diffs(ln, by_name, cm) for ln in cm["lines"]}
+    dc = st.columns([3, 2])
+    diff = dc[0].segmented_control(
+        "🎚️ Difficulty", ["all"] + DIFF_OPTS, key="cm_fdiff", default="all",
+        format_func=lambda d: "All" if d == "all" else f"{E.DIFFICULTIES[d]} {sum(1 for v in plays.values() if d in v)}") or "all"
+    dmode = dc[1].segmented_control(
+        "Show", ["in", "missing"], key="cm_fdiff_mode", default="in", disabled=diff == "all",
+        format_func=lambda m: "Plays in it" if m == "in" else
+        f"Not in it {sum(1 for v in plays.values() if diff != 'all' and diff not in v)}") or "in"
+
+    def in_diff(ln):
+        return diff == "all" or (diff in plays[ln["name"]]) == (dmode == "in")
     rows = [ln for ln in cm["lines"] if (not q or q.lower() in ln["name"].lower() or q.lower() in (ln.get("notes") or "").lower())
-            and in_cats(ln) and (not nocue or not ln.get("cues"))]
+            and in_cats(ln) and (not nocue or not ln.get("cues")) and in_diff(ln)]
     if order == "Name":
         rows.sort(key=lambda ln: ln["name"].lower())
     else:
@@ -709,10 +750,12 @@ def lines_tab(cm: dict) -> None:
     mark = {n: "✎" for n in ch["changed"]} | {n: "➕" for n in ch["added"]}
     table = [{"": mark.get(ln["name"], ""), "Line": ln["name"], "Plays (s)": round(CS.played_seconds(ln), 2),
               "✂": "✂" if CS.is_cut(ln) else "", "Categories": ", ".join(ln.get("cats") or []),
-              "Cues": len(ln.get("cues") or []), "First cue": CS.describe(ln["cues"][0]) if ln.get("cues") else "—",
+              "Cues": len(ln.get("cues") or []),
+              **{d.title(): "✅" if d in plays[ln["name"]] else "—" for d in DIFF_OPTS},
+              "First cue": CS.describe(ln["cues"][0]) if ln.get("cues") else "—",
               "On server": "✅" if line_path(ln) else "—"} for ln in rows]
     ev = st.dataframe(table, hide_index=True, use_container_width=True, on_select="rerun", selection_mode="single-row",
-                      key=f"cm_lines_{len(rows)}_{q}_{'_'.join(cats)}_{nocue}_{order}", height=360)
+                      key=f"cm_lines_{len(rows)}_{q}_{'_'.join(cats)}_{nocue}_{order}_{diff}_{dmode}", height=360)
     sel = _picked(ev, "rows")
     tok = ("df", rows[sel[0]]["name"]) if sel and sel[0] < len(rows) else None
     if tok and tok != st.session_state.get("cm_df_tok"):            # act on a new tap only

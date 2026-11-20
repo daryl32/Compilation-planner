@@ -391,3 +391,42 @@ def test_improved_timeline_opens_a_phase_panel_with_category_filters(voice):
     next(b for b in at.button if b.label == "✕").click().run() if any(b.label == "✕" for b in at.button) else None
     at.run()
     assert not errors(at)
+
+
+def test_lines_difficulty_filter_shows_where_each_line_plays(voice):
+    """🎚️ Lines → Difficulty (Daryl, 20 Nov): which difficulties each line plays in, and the ones missing from one."""
+    import cue_map_view as V
+    lines = [
+        {"name": "Everywhere", "cues": [{"type": "phase", "phases": ["slow"], "diffs": []}]},
+        {"name": "Chill only", "cues": [{"type": "phase", "phases": ["slow"], "diffs": ["chill"]}]},
+        {"name": "A surprise", "cues": [{"type": "surprise", "diffs": []}]},
+        {"name": "After chill", "cues": [{"type": "after", "after": "Chill only"}]},
+        {"name": "Just stroke", "cues": []},                       # a Hard callout with no cue of its own
+        {"name": "Nowhere", "cues": []},
+    ]
+    by = {ln["name"]: ln for ln in lines}
+    got = {ln["name"]: V.line_diffs(ln, by, {}) for ln in lines}
+    assert got["Everywhere"] == {"chill", "medium", "hard"}
+    assert got["Chill only"] == {"chill"}
+    assert got["A surprise"] == {"chill", "medium"}
+    assert got["After chill"] == {"chill"}
+    assert got["Just stroke"] == {"hard"}
+    assert got["Nowhere"] == set()
+    assert V.line_diffs(by["Just stroke"], by, {"autofill": {"hard": False}}) == set()   # Hard's auto fillers off
+
+
+def test_lines_tab_difficulty_filter_runs(voice):
+    import cue_store as CS
+    from tests.apptest_util import errors, page_app
+    new, _ = CS.copy_chill_to_medium(CS.load())
+    CS.save(new, 0, "split")
+    at = page_app("pages/8_Cue_Map.py")
+    at.session_state["cm_view"] = "🎙️ Lines"
+    at.session_state["cm_fdiff"] = "medium"
+    at.run()
+    assert not errors(at)
+    shown = len(at.dataframe[0].value)
+    at.session_state["cm_fdiff_mode"] = "missing"
+    at.run()
+    assert not errors(at)
+    assert shown + len(at.dataframe[0].value) == len(CS.load()["lines"])          # in it + not in it = every line
