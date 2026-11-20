@@ -24,7 +24,15 @@ import edge_mode as E
 
 DEFAULTS = {"on": False, "split": 0.5, "first": "chill", "second": "medium", "max_repeat": 2, "per_phase": 1,
             "offset": 0.5, "fallback": True, "autofill": True, "anchors": True,
-            "final_extra": "chill", "fe_timing": "ends"}
+            "final_extra": "chill", "fe_timing": "ends", "cat_rules": []}
+# 📐 Category rules (20 Nov): "add lines of this category to these phases of Hard, here in the phase". Each one can be
+# changed, switched off or deleted; they run in list order.
+CAT_RULE = {"on": True, "cat": "", "phases": ["medium"], "turns": [], "rounds": [], "where": "start", "per_phase": 1,
+            "chance": 100, "when": "always", "order": "before", "min_len": 0.0, "max_repeat": 2, "pick": "least"}
+WHERE = {"start": "at the start", "middle": "in the middle", "end": "at the end", "spread": "spread through it"}
+WHEN = {"always": "always", "silent": "only if the phase has no line yet"}
+ORDER = {"before": "before the pool lines (gets first choice of the room)", "after": "after the pool lines (fills what's left)"}
+PICK = {"least": "least used first", "random": "random", "list": "in list order (A → Z)"}
 FE_SOURCES = ("chill", "medium", "hard")
 FE_TIMING = {"ends": "first half from its start, second half from its end",
              "start": "from the phase start", "stretch": "stretched to the longer phase"}
@@ -152,6 +160,8 @@ def resolve(sched: list, cm: dict, seed: int = 0, durations: dict = None, rules:
         ln = by_name.get(name) or {}
         return float(durations.get(name) or ln.get("play_seconds") or ln.get("seconds") or 2.0)
 
+    _apply_cat_rules("before", R, sched, cm, plays, secs, rng, n, by_name)
+
     total_count = {}
     unfilled, split = [], {}
     for r, ms in mids.items():
@@ -193,12 +203,102 @@ def resolve(sched: list, cm: dict, seed: int = 0, durations: dict = None, rules:
                 placed += 1
             if not placed:
                 unfilled.append({"round": r, "profile": ph["profile"], "start": ph["start"], "end": ph["end"], "why": why_not})
+    _apply_cat_rules("after", R, sched, cm, plays, secs, rng, n, by_name)
+    unfilled = [u for u in unfilled if not any(p.get("pool") == "cat" and u["start"] <= p["time"] < u["end"] for p in plays)]
     if R["autofill"]:
         E._fill_silences(sched, cm, "hard", plays, secs_for(by_name, durations), rng, E.total_seconds(sched))
     plays.sort(key=lambda p: p["time"])
     return {"plays": plays, "intro": base["intro"], "outro": base["outro"], "clashes": base["clashes"],
             "unused": base.get("unused", []), "hard": {"unfilled": unfilled, "split": split, "pools": P, "final_extra": FE,
                                                          "fe_differs": sorted(fe_diff)}}
+
+
+def describe_rule(rule: dict, n_rounds: int = None) -> str:
+    """One line in words, e.g. "Fast lines · Medium 1 & 2 · rounds 1, 3 · at the start"."""
+    r = {**CAT_RULE, **rule}
+    ph = " / ".join(E.PROFILES[p]["label"].title() for p in r["phases"]) or "no phase"
+    tl = ["last" if t == "last" else str(t) for t in r["turns"]]
+    turns = (" " + " & ".join(tl)) if tl else ""
+    rounds = ("rounds " + ", ".join(str(x) for x in r["rounds"])) if r["rounds"] else "every round"
+    extra = (f" · {r['per_phase']} a phase" if int(r["per_phase"]) > 1 else "") + \
+            (f" · {int(r['chance'])} % of the time" if float(r["chance"]) < 100 else "") + \
+            (" · only silent phases" if r["when"] == "silent" else "")
+    return f"{r['cat'] or '(no category)'} lines · {ph}{turns} · {rounds} · {WHERE[r['where']]}{extra}"
+
+
+def turn_phases(sched: list, r: int, profile: str) -> list:
+    """The phases of one kind in a round, in order — turn 1, turn 2, …"""
+    return [ph for ph in sched if ph["round"] == r and ph.get("kind", "phase") == "phase" and ph["profile"] == profile]
+
+
+def cat_rule_targets(sched: list, rule: dict, n: int) -> list:
+    """The phases a category rule adds to: [(phase, turn label)]."""
+    rounds = rule.get("rounds") or []
+    out = []
+    for r in range(1, n + 1):
+        if rounds and r not in rounds and not ("last" in rounds and r == n):
+            continue
+        for prof in rule.get("phases") or []:
+            phs = turn_phases(sched, r, prof)
+            for i, ph in enumerate(phs, 1):
+                turns = rule.get("turns") or []
+                if turns and i not in turns and not ("last" in turns and i == len(phs)):
+                    continue
+                if ph["end"] - ph["start"] < float(rule.get("min_len") or 0):
+                    continue
+                out.append(ph)
+    return out
+
+
+def _apply_cat_rules(stage, R, sched, cm, plays, secs, rng, n, by_name):
+    for i, rule in enumerate(R.get("cat_rules") or []):
+        rule = {**CAT_RULE, **rule}
+        if not rule["on"] or not rule["cat"] or rule["order"] != stage:
+            continue
+        names = sorted(ln["name"] for ln in cm.get("lines") or [] if rule["cat"] in (ln.get("cats") or []))
+        if not names:
+            continue
+        for ph in cat_rule_targets(sched, rule, n):
+            r = ph["round"]
+            if rule["when"] == "silent" and any(ph["start"] <= p["time"] < ph["end"] for p in plays):
+                continue
+            if rng.random() * 100 >= float(rule["chance"]):
+                continue
+            k = int(rule["per_phase"])
+            for j in range(k):
+                count = {}
+                for p in plays:
+                    if p["round"] == r:
+                        count[p["line"]] = count.get(p["line"], 0) + 1
+                ok = [x for x in names if count.get(x, 0) < int(rule["max_repeat"])]
+                if rule["pick"] == "random":
+                    rng.shuffle(ok)
+                elif rule["pick"] == "least":
+                    rng.shuffle(ok)
+                    ok.sort(key=lambda x: count.get(x, 0))
+                busy = [(p["time"], p["time"] + p["seconds"]) for p in plays]
+                spans = E._free_spans(ph["start"], ph["end"], busy)
+                L = ph["end"] - ph["start"]
+                for x in ok:
+                    d = secs(x)
+                    w = rule["where"]
+                    if w == "start":
+                        t = ph["start"] + float(R["offset"])
+                    elif w == "end":
+                        t = ph["end"] - d - 0.3
+                    elif w == "middle":
+                        t = ph["start"] + (L - d) / 2
+                    else:                                                       # spread: evenly through the phase
+                        t = ph["start"] + (L - d) * (j + 0.5) / k
+                    fits = [min(max(t, a), b - d) for a, b in spans if b - a >= d]
+                    if not fits:
+                        continue
+                    spot = min(fits, key=lambda v: abs(v - t))
+                    plays.append({"time": round(spot, 3), "seconds": round(d, 3), "line": x,
+                                  "file": by_name.get(x, {}).get("file"), "profile": ph["profile"], "round": r, "key": None,
+                                  "moved": round(spot - t, 3), "pool": "cat", "rule": i,
+                                  "why": f"📐 rule {i + 1}: {rule['cat']} {WHERE[w]}"})
+                    break
 
 
 def secs_for(by_name: dict, durations: dict):
@@ -210,7 +310,7 @@ def secs_for(by_name: dict, durations: dict):
 def check(cm: dict, rules: dict, rounds: int = 5, draws: int = 50) -> dict:
     """The rules over many Hard draws: how full the middles are, the longest silences, which phase types run short
     in which rounds (what's worth recording)."""
-    short, longest, filled, total, repeats = {}, [], 0, 0, 0
+    short, longest, filled, total, repeats, cat = {}, [], 0, 0, 0, 0
     for seed in range(draws):
         sch = E.schedule("hard", rounds, seed)
         got = resolve(sch, cm, seed, None, rules)
@@ -228,20 +328,21 @@ def check(cm: dict, rules: dict, rounds: int = 5, draws: int = 50) -> dict:
                 worst = max(worst, p["time"] - t)
             t = max(t, p["time"] + p["seconds"])
         longest.append(worst)
+        cat += sum(1 for p in got["plays"] if p.get("pool") == "cat")
         per = {}
         for p in got["plays"]:
             per[(p["round"], p["line"])] = per.get((p["round"], p["line"]), 0) + 1
         repeats += sum(1 for v in per.values() if v > 1)
     return {"draws": draws, "filled_pct": round(100 * filled / max(total, 1), 1),
             "longest_avg": round(sum(longest) / max(len(longest), 1), 1), "longest_max": round(max(longest or [0]), 1),
-            "repeats_per_draw": round(repeats / max(draws, 1), 1),
+            "repeats_per_draw": round(repeats / max(draws, 1), 1), "cat_per_draw": round(cat / max(draws, 1), 1),
             "short": sorted(((k[0], k[1], v) for k, v in short.items()), key=lambda x: -x[2])}
 
 
 def bake(cm: dict, rules: dict) -> dict:
     """The cue map with the rules switched on for Hard (into the unsaved changes; 💾 to keep)."""
     out = copy.deepcopy(cm)
-    out["hard_rules"] = {**DEFAULTS, **rules, "on": True}
+    out["hard_rules"] = copy.deepcopy({**DEFAULTS, **rules, "on": True})
     return out
 
 

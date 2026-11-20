@@ -102,3 +102,66 @@ def test_last_extra_plays_chill_and_mediums_lines():
                 assert abs((ph["end"] - p["time"]) - (x["len"] - x["off"])) < 1.0
     own = HR.resolve(E.schedule("hard", 5, 1), cm, 1, None, {"final_extra": "hard", "autofill": False})
     assert not any(p.get("pool") == "fe" for p in own["plays"])
+
+
+def _tagged_map():
+    cm = _split_map()
+    for ln in cm["lines"][::4]:
+        ln["cats"] = ["Fast"]
+    return cm
+
+
+def test_category_rules():
+    import edge_mode as E
+    import hard_rules as HR
+    cm = _tagged_map()
+    cat = "Fast"
+    names = {ln["name"] for ln in cm["lines"] if cat in (ln.get("cats") or [])}
+    rule = {"cat": cat, "phases": ["medium"], "turns": [1, 2], "rounds": [1, "last"], "where": "start"}
+    for seed in range(6):
+        sch = E.schedule("hard", 5, seed)
+        got = HR.resolve(sch, cm, seed, None, {"autofill": False, "cat_rules": [rule]})
+        targets = HR.cat_rule_targets(sch, rule, 5)
+        assert all(t["round"] in (1, 5) and t["profile"] == "medium" for t in targets)
+        added = [p for p in got["plays"] if p.get("pool") == "cat"]
+        assert added and all(p["line"] in names for p in added)
+        for p in added:
+            ph = next(t for t in targets if t["start"] <= p["time"] < t["end"])
+            assert p["time"] - ph["start"] < (ph["end"] - ph["start"]) / 2            # "at the start"
+        per = {}
+        for p in got["plays"]:
+            per[(p["round"], p["line"])] = per.get((p["round"], p["line"]), 0) + 1
+        assert all(per[(p["round"], p["line"])] <= 2 for p in added)
+        pl = sorted(got["plays"], key=lambda p: p["time"])
+        assert all(b["time"] >= a["time"] + a["seconds"] - 1e-3 for a, b in zip(pl, pl[1:]))
+    sch = E.schedule("hard", 5, 2)
+    off = HR.resolve(sch, cm, 2, None, {"autofill": False, "cat_rules": [{**rule, "on": False}]})
+    assert not any(p.get("pool") == "cat" for p in off["plays"])
+    end = HR.resolve(sch, cm, 2, None, {"autofill": False, "cat_rules": [{**rule, "where": "end", "turns": []}]})
+    for p in (p for p in end["plays"] if p.get("pool") == "cat"):
+        ph = E.phase_at(sch, p["time"])
+        assert ph["end"] - (p["time"] + p["seconds"]) < (ph["end"] - ph["start"]) / 2
+    assert HR.describe_rule(rule).startswith("Fast lines · Medium 1 & last") or "Medium 1 & 2" in HR.describe_rule(rule)
+    baked = E.resolve_lines(sch, HR.bake(cm, {"cat_rules": [rule]}), "hard", 2)
+    assert any(p.get("pool") == "cat" for p in baked["plays"])
+
+
+def test_lab_category_rule_editor(tmp_path, monkeypatch):
+    import planner.edge as PE
+    import cue_store as CS
+    from tests.apptest_util import errors, page_app
+    monkeypatch.setattr(PE, "voice_dir", lambda: tmp_path / "v")
+    CS.save(_tagged_map(), 0, "split")
+    at = page_app("pages/8_Cue_Map.py")
+    at.session_state["cm_view"] = "🧪 Hard lab"
+    at.run()
+    next(b for b in at.button if b.label == "➕ Add a rule").click().run()
+    assert not errors(at)
+    assert len(at.session_state["hl_rules"]["cat_rules"]) == 1
+    assert any("in this draw" in (e.label or "") for e in at.expander), [e.label for e in at.expander]
+    next(b for b in at.button if b.label == "⧉ Duplicate").click().run()
+    assert len(at.session_state["hl_rules"]["cat_rules"]) == 2
+    next(b for b in at.button if b.label == "🗑 Delete").click().run()
+    assert not errors(at) and len(at.session_state["hl_rules"]["cat_rules"]) == 1
+    next(b for b in at.button if "Bake these rules" in b.label).click().run()
+    assert CS.load_draft()["map"]["hard_rules"]["cat_rules"]
