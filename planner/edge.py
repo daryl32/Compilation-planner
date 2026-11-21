@@ -29,7 +29,8 @@ KEPT = {"edge_playlist": [], "edge_rounds": 3, "edge_difficulty": "chill", "edge
         "edge_corner": "top-left", "edge_max_videos": 0, "edge_avatar": False, "edge_avatar_mode": "corner",
         "edge_avatar_corner": "bottom-right", "edge_intro": False, "edge_quick": True, "edge_stream": True, "edge_render_name": "",
         "edge_song_per_round": False, "edge_energy_mix": False, "edge_surprises": False,
-        "edge_random_videos": False, "edge_random_n": 30, **{"edge_tags_" + p: [] for p in E.ORDER}}
+        "edge_random_videos": False, "edge_random_n": 30, **{"edge_tags_" + p: [] for p in E.ORDER},
+        **{"edge_roles_" + p: list({"wait": ["intro"], "stop": ["outro"]}.get(p, [])) for p in E.ORDER}}
 KEPT_IF_SET = tuple("ce_" + k for k in ("actors", "tags", "hair", "gg", "new", "minlen", "exclude"))
 
 
@@ -519,33 +520,49 @@ def _slice(timeline: list, a: float, b: float, offset: float, part: int, track_i
     return out
 
 
-PHASE_ROLES = {"wait": "intro", "stop": "outro"}       # 🎭 the footage Wait and Stop favour (Daryl, 15 Nov)
+DEFAULT_PHASE_ROLES = {"wait": ["intro"], "stop": ["outro"]}   # 🎭 intro clips in Wait, outro clips in Stop (15 Nov)
 
 
-def _phase_role(sched: list, t: float):
-    """🎭 The scene role the footage at compilation time t should have: intro clips in Wait, outro clips in Stop
-    (the music drives the rest)."""
+def phase_roles_or_default(phase_roles) -> dict:
+    """🎭 Roles per phase as set (Daryl, 21 Nov: his own rules, strict); None = the default."""
+    if phase_roles is None:
+        return {p: list(v) for p, v in DEFAULT_PHASE_ROLES.items()}
+    return {p: list(v) for p, v in (phase_roles or {}).items() if v}
+
+
+def _phase_role(sched: list, t: float, phase_roles: dict = None):
+    """🎭 The (first) scene role the footage at compilation time t should have — intro clips in Wait, outro clips in
+    Stop by default."""
     ph = E.phase_at(sched, t)
-    return PHASE_ROLES.get(ph["profile"]) if ph else None
+    roles = phase_roles_or_default(phase_roles).get(ph["profile"]) if ph else None
+    return roles[0] if roles else None
 
 
-def _phase_hooks(sched: list, to_comp, phase_tags: dict = None) -> dict:
-    """compile_plan's per-block hooks for one song (or round of the beat): 🎭 block_role (intro clips in Wait, outro
-    clips in Stop) and 🏷️ block_tags (the phase's own tags, when set). to_comp(song time) → compilation time, or None
-    where the song isn't heard."""
+def _phase_hooks(sched: list, to_comp, phase_tags: dict = None, phase_roles: dict = None) -> dict:
+    """compile_plan's per-block hooks for one song (or round of the beat): 🎭 block_roles_only (the phase's roles —
+    strict, any footage where too little carries them) with block_role (a bonus for the first of them), and 🏷️
+    block_tags (the phase's own tags, when set). to_comp(song time) → compilation time, or None where the song isn't
+    heard."""
     def phase(a, b):
         t = to_comp((a + b) / 2)
         return E.phase_at(sched, t) if t is not None else None
+    roles = phase_roles_or_default(phase_roles)
 
     def role(a, b):
         ph = phase(a, b)
-        return PHASE_ROLES.get(ph["profile"]) if ph else None
+        got = roles.get(ph["profile"]) if ph else None
+        return got[0] if got else None
+
+    def roles_only(a, b):
+        ph = phase(a, b)
+        return roles.get(ph["profile"]) if ph else None
     tags = {p: list(v) for p, v in (phase_tags or {}).items() if v}
 
     def block_tags(a, b):
         ph = phase(a, b)
         return tags.get(ph["profile"]) if ph else None
-    return {"block_role": role, "block_tags": block_tags if tags else None}
+    return {"block_role": role, "block_tags": block_tags if tags else None,
+            "block_roles_only": roles_only if roles else None}
 
 
 def _jump_fit(tracks: dict):
@@ -579,7 +596,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                  avatar: bool = False, avatar_mode: str = "corner", avatar_corner: str = "bottom-right",
                  intro: bool = False, signals: bool = True, round_badge: bool = True, music_fade: bool = True,
                  song_per_round: bool = False, energy_mix: bool = False, phase_tags: dict = None, surprises: bool = False,
-                 progress=None) -> dict:
+                 phase_roles: dict = None, progress=None) -> dict:
     """The Edge plan. track_ids: the playlist in playing order ([] = no song: the generated beat is the track, and
     the beat sound is on whatever `beat` says). The footage is matched 🎯 Movement only — each song on the 📐 lines
     from its music; a song's later plays (and later songs) leave out the clips already used, as long as the library
@@ -639,7 +656,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                 hit = next(((bar, off) for bar, play, off in _st if bar <= t < bar + play), None)
                 return hit[1] + t - hit[0] if hit else None
             kw = dict(movement_only=True, cuts="lines", max_videos=int(max_videos or 0), progress=prog,
-                      **_phase_hooks(sched, to_comp, phase_tags))
+                      **_phase_hooks(sched, to_comp, phase_tags, phase_roles))
             res = _cp(tid, video_ids, excluded=set(used), **kw)
             if used and (res.get("shortfall") or float(res.get("unfilled") or 0.0) > 0.5):
                 again = _cp(tid, video_ids, **kw)
@@ -674,7 +691,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                     progress(_k + d / max(t, 1), len(parts), f"song {_k + 1} of {len(parts)} · {_tid} · block {d} of {t}")
             kw = dict(movement_only=True, cuts="lines", max_videos=int(max_videos or 0), progress=prog,
                       **_phase_hooks(sched, lambda t, _o=part["offset"], _p=part["play"]: _o + t if t < _p else None,
-                                     phase_tags))
+                                     phase_tags, phase_roles))
             res = _cp(part["track_id"], video_ids, excluded=set(used), **kw)
             if used and (res.get("shortfall") or float(res.get("unfilled") or 0.0) > 0.5):
                 again = _cp(part["track_id"], video_ids, **kw)        # not enough fresh footage left
@@ -710,7 +727,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                     progress(_k + d / max(t, 1), len(rounds_), f"round {_k + 1} of {len(rounds_)} · block {d} of {t}")
             kw = dict(movement_only=True, max_videos=int(max_videos or 0), given_track=E.beat_track(sub),
                       given_segments=E.beat_segments(sub), progress=prog,
-                      **_phase_hooks(sub, lambda t: t, phase_tags),
+                      **_phase_hooks(sub, lambda t: t, phase_tags, phase_roles),
                       lab={"stem": False, "phrase": False})       # a beat has no lead layer or phrases to follow
             res = _cp(E.TRACK_ID, video_ids, excluded=set(used), **kw)
             if used and (res.get("shortfall") or float(res.get("unfilled") or 0.0) > 0.5):
@@ -855,6 +872,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             "next_up": {"on": True},
             "surprises": {"on": surprises, "list": E.surprise_list(sched)},
             "phase_tags": {p: list(v) for p, v in (phase_tags or {}).items() if v},
+            "phase_roles": phase_roles_or_default(phase_roles),
             "avatar": {"on": bool(avatar), "mode": avatar_mode if avatar_mode in E.AVATAR_MODES else "corner",
                        "corner": avatar_corner, "cues": av_cues, "placeholders": missing_avatar,
                        "looks": load_looks(cue_map) if avatar else {}},
@@ -991,9 +1009,16 @@ def _settings() -> dict:
             "song_per_round": bool(ss.get("edge_song_per_round", False)), "energy_mix": bool(ss.get("edge_energy_mix", False)),
             "surprises": bool(ss.get("edge_surprises", False)),
             "phase_tags": {p: list(ss.get("edge_tags_" + p) or []) for p in E.ORDER if ss.get("edge_tags_" + p)},
+            "phase_roles": {p: list(ss.get("edge_roles_" + p) or []) for p in E.ORDER if ss.get("edge_roles_" + p)},
             "stream": bool(ss.get("edge_stream", True)), "quick": bool(ss.get("edge_quick", True)),
             "random_videos": int(ss.get("edge_random_n", 30) or 30) if ss.get("edge_random_videos") else 0,
             "label": " ".join(str(ss.get("edge_render_name") or "").split())[:80]}
+
+
+def _video_roles(row: dict) -> set:
+    """🎭 The Reviewer role marks on a video's scenes."""
+    import scene_roles as SR
+    return {r for sc in row.get("scenes") or [] if not sc.get("excluded") for r in SR.scene_roles(sc)}
 
 
 def _draw(settings: dict, video_ids: list, seed: int, draw_videos_: bool = True) -> tuple:
@@ -1017,6 +1042,8 @@ def _draw(settings: dict, video_ids: list, seed: int, draw_videos_: bool = True)
                    for v in video_ids}
         must = [[v for v in video_ids if v in rows and set(tags) & PC._video_tags(rows[v])]
                 for tags in (settings.get("phase_tags") or {}).values() if tags]
+        must += [[v for v in video_ids if v in rows and set(roles) & _video_roles(rows[v])]
+                 for roles in phase_roles_or_default(settings.get("phase_roles")).values() if roles]
         need = E.round_seconds(settings["difficulty"]) * settings["rounds"] * 1.2
         picked, note = draw_videos(video_ids, n, seed, seconds, need, must)
         drawn.update(videos=picked, pool=list(video_ids), note=note)
@@ -1046,7 +1073,7 @@ def _job(job, settings: dict, video_ids: list, seed: int, render: bool, token, r
                            avatar_corner=settings["avatar_corner"], intro=settings["intro"],
                            song_per_round=settings["song_per_round"], energy_mix=settings["energy_mix"],
                            surprises=settings.get("surprises", False),
-                           phase_tags=settings.get("phase_tags"),
+                           phase_tags=settings.get("phase_tags"), phase_roles=settings.get("phase_roles"),
                            progress=lambda d, t, txt: job.progress(share * min(d / max(t, 1), 1.0), f"compiling · {txt}"))
         drawn = settings.get("drawn") or {}
         if drawn.get("songs"):
@@ -1191,6 +1218,7 @@ def _setup_from_plan(edge: dict) -> dict:
             "avatar_mode": av.get("mode", "corner"), "avatar_corner": av.get("corner", "bottom-right"),
             "intro": bool((edge.get("intro") or {}).get("on")), "song_per_round": bool(music.get("song_per_round")),
             "energy_mix": bool(music.get("energy_mix")), "phase_tags": dict(edge.get("phase_tags") or {}),
+            "phase_roles": edge.get("phase_roles"),
             "surprises": bool((edge.get("surprises") or {}).get("on"))}
 
 

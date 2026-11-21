@@ -18,7 +18,7 @@ from library_common import format_mmss
 from planner.edge import (JOB_KEY, KEPT, KEPT_IF_SET, RESULT_KEY, SETUP_KEYS, _missing_sources, _setup_from_plan, _start,
                           _used_line, avatar_line_clip, took_line, cue_map_path, fetch_lines, line_file, line_takes, load_cue_map,
                           save_cue_map, LOOK_PARTS, LOOK_PART_LABELS, load_looks, save_looks, local_looks,
-                          SURPRISE, surprise_count)
+                          SURPRISE, surprise_count, DEFAULT_PHASE_ROLES)
 
 
 def _take_finished_job() -> bool:
@@ -134,6 +134,36 @@ def _phase_tags_panel(rows: dict, vids: list) -> None:
                                     placeholder="any footage")
 
 
+def _roles_default() -> None:
+    for p in E.ORDER:
+        st.session_state["edge_roles_" + p] = list(DEFAULT_PHASE_ROLES.get(p, []))
+
+
+def _phase_roles_panel() -> None:
+    """🎭 Roles per phase (Daryl, 21 Nov): each phase's footage keeps to clips carrying one of its 🎭 Reviewer role
+    marks — strict; any footage where too little carries them. One set for every difficulty."""
+    import scene_roles as SR
+    roles = SR.all_roles()
+    ids = [r["id"] for r in roles]
+    names = {r["id"]: f"{r['emoji']} {r['name']}" for r in roles}
+    for p in E.ORDER:
+        PC._still_there("edge_roles_" + p, ids)
+    set_ = {p: st.session_state.get("edge_roles_" + p) or [] for p in E.ORDER}
+    is_default = {p: v for p, v in set_.items() if v} == {p: list(v) for p, v in DEFAULT_PHASE_ROLES.items()}
+    with st.expander("🎭 Roles per phase — " + ("default (Wait: intro · Stop: outro)" if is_default else
+                     " · ".join(f"{E.PROFILES[p]['label'].title()}: {', '.join(names.get(r, r) for r in v)}"
+                                for p, v in set_.items() if v) or "none — the music decides")):
+        st.caption("Tap the 🎭 Reviewer roles a phase's footage must have — only clips marked with one of them play "
+                   "there (e.g. 🏁 Outro on Medium, Fast and Extra for a challenge). Blank = the music decides. Where "
+                   "too little footage carries them, any footage fills in and the result says so. One set for every "
+                   "difficulty; works with 🏷️ Footage per phase (a clip must fit both).")
+        for p in E.ORDER:
+            st.pills(E.PROFILES[p]["label"].title(), ids, selection_mode="multi", key="edge_roles_" + p,
+                     format_func=lambda r: names.get(r, r))
+        st.button("↺ Default", key="edge_roles_reset", on_click=_roles_default, disabled=is_default,
+                  help="Wait: 🎬 Intro · Stop: 🏁 Outro · the rest: the music decides.")
+
+
 def _surprise_alone() -> None:
     """🎲 Surprise me replaces the songs picked; picking a song after it takes Surprise me out."""
     ss = st.session_state
@@ -182,8 +212,8 @@ def _setup(rows: dict, have_tl: set) -> None:
                    "first, faster later, the faster ones longer, now and then a drop back to Slow — then Extra → Stop. "
                    "⏭️ Next up always tells the truth; how long is the surprise.")
     st.caption("🔔 Every phase change brings a bell, a flash of the phase's colour and the ring in that colour; the "
-               "timer pulses over a phase's last 3 seconds. ▸ The round number sits by the timer. 🎭 Wait favours "
-               "clips marked intro, Stop clips marked outro (🎭 Reviewer roles); the music drives the rest.")
+               "timer pulses over a phase's last 3 seconds. ▸ The round number sits by the timer. 🎭 Which clips play "
+               "in each phase: 🎭 Roles per phase below (Wait: intro, Stop: outro by default).")
     total = E.round_seconds(diff) * rounds
     if surprise:
         n = surprise_count(diff, rounds, bool(st.session_state.get("edge_song_per_round")))
@@ -277,6 +307,7 @@ def _setup(rows: dict, have_tl: set) -> None:
     if mins * 60 < total:
         st.warning("There is less footage in play than the compilation is long — widen the video filters or pick fewer rounds.")
     _phase_tags_panel(rows, vids)
+    _phase_roles_panel()
     with st.popover("⚙️ More"):
         st.number_input("At most this many different videos (0 = no limit)", 0, 60, key="edge_max_videos",
                         help="Fewer different videos = fewer files to fetch for a full-quality render.")
@@ -429,6 +460,10 @@ def _reopen(ro: dict) -> None:
         ss["edge_random_n"] = int(setup["random_videos"])
     for p in E.ORDER:                                      # 🏷️ tags per phase
         ss["edge_tags_" + p] = list((setup.get("phase_tags") or {}).get(p) or [])
+    pr = setup.get("phase_roles", edge.get("phase_roles"))
+    pr = DEFAULT_PHASE_ROLES if pr is None else pr          # 🎭 (renders from before 21 Nov: the default)
+    for p in E.ORDER:
+        ss["edge_roles_" + p] = list(pr.get(p) or [])
     if edge.get("seed") is not None:
         ss["edge_seed"] = int(edge["seed"])
     vo, av = edge.get("voiceover") or {}, edge.get("avatar") or {}

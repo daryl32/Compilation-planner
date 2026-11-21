@@ -323,28 +323,46 @@ def _motion_curves(video_id: str) -> dict:
 TAG_ROOM = 2.0              # 🏷️ a block keeps to its tags only when tagged footage of at least this many times its length is left
 
 
-def _tag_exclusions(segments: list, queues: dict, block_tags) -> tuple:
-    """🏷️ ({block index: (video, scene) keys it may not use}, notes): a block keeps to footage carrying one of its
-    tags — unless too little of it is in play (under TAG_ROOM × the block), when it takes any footage (counted in the
-    notes)."""
+def _tag_exclusions(segments: list, queues: dict, block_tags=None, block_roles_only=None) -> tuple:
+    """🏷️ / 🎭 ({block index: (video, scene) keys it may not use}, notes): a block keeps to footage carrying one of its
+    tags (block_tags) and one of its roles (block_roles_only — ⏱️ Edge's 🎭 Roles per phase, strict) — unless too
+    little of it is in play (under TAG_ROOM × the block), when it takes any footage (counted in the notes)."""
     spans = [sp for v in queues.values() for sp in v]
-    out, kept, fell = {}, 0, 0
+    out = {}
+    count = {"tags": [0, 0], "roles": [0, 0]}
     for i, sg in enumerate(segments):
-        want = {str(t).lower() for t in (block_tags(float(sg["start"]), float(sg["end"])) or ())}
-        if not want:
+        a, b = float(sg["start"]), float(sg["end"])
+        want = {str(t).lower() for t in ((block_tags(a, b) if block_tags else None) or ())}
+        roles = set((block_roles_only(a, b) if block_roles_only else None) or ())
+        if not want and not roles:
             continue
-        ok = [sp for sp in spans if want & {str(x).lower() for x in sp.get("tags") or []}]
-        if sum(float(sp.get("remaining_sec") or 0.0) for sp in ok) < TAG_ROOM * (float(sg["end"]) - float(sg["start"])):
-            fell += 1
+        def fits(use_tags, use_roles):
+            return [sp for sp in spans
+                    if (not use_tags or want & {str(x).lower() for x in sp.get("tags") or []})
+                    and (not use_roles or roles & set(sp.get("roles") or []))]
+        ok, used = [], (False, False)
+        # both rules; when too little footage fits both, the tags alone, then the roles alone; else any footage
+        for use in ((bool(want), bool(roles)), (bool(want), False), (False, bool(roles))):
+            if not any(use):
+                continue
+            got = fits(*use)
+            if sum(float(sp.get("remaining_sec") or 0.0) for sp in got) >= TAG_ROOM * (b - a):
+                ok, used = got, use
+                break
+        for kind, on, kept in (("tags", want, used[0]), ("roles", roles, used[1])):
+            if on:
+                count[kind][0 if kept else 1] += 1
+        if not any(used):
             continue
         keep = {(sp["video_id"], sp["scene_id"]) for sp in ok}
         out[i] = {(sp["video_id"], sp["scene_id"]) for sp in spans} - keep
-        kept += 1
     notes = []
-    if kept or fell:
-        notes.append(f"🏷️ Tags per phase: {kept} block{'s' if kept != 1 else ''} kept to their phase's tags"
-                     + (f"; {fell} had too little footage with them, so any footage your filters allow was used there"
-                        if fell else "") + ".")
+    for kind, head, what in (("tags", "🏷️ Tags per phase", "tags"), ("roles", "🎭 Roles per phase", "roles")):
+        kept, fell = count[kind]
+        if kept or fell:
+            notes.append(f"{head}: {kept} block{'s' if kept != 1 else ''} kept to their phase's {what}"
+                         + (f"; {fell} had too little footage with them, so any footage your filters allow was used "
+                            "there" if fell else "") + ".")
     return out, notes
 
 
@@ -353,7 +371,7 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
                  movement_only: bool = False, min_clip: float = None, level_range: float = 0.0,
                  bounce_speed: float = 0.0, cuts: str = "sections", vocal_rule: bool = True,
                  natural: bool = False, lab: dict = None, given_track: dict = None, given_segments: list = None,
-                 block_role=None, block_tags=None) -> dict:
+                 block_role=None, block_tags=None, block_roles_only=None) -> dict:
     """cuts: "sections" — the 🧩 section map at each 🍳 recipe's pace (as always); "lines" — the 📐 lines from the
     music with their own blocks (section_bounds.py), every block kept as cut (no two joined into one clip).
     🎯 Movement only always follows the lead layer and matches at the scale of a phrase off the beat (13 Nov: both
@@ -366,7 +384,9 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
     block_role(start, end) → a 🎭 scene role the block's footage should have (a bonus for clips marked with it — ⏱️
     Edge Mode: intro clips in Wait, outro clips in Stop), or None.
     block_tags(start, end) → scene tags the block's footage must have one of (⏱️ Edge Mode: 🏷️ tags per phase), or
-    None. A block with too little footage carrying them takes any footage the filters allow, and a note says so."""
+    None. A block with too little footage carrying them takes any footage the filters allow, and a note says so.
+    block_roles_only(start, end) → 🎭 role ids the block's footage must carry one of (⏱️ Edge Mode: 🎭 Roles per
+    phase, strict), or None — the same fallback."""
     given = dict(lab or {})
     lab = {"stem": bool(given.get("stem", movement_only)), "phrase": bool(given.get("phrase", movement_only)),
            "shot": bool(given.get("shot", natural)), "join": bool(given.get("join", natural)),
@@ -394,7 +414,8 @@ def compile_plan(track_id: str, video_ids: list, *, split_screen: bool = False, 
         cuts = "sections"
         segments = SCUT.story_segments(track, regions, all_recipes, min_clip)
     queues = build_footage_queues(tuple(video_ids), (), LC.library_ranges())
-    seg_excl, tag_notes = _tag_exclusions(segments, queues, block_tags) if block_tags else ({}, [])
+    seg_excl, tag_notes = (_tag_exclusions(segments, queues, block_tags, block_roles_only)
+                           if (block_tags or block_roles_only) else ({}, []))
     opts = SMX.StoryOptions(music_story=music_story, smooth_contrast=smooth_contrast, section_map=regions or None,
                             max_videos=int(max_videos or 0), progress=progress,
                             merge_blocks=cuts not in ("lines", "given") or lab["join"],

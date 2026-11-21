@@ -357,3 +357,59 @@ def test_the_page_runs_surprise_me_and_random_videos(monkeypatch):
         mix_jobs.forget(PE.JOB_KEY)
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def test_roles_per_phase_are_strict_with_a_fallback(monkeypatch):
+    """🎭 Roles per phase (21 Nov): a phase's footage keeps to clips with one of its roles; too little → any footage."""
+    import planner.compose as PC
+    import planner.edge as PE
+    spans = {"v": [{"video_id": "v", "scene_id": i, "remaining_sec": 30.0, "tags": ["crowd"] if i < 2 else [],
+                    "roles": ["outro"] if i in (0, 3) else []} for i in range(5)]}
+    segs = [{"start": 0.0, "end": 10.0}, {"start": 10.0, "end": 20.0}, {"start": 20.0, "end": 60.0}]
+    rule = {0: ["outro"], 1: ["nonesuch"], 2: ["outro"]}
+    out, notes = PC._tag_exclusions(segs, spans, None, lambda a, b: rule[int(a // 10) if a < 20 else 2])
+    assert out[0] == {("v", 1), ("v", 2), ("v", 4)}                     # only the outro scenes 0 and 3 are left
+    assert 1 not in out and 2 not in out                                # none carry it / 60 s isn't 2× the 40 s block
+    assert any("Roles per phase" in n and "too little footage" in n for n in notes)
+    both, _ = PC._tag_exclusions(segs[:1], spans, lambda a, b: ["crowd"], lambda a, b: ["outro"])
+    assert both == {0: {("v", 1), ("v", 2), ("v", 3), ("v", 4)}}        # crowd AND outro: only scene 0
+    loose, _ = PC._tag_exclusions(segs[:1], spans, lambda a, b: ["crowd"], lambda a, b: ["nonesuch"])
+    assert loose == {0: {("v", 2), ("v", 3), ("v", 4)}}                # nothing fits both: the tags alone
+    # the defaults, and the plan carries the rules
+    assert PE.phase_roles_or_default(None) == {"wait": ["intro"], "stop": ["outro"]}
+    assert PE.phase_roles_or_default({}) == {} and PE._phase_role(PE.E.schedule("chill", 3), 115.0, {}) is None
+    out_ = _timelines(monkeypatch)
+    try:
+        res = PE.compile_edge([], VIDS, "chill", 3, phase_roles={"medium": ["action"], "wait": []})
+        assert res["plan"]["edge"]["phase_roles"] == {"medium": ["action"]}
+        assert any("Roles per phase" in n for n in res["notes"])
+    finally:
+        shutil.rmtree(out_, ignore_errors=True)
+
+
+def test_the_page_sets_roles_per_phase(monkeypatch):
+    out = _timelines(monkeypatch)
+    try:
+        import mix_jobs
+        import planner.edge as PE
+        mix_jobs.forget(PE.JOB_KEY)
+        from tests.apptest_util import errors, page_app
+        at = page_app("pages/1_Compilation_Planner.py", timeout=300)
+        at.session_state["planner_mode"] = "⏱️ Edge Mode"
+        at.run()
+        assert at.session_state["edge_roles_wait"] == ["intro"] and at.session_state["edge_roles_stop"] == ["outro"]
+        for p in ("medium", "fast", "extra"):
+            at.session_state["edge_roles_" + p] = ["outro"]
+        at.run()
+        assert not errors(at), errors(at)
+        at.button(key="edge_go_only").click().run()
+        _wait_job(at)
+        assert not errors(at), errors(at)
+        got = at.session_state["edge_result"]["plan"]["edge"]["phase_roles"]
+        assert got == {"wait": ["intro"], "medium": ["outro"], "fast": ["outro"], "extra": ["outro"], "stop": ["outro"]}
+        at.button(key="edge_back").click().run()
+        at.button(key="edge_roles_reset").click().run()
+        assert at.session_state["edge_roles_medium"] == [] and at.session_state["edge_roles_wait"] == ["intro"]
+        mix_jobs.forget(PE.JOB_KEY)
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
