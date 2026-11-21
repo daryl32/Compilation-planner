@@ -206,17 +206,18 @@ def _setup(rows: dict, have_tl: set) -> None:
     tc[1].selectbox("Timer position", list(E.CORNERS), key="edge_corner", format_func=lambda k: E.CORNERS[k],
                     disabled=st.session_state.get("edge_timer_style") == "strip")
     st.caption("⏱️ " + E.describe(diff, rounds))
-    if diff in E.HANDS_OFF_SEC:
+    if diff in E.SURPRISES_OPTIONAL:
         st.toggle("🎲 Surprises", key="edge_surprises",
                   help="From round 2, the timer doesn't always do what ⏭️ Next up promised: ✋ Hands off — the clock "
-                       "freezes for a random few seconds mid-phase, then carries on; ⏩ Override — a phase runs past its "
-                       "zero (+5 s, or up to +15 s on Medium), never before Wait or Slow; 🎭 False finish — once at most, "
-                       "the last Extra counts down to Stop… then NOT YET, +10 s. Chill: 0–1 a round, Medium: 1–2. "
-                       "Each has its own lines in the Cue Map (🎲 cue).")
+                       "freezes for 5, 8 or 12 s mid-phase, then carries on; ⏩ Override — a phase runs past its "
+                       "zero by +5, +10 or +15 s, never before Wait or Slow; 🎭 False finish — once at most, "
+                       "the last Extra counts down to Stop… then NOT YET, +10 s. Chill: 0–1 a round (mostly the "
+                       "shorter ones), Medium: 1–2. Each has its own lines in the Cue Map (🎲 cue).")
     else:
-        st.caption("💀 Hard draws its own structure every round: Wait, then random phases of random lengths — calmer "
-                   "first, faster later, the faster ones longer, now and then a drop back to Slow — then Extra → Stop. "
-                   "⏭️ Next up always tells the truth; how long is the surprise.")
+        st.caption("💀 Hard draws its own structure every round (6:00): Wait, then random phases of random lengths, "
+                   "then Extra → Stop. Round 1 and the last round go calmer first, faster later; the rounds between "
+                   "are drawn evenly. The last round brings 2–3 🎲 surprises (longer ones likelier) and always a false "
+                   "finish.")
     st.caption("🔔 Every phase change brings a bell, a flash of the phase's colour and the ring in that colour; the "
                "timer pulses over a phase's last 3 seconds. ▸ The round number sits by the timer. 🎭 Which clips play "
                "in each phase: 🎭 Roles per phase below (Wait: intro, Stop: outro by default).")

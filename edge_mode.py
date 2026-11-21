@@ -106,23 +106,39 @@ def phase_bpm(ph: dict) -> float:
     return float(ph["bpm"]) if ph.get("bpm") is not None else float(PROFILES[ph["profile"]]["bpm"])
 
 
+# ⏱️ Each difficulty's phase lengths (Daryl, 21 Nov: "too short"): Chill 3:00 a round, Medium 4:00 (its Slow / Medium /
+# Fast twice). Hard draws its own (HARD_LEN), 6:00 a round.
+PHASE_LEN = {"chill": {"wait": 20, "slow": 40, "medium": 40, "fast": 40, "extra": 20, "stop": 20},
+             "medium": {"wait": 20, "slow": 30, "medium": 30, "fast": 30, "extra": 20, "stop": 20}}
+
+
+def phase_len(profile: str, difficulty: str) -> float:
+    return float((PHASE_LEN.get(difficulty) or {}).get(profile, PROFILES[profile]["seconds"]))
+
+
 def round_seconds(difficulty: str) -> float:
-    return sum(PROFILES[p]["seconds"] for p in round_phases(difficulty))
+    if difficulty == "hard":
+        return float(HARD_ROUND_SEC)
+    return sum(phase_len(p, difficulty) for p in round_phases(difficulty))
 
 
 # 💀 Hard's round (Daryl, 16 Nov): Wait 20 s, a random middle, then Extra → Stop — 5:00 as before. The middle's
 # phases are drawn with weights that rise through the round, the faster ones last longer, Fast / Extra drop back to
 # Slow now and then, and the same phase never comes twice running.
-HARD_ROUND_SEC = 300
-HARD_WAIT_SEC, HARD_STOP_SEC, HARD_FINAL_EXTRA = 20, 20, (20, 30)
-HARD_LEN = {"slow": (10, 18), "medium": (12, 22), "fast": (15, 28), "extra": (18, 32)}
+# (21 Nov: 6:00 a round, longer phases; round 1 and the last round shift from calm to fast through the middle, the
+# rounds between are drawn evenly — the same safety rules everywhere; the last round has 🎲 surprises.)
+HARD_ROUND_SEC = 360
+HARD_WAIT_SEC, HARD_STOP_SEC, HARD_FINAL_EXTRA = 20, 20, (30, 40)
+HARD_LEN = {"slow": (15, 30), "medium": (15, 30), "fast": (20, 40), "extra": (25, 40)}
+HARD_EVEN = {"slow": 1.0, "medium": 1.0, "fast": 1.0, "extra": 1.0}        # the rounds between: no shift
+HARD_SHIFT_ALL = False                                                      # (True: every round shifts, as before 21 Nov)
 HARD_EARLY = {"slow": 2.0, "medium": 2.0, "fast": 1.0, "extra": 0.5}       # the middle's first half
 HARD_LATE = {"slow": 0.7, "medium": 1.0, "fast": 2.0, "extra": 2.0}        # its second half
 HARD_DROP_CHANCE, HARD_MAX_DROPS = 0.3, 2
 FAST_ONES = ("fast", "extra")
 
 
-def hard_round(rng: random.Random) -> list:
+def hard_round(rng: random.Random, shift: bool = True) -> list:
     """💀 One Hard round → [(profile, seconds)]: Wait, the random middle, Extra, Stop — always HARD_ROUND_SEC long.
     Rules: weights HARD_EARLY then HARD_LATE (half way through the middle); after Fast / Extra a HARD_DROP_CHANCE to drop
     back to Slow (at most HARD_MAX_DROPS); never the same phase twice running; never three of Fast / Extra in a row;
@@ -137,19 +153,19 @@ def hard_round(rng: random.Random) -> list:
             p = "slow"
             drops += 1
         else:
-            w = HARD_EARLY if (room - left) < room / 2 else HARD_LATE
+            w = (HARD_EARLY if (room - left) < room / 2 else HARD_LATE) if shift else HARD_EVEN
             opts = [q for q in w if q != prev and not (two_fast and q in FAST_ONES)]
             if left <= HARD_LEN["extra"][1]:                   # the last of the middle: not Extra
                 opts = [q for q in opts if q != "extra"] or ["medium"]
             p = rng.choices(opts, [w[q] for q in opts])[0]
         lo, hi = HARD_LEN[p]
-        if left <= hi or left - lo < 10:                       # the rest fits this phase (a little over is fine)
+        if left <= hi or left - lo < 15:                       # the rest fits this phase (a little over is fine)
             if left < lo and mid:                              # too short for a phase of its own: the last one stretches
                 mid[-1] = (mid[-1][0], mid[-1][1] + left)
                 break
             n = left
         else:
-            n = rng.randint(lo, min(hi, left - 10))
+            n = rng.randint(lo, min(hi, left - 15))
         mid.append((p, n))
         left -= n
     if mid and mid[-1][0] == "extra":
@@ -174,11 +190,21 @@ def hard_round(rng: random.Random) -> list:
 # ✋ Hands off: inside a phase, the phase's clock freezes for a random few seconds (the round gets longer), then the
 #   phase carries on where it was. ⏩ Override: a phase runs past its zero by +N s — before any phase but Wait / Slow.
 # 🎭 False finish: the round's last Extra counts down to Stop… then "NOT YET" and +10 s. Once a compilation at most.
-HANDS_OFF_SEC = {"chill": (3, 5), "medium": (5, 8, 12)}
-OVERRIDE_SEC = {"chill": (5,), "medium": (5, 10, 15)}
+# (21 Nov: one set of lengths for every difficulty; the difficulty decides how likely the long ones are. Hard: 2–3 in
+# its last round only, the false finish always.)
+SURPRISE_SECS = {"handsoff": (5, 8, 12), "override": (5, 10, 15)}
+SURPRISE_LEAN = {"chill": (3, 3, 1), "medium": (1, 1, 1), "hard": (1, 3, 3)}   # how likely each length is
+HANDS_OFF_SEC = {d: SURPRISE_SECS["handsoff"] for d in ("chill", "medium", "hard")}
+OVERRIDE_SEC = {d: SURPRISE_SECS["override"] for d in ("chill", "medium", "hard")}
 FALSE_FINISH_SEC = 10
 FALSE_FINISH_CHANCE = 0.6
-HANDS_OFF_IN = {"chill": ("fast", "extra"), "medium": ("medium", "fast", "extra")}
+HANDS_OFF_SHORT_GAP = 3.0                                      # ✋ a line made for a hands off this much shorter: end-synced
+HANDS_OFF_IN = {"chill": ("fast", "extra"), "medium": ("medium", "fast", "extra"), "hard": ("medium", "fast", "extra")}
+SURPRISES_OPTIONAL = ("chill", "medium")                        # the 🎲 switch; Hard's last round always has them
+
+
+def surprise_len(kind: str, difficulty: str, rng: random.Random) -> int:
+    return rng.choices(SURPRISE_SECS[kind], SURPRISE_LEAN.get(difficulty, (1, 1, 1)))[0]
 HANDS_OFF_EARLIEST, HANDS_OFF_LATEST = 6.0, 4.0                # seconds into the phase / before its end
 NO_OVERRIDE_BEFORE = ("wait", "slow")
 SURPRISE_STYLES = {                                            # the timer's look during one (PROFILES-like)
@@ -198,13 +224,17 @@ def plan_surprises(rounds: list, difficulty: str, rng: random.Random) -> list:
     if difficulty not in HANDS_OFF_SEC or len(rounds) < 2:
         return []
     out, used, last_kind = [], set(), None
-    budget = {r: (1 if rng.random() < 0.6 else 0) if difficulty == "chill" else 1 + (rng.random() < 0.5)
-              for r in range(2, len(rounds) + 1)}
-    if not any(budget.values()):
-        budget[len(rounds)] = 1
-    ff_round = None
-    if rng.random() < FALSE_FINISH_CHANCE:
-        ff_round = rng.choice([r for r in (len(rounds) - 1, len(rounds)) if r >= 2])
+    if difficulty == "hard":                               # 💀 2–3 in the last round, the false finish always
+        budget = {len(rounds): 2 + (rng.random() < 0.5)}
+        ff_round = len(rounds)
+    else:
+        budget = {r: (1 if rng.random() < 0.6 else 0) if difficulty == "chill" else 1 + (rng.random() < 0.5)
+                  for r in range(2, len(rounds) + 1)}
+        if not any(budget.values()):
+            budget[len(rounds)] = 1
+        ff_round = None
+        if rng.random() < FALSE_FINISH_CHANCE:
+            ff_round = rng.choice([r for r in (len(rounds) - 1, len(rounds)) if r >= 2])
     for r in sorted(budget):
         units = rounds[r - 1]
         take = budget[r]
@@ -221,7 +251,7 @@ def plan_surprises(rounds: list, difficulty: str, rng: random.Random) -> list:
         for _ in range(take):
             kinds = ["handsoff", "override"]
             rng.shuffle(kinds)
-            if difficulty == "medium" and last_kind in kinds:
+            if difficulty in ("medium", "hard") and last_kind in kinds:
                 kinds.remove(last_kind)
                 kinds.append(last_kind)
             for kind in kinds:
@@ -238,10 +268,10 @@ def plan_surprises(rounds: list, difficulty: str, rng: random.Random) -> list:
                     n = units[k][1]
                     span = n - HANDS_OFF_EARLIEST - HANDS_OFF_LATEST
                     at = round((HANDS_OFF_EARLIEST + span * math.sqrt(rng.random())) * 2) / 2   # later is likelier
-                    out.append({"round": r, "unit": k, "kind": kind, "seconds": rng.choice(HANDS_OFF_SEC[difficulty]),
+                    out.append({"round": r, "unit": k, "kind": kind, "seconds": surprise_len("handsoff", difficulty, rng),
                                 "at": at})
                 else:
-                    out.append({"round": r, "unit": k, "kind": kind, "seconds": rng.choice(OVERRIDE_SEC[difficulty])})
+                    out.append({"round": r, "unit": k, "kind": kind, "seconds": surprise_len("override", difficulty, rng)})
                 used.add((r, k))
                 last_kind = kind
                 break
@@ -251,11 +281,11 @@ def plan_surprises(rounds: list, difficulty: str, rng: random.Random) -> list:
 def round_units(difficulty: str, rounds: int, rng: random.Random) -> list:
     """Each round's phases with their lengths → [[(profile, seconds)], …]."""
     out = []
-    for _r in range(rounds):
-        if difficulty == "hard":
-            out.append(hard_round(rng))
+    for r in range(1, rounds + 1):
+        if difficulty == "hard":                           # round 1 and the last shift calm → fast; between: even
+            out.append(hard_round(rng, shift=HARD_SHIFT_ALL or r in (1, rounds)))
         else:
-            out.append([(p, float(PROFILES[p]["seconds"])) for p in round_phases(difficulty, rng)])
+            out.append([(p, phase_len(p, difficulty)) for p in round_phases(difficulty, rng)])
     return out
 
 
@@ -267,7 +297,8 @@ def schedule(difficulty: str, rounds: int, seed: int = 0, surprises: bool = Fals
     rounds = int(min(max(int(rounds), MIN_ROUNDS), MAX_ROUNDS))
     rng = random.Random(seed)
     units = round_units(difficulty, rounds, rng)
-    sur = plan_surprises(units, difficulty, random.Random(seed * 7919 + 17)) if surprises else []
+    sur = (plan_surprises(units, difficulty, random.Random(seed * 7919 + 17))
+           if (surprises or difficulty == "hard") else [])     # 💀 Hard's last round always has them (21 Nov)
     by = {(s["round"], s["unit"]): s for s in sur}
     out, t, u = [], 0.0, 0
 
@@ -1412,8 +1443,31 @@ def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, du
         if not kind:
             continue
         n = float(ph["end"]) - float(ph["start"])
-        for at in ("before", "start", "end"):
-            pool = [c for c in surprise_lines if c["kind"] == kind and c["at"] == at]
+        moments = ("before", "start", "end")
+        if kind == "handsoff":
+            # ✋ one line per hands off (21 Nov): one made for its length (at its start or end, as cued), or a shorter
+            # one played so it ends as the hands off does — its "back on" lands on the release (the old 3 s lines in
+            # a 5 s hands off)
+            def _len(c):
+                try:
+                    return float(c.get("length"))
+                except (TypeError, ValueError):
+                    return None
+            hs = [c for c in surprise_lines if c["kind"] == "handsoff"]
+            exact = [c for c in hs if _len(c) is not None and abs(_len(c) - n) < 0.5]
+            short = [dict(c, at="end") for c in hs if _len(c) is not None and 0.5 <= n - _len(c) <= HANDS_OFF_SHORT_GAP
+                     and c["seconds"] <= n]
+            pick = exact + short or [c for c in hs if _len(c) is None]
+            if pick:
+                c = rng.choice(pick)
+                surprise_lines_now = [dict(c, length=n)]
+            else:
+                surprise_lines_now = []
+            moments = tuple(dict.fromkeys(c["at"] for c in surprise_lines_now))
+        else:
+            surprise_lines_now = surprise_lines
+        for at in moments:
+            pool = [c for c in surprise_lines_now if c["kind"] == kind and c["at"] == at]
             if not pool and kind == "falsefinish":
                 pool = [c for c in surprise_lines if c["kind"] == "override" and c["at"] == at]
             if not pool:

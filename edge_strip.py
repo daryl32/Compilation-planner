@@ -306,8 +306,12 @@ DROP_IN, DROP_HOLD, DROP_OUT = 0.2, 1.05, 1.3     # the box: down by, held until
 BORDER = 18                             # the frame's width at 720 p (plus a soft glow inside it)
 
 
-def drop_panel(label: str, colour, frame: tuple):
-    """The dropped-down box: the phase's colour, "NOW" and the phase's name huge in dark text, bottom corners round."""
+DROP_SUB = {"HANDS OFF": "LET GO · WAIT FOR IT", "OVERRIDE": "DON'T STOP · KEEP THE PACE", "NOT YET": "KEEP GOING"}
+
+
+def drop_panel(label: str, colour, frame: tuple, head: str = "N O W", sub: str = None):
+    """The dropped-down box: the phase's colour, "NOW" and the phase's name huge in dark text, bottom corners round;
+    a surprise adds a small line saying what to do (DROP_SUB — Daryl, 21 Nov)."""
     from PIL import Image, ImageDraw
     W, H = frame
     k = scale(H)
@@ -324,13 +328,26 @@ def drop_panel(label: str, colour, frame: tuple):
         size = int(size * 0.93)
         fl = E._font(size, bold=True)
         lb = d.textbbox((0, 0), label, font=fl)
-    nb = d.textbbox((0, 0), "N O W", font=fn)
+    sub = DROP_SUB.get(label) if sub is None else sub
+    nb = d.textbbox((0, 0), head, font=fn)
+    fs = E._font(int(18 * k * S), bold=True)
+    sb = d.textbbox((0, 0), sub, font=fs) if sub else (0, 0, 0, 0)
     g = 8 * k * S
-    total = (nb[3] - nb[1]) + g + (lb[3] - lb[1])
+    total = (nb[3] - nb[1]) + g + (lb[3] - lb[1]) + ((sb[3] - sb[1]) + g if sub else 0)
     top = (h * S - total) / 2
-    d.text((w * S / 2 - (nb[2] + nb[0]) / 2, top - nb[1]), "N O W", font=fn, fill=DARK + (255,))
-    d.text((w * S / 2 - (lb[2] + lb[0]) / 2, top + (nb[3] - nb[1]) + g - lb[1]), label, font=fl, fill=DARK + (255,))
+    d.text((w * S / 2 - (nb[2] + nb[0]) / 2, top - nb[1]), head, font=fn, fill=DARK + (255,))
+    ly = top + (nb[3] - nb[1]) + g
+    d.text((w * S / 2 - (lb[2] + lb[0]) / 2, ly - lb[1]), label, font=fl, fill=DARK + (255,))
+    if sub:
+        d.text((w * S / 2 - (sb[2] + sb[0]) / 2, ly + (lb[3] - lb[1]) + g - sb[1]), sub, font=fs, fill=DARK + (230,))
     return img.resize((w, h), Image.LANCZOS)
+
+
+BACK_ON_SEC = 0.65                      # ✋ the "BACK ON" drop as a hands off ends: about half as long
+
+
+def back_on_share(t: float) -> float:
+    return drop_share(t * 2.0)
 
 
 def drop_share(t: float) -> float:

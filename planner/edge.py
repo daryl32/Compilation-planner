@@ -658,7 +658,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
     # 👩 the avatar brings the lines with her: she follows the cue map (her clips, their own sound; the line's
     # recording under a stand-in where she has no clip yet) whether or not the voiceover switch is on (Daryl, 14 Nov)
     voiceover = bool(voiceover or avatar)
-    surprises = bool(surprises and difficulty in E.HANDS_OFF_SEC)      # 🎲 Chill / Medium only (Hard has its own)
+    surprises = bool(surprises and difficulty in E.SURPRISES_OPTIONAL) or difficulty == "hard"   # 💀 Hard: its last round, always
     sched = E.schedule(difficulty, rounds, seed, surprises=surprises)
     total = E.total_seconds(sched)
     track_ids = list(track_ids or [])

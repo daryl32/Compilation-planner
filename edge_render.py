@@ -722,6 +722,8 @@ def _strip_layers(edge: dict, sched: list, frame: tuple, signals: bool, band: in
             st_ = E.style(lk)
             out["change"][lk] = {"drop": _rgba(ES.drop_panel(st_["label"], st_["ring"], frame)),
                                  "border": [(*_rgba(img), x, y) for img, x, y in ES.border_strips(st_["ring"], frame)]}
+        out["back_on"] = {p: _rgba(ES.drop_panel("BACK ON", E.PROFILES[p]["ring"], frame, sub=""))
+                          for p in {ph["profile"] for ph in sched if ph.get("kind") == "handsoff"}}
     pace = edge.get("pace") or {}
     if pace.get("on") and pace.get("beats"):
         # 🗒️ with instructions the strip is the taller band, the stroke meter in its left (footage) half
@@ -741,9 +743,9 @@ def _strip_layers(edge: dict, sched: list, frame: tuple, signals: bool, band: in
                 continue
             for n in range(1, int(math.ceil(float(ph["end"]) - float(ph["start"]))) + 1):
                 if kind == "handsoff" and ("hold", n) not in out["tags"]:
-                    out["tags"][("hold", n)] = _rgba(ES.tag_image(f"HOLD {n}", (0, 0, 0, 190), (212, 212, 218, 255), H, lock=True))
+                    out["tags"][("hold", n)] = _rgba(ES.tag_image(f"BACK ON IN {n}", (0, 0, 0, 190), (212, 212, 218, 255), H, lock=True))
                 if kind == "override" and ("over", n) not in out["tags"]:
-                    out["tags"][("over", n)] = _rgba(ES.tag_image(f"+{n} S", (245, 70, 75, 255), ES.DARK + (255,), H))
+                    out["tags"][("over", n)] = _rgba(ES.tag_image(f"KEEP GOING +{n}", (245, 70, 75, 255), ES.DARK + (255,), H))
     return out
 
 
@@ -928,6 +930,12 @@ def _lay_strip(pic, strip: dict, ph: dict, i: int, a: float, c_left: float, movi
         if al > 0.01:
             _lay(pic, (pic.shape[1] - card[0].shape[1]) // 2, int(pic.shape[0] * 0.33), card[0],
                  (card[1].astype(np.float32) * al).astype(np.uint16))
+    bo = (strip.get("back_on") or {}).get(ph["profile"]) if sig and not fresh else None
+    if bo is not None and t < ES.BACK_ON_SEC:              # ✋ the hands off is over: a quick BACK ON
+        share = ES.back_on_share(t)
+        if share > 0.01:
+            hh = max(int(bo[0].shape[0] * share), 1)
+            _lay(pic, (pic.shape[1] - bo[0].shape[1]) // 2, 0, bo[0][-hh:], bo[1][-hh:])
     ch = strip["change"].get(look) if sig and int(ph.get("index", 0)) > 0 and fresh else None
     if ch is not None and t < ES.CHANGE_SEC:               # 🔔 a new phase: the frame pulses, the box drops down
         lvl = ES.border_level(t)

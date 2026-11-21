@@ -285,7 +285,8 @@ def test_surprise_lines_play_at_their_surprise_and_fit_its_length():
         n = ho["end"] - ho["start"]
         start = [p for p in got["plays"] if abs(p["time"] - ho["start"]) < 1e-6]
         assert [p["line"] for p in start] == [f"Hands off {n:g}"]                   # the line made for its length
-        assert any(p["line"] == "Back on" and abs(p["time"] + p["seconds"] - ho["end"]) < 1e-6 for p in got["plays"])
+        # one line per hands off (21 Nov): the general "Back on" isn't added on top of the line made for it
+        assert not any(p["line"] == "Back on" and ho["start"] <= p["time"] < ho["end"] for p in got["plays"])
     assert any(p["line"] == "Almost 321" and abs(p["time"] + 3.8 - ff["start"]) < 1e-6 for p in got["plays"])
     assert any(p["line"] == "Scratch that" and -1e-6 < p["time"] - ff["start"] <= E.LINE_GAP + 1e-6 for p in got["plays"])
     busy = [p for p in got["plays"] if p["line"] == "Busy"]
@@ -414,3 +415,55 @@ def test_medium_and_hard_have_no_long_silences_and_fillers_find_room():
                 assert not any(p["why"].startswith("callout") for p in pl)      # callouts are Hard's
     chill = E.resolve_lines(E.schedule("chill", 4, 1), cm, "chill", 1)["plays"]
     assert not any(p["why"].startswith(("callout", "fills")) for p in chill)      # Chill untouched
+
+
+@pytest.mark.new_lengths
+def test_a_shorter_hands_off_line_plays_so_its_back_on_lands_on_the_release():
+    """✋ (21 Nov) The 3 s lines in a 5 s hands off: started late, so they end as the clock unfreezes; one line a hands
+    off, the 5 s lines and the shorter ones taking turns."""
+    import edge_mode as E
+    lines = [{"name": "Hands off 3 A", "seconds": 2.8, "cues": [{"type": "surprise", "kind": "handsoff", "at": "start", "length": 3}]},
+             {"name": "Hands off 5 A", "seconds": 4.3, "cues": [{"type": "surprise", "kind": "handsoff", "at": "start", "length": 5}]}]
+    seen = set()
+    for k in range(200):
+        sched = E.schedule("chill", 4, k, surprises=True)
+        for ho in (p for p in sched if p["kind"] == "handsoff" and abs(p["end"] - p["start"] - 5) < 0.01):
+            got = E.resolve_lines(sched, {"lines": lines}, "chill", seed=k)
+            mine = [p for p in got["plays"] if ho["start"] - 0.01 <= p["time"] < ho["end"]]
+            assert len(mine) == 1
+            p = mine[0]
+            if p["line"] == "Hands off 3 A":
+                assert abs(p["time"] + p["seconds"] - ho["end"]) < 1e-6           # ends on the release
+            else:
+                assert abs(p["time"] - ho["start"]) < 1e-6
+            seen.add(p["line"])
+        if len(seen) == 2:
+            break
+    assert seen == {"Hands off 3 A", "Hands off 5 A"}
+
+
+@pytest.mark.new_lengths
+def test_the_21_nov_lengths_rounds_and_surprises():
+    import random
+    import edge_mode as E
+    assert E.round_seconds("chill") == 180 and E.round_seconds("medium") == 240 and E.round_seconds("hard") == 360
+    s = E.schedule("chill", 3, 1)
+    assert [round(p["end"] - p["start"]) for p in s if p["round"] == 1] == [20, 40, 40, 40, 20, 20]
+    s = E.schedule("medium", 3, 1)
+    assert [round(p["end"] - p["start"]) for p in s if p["round"] == 1] == [20] + [30] * 6 + [20, 20]
+    for seed in range(30):
+        s = E.schedule("hard", 4, seed)
+        for r in range(1, 5):
+            mine = [p for p in s if p["round"] == r]
+            assert mine[0]["profile"] == "wait" and mine[-1]["profile"] == "stop"
+            plain = [p for p in mine if p["kind"] == "phase"]
+            assert plain[-2]["profile"] == "extra"                            # every round ends Extra → Stop
+            if r < 4:
+                assert not any(p.get("surprise") for p in mine) and mine[-1]["end"] - mine[0]["start"] == 360
+        last = [p for p in s if p["round"] == 4 and p.get("surprise")]
+        assert 2 <= len(last) <= 3 and any(p["surprise"] == "falsefinish" for p in last)
+        assert all(p["end"] - p["start"] in (5, 8, 10, 12, 15) for p in last)
+    rng = random.Random(1)
+    chill = [E.surprise_len("handsoff", "chill", rng) for _ in range(700)]
+    hard = [E.surprise_len("handsoff", "hard", rng) for _ in range(700)]
+    assert chill.count(12) < chill.count(5) and hard.count(5) < hard.count(12)

@@ -95,7 +95,7 @@ def draw_edge(rng: random.Random, songs: list = None) -> dict:
             "avatar": True, "avatar_mode": rng.choice(["corner", "split"]), "avatar_corner": "bottom-right",
             "intro": True, "song_per_round": len(playlist) > 1 and rng.random() < 0.5,
             "energy_mix": bool(playlist) and rng.random() < 0.5,
-            "surprises": diff in getattr(E, "HANDS_OFF_SEC", {}) and rng.random() < 0.5,
+            "surprises": diff in getattr(E, "SURPRISES_OPTIONAL", ()) and rng.random() < 0.5,
             "phase_tags": {}, "stream": True, "quick": True, "label": ""}
 
 
