@@ -106,3 +106,33 @@ def test_sync_brings_only_new_and_changed_lines(tmp_path, monkeypatch):
     assert not errs, errs
     assert sorted(got) == ["Changed.mp3", "New.mp3", "New.mp4"]
     assert stats == {"lines": 2, "clips": 1, "skipped": 1}
+
+
+def test_the_test_copy_uses_productions_lines_clips_and_newer_cue_map(tmp_path, monkeypatch):
+    """🧪 (21 Nov) The test copy reads production's voice lines and avatar clips (nothing fetched twice) and its cue
+    map / round looks whenever production saved them more recently; its own saves stay its own."""
+    import json
+    import os
+    import time
+    import config
+    import cue_store as CS
+    import planner.edge as PE
+    prod, dev = tmp_path / "data", tmp_path / "data-dev"
+    (prod / "edge_voiceover" / "lines").mkdir(parents=True)
+    (prod / "edge_voiceover" / "lines" / "A.mp3").write_bytes(b"x")
+    (dev / "catalogue").mkdir(parents=True)
+    monkeypatch.setattr(PE, "CATALOGUE_DIR", dev / "catalogue")
+    assert PE.production_root() is None                         # production itself: its own folders
+    monkeypatch.setattr(config, "APP_ENV", "test", raising=False)
+    monkeypatch.setattr(config, "PROXY_DIR", prod / "proxies", raising=False)
+    assert PE.production_root() == prod
+    assert PE.lines_dir() == prod / "edge_voiceover" / "lines" and PE.avatar_dir() == prod / "edge_avatar"
+    assert PE.line_file({"name": "A"}, cut=False) == prod / "edge_voiceover" / "lines" / "A.mp3"
+    # the cue map: production's when it is the newer, this copy's own after it saves
+    (prod / "edge_voiceover" / "edge_cues.json").write_text(json.dumps({"rev": 7, "managed": "app", "lines": []}))
+    assert CS.load()["rev"] == 7 and CS.managed()
+    got = CS.save(CS.load(), 7, "dev edit")
+    assert got["rev"] == 8 and CS.path() == dev / "edge_voiceover" / "edge_cues.json" and CS.load()["rev"] == 8
+    later = time.time() + 60
+    os.utime(prod / "edge_voiceover" / "edge_cues.json", (later, later))
+    assert CS.load()["rev"] == 7                                # production saved again since: its map

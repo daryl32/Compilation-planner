@@ -40,9 +40,47 @@ def voice_dir() -> Path:
     return Path(CATALOGUE_DIR).parent / "edge_voiceover"
 
 
+def production_root() -> Path | None:
+    """🧪 On the test copy (APP_ENV "test", Daryl 21 Nov: "I thought dev used main's data"): production's data folder,
+    whose voice lines, avatar clips and cue map the test copy uses instead of fetching its own — EDGE_PRODUCTION_ROOT
+    in config.py, else the folder production's preview copies sit in (the test copy's PROXY_DIR is production's).
+    None on production, or when that folder has no Edge data."""
+    import config
+    if str(getattr(config, "APP_ENV", "production")).lower() != "test":
+        return None
+    root = getattr(config, "EDGE_PRODUCTION_ROOT", None)
+    if root is None:
+        px = getattr(config, "PROXY_DIR", None)
+        if not px:
+            return None
+        root = Path(px).parent
+    root = Path(root)
+    if root == Path(CATALOGUE_DIR).parent or not (root / "edge_voiceover").is_dir():
+        return None
+    return root
+
+
+def newest_copy(name: str) -> Path:
+    """A file kept beside the lines (edge_cues.json, edge_looks.json) to READ: this copy's own — except on the test
+    copy, where production's is read whenever it was saved more recently (writes always go to this copy's own)."""
+    own = voice_dir() / name
+    root = production_root()
+    if root is None:
+        return own
+    prod = root / "edge_voiceover" / name
+    try:
+        if prod.exists() and prod.stat().st_size > 0 and (not own.exists() or prod.stat().st_mtime > own.stat().st_mtime):
+            return prod
+    except OSError:
+        pass
+    return own
+
+
 def lines_dir() -> Path:
-    """Where the cue map's voiceover lines live on this machine: <data>/edge_voiceover/lines/<line>.mp3."""
-    return voice_dir() / "lines"
+    """Where the cue map's voiceover lines live on this machine: <data>/edge_voiceover/lines/<line>.mp3 (the test
+    copy: production's — the same files, never fetched twice)."""
+    root = production_root()
+    return (root / "edge_voiceover" / "lines") if root else voice_dir() / "lines"
 
 
 def line_file(line: dict, cut: bool = True) -> Path | None:
@@ -106,7 +144,7 @@ def _is_vpx(path) -> bool:
 def cue_map_path() -> Path:
     """The cue map in use: <data>/edge_voiceover/edge_cues.json when one has been uploaded or fetched from Google
     Drive (Edge_voiceover/edge_cues.json), else the copy that ships with the app."""
-    here = voice_dir() / "edge_cues.json"
+    here = newest_copy("edge_cues.json")
     return here if here.exists() and here.stat().st_size > 0 else E.CUE_MAP_FILE
 
 
@@ -344,8 +382,8 @@ def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing:
 
 
 def avatar_dir() -> Path:
-    """Where the avatar's clips live: <data>/edge_avatar/intro/ and <data>/edge_avatar/<phase>/."""
-    return Path(CATALOGUE_DIR).parent / "edge_avatar"
+    """Where the avatar's clips live: <data>/edge_avatar/intro/, lines/, looks/ (the test copy: production's)."""
+    return (production_root() or Path(CATALOGUE_DIR).parent) / "edge_avatar"
 
 
 # ---------------------------------------------------------------------------
@@ -380,8 +418,9 @@ def load_looks(cue_map: dict | None = None) -> dict:
     inside the cue map ("round_looks"), else the 18 Nov plan."""
     got = {}
     try:
-        if looks_path().exists():
-            got = json.loads(looks_path().read_text(encoding="utf-8")) or {}
+        src = newest_copy(looks_path().name)
+        if src.exists():
+            got = json.loads(src.read_text(encoding="utf-8")) or {}
     except (OSError, ValueError):
         got = {}
     if not got and isinstance((cue_map or {}).get("round_looks"), dict):

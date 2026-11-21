@@ -43,9 +43,12 @@ def versions_dir() -> Path:
 
 
 def load() -> dict:
-    """The cue map in use (the app's own copy when there is one, else the one that ships with the app), with "rev"."""
+    """The cue map in use (the app's own copy when there is one, else the one that ships with the app), with "rev".
+    On the test copy, production's when production saved it more recently."""
     import edge_mode as E
-    p = path() if path().exists() and path().stat().st_size > 0 else E.CUE_MAP_FILE
+    from planner.edge import newest_copy
+    here = newest_copy(path().name)                       # (the test copy: production's when it was saved more recently)
+    p = here if here.exists() and here.stat().st_size > 0 else E.CUE_MAP_FILE
     cm = E.load_cue_map(p)
     cm.setdefault("rev", 0)
     cm.setdefault("lines", [])
@@ -55,7 +58,8 @@ def load() -> dict:
 def managed() -> bool:
     """True once the cue map is kept in the app: compiles leave Drive's sent files alone."""
     try:
-        return json.loads(path().read_text(encoding="utf-8")).get("managed") == "app"
+        from planner.edge import newest_copy
+        return json.loads(newest_copy(path().name).read_text(encoding="utf-8")).get("managed") == "app"
     except (OSError, ValueError):
         return False
 
