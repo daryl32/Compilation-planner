@@ -309,8 +309,8 @@ BORDER = 18                             # the frame's width at 720 p (plus a sof
 DROP_SUB = {"HANDS OFF": "LET GO · WAIT FOR IT", "OVERRIDE": "DON'T STOP · KEEP THE PACE", "NOT YET": "KEEP GOING"}
 
 
-def drop_panel(label: str, colour, frame: tuple, head: str = "N O W", sub: str = None):
-    """The dropped-down box: the phase's colour, "NOW" and the phase's name huge in dark text, bottom corners round;
+def drop_panel(label: str, colour, frame: tuple, head: str = "", sub: str = None):
+    """The dropped-down box: the phase's colour and its name huge in dark text, bottom corners round;
     a surprise adds a small line saying what to do (DROP_SUB — Daryl, 21 Nov)."""
     from PIL import Image, ImageDraw
     W, H = frame
@@ -329,14 +329,18 @@ def drop_panel(label: str, colour, frame: tuple, head: str = "N O W", sub: str =
         fl = E._font(size, bold=True)
         lb = d.textbbox((0, 0), label, font=fl)
     sub = DROP_SUB.get(label) if sub is None else sub
-    nb = d.textbbox((0, 0), head, font=fn)
-    fs = E._font(int(18 * k * S), bold=True)
+    nb = d.textbbox((0, 0), head, font=fn) if head else (0, 0, 0, 0)
+    fs = E._font(int(36 * k * S), bold=True)                 # (21 Nov: twice as big; "NOW" dropped)
     sb = d.textbbox((0, 0), sub, font=fs) if sub else (0, 0, 0, 0)
-    g = 8 * k * S
-    total = (nb[3] - nb[1]) + g + (lb[3] - lb[1]) + ((sb[3] - sb[1]) + g if sub else 0)
+    while sub and sb[2] - sb[0] > w * S * 0.9 and fs.size > 8:
+        fs = E._font(int(fs.size * 0.94), bold=True)
+        sb = d.textbbox((0, 0), sub, font=fs)
+    g = 10 * k * S
+    total = ((nb[3] - nb[1]) + g if head else 0) + (lb[3] - lb[1]) + ((sb[3] - sb[1]) + g if sub else 0)
     top = (h * S - total) / 2
-    d.text((w * S / 2 - (nb[2] + nb[0]) / 2, top - nb[1]), head, font=fn, fill=DARK + (255,))
-    ly = top + (nb[3] - nb[1]) + g
+    if head:
+        d.text((w * S / 2 - (nb[2] + nb[0]) / 2, top - nb[1]), head, font=fn, fill=DARK + (255,))
+    ly = top + ((nb[3] - nb[1]) + g if head else 0)
     d.text((w * S / 2 - (lb[2] + lb[0]) / 2, ly - lb[1]), label, font=fl, fill=DARK + (255,))
     if sub:
         d.text((w * S / 2 - (sb[2] + sb[0]) / 2, ly + (lb[3] - lb[1]) + g - sb[1]), sub, font=fs, fill=DARK + (230,))
