@@ -430,3 +430,35 @@ def test_lines_tab_difficulty_filter_runs(voice):
     at.run()
     assert not errors(at)
     assert shown + len(at.dataframe[0].value) == len(CS.load()["lines"])          # in it + not in it = every line
+
+
+def test_instructions_tab_adds_renames_links_and_saves(voice):
+    """🗒️ Instructions (21 Nov): add, link lines in one go, rename (the lines follow), 💾 Save; the line editor's
+    instruction and delay."""
+    import cue_store as CS
+    from tests.apptest_util import errors, page_app
+    CS.save(CS.load(), 0, "taken over")
+    at = page_app("pages/8_Cue_Map.py")
+    at.session_state["cm_view"] = "🗒️ Instructions"
+    at.run()
+    assert not errors(at), errors(at)
+    at.text_input(key="cm_ins_new_0").set_value("just the tip").run()
+    at.button(key="cm_ins_add").click().run()
+    assert CS.instructions(at.session_state["cm_map"]) == ["JUST THE TIP"]
+    names = [ln["name"] for ln in CS.load()["lines"]][:2]
+    gen = at.session_state["cm_gen"]
+    at.multiselect(key=f"cm_ins_lines_JUST THE TIP_{gen}").set_value(names).run()
+    at.button(key="cm_ins_link").click().run()
+    assert not errors(at), errors(at)
+    work = at.session_state["cm_map"]
+    assert sorted(ln["name"] for ln in work["lines"] if ln.get("instruction") == "JUST THE TIP") == sorted(names)
+    gen = at.session_state["cm_gen"]
+    at.text_input(key=f"cm_ins_t_0_{gen}").set_value("Tip only").run()
+    at.button(key="cm_ins_rn_0").click().run()
+    work = at.session_state["cm_map"]
+    assert work["instructions"] == ["TIP ONLY"] and all(ln.get("instruction") != "JUST THE TIP" for ln in work["lines"])
+    assert CS.INSTRUCTIONS_ITEM in CS.changes(CS.load(), work)["changed"]
+    at.button(key="cm_save_all").click().run()
+    saved = CS.load()
+    assert saved["instructions"] == ["TIP ONLY"]
+    assert sorted(ln["name"] for ln in saved["lines"] if ln.get("instruction") == "TIP ONLY") == sorted(names)

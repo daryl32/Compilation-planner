@@ -157,7 +157,7 @@ def norm(x):
             if k in ("play_seconds", "seconds") or k.startswith("_"):
                 continue
             v = norm(v)
-            if v in ("", [], {}, None) or (k in ("offset", "gain", "trim_in", "trim_out") and v == 0) or (k == "speed" and v == 1):
+            if v in ("", [], {}, None) or (k in ("offset", "gain", "trim_in", "trim_out", "instruction_delay") and v == 0) or (k == "speed" and v == 1):
                 continue
             out[k] = v
         return out
@@ -178,8 +178,21 @@ def changes(saved: dict, work: dict) -> dict:
     """{"changed": [names], "added": [names], "deleted": [names]} between the saved map and the draft."""
     a = {ln["name"]: ln for ln in saved.get("lines") or []}
     b = {ln["name"]: ln for ln in work.get("lines") or []}
-    return {"changed": sorted((n for n in a.keys() & b.keys() if norm(a[n]) != norm(b[n])), key=str.lower),
-            "added": sorted(b.keys() - a.keys(), key=str.lower), "deleted": sorted(a.keys() - b.keys(), key=str.lower)}
+    out = {"changed": sorted((n for n in a.keys() & b.keys() if norm(a[n]) != norm(b[n])), key=str.lower),
+           "added": sorted(b.keys() - a.keys(), key=str.lower), "deleted": sorted(a.keys() - b.keys(), key=str.lower)}
+    if list(saved.get("instructions") or []) != list(work.get("instructions") or []):
+        out["changed"].insert(0, INSTRUCTIONS_ITEM)         # 🗒️ the instructions list itself
+    return out
+
+
+INSTRUCTIONS_ITEM = "🗒️ the instructions list"
+
+
+def instructions(cm: dict) -> list:
+    """🗒️ The instruction texts: the list kept in the map, plus any a line uses that isn't in it."""
+    have = list(cm.get("instructions") or [])
+    used = [str(ln.get("instruction")) for ln in cm.get("lines") or [] if ln.get("instruction")]
+    return list(dict.fromkeys(have + used))
 
 
 # ---------------------------------------------------------------------------

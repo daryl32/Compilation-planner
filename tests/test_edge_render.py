@@ -546,3 +546,50 @@ def test_the_strip_timer_style_shows_the_box_the_number_and_the_stroke_strip(tmp
     left_x, right_x = bar["x0"] + 4, bar["x1"] - 4
     assert green(_pixel(out, 4.0, left_x, my)) and not green(_pixel(out, 4.0, right_x, my))
     assert green(_pixel(out, 5.0, right_x, my)) and not green(_pixel(out, 5.0, left_x, my))
+
+
+def test_instructions_stay_until_replaced_and_show_in_her_half_of_the_band(tmp_path, monkeypatch):
+    """🗒️ Instructions (21 Nov): put up by linked lines (after their delay), kept until another replaces them; drawn
+    in her half of a 60 px band (◧ split screen), the strip's stroke meter in the footage half."""
+    import sys
+    import types
+    import edge_mode as E
+    import edge_render as R
+    import edge_strip as ES
+    cm = {"lines": [{"name": "Tip", "instruction": "JUST THE TIP", "instruction_delay": 0.5},
+                    {"name": "Filler"}, {"name": "Same", "instruction": "JUST THE TIP"},
+                    {"name": "Stroke", "instruction": "stroke  it"}]}
+    plays = [{"time": 2.0, "line": "Tip"}, {"time": 5.0, "line": "Filler"}, {"time": 8.0, "line": "Same"},
+             {"time": 12.0, "line": "Stroke"}]
+    track = E.instruction_track(plays, cm)
+    assert track == [{"time": 2.5, "text": "JUST THE TIP"}, {"time": 12.0, "text": "stroke it"}]
+    assert E.instruction_at(track, 1.0) is None and E.instruction_at(track, 9.0) == "JUST THE TIP"
+    assert E.instruction_at(track, 30.0) == "stroke it"
+    # the render
+    monkeypatch.setitem(sys.modules, "render_preview", types.SimpleNamespace(get_track_raw_source=lambda t: t))
+    comb = tmp_path / "comb.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x202020:s=640x360:r=25:d=20",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(comb)], check=True)
+    sched = [{"index": 0, "round": 1, "profile": "slow", "start": 0.0, "end": 20.0, "bpm": 60.0}]
+    guide = E.pace_guide(sched)
+    edge = {"schedule": sched, "playlist": [], "beat": {"on": True, "volume": 1.0}, "voiceover": {"on": False, "cues": []},
+            "overlay": {"corner": "top-left", "style": "strip"}, "avatar": {"on": True, "mode": "split", "cues": []},
+            "intro": {"on": False}, "outro": {"on": False}, "signals": {"sound": False, "timer": True, "flash": False},
+            "round_badge": {"on": True}, "pace": {"on": True, "beats": guide["beats"]}, "next_up": {"on": True},
+            "instructions": {"on": True, "items": [{"time": 4.0, "text": "JUST THE TIP"}]}}
+
+    def run(cmd):
+        subprocess.run(cmd, capture_output=True, check=True)
+    out = tmp_path / "out.mp4"
+    took = R.finish({"edge": edge}, comb, str(out), types.SimpleNamespace(input_args=lambda raw: ["-i", raw]),
+                    tmp_path / "w", run, 360, 640)
+    assert took["edge_check"] == "ok"
+    band = ES.band_height(360)
+    st_ = R._strip_layers(edge, sched, (640, 360), True, band)
+    assert st_["bar"]["h"] == band and st_["bar"]["track"][0].shape[1] == 320          # the meter: the footage half
+    y = 360 - band // 2
+    white = lambda px: min(px) > 180                                    # noqa: E731
+    before = [_pixel(out, 2.0, x, y) for x in range(340, 630, 3)]
+    after = [_pixel(out, 8.0, x, y) for x in range(340, 630, 3)]
+    assert not any(white(px) for px in before) and any(white(px) for px in after)     # the text from 4 s, kept on
+    assert any(white(px) for px in [_pixel(out, 18.0, x, y) for x in range(340, 630, 3)])

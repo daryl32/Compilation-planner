@@ -290,6 +290,10 @@ def _setup(rows: dict, have_tl: set) -> None:
                           format_func=lambda k: E.AVATAR_MODES[k],
                           help="In a corner: a framed box over the footage. Split screen: she takes the right half, "
                                "the footage's middle the left, for as long as her clip runs.")
+        if mode == "split":
+            m[1].toggle("🗒️ Instructions", key="edge_instructions",
+                        help="A text command in her half of the bottom strip — STROKE, JUST THE TIP… — put up by the "
+                             "lines it's linked to on the 🎙️ Cue Map (🗒️ Instructions) and kept until the next one.")
         if mode == "corner":
             m[1].selectbox("Her corner", [k for k in E.CORNERS if k != "centre"], key="edge_avatar_corner",
                            format_func=lambda k: E.CORNERS[k])

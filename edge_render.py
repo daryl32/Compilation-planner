@@ -671,7 +671,7 @@ def _guide_layers(edge: dict, sched: list, corner: str, frame: tuple, badges: di
     return out
 
 
-def _strip_layers(edge: dict, sched: list, frame: tuple, signals: bool) -> dict:
+def _strip_layers(edge: dict, sched: list, frame: tuple, signals: bool, band: int = None) -> dict:
     """⏱️ The "strip" timer style (edge_strip.py): the top box for every stretch (as it is, filled for 🔔 the flash,
     edged for the pulse), the numbers it shows, and the bottom stroke strip with its markers."""
     import edge_strip as ES
@@ -701,7 +701,8 @@ def _strip_layers(edge: dict, sched: list, frame: tuple, signals: bool) -> dict:
     out = {"lay": lay, "boxes": boxes, "digits": digits, "signals": signals, "bar": None}
     pace = edge.get("pace") or {}
     if pace.get("on") and pace.get("beats"):
-        track, x0, x1 = ES.bar_track(W, H)
+        # 🗒️ with instructions the strip is the taller band, the stroke meter in its left (footage) half
+        track, x0, x1 = ES.bar_track(W // 2, H, height=band) if band else ES.bar_track(W, H)
         mk = {p: _rgba(ES.bar_marker(H, E.PROFILES[p]["ring"])) for p in E.ORDER}
         out["bar"] = {"beats": [float(t) for t in pace["beats"]], "track": _rgba(track), "y": H - track.size[1],
                       "x0": x0, "x1": x1, "h": track.size[1], "markers": mk, "dim": _rgba(ES.bar_marker(H, (0, 0, 0), True))}
@@ -724,6 +725,7 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
     black = np.zeros((H, W, 3), dtype=np.uint8)
 
     strip = extras.get("strip")                           # ⏱️ the "strip" timer style (edge_strip.py), or None
+    instr = extras.get("instr")                           # 🗒️ the instructions (◧ split screen), or None
     # 👩 what she does in this phase: (first frame, last frame + 1, her frames, how solid (None = a solid box), x, y)
     split = av.get("mode") == "split"
     layers = []
@@ -802,6 +804,11 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
             _lay(pic, badge[2], badge[3], badge[0], badge[1])
         if nxt is not None:
             _lay(pic, nxt[2], nxt[3], nxt[0], nxt[1])
+        if instr is not None:                              # 🗒️ her half of the bottom band
+            text = E.instruction_at(instr["track"], a + i / FPS)
+            panel = instr["panels"].get((text, ph["profile"])) if text else instr["empty"]
+            if panel is not None:
+                _lay(pic, W // 2, H - instr["band"], *panel)
         if strip is not None:
             _lay_strip(pic, strip, ph, i, a, c_left, moving)
         if bar is not None:                                # 🎯 the stroke bar: the marker slides top ↔ bottom on the beats
@@ -820,6 +827,27 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
             except OSError:
                 pass
             dec.wait()
+
+
+def _instruction_layers(edge: dict, frame: tuple) -> dict | None:
+    """🗒️ The instruction panels for her half of the bottom band (◧ split screen, switched on): one per text and
+    phase colour in use, and an empty band before the first. None when off."""
+    import edge_strip as ES
+    ins = edge.get("instructions") or {}
+    if not ins.get("on") or (edge.get("avatar") or {}).get("mode") != "split":
+        return None
+    W, H = frame
+    track = [x for x in ins.get("items") or [] if str(x.get("text") or "").strip()]
+    panels = {}
+    for ph in edge["schedule"]:
+        t0, t1 = float(ph["start"]), float(ph["end"])
+        texts = {E.instruction_at(track, t0)} | {x["text"] for x in track if t0 <= float(x["time"]) < t1}
+        for text in texts - {None}:
+            if (text, ph["profile"]) not in panels:
+                panels[(text, ph["profile"])] = _rgba(ES.instruction_panel(text, E.PROFILES[ph["profile"]]["ring"],
+                                                                           W - W // 2, H))
+    empty = _rgba(ES.instruction_panel("", (0, 0, 0), W - W // 2, H))
+    return {"track": track, "panels": panels, "empty": empty, "band": ES.band_height(H)}
 
 
 def _lay_strip(pic, strip: dict, ph: dict, i: int, a: float, c_left: float, moving: bool) -> None:
@@ -907,8 +935,9 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
     signals = edge.get("signals") or {}
     corner = (edge.get("overlay") or {}).get("corner", "top-left")
     strip = None
+    instr = _instruction_layers(edge, (W, H))
     if (edge.get("overlay") or {}).get("style") == "strip":          # ⏱️ the strip style: no ring pictures
-        strip = _strip_layers(edge, sched, (W, H), bool(signals.get("timer")))
+        strip = _strip_layers(edge, sched, (W, H), bool(signals.get("timer")), instr["band"] if instr else None)
         timers = {}
     else:
         E.write_overlay(sched, timer_dir, H, signals=bool(signals.get("timer")))
@@ -931,7 +960,7 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
         jobs = [pool.submit(_piece, combined_video, ph, timers, corner, shows, av, (W, H), piece, footage,
                             {"flash": bool(signals.get("flash")), "badge": badges.get(ph["round"]),
                              "guide": guide.get("bar"), "next": guide.get("next", {}).get(ph["index"]),
-                             "strip": strip})
+                             "strip": strip, "instr": instr})
                 for ph, piece in zip(sched, pieces)]
         try:
             for done, job in enumerate(as_completed(jobs), 1):

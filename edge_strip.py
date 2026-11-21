@@ -22,6 +22,7 @@ import edge_mode as E
 S = 3                                   # drawn this many times larger, then shrunk
 BOX_H = 62                              # the top box's height at 720 p
 BAR_H = 34                              # the bottom strip's height at 720 p
+BAND_H = 60                             # 🗒️ with instructions (◧ split screen): the strip is this tall
 FLASH_SEC = 0.5                         # 🔔 how long the box stays filled with the new phase's colour
 DARK = (17, 17, 20)
 GREY = (142, 142, 152)
@@ -116,12 +117,16 @@ def number_text(look: str, left: float) -> str:
     return f"+{secs:d}" if look in ("override", "notyet") else f"{min(secs, 99):02d}"
 
 
-def bar_track(width: int, frame_h: int, alpha: float = 0.45):
+def band_height(frame_h: int) -> int:
+    return max(int(round(BAND_H * scale(frame_h))) // 2 * 2, 12)
+
+
+def bar_track(width: int, frame_h: int, alpha: float = 0.45, height: int = None):
     """The bottom strip: a dark see-through band `width` wide with a thin light track along its middle. Returns
-    (picture, track x0, track x1) — the track's ends in the picture."""
+    (picture, track x0, track x1) — the track's ends in the picture. height: the band's (default: the strip's)."""
     from PIL import Image, ImageDraw
     k = scale(frame_h)
-    h = bar_height(frame_h)
+    h = int(height or bar_height(frame_h))
     img = Image.new("RGBA", (width * S, h * S), (0, 0, 0, int(255 * alpha)))
     d = ImageDraw.Draw(img)
     pad = int(40 * k)
@@ -140,3 +145,31 @@ def bar_marker(frame_h: int, colour, dim: bool = False):
     fill = (150, 150, 155, 110) if dim else tuple(colour) + (255,)
     ImageDraw.Draw(img).rounded_rectangle((0, 0, w * S - 1, h * S - 1), radius=w * S // 2, fill=fill)
     return img.resize((w, h), Image.LANCZOS)
+
+
+def instruction_panel(text: str, colour, width: int, frame_h: int, alpha: float = 0.6):
+    """🗒️ Her half of the bottom band: the instruction in large white capitals beside a short bar in the phase's
+    colour, on a dark see-through band with a thin divider on its left edge. Long text shrinks to fit."""
+    from PIL import Image, ImageDraw
+    k = scale(frame_h)
+    h = band_height(frame_h)
+    img = Image.new("RGBA", (width * S, h * S), (0, 0, 0, int(255 * alpha)))
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 0, max(int(k * S), 1), h * S), fill=(255, 255, 255, 36))
+    text = text.upper()
+    size = int(30 * k * S)
+    f = E._font(size, bold=True)
+    acc_w, gap = 6 * k * S, 12 * k * S
+    room = width * S - 2 * 24 * k * S - acc_w - gap
+    while _w(d, text, f) > room and size > 8:
+        size = int(size * 0.92)
+        f = E._font(size, bold=True)
+    b = d.textbbox((0, 0), text, font=f)
+    tw = b[2] - b[0]
+    x = (width * S - (acc_w + gap + tw)) / 2
+    cy = h * S / 2
+    ah = 30 * k * S
+    if text:                                               # (an empty band before the first instruction)
+        d.rounded_rectangle((x, cy - ah / 2, x + acc_w, cy + ah / 2), radius=acc_w / 2, fill=tuple(colour) + (255,))
+        d.text((x + acc_w + gap - b[0], cy - (b[3] + b[1]) / 2), text, font=f, fill=(255, 255, 255, 255))
+    return img.resize((width, h), Image.LANCZOS)

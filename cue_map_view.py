@@ -77,7 +77,8 @@ def undo() -> bool:
     if not stack:
         return False
     prev = json.loads(stack.pop())
-    if CS.norm(prev.get("lines")) == CS.norm(CS.load().get("lines")) and prev.get("autofill") == CS.load().get("autofill"):
+    if (CS.norm(prev.get("lines")) == CS.norm(CS.load().get("lines")) and prev.get("autofill") == CS.load().get("autofill")
+            and list(prev.get("instructions") or []) == list(CS.load().get("instructions") or [])):
         CS.clear_draft()
         st.session_state[SS_MAP] = CS.load()
     else:
@@ -335,6 +336,19 @@ def editor(names: list) -> None:
         draft["cats"].append(newcat.strip())
     draft["notes"] = st.text_area("Notes (situations to turn into a cue later)", draft.get("notes") or "", key=f"cm_n_{k}",
                                   height=70)
+    ins = CS.instructions(current())                     # 🗒️ the text this line puts up (◧ split screen, 21 Nov)
+    cur = str(draft.get("instruction") or "")
+    opts = [""] + ins + ([cur] if cur and cur not in ins else [])
+    ic = st.columns([3, 1])
+    draft["instruction"] = ic[0].selectbox("🗒️ Instruction (split screen)", opts, index=opts.index(cur), key=f"cm_ins_{k}",
+                                           format_func=lambda v: v or "— none (the one on screen stays) —",
+                                           help="Shown in her half of the bottom strip from this line until a line "
+                                                "with another instruction plays. Add and rename them in 🗒️ Instructions.")
+    draft["instruction_delay"] = ic[1].number_input("Delay (s)", 0.0, E.INSTRUCTION_DELAY_MAX,
+                                                    float(draft.get("instruction_delay") or 0.0), 0.1,
+                                                    key=f"cm_insd_{k}", disabled=not draft["instruction"],
+                                                    help="How long after the line starts the text appears — to land "
+                                                         "on the right word.")
     st.markdown(f"**Cues** ({len(draft.get('cues') or [])})")
     for i, cue in enumerate(list(draft.get("cues") or [])):
         _cue_editor(draft, i, cue, names, f"{k}_{i}")
@@ -666,6 +680,10 @@ def timeline(cm: dict) -> None:
             if msg:
                 st.session_state["cm_msg"] = ("info", msg)
             st.rerun()
+    track = E.instruction_track(got["plays"], cm)
+    if track:
+        with st.expander(f"🗒️ Instructions on screen in this draw — {len(track)} change(s)"):
+            st.caption(" → ".join(f"{int(x['time'] // 60)}:{int(x['time'] % 60):02d} {x['text']}" for x in track))
     if got["clashes"]:
         with st.expander(f"⚠️ {len(got['clashes'])} clash(es) in this draw"):
             for k, x in enumerate(got["clashes"]):
@@ -677,6 +695,84 @@ def timeline(cm: dict) -> None:
                     st.rerun()
     else:
         st.caption("Clashes: none — no two lines meet.")
+
+
+# ---------------------------------------------------------------------------
+# 🗒️ Instructions (Daryl, 21 Nov): text commands linked to lines, shown in her half of a split screen
+# ---------------------------------------------------------------------------
+
+def set_instructions(texts: list, rename: dict = None, drop: str = None, link: tuple = None) -> None:
+    """Change the 🗒️ instructions in the unsaved changes: the list, a rename (every line using it follows), a delete
+    (lines using it get none) or a link (text, [line names]: those lines get it, others using it lose it)."""
+    _remember()
+    work = _disk_work()
+    work["instructions"] = list(dict.fromkeys(t for t in texts if t))
+    for ln in work["lines"]:
+        cur = ln.get("instruction") or ""
+        if rename and cur in rename:
+            ln["instruction"] = rename[cur]
+        if drop and cur == drop:
+            ln["instruction"] = ""
+        if link:
+            text, names = link
+            if ln["name"] in names:
+                ln["instruction"] = text
+            elif cur == text:
+                ln["instruction"] = ""
+    CS.save_draft(work)
+    st.session_state[SS_MAP] = work
+    st.session_state["cm_gen"] = st.session_state.get("cm_gen", 0) + 1
+    if st.session_state.get(SS_SEL):
+        select(st.session_state[SS_SEL])
+
+
+def instructions_tab(cm: dict) -> None:
+    ins = CS.instructions(cm)
+    gen = st.session_state.get("cm_gen", 0)
+    lines = cm.get("lines") or []
+    st.caption("🗒️ Text commands shown in her half of the bottom strip on a ◧ split-screen render (switch 🗒️ "
+               "Instructions on in Edge's setup). A line linked to one puts it up — after its own delay — and it stays "
+               "until a line with another one plays; give Stop and Wait lines their own (STOP, RELAX…). Changes are "
+               "unsaved until 💾 Save.")
+    a = st.columns([4, 1])
+    new = a[0].text_input("➕ New instruction", key=f"cm_ins_new_{gen}", placeholder="e.g. JUST THE TIP")
+    if a[1].button("➕ Add", key="cm_ins_add", disabled=not new.strip() or new.strip().upper() in ins,
+                   use_container_width=True):
+        set_instructions(ins + [" ".join(new.split()).upper()])
+        st.rerun()
+    if not ins:
+        st.info("No instructions yet — add one above.")
+        return
+    use = {t: [ln["name"] for ln in lines if ln.get("instruction") == t] for t in ins}
+    for j, t in enumerate(ins):
+        r = st.columns([3, 1, 1, 1])
+        val = r[0].text_input(f"Instruction {j + 1}", t, key=f"cm_ins_t_{j}_{gen}", label_visibility="collapsed")
+        r[1].caption(f"{len(use[t])} line(s)")
+        val = " ".join(val.split()).upper()
+        if r[2].button("✎ Rename", key=f"cm_ins_rn_{j}", disabled=not val or val == t or val in ins,
+                       use_container_width=True):
+            set_instructions([val if x == t else x for x in ins], rename={t: val})
+            st.rerun()
+        if r[3].button("🗑", key=f"cm_ins_del_{j}", use_container_width=True,
+                       help="Delete it — the lines using it get none."):
+            set_instructions([x for x in ins if x != t], drop=t)
+            st.rerun()
+    st.markdown("**🔗 Link lines**")
+    c = st.columns([2, 4])
+    pick = c[0].selectbox("Instruction", ins, key="cm_ins_pick")
+    names = sorted((ln["name"] for ln in lines), key=str.lower)
+    chosen = c[1].multiselect("Lines that put it up", names, default=use.get(pick, []), key=f"cm_ins_lines_{pick}_{gen}")
+    if st.button("🔗 Link", key="cm_ins_link", type="primary", disabled=sorted(chosen) == sorted(use.get(pick, []))):
+        set_instructions(ins, link=(pick, chosen))
+        st.session_state["cm_msg"] = ("info", f"🗒️ {pick}: {len(chosen)} line(s) — 💾 Save to keep it.")
+        st.rerun()
+    linked = [ln for ln in lines if ln.get("instruction")]
+    if linked:
+        st.dataframe([{"Line": ln["name"], "Instruction": ln["instruction"],
+                       "Delay (s)": float(ln.get("instruction_delay") or 0.0)} for ln in
+                      sorted(linked, key=lambda x: (x["instruction"], x["name"].lower()))],
+                     hide_index=True, use_container_width=True)
+        st.caption("Set a line's delay in its editor (tap it on a timeline or in 🎙️ Lines).")
 
 
 # ---------------------------------------------------------------------------

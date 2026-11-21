@@ -416,3 +416,23 @@ def test_the_page_sets_roles_per_phase(monkeypatch):
         mix_jobs.forget(PE.JOB_KEY)
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def test_compile_carries_the_instructions_only_on_a_split_screen(monkeypatch):
+    out = _timelines(monkeypatch)
+    try:
+        import edge_mode as E
+        import planner.edge as PE
+        cm = E.load_cue_map(E.CUE_MAP_FILE)
+        for ln in cm["lines"]:
+            if ln["name"] == "Start-Round 1":
+                ln["instruction"], ln["instruction_delay"] = "JUST THE TIP", 0.5
+        monkeypatch.setattr(PE, "load_cue_map", lambda: cm)
+        res = PE.compile_edge([], VIDS, "chill", 3, avatar=True, avatar_mode="split", instructions=True)
+        ins = res["plan"]["edge"]["instructions"]
+        start = next(c["time"] for c in res["plan"]["edge"]["voiceover"]["cues"] if c["line"] == "Start-Round 1")
+        assert ins["on"] and ins["items"][0] == {"time": round(start + 0.5, 3), "text": "JUST THE TIP"}
+        corner = PE.compile_edge([], VIDS, "chill", 3, avatar=True, avatar_mode="corner", instructions=True)
+        assert not corner["plan"]["edge"]["instructions"]["on"]
+    finally:
+        shutil.rmtree(out, ignore_errors=True)

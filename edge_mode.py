@@ -1173,6 +1173,40 @@ def _silence_around(plays, a, b, total) -> float:
     return after - before
 
 
+# ---------------------------------------------------------------------------
+# 🗒️ Instructions (Daryl, 21 Nov): text commands linked to lines, shown in her half of a split screen
+# ---------------------------------------------------------------------------
+
+INSTRUCTION_DELAY_MAX = 5.0
+
+
+def instruction_track(plays: list, cue_map: dict) -> list:
+    """[{"time", "text"}] — what the 🗒️ Instruction reads from when on: a line linked to an instruction puts it up
+    (its own delay after the line starts, to land on the right word); it stays until another line's different
+    instruction replaces it — nothing clears it (Stop / Wait lines carry their own: STOP, RELAX…). Lines with none
+    leave it as it is."""
+    by_name = {ln["name"]: ln for ln in (cue_map or {}).get("lines") or []}
+    out, now = [], None
+    for p in sorted(plays, key=lambda x: float(x["time"])):
+        ln = by_name.get(p.get("line"))
+        text = " ".join(str((ln or {}).get("instruction") or "").split())
+        if not text or text == now:
+            continue
+        delay = min(max(float((ln or {}).get("instruction_delay") or 0.0), 0.0), INSTRUCTION_DELAY_MAX)
+        t = round(float(p["time"]) + delay, 3)
+        if out and t <= out[-1]["time"]:                   # (a later line's text never lands before an earlier one)
+            t = round(out[-1]["time"] + 0.04, 3)
+        out.append({"time": t, "text": text})
+        now = text
+    return out
+
+
+def instruction_at(track: list, t: float) -> str | None:
+    import bisect
+    k = bisect.bisect_right([x["time"] for x in track], t) - 1
+    return track[k]["text"] if k >= 0 else None
+
+
 def resolve_lines(sched: list, cue_map: dict, difficulty: str, seed: int = 0, durations: dict = None,
                   _raw: bool = False) -> dict:
     """The cue map played against one compilation's phases → when every line is heard, with no two overlapping.
