@@ -25,11 +25,12 @@ from config import CATALOGUE_DIR
 from library_common import format_mmss
 
 RESULT_KEY = "edge_result"
+TIMER_STYLES = {"ring": "◯ Ring", "strip": "▬ Strip"}   # ⏱️ the strip: a box at the top + a stroke strip at the bottom (21 Nov)
 KEPT = {"edge_playlist": [], "edge_rounds": 3, "edge_difficulty": "chill", "edge_voice": False, "edge_beat": False,
         "edge_corner": "top-left", "edge_max_videos": 0, "edge_avatar": False, "edge_avatar_mode": "corner",
         "edge_avatar_corner": "bottom-right", "edge_intro": False, "edge_quick": True, "edge_stream": True, "edge_render_name": "",
         "edge_song_per_round": False, "edge_energy_mix": False, "edge_surprises": False,
-        "edge_random_videos": False, "edge_random_n": 30, **{"edge_tags_" + p: [] for p in E.ORDER},
+        "edge_random_videos": False, "edge_random_n": 30, "edge_timer_style": "ring", **{"edge_tags_" + p: [] for p in E.ORDER},
         **{"edge_roles_" + p: list({"wait": ["intro"], "stop": ["outro"]}.get(p, [])) for p in E.ORDER}}
 KEPT_IF_SET = tuple("ce_" + k for k in ("actors", "tags", "hair", "gg", "new", "minlen", "exclude"))
 
@@ -596,7 +597,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
                  avatar: bool = False, avatar_mode: str = "corner", avatar_corner: str = "bottom-right",
                  intro: bool = False, signals: bool = True, round_badge: bool = True, music_fade: bool = True,
                  song_per_round: bool = False, energy_mix: bool = False, phase_tags: dict = None, surprises: bool = False,
-                 phase_roles: dict = None, progress=None) -> dict:
+                 phase_roles: dict = None, timer_style: str = "ring", progress=None) -> dict:
     """The Edge plan. track_ids: the playlist in playing order ([] = no song: the generated beat is the track, and
     the beat sound is on whatever `beat` says). The footage is matched 🎯 Movement only — each song on the 📐 lines
     from its music; a song's later plays (and later songs) leave out the clips already used, as long as the library
@@ -858,7 +859,7 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
             "voiceover": {"on": bool(voiceover), "music_volume": E.MUSIC_UNDER_VOICE, "cues": cues,
                           "placeholders": missing_voice, "cue_map": lines_used, "clashes": clashes,
                           "lines_missing": lines_missing},
-            "overlay": {"corner": corner, "fps": E.OVERLAY_FPS},
+            "overlay": {"corner": corner, "fps": E.OVERLAY_FPS, "style": timer_style if timer_style in TIMER_STYLES else "ring"},
             # 🌙 the songs fade out in Stop / back in over Wait; 🔉 full volume, dipping under each line
             "music": {"still_volume": E.MUSIC_IN_STILL, "fade": E.MUSIC_FADE_SEC, "fade_stop": bool(music_fade),
                       "stop_fade": "whole phase", "duck": False,
@@ -1004,6 +1005,7 @@ def _settings() -> dict:
     return {"playlist": list(ss.get("edge_playlist") or []), "difficulty": ss.get("edge_difficulty", "chill"),
             "rounds": int(ss.get("edge_rounds", 3)), "voiceover": bool(ss.get("edge_voice")), "beat": bool(ss.get("edge_beat")),
             "corner": ss.get("edge_corner", "top-left"), "max_videos": int(ss.get("edge_max_videos", 0) or 0),
+            "timer_style": ss.get("edge_timer_style", "ring"),
             "avatar": bool(ss.get("edge_avatar")), "avatar_mode": ss.get("edge_avatar_mode", "corner"),
             "avatar_corner": ss.get("edge_avatar_corner", "bottom-right"), "intro": bool(ss.get("edge_intro")),
             "song_per_round": bool(ss.get("edge_song_per_round", False)), "energy_mix": bool(ss.get("edge_energy_mix", False)),
@@ -1074,6 +1076,7 @@ def _job(job, settings: dict, video_ids: list, seed: int, render: bool, token, r
                            song_per_round=settings["song_per_round"], energy_mix=settings["energy_mix"],
                            surprises=settings.get("surprises", False),
                            phase_tags=settings.get("phase_tags"), phase_roles=settings.get("phase_roles"),
+                           timer_style=settings.get("timer_style", "ring"),
                            progress=lambda d, t, txt: job.progress(share * min(d / max(t, 1), 1.0), f"compiling · {txt}"))
         drawn = settings.get("drawn") or {}
         if drawn.get("songs"):
@@ -1215,6 +1218,7 @@ def _setup_from_plan(edge: dict) -> dict:
     return {"playlist": playlist, "difficulty": edge.get("difficulty", "chill"), "rounds": int(edge.get("rounds") or 3),
             "voiceover": bool(vo.get("on")) and not av.get("on"), "beat": bool((edge.get("beat") or {}).get("on")) and bool(parts),
             "corner": (edge.get("overlay") or {}).get("corner", "top-left"), "avatar": bool(av.get("on")),
+            "timer_style": (edge.get("overlay") or {}).get("style", "ring"),
             "avatar_mode": av.get("mode", "corner"), "avatar_corner": av.get("corner", "bottom-right"),
             "intro": bool((edge.get("intro") or {}).get("on")), "song_per_round": bool(music.get("song_per_round")),
             "energy_mix": bool(music.get("energy_mix")), "phase_tags": dict(edge.get("phase_tags") or {}),
@@ -1226,7 +1230,7 @@ SETUP_KEYS = {"playlist": "edge_playlist", "difficulty": "edge_difficulty", "rou
               "beat": "edge_beat", "corner": "edge_corner", "max_videos": "edge_max_videos", "avatar": "edge_avatar",
               "avatar_mode": "edge_avatar_mode", "avatar_corner": "edge_avatar_corner", "intro": "edge_intro",
               "song_per_round": "edge_song_per_round", "energy_mix": "edge_energy_mix", "stream": "edge_stream",
-              "surprises": "edge_surprises",
+              "surprises": "edge_surprises", "timer_style": "edge_timer_style",
               "quick": "edge_quick"}
 
 

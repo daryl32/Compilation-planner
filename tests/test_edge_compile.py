@@ -400,13 +400,16 @@ def test_the_page_sets_roles_per_phase(monkeypatch):
         assert at.session_state["edge_roles_wait"] == ["intro"] and at.session_state["edge_roles_stop"] == ["outro"]
         for p in ("medium", "fast", "extra"):
             at.session_state["edge_roles_" + p] = ["outro"]
+        at.selectbox(key="edge_timer_style").set_value("strip")     # ⏱️ (and the strip timer style, 21 Nov)
         at.run()
+        assert at.selectbox(key="edge_corner").disabled
         assert not errors(at), errors(at)
         at.button(key="edge_go_only").click().run()
         _wait_job(at)
         assert not errors(at), errors(at)
         got = at.session_state["edge_result"]["plan"]["edge"]["phase_roles"]
         assert got == {"wait": ["intro"], "medium": ["outro"], "fast": ["outro"], "extra": ["outro"], "stop": ["outro"]}
+        assert at.session_state["edge_result"]["plan"]["edge"]["overlay"]["style"] == "strip"
         at.button(key="edge_back").click().run()
         at.button(key="edge_roles_reset").click().run()
         assert at.session_state["edge_roles_medium"] == [] and at.session_state["edge_roles_wait"] == ["intro"]

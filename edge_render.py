@@ -22,6 +22,7 @@ A check at the end compares the picture's and the sound's length with the plan's
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import time
@@ -670,6 +671,43 @@ def _guide_layers(edge: dict, sched: list, corner: str, frame: tuple, badges: di
     return out
 
 
+def _strip_layers(edge: dict, sched: list, frame: tuple, signals: bool) -> dict:
+    """⏱️ The "strip" timer style (edge_strip.py): the top box for every stretch (as it is, filled for 🔔 the flash,
+    edged for the pulse), the numbers it shows, and the bottom stroke strip with its markers."""
+    import edge_strip as ES
+    W, H = frame
+    n_rounds = max((ph["round"] for ph in sched), default=1)
+    looks = {ph["index"]: E.timer_style(ph) for ph in sched}
+    nexts = {ph["index"]: (E.PROFILES[nx]["label"] if (nx := E.next_real(sched, k)) else "END")
+             for k, ph in enumerate(sched)}
+    lay = ES.layout(frame, sorted({E.style(lk)["label"] for lk in looks.values()}), sorted(set(nexts.values())), n_rounds)
+    boxes = {}
+    for ph in sched:
+        st_ = E.style(looks[ph["index"]])
+        boxes[ph["index"]] = {m: _rgba(ES.box_image(lay, st_["label"], st_["colour"] if m == "flash" else st_["ring"],
+                                                    nexts[ph["index"]], ph["round"], n_rounds, m))
+                              for m in (("normal", "flash", "pulse") if signals else ("normal",))}
+    digits = {}
+    for ph in sched:
+        look = looks[ph["index"]]
+        c_total, c_left = E.clock(ph)
+        ring = tuple(E.style(look)["ring"])
+        for secs in range(0, int(math.ceil(c_left)) + 1):
+            text = ES.number_text(look, float(secs))
+            for kind, colour, pulse in (("normal", (255, 255, 255), False), ("dark", ES.DARK, False),
+                                        ("pulse", ring, True)):
+                if (text, kind, ring) not in digits and (kind == "normal" or signals):
+                    digits[(text, kind, ring)] = _rgba(ES.digits_image(lay, text, colour, pulse))
+    out = {"lay": lay, "boxes": boxes, "digits": digits, "signals": signals, "bar": None}
+    pace = edge.get("pace") or {}
+    if pace.get("on") and pace.get("beats"):
+        track, x0, x1 = ES.bar_track(W, H)
+        mk = {p: _rgba(ES.bar_marker(H, E.PROFILES[p]["ring"])) for p in E.ORDER}
+        out["bar"] = {"beats": [float(t) for t in pace["beats"]], "track": _rgba(track), "y": H - track.size[1],
+                      "x0": x0, "x1": x1, "h": track.size[1], "markers": mk, "dim": _rgba(ES.bar_marker(H, (0, 0, 0), True))}
+    return out
+
+
 def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av: dict, frame: tuple, out: Path,
            footage: float = None, extras: dict = None) -> None:
     """One phase's picture → out: that stretch of the footage, the avatar appearances (or the parts of them) that
@@ -685,6 +723,7 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
     size = W * H * 3
     black = np.zeros((H, W, 3), dtype=np.uint8)
 
+    strip = extras.get("strip")                           # ⏱️ the "strip" timer style (edge_strip.py), or None
     # 👩 what she does in this phase: (first frame, last frame + 1, her frames, how solid (None = a solid box), x, y)
     split = av.get("mode") == "split"
     layers = []
@@ -712,6 +751,11 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
                 pic, box = framed, (box[0] + 4, box[1] + 4)
             got, solid = pic[None], None
         x, y = (W // 2, 0) if split else _corner_xy(av.get("corner", "bottom-right"), (W, H), box)
+        if strip is not None and not split:                # ⏱️ strip style: her box clear of the top box / stroke strip
+            if av.get("corner", "bottom-right").startswith("bottom") and strip.get("bar"):
+                y = max(y - strip["bar"]["h"], 0)
+            elif av.get("corner", "bottom-right").startswith("top"):
+                y = min(y + strip["lay"]["h"], H - box[1])
         layers.append((first, last, got, solid, x, y))
 
     pictures = timers.get(E.timer_key(ph)) or []
@@ -758,6 +802,8 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
             _lay(pic, badge[2], badge[3], badge[0], badge[1])
         if nxt is not None:
             _lay(pic, nxt[2], nxt[3], nxt[0], nxt[1])
+        if strip is not None:
+            _lay_strip(pic, strip, ph, i, a, c_left, moving)
         if bar is not None:                                # 🎯 the stroke bar: the marker slides top ↔ bottom on the beats
             _lay(pic, bar["track_x"], bar["y"], *bar["track"])
             pos = E.guide_position(bar["beats"], a + i / FPS) if moving else None
@@ -774,6 +820,34 @@ def _piece(combined, ph: dict, timers: dict, timer_corner: str, shows: list, av:
             except OSError:
                 pass
             dec.wait()
+
+
+def _lay_strip(pic, strip: dict, ph: dict, i: int, a: float, c_left: float, moving: bool) -> None:
+    """⏱️ One frame of the strip style: the top box with its number, the bottom stroke strip with its marker."""
+    import edge_strip as ES
+    lay, t = strip["lay"], i / FPS
+    left = c_left - t
+    look = E.timer_style(ph)
+    ring = tuple(E.style(look)["ring"])
+    sig = strip["signals"]
+    flash = sig and int(ph.get("index", 0)) > 0 and t < ES.FLASH_SEC
+    pulse = sig and not flash and 0 < left <= E.PULSE_SEC
+    mode = "flash" if flash else "pulse" if pulse else "normal"
+    box = strip["boxes"][ph["index"]].get(mode) or strip["boxes"][ph["index"]]["normal"]
+    _lay(pic, lay["x"], 0, *box)
+    kind = "dark" if flash else "pulse" if pulse else "normal"
+    dg = strip["digits"].get((ES.number_text(look, max(left, 0.0)), kind, ring))
+    if dg is not None:
+        _lay(pic, lay["x"] + lay["slot_x"], 0, *dg)
+    bar = strip.get("bar")
+    if bar is not None:
+        _lay(pic, 0, bar["y"], *bar["track"])
+        pos = E.guide_position(bar["beats"], a + t) if moving else None
+        m = bar["markers"][ph["profile"]] if pos is not None else bar["dim"]
+        mw, mh = m[0].shape[1], m[0].shape[0]
+        pos = 0.5 if pos is None else pos
+        x = int(round(bar["x0"] + pos * (bar["x1"] - bar["x0"] - mw)))
+        _lay(pic, x, bar["y"] + (bar["h"] - mh) // 2, *m)
 
 
 def _lengths(path) -> dict:
@@ -831,14 +905,19 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
     t0 = time.time()
     timer_dir = tmp_dir / "overlay"
     signals = edge.get("signals") or {}
-    E.write_overlay(sched, timer_dir, H, signals=bool(signals.get("timer")))
-    timers = _timer_pictures(timer_dir, sched)
     corner = (edge.get("overlay") or {}).get("corner", "top-left")
+    strip = None
+    if (edge.get("overlay") or {}).get("style") == "strip":          # ⏱️ the strip style: no ring pictures
+        strip = _strip_layers(edge, sched, (W, H), bool(signals.get("timer")))
+        timers = {}
+    else:
+        E.write_overlay(sched, timer_dir, H, signals=bool(signals.get("timer")))
+        timers = _timer_pictures(timer_dir, sched)
     av = edge.get("avatar") or {}
     pieces = [tmp_dir / f"phase_{k:03d}.mp4" for k in range(len(sched))]
     footage = probe(combined_video)["seconds"] or None
     badges = {}
-    if (edge.get("round_badge") or {}).get("on") and sched:          # ▸ "ROUND 2 / 3" by the timer
+    if strip is None and (edge.get("round_badge") or {}).get("on") and sched:          # ▸ "ROUND 2 / 3" by the timer
         import numpy as np
         tw, th = E.overlay_size(H)
         n_rounds = max(ph["round"] for ph in sched)
@@ -846,12 +925,13 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
             a = np.asarray(E.round_badge(r, n_rounds, tw).convert("RGBA"), dtype=np.uint8)
             rgb, solid = a[..., :3].copy(), a[..., 3:4].astype(np.uint16)
             badges[r] = (rgb, solid, *_badge_xy(corner, (W, H), (tw, th), (rgb.shape[1], rgb.shape[0])))
-    guide = _guide_layers(edge, sched, corner, (W, H), badges)
+    guide = _guide_layers(edge, sched, corner, (W, H), badges) if strip is None else {}
     n = max(1, min(int(workers or min(4, os.cpu_count() or 2)), len(sched) or 1))
     with ThreadPoolExecutor(max_workers=n) as pool:
         jobs = [pool.submit(_piece, combined_video, ph, timers, corner, shows, av, (W, H), piece, footage,
                             {"flash": bool(signals.get("flash")), "badge": badges.get(ph["round"]),
-                             "guide": guide.get("bar"), "next": guide.get("next", {}).get(ph["index"])})
+                             "guide": guide.get("bar"), "next": guide.get("next", {}).get(ph["index"]),
+                             "strip": strip})
                 for ph, piece in zip(sched, pieces)]
         try:
             for done, job in enumerate(as_completed(jobs), 1):

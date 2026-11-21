@@ -18,7 +18,7 @@ from library_common import format_mmss
 from planner.edge import (JOB_KEY, KEPT, KEPT_IF_SET, RESULT_KEY, SETUP_KEYS, _missing_sources, _setup_from_plan, _start,
                           _used_line, avatar_line_clip, took_line, cue_map_path, fetch_lines, line_file, line_takes, load_cue_map,
                           save_cue_map, LOOK_PARTS, LOOK_PART_LABELS, load_looks, save_looks, local_looks,
-                          SURPRISE, surprise_count, DEFAULT_PHASE_ROLES)
+                          SURPRISE, surprise_count, DEFAULT_PHASE_ROLES, TIMER_STYLES)
 
 
 def _take_finished_job() -> bool:
@@ -198,7 +198,13 @@ def _setup(rows: dict, have_tl: set) -> None:
     diff = c[0].radio("Difficulty", list(E.DIFFICULTIES), key="edge_difficulty", horizontal=True,
                       format_func=lambda d: E.DIFFICULTIES[d])
     rounds = c[1].slider("Rounds", E.MIN_ROUNDS, E.MAX_ROUNDS, key="edge_rounds")
-    c[2].selectbox("Timer position", list(E.CORNERS), key="edge_corner", format_func=lambda k: E.CORNERS[k])
+    tc = c[2].columns(2)
+    tc[0].selectbox("Timer style", list(TIMER_STYLES), key="edge_timer_style", format_func=lambda k: TIMER_STYLES[k],
+                    help="◯ Ring: the countdown ring in a corner, the stroke bar beside it. ▬ Strip: a slim box "
+                         "at the top (seconds left, the phase large, the next phase small, the round) and the stroke "
+                         "meter across the bottom.")
+    tc[1].selectbox("Timer position", list(E.CORNERS), key="edge_corner", format_func=lambda k: E.CORNERS[k],
+                    disabled=st.session_state.get("edge_timer_style") == "strip")
     st.caption("⏱️ " + E.describe(diff, rounds))
     if diff in E.HANDS_OFF_SEC:
         st.toggle("🎲 Surprises", key="edge_surprises",
@@ -287,7 +293,8 @@ def _setup(rows: dict, have_tl: set) -> None:
         if mode == "corner":
             m[1].selectbox("Her corner", [k for k in E.CORNERS if k != "centre"], key="edge_avatar_corner",
                            format_func=lambda k: E.CORNERS[k])
-            if st.session_state.get("edge_avatar_corner") == st.session_state.get("edge_corner"):
+            if (st.session_state.get("edge_timer_style") != "strip"
+                    and st.session_state.get("edge_avatar_corner") == st.session_state.get("edge_corner")):
                 st.warning("The avatar and the timer are set to the same corner — she will sit under the timer.")
     r = st.columns([2.2, 1])
     r[0].toggle("🎲 Random videos", key="edge_random_videos",

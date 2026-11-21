@@ -499,3 +499,50 @@ def test_her_clip_keeps_the_lines_cue_map_gain():
     shows = [{"time": 5.0, "seconds": 3.0, "profile": "slow", "clip": "her.mp4", "still": None, "sound": "her.mp4"}]
     assert R._sound_cues(edge, shows)[0]["gain"] == -3
 
+
+
+def test_the_strip_timer_style_shows_the_box_the_number_and_the_stroke_strip(tmp_path, monkeypatch):
+    """⏱️ Timer style ▬ Strip (21 Nov): a box at the top (number, phase, next, round), the stroke meter across the
+    bottom (left ↔ right on the beats), the box filled with the phase colour as it starts, no ring."""
+    import sys
+    import types
+    import edge_mode as E
+    import edge_render as R
+    import edge_strip as ES
+    monkeypatch.setitem(sys.modules, "render_preview", types.SimpleNamespace(get_track_raw_source=lambda t: t))
+    comb = tmp_path / "comb.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x202020:s=640x360:r=25:d=40",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(comb)], check=True)
+    sched = [{"index": 0, "round": 1, "profile": "slow", "start": 0.0, "end": 20.0, "bpm": 60.0},
+             {"index": 1, "round": 1, "profile": "extra", "start": 20.0, "end": 40.0, "bpm": 180.0}]
+    guide = E.pace_guide(sched)
+    edge = {"schedule": sched, "playlist": [], "beat": {"on": True, "volume": 1.0}, "voiceover": {"on": False, "cues": []},
+            "overlay": {"corner": "top-left", "style": "strip"}, "avatar": {"on": False}, "intro": {"on": False},
+            "outro": {"on": False}, "signals": {"sound": False, "timer": True, "flash": False},
+            "round_badge": {"on": True}, "pace": {"on": True, "beats": guide["beats"]}, "next_up": {"on": True}}
+
+    def run(cmd):
+        subprocess.run(cmd, capture_output=True, check=True)
+    out = tmp_path / "out.mp4"
+    took = R.finish({"edge": edge}, comb, str(out), types.SimpleNamespace(input_args=lambda raw: ["-i", raw]),
+                    tmp_path / "w", run, 360, 640)
+    assert took["edge_check"] == "ok"
+    assert not (tmp_path / "w" / "overlay").exists() or not list((tmp_path / "w" / "overlay").glob("*.png"))   # no ring
+    st_ = R._strip_layers(edge, sched, (640, 360), True)
+    lay, bar = st_["lay"], st_["bar"]
+    assert lay["w"] < 640 and lay["h"] == 30 and bar["h"] == ES.bar_height(360) and bar["y"] == 360 - bar["h"]
+    # the box is dark at the top centre; on Extra's first moments it is filled with Extra's red
+    bx, by = lay["x"] + lay["w"] - 6, lay["h"] // 2
+    r, g, b = _pixel(out, 10.0, bx, by)
+    assert max(r, g, b) < 40
+    r, g, b = _pixel(out, 20.12, bx, by)
+    assert r > 150 and g < 90
+    # the round sits in the box: something light right of the second divider
+    light = [_pixel(out, 10.0, x, by) for x in range(lay["x"] + lay["round_x"], lay["x"] + lay["w"] - 30, 2)]
+    assert any(min(px) > 150 for px in light)
+    # the stroke marker slides along the bottom strip: at one end on a beat, the other end on the next
+    my = bar["y"] + bar["h"] // 2
+    green = lambda px: px[1] > 140 and px[1] > px[0] + 40            # noqa: E731  (Slow's ring colour)
+    left_x, right_x = bar["x0"] + 4, bar["x1"] - 4
+    assert green(_pixel(out, 4.0, left_x, my)) and not green(_pixel(out, 4.0, right_x, my))
+    assert green(_pixel(out, 5.0, right_x, my)) and not green(_pixel(out, 5.0, left_x, my))
