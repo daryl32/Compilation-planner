@@ -17,7 +17,8 @@ from config import PLANS_DIR, PREVIEW_DIR
 from library_common import format_mmss
 from planner.edge import (JOB_KEY, KEPT, KEPT_IF_SET, RESULT_KEY, SETUP_KEYS, _missing_sources, _setup_from_plan, _start,
                           _used_line, avatar_line_clip, took_line, cue_map_path, fetch_lines, line_file, line_takes, load_cue_map,
-                          save_cue_map, LOOK_PARTS, LOOK_PART_LABELS, load_looks, save_looks, local_looks)
+                          save_cue_map, LOOK_PARTS, LOOK_PART_LABELS, load_looks, save_looks, local_looks,
+                          SURPRISE, surprise_count)
 
 
 def _take_finished_job() -> bool:
@@ -133,18 +134,36 @@ def _phase_tags_panel(rows: dict, vids: list) -> None:
                                     placeholder="any footage")
 
 
+def _surprise_alone() -> None:
+    """🎲 Surprise me replaces the songs picked; picking a song after it takes Surprise me out."""
+    ss = st.session_state
+    now = list(ss.get("edge_playlist") or [])
+    before = list(ss.get("_edge_playlist_before") or [])
+    if SURPRISE in now and SURPRISE not in before:
+        now = [SURPRISE]
+    elif SURPRISE in now and len(now) > 1:
+        now = [t for t in now if t != SURPRISE]
+    ss["edge_playlist"] = now
+    ss["_edge_playlist_before"] = now
+
+
 def _setup(rows: dict, have_tl: set) -> None:
     st.caption("⏱️ A compilation run by a countdown timer: rounds of 20-second phases — Wait, Slow, Medium, Fast, "
                "Extra, Stop — shown as an overlay. Pick songs or let a beat follow the timer; the footage is matched "
                "to whichever plays.")
     summaries = PC.audio_summaries(PC._audio_signature())
-    PC._still_there("edge_playlist", summaries)
-    songs = st.multiselect(
-        "🎵 Playlist — optional", sorted(summaries, key=str.lower), key="edge_playlist",
-        format_func=lambda t: f"{t} · {format_mmss(summaries[t]['duration'])}"
-                              + (f" · {summaries[t]['bpm']:.0f} BPM" if summaries[t]["bpm"] else ""),
+    PC._still_there("edge_playlist", list(summaries) + [SURPRISE])
+    picked = st.multiselect(
+        "🎵 Playlist — optional", [SURPRISE] + sorted(summaries, key=str.lower), key="edge_playlist",
+        on_change=_surprise_alone,
+        format_func=lambda t: "🎲 Surprise me — songs picked for you when you compile" if t == SURPRISE else
+        f"{t} · {format_mmss(summaries[t]['duration'])}" + (f" · {summaries[t]['bpm']:.0f} BPM" if summaries[t]["bpm"] else ""),
         help="Any number of songs, played back to back in the order picked; the list starts again until the rounds "
-             "are filled, and the last song is cut where the time ends. None: a beat that follows the timer.")
+             "are filled, and the last song is cut where the time ends. None: a beat that follows the timer. "
+             "🎲 Surprise me: the app picks the songs when you compile — how many from the rounds and difficulty, "
+             "calmer for Chill and the most driving for Hard, building in energy, avoiding the last few Edge renders' songs.")
+    surprise = SURPRISE in picked
+    songs = [t for t in picked if t != SURPRISE]
     c = st.columns([2.2, 1.6, 2])
     diff = c[0].radio("Difficulty", list(E.DIFFICULTIES), key="edge_difficulty", horizontal=True,
                       format_func=lambda d: E.DIFFICULTIES[d])
@@ -166,7 +185,10 @@ def _setup(rows: dict, have_tl: set) -> None:
                "timer pulses over a phase's last 3 seconds. ▸ The round number sits by the timer. 🎭 Wait favours "
                "clips marked intro, Stop clips marked outro (🎭 Reviewer roles); the music drives the rest.")
     total = E.round_seconds(diff) * rounds
-    if songs:
+    if surprise:
+        n = surprise_count(diff, rounds, bool(st.session_state.get("edge_song_per_round")))
+        st.caption(f"🎲 About {n} song{'s' if n != 1 else ''}, picked when you compile.")
+    if songs or surprise:
         mc = st.columns(2)
         mc[0].toggle("🎵 New song each round", key="edge_song_per_round",
                      help="Round 1 plays the first song, round 2 the second… (the list starts again when there are "
@@ -186,6 +208,8 @@ def _setup(rows: dict, have_tl: set) -> None:
             st.caption("⚡ " + ("Each round's parts come from its own song." if st.session_state.get("edge_song_per_round")
                                else f"Parts picked from all {len(songs)} song{'s' if len(songs) != 1 else ''} to fit each phase.")
                        + " Compile shows how close the fit is.")
+        elif surprise:
+            pass
         elif st.session_state.get("edge_song_per_round"):
             rp = E.round_playlist_parts([(t, summaries[t]["duration"]) for t in songs], E.schedule(diff, rounds))
             per = {}
@@ -200,7 +224,7 @@ def _setup(rows: dict, have_tl: set) -> None:
                        + (f" — the list comes round {passes} times" if passes > 1 else "")
                        + f"; the last one stops at {format_mmss(total)}.")
     t = st.columns(2)
-    if songs:
+    if songs or surprise:
         t[0].toggle("🥁 Beat sound over the songs", key="edge_beat",
                     help="Off with a song by default. On: the timer's beat (Slow 60, Medium 100, Fast 140, Extra 180 "
                          "a minute; silent in Wait and Stop) plays over the music. The footage still follows the songs.")
@@ -235,12 +259,21 @@ def _setup(rows: dict, have_tl: set) -> None:
                            format_func=lambda k: E.CORNERS[k])
             if st.session_state.get("edge_avatar_corner") == st.session_state.get("edge_corner"):
                 st.warning("The avatar and the timer are set to the same corner — she will sit under the timer.")
+    r = st.columns([2.2, 1])
+    r[0].toggle("🎲 Random videos", key="edge_random_videos",
+                help="Each compile draws this many videos at random from the ones the filters below allow — a "
+                     "different mix every time. Enough footage for 🏷️ Footage per phase is drawn first; more are "
+                     "added when they aren't enough footage for the run.")
+    r[1].number_input("How many", 1, 200, key="edge_random_n", disabled=not st.session_state.get("edge_random_videos"),
+                      label_visibility="collapsed")
     vids = PC._video_filters("ce_", rows, have_tl,
                              f"🎬 Videos / tags — optional (the best fit from all {len(have_tl)} unless you narrow it)")
     ranges = LC.library_ranges()
     mins = sum((ranges[v][1] - ranges[v][0]) if v in ranges else float(rows[v].get("duration") or 0) for v in vids) / 60
     st.caption(f"🎬 {len(vids)} video{'s' if len(vids) != 1 else ''} · {mins:.0f} min of footage in play for "
-               f"{format_mmss(total)} of compilation")
+               f"{format_mmss(total)} of compilation"
+               + (f" · 🎲 {min(int(st.session_state.get('edge_random_n') or 30), len(vids))} drawn at random each compile"
+                  if st.session_state.get("edge_random_videos") else ""))
     if mins * 60 < total:
         st.warning("There is less footage in play than the compilation is long — widen the video filters or pick fewer rounds.")
     _phase_tags_panel(rows, vids)
@@ -354,7 +387,20 @@ def _result(res: dict) -> None:
     b[3].download_button("⬇️ Download", data=RJ.plan_json(plan), file_name=f"{plan['track_id']}_plan.json",
                          mime="application/json", width="stretch", key="edge_dl")
     b[4].button("↻ Recompile & render", key="edge_again", width="stretch", on_click=_start, args=(res["video_ids"], True),
+                kwargs={"draw": False, "pool": (res.get("drawn") or {}).get("pool")},
                 help="Build it again with the current setup and render it — Hard draws a new order of phases.")
+    drawn = res.get("drawn") or {}
+    if drawn.get("songs") or drawn.get("pool"):
+        d = st.columns(2)
+        if drawn.get("songs"):
+            d[0].button("🎲 Re-draw songs", key="edge_redraw_songs", width="stretch", on_click=_start,
+                        args=(res["video_ids"], True), kwargs={"playlist": [SURPRISE], "draw": False, "pool": drawn.get("pool")},
+                        help="New Surprise me songs; the same videos and everything else — compiled and rendered.")
+        if drawn.get("pool"):
+            d[1].button("🎲 Re-draw videos", key="edge_redraw_videos", width="stretch", on_click=_start,
+                        args=(drawn["pool"], True),
+                        kwargs={"playlist": list(drawn["songs"]) if drawn.get("songs") else None},
+                        help="A new random set of videos from the same filters; the same songs — compiled and rendered.")
     if name := st.session_state.get("edge_render"):
         from library_common import show_render_player
         from renders import load_render
@@ -376,6 +422,11 @@ def _reopen(ro: dict) -> None:
     for k, key in SETUP_KEYS.items():
         if k in setup:
             ss[key] = setup[k]
+    if setup.get("surprise_songs"):                        # 🎲 made with Surprise me: it stays Surprise me
+        ss["edge_playlist"] = [SURPRISE]
+    ss["edge_random_videos"] = bool(setup.get("random_videos"))
+    if setup.get("random_videos"):
+        ss["edge_random_n"] = int(setup["random_videos"])
     for p in E.ORDER:                                      # 🏷️ tags per phase
         ss["edge_tags_" + p] = list((setup.get("phase_tags") or {}).get(p) or [])
     if edge.get("seed") is not None:

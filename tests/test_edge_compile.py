@@ -277,3 +277,83 @@ def test_an_edge_render_reopens_in_edge_mode_with_its_setup_and_plan(monkeypatch
         assert any("Reopened" in c.value for c in at.caption)
     finally:
         shutil.rmtree(out, ignore_errors=True)
+
+
+def test_surprise_me_picks_songs_by_difficulty_building_in_energy():
+    """🎲 Surprise me (21 Nov): how many from the rounds, calmer for Chill and driving for Hard, energy builds,
+    recent songs avoided, short tracks left out."""
+    import planner.edge as PE
+    lib = {f"calm{i}": {"duration": 200.0, "bpm": 72.0 + i, "level_rank": 0.05 * i, "analysed": True} for i in range(5)}
+    lib.update({f"loud{i}": {"duration": 200.0, "bpm": 150.0 + i, "level_rank": 0.8 + 0.04 * i, "analysed": True}
+                for i in range(5)})
+    lib["short"] = {"duration": 60.0, "bpm": 150.0, "level_rank": 1.0}
+    assert PE.surprise_count("chill", 3, True) == 3 and PE.surprise_count("chill", 3, False) == 2
+    assert PE.surprise_count("hard", 6, False) == round(300 * 6 / PE.SURPRISE_SEC_PER_SONG)
+    for seed in range(8):
+        chill = PE.surprise_songs(lib, "chill", 4, song_per_round=True, seed=seed)
+        hard = PE.surprise_songs(lib, "hard", 4, song_per_round=True, seed=seed)
+        assert len(chill) == len(set(chill)) == 4 and "short" not in chill + hard
+        assert sum(t.startswith("calm") for t in chill) >= 3 and sum(t.startswith("loud") for t in hard) >= 3
+        ints = [PE.song_intensity(lib[t]) for t in hard]
+        assert ints == sorted(ints)                                         # the energy builds
+    recent = {"loud0", "loud1", "loud2"}
+    picks = [t for seed in range(20) for t in PE.surprise_songs(lib, "hard", 2, True, seed=seed, recent=recent)]
+    assert sum(t in recent for t in picks) < len(picks) / 4
+
+
+def test_random_videos_cover_the_phase_rules_and_top_up_for_length():
+    import planner.edge as PE
+    pool = [f"v{i}" for i in range(100)]
+    secs = {v: 60.0 for v in pool}
+    tagged = ["v97", "v98", "v99"]
+    got, note = PE.draw_videos(pool, 30, 1, secs, 600.0, must=[tagged])
+    assert len(got) == 30 and set(tagged) <= set(got) and note is None
+    assert PE.draw_videos(pool, 30, 1, secs, 600.0)[0] == PE.draw_videos(pool, 30, 1, secs, 600.0)[0]
+    assert PE.draw_videos(pool, 30, 1, secs, 600.0)[0] != PE.draw_videos(pool, 30, 2, secs, 600.0)[0]
+    long_, note = PE.draw_videos(pool, 10, 1, secs, 1800.0)
+    assert len(long_) == 30 and "instead of 10" in note
+    assert PE.draw_videos(pool[:5], 30, 1, secs, 0.0) == (pool[:5], None)
+
+
+def test_the_page_runs_surprise_me_and_random_videos(monkeypatch):
+    out = _timelines(monkeypatch)
+    try:
+        import mix_jobs
+        import planner.edge as PE
+        mix_jobs.forget(PE.JOB_KEY)
+        monkeypatch.setattr(PE, "recent_edge_songs", lambda n=5: set())
+        from tests.apptest_util import errors, page_app
+        at = page_app("pages/1_Compilation_Planner.py", timeout=300)
+        at.session_state["planner_mode"] = "⏱️ Edge Mode"
+        at.run()
+        at.multiselect(key="edge_playlist").set_value(["song_full"]).run()
+        at.multiselect(key="edge_playlist").set_value(["song_full", PE.SURPRISE]).run()
+        assert at.session_state["edge_playlist"] == [PE.SURPRISE]           # Surprise me replaces the picks
+        at.toggle(key="edge_random_videos").set_value(True).run()
+        at.number_input(key="edge_random_n").set_value(2).run()
+        assert not errors(at), errors(at)
+        at.button(key="edge_go_only").click().run()
+        _wait_job(at)
+        assert not errors(at), errors(at)
+        res = at.session_state["edge_result"]
+        drawn = res["drawn"]
+        assert drawn["songs"] and res["track_ids"] and set(res["track_ids"]) <= set(drawn["songs"])
+        assert len(res["video_ids"]) >= 2 and set(res["video_ids"]) <= set(drawn["pool"])
+        assert any("Surprise me picked" in n for n in res["notes"]) and any("random videos" in n for n in res["notes"])
+        assert any(b.key == "edge_redraw_songs" for b in at.button) and any(b.key == "edge_redraw_videos" for b in at.button)
+        monkeypatch.setattr(PE, "_render", lambda res, settings, token, prog: (("success", "ok"), "t.mp4"))
+        before = list(res["video_ids"])
+        at.button(key="edge_redraw_songs").click().run()        # 🎲 new songs, the same videos
+        _wait_job(at)
+        assert not errors(at), errors(at)
+        again = at.session_state["edge_result"]
+        assert again["video_ids"] == before and again["drawn"]["songs"]
+        at.button(key="edge_redraw_videos").click().run()       # 🎲 new videos from the same pool, the same songs
+        _wait_job(at)
+        assert not errors(at), errors(at)
+        third = at.session_state["edge_result"]
+        assert third["track_ids"] and set(third["track_ids"]) <= set(again["drawn"]["songs"])
+        assert set(third["video_ids"]) <= set(drawn["pool"])
+        mix_jobs.forget(PE.JOB_KEY)
+    finally:
+        shutil.rmtree(out, ignore_errors=True)

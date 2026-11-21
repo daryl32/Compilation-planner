@@ -28,7 +28,8 @@ RESULT_KEY = "edge_result"
 KEPT = {"edge_playlist": [], "edge_rounds": 3, "edge_difficulty": "chill", "edge_voice": False, "edge_beat": False,
         "edge_corner": "top-left", "edge_max_videos": 0, "edge_avatar": False, "edge_avatar_mode": "corner",
         "edge_avatar_corner": "bottom-right", "edge_intro": False, "edge_quick": True, "edge_stream": True, "edge_render_name": "",
-        "edge_song_per_round": False, "edge_energy_mix": False, "edge_surprises": False, **{"edge_tags_" + p: [] for p in E.ORDER}}
+        "edge_song_per_round": False, "edge_energy_mix": False, "edge_surprises": False,
+        "edge_random_videos": False, "edge_random_n": 30, **{"edge_tags_" + p: [] for p in E.ORDER}}
 KEPT_IF_SET = tuple("ce_" + k for k in ("actors", "tags", "hair", "gg", "new", "minlen", "exclude"))
 
 
@@ -879,6 +880,100 @@ def compile_edge(track_ids: list, video_ids: list, difficulty: str, rounds: int,
 
 
 # ---------------------------------------------------------------------------
+# 🎲 Surprise me (songs) and 🎲 random videos — drawn when Compile is pressed (Daryl, 21 Nov)
+# ---------------------------------------------------------------------------
+
+SURPRISE = "🎲 Surprise me"                     # the playlist's first option: songs picked at compile time
+SURPRISE_MIN_SEC = 90.0                         # shorter tracks are left out (as the overnight renders do)
+SURPRISE_SEC_PER_SONG = 210.0                   # about one song per 3½ minutes when not one per round
+SURPRISE_TARGET = {"chill": 0.25, "medium": 0.5, "hard": 0.85}     # 0 = calm, 1 = the most driving in the library
+RECENT_RENDERS = 5                              # songs of the last few Edge renders are avoided
+
+
+def song_intensity(s: dict) -> float:
+    """0 (calm) … 1 (driving): the track's tempo and loudness against the rest of the library."""
+    bpm = float(s.get("bpm") or 0.0)
+    tempo = min(max((bpm - 70.0) / 90.0, 0.0), 1.0) if bpm else 0.5     # 70 BPM → 0, 160 → 1
+    return 0.5 * tempo + 0.5 * float(s.get("level_rank", s.get("energy_rank", 0.5)))
+
+
+def surprise_count(difficulty: str, rounds: int, song_per_round: bool) -> int:
+    if song_per_round:
+        return int(rounds)
+    return max(1, round(E.round_seconds(difficulty) * rounds / SURPRISE_SEC_PER_SONG))
+
+
+def surprise_songs(summaries: dict, difficulty: str, rounds: int, song_per_round: bool = False,
+                   energy_mix: bool = False, seed: int = 0, recent=()) -> list:
+    """🎲 The songs for Surprise me: a weighted draw by difficulty (calmer for Chill, the most driving for Hard),
+    analysed songs preferred for ⚡ matched sections, songs of recent Edge renders avoided, no repeats — ordered so the
+    energy builds (calmest first)."""
+    import math
+    rng = random.Random(seed)
+    pool = {t: s for t, s in summaries.items() if float(s.get("duration") or 0) >= SURPRISE_MIN_SEC}
+    if not pool:
+        return []
+    target = SURPRISE_TARGET.get(difficulty, 0.5)
+    recent = set(recent or ())
+    weight = {}
+    for t, s in pool.items():
+        w = math.exp(-((song_intensity(s) - target) / 0.22) ** 2) + 0.02
+        if energy_mix:
+            w *= 1.5 if s.get("analysed") else 0.5
+        if t in recent:
+            w *= 0.08
+        weight[t] = w
+    want = min(surprise_count(difficulty, rounds, song_per_round), len(pool))
+    picks = []
+    while len(picks) < want:
+        names = [t for t in weight if t not in picks]
+        picks.append(rng.choices(names, [weight[t] for t in names])[0])
+    return sorted(picks, key=lambda t: song_intensity(pool[t]))
+
+
+def recent_edge_songs(n: int = RECENT_RENDERS) -> set:
+    """The songs the last n Edge renders played (overnight ones included)."""
+    try:
+        from renders import list_renders
+        metas = [m for m in list_renders() if ((m.get("plan") or {}).get("matching_mode") == "Edge")]
+    except Exception:                                      # noqa: BLE001 — a hint, never a reason to fail
+        return set()
+    metas.sort(key=lambda m: str(m.get("created") or ""), reverse=True)
+    out = set()
+    for m in metas[:n]:
+        for p in ((m.get("plan") or {}).get("edge") or {}).get("playlist") or []:
+            if p.get("track_id"):
+                out.add(p["track_id"])
+    return out
+
+
+def draw_videos(pool: list, n: int, seed: int, seconds: dict, need_sec: float, must: list = ()) -> tuple:
+    """🎲 n videos at random from the pool (the ones the video filters allow). must: lists of videos a phase's rule
+    needs (🏷️ tags / 🎭 roles per phase) — a few of each are drawn first, so a strict rule never runs dry. Topped up
+    past n while the footage is shorter than need_sec. Returns (videos, note or None)."""
+    rng = random.Random(seed)
+    pool = list(dict.fromkeys(pool))
+    n = max(1, int(n or 30))
+    if len(pool) <= n:
+        return pool, None
+    picked = []
+    for group in must or ():
+        group = [v for v in group if v in pool and v not in picked]
+        rng.shuffle(group)
+        picked += group[:3]
+    rest = [v for v in pool if v not in picked]
+    rng.shuffle(rest)
+    while rest and len(picked) < n:
+        picked.append(rest.pop())
+    note = None
+    if sum(float(seconds.get(v) or 0) for v in picked) < need_sec:
+        while rest and sum(float(seconds.get(v) or 0) for v in picked) < need_sec:
+            picked.append(rest.pop())
+        note = f"{len(picked)} videos drawn instead of {n} — {n} weren't enough footage for the run."
+    return picked, note
+
+
+# ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
 
@@ -897,7 +992,36 @@ def _settings() -> dict:
             "surprises": bool(ss.get("edge_surprises", False)),
             "phase_tags": {p: list(ss.get("edge_tags_" + p) or []) for p in E.ORDER if ss.get("edge_tags_" + p)},
             "stream": bool(ss.get("edge_stream", True)), "quick": bool(ss.get("edge_quick", True)),
+            "random_videos": int(ss.get("edge_random_n", 30) or 30) if ss.get("edge_random_videos") else 0,
             "label": " ".join(str(ss.get("edge_render_name") or "").split())[:80]}
+
+
+def _draw(settings: dict, video_ids: list, seed: int, draw_videos_: bool = True) -> tuple:
+    """🎲 Resolve Surprise me and the random videos for one compile (in the session, when Compile is pressed).
+    Returns (settings with the songs filled in, the videos to match, what was drawn)."""
+    settings = dict(settings)
+    drawn = {}
+    if SURPRISE in settings["playlist"]:
+        summaries = PC.audio_summaries(PC._audio_signature())
+        picks = surprise_songs(summaries, settings["difficulty"], settings["rounds"], settings["song_per_round"],
+                               settings["energy_mix"], seed, recent_edge_songs())
+        settings["playlist"] = picks
+        settings["surprise_songs"] = True
+        drawn["songs"] = picks
+    n = int(settings.get("random_videos") or 0)
+    if n and draw_videos_:
+        import library_common as LC
+        rows = PC._video_rows()
+        ranges = LC.library_ranges()
+        seconds = {v: (ranges[v][1] - ranges[v][0]) if v in ranges else float((rows.get(v) or {}).get("duration") or 0)
+                   for v in video_ids}
+        must = [[v for v in video_ids if v in rows and set(tags) & PC._video_tags(rows[v])]
+                for tags in (settings.get("phase_tags") or {}).values() if tags]
+        need = E.round_seconds(settings["difficulty"]) * settings["rounds"] * 1.2
+        picked, note = draw_videos(video_ids, n, seed, seconds, need, must)
+        drawn.update(videos=picked, pool=list(video_ids), note=note)
+        video_ids = picked
+    return settings, list(video_ids), drawn
 
 
 def _job(job, settings: dict, video_ids: list, seed: int, render: bool, token, res: dict = None) -> dict:
@@ -924,7 +1048,16 @@ def _job(job, settings: dict, video_ids: list, seed: int, render: bool, token, r
                            surprises=settings.get("surprises", False),
                            phase_tags=settings.get("phase_tags"),
                            progress=lambda d, t, txt: job.progress(share * min(d / max(t, 1), 1.0), f"compiling · {txt}"))
+        drawn = settings.get("drawn") or {}
+        if drawn.get("songs"):
+            out["notes_first"].append("🎲 Surprise me picked: " + " → ".join(drawn["songs"]))
+        elif SURPRISE in (settings.get("playlist_asked") or []):
+            out["notes_first"].append("🎲 Surprise me found no song of 90 s or more — the beat plays instead.")
+        if drawn.get("videos"):
+            out["notes_first"].append(f"🎲 {len(drawn['videos'])} random videos drawn from {len(drawn['pool'])}."
+                                      + (f" {drawn['note']}" if drawn.get("note") else ""))
         res["notes"] = out["notes_first"] + list(res.get("notes") or [])
+        res["drawn"] = drawn
         res.setdefault("took", {})["fetch"] = round(time.time() - t_fetch - float(res["took"].get("total") or 0.0), 1)
     out["res"] = res
     if render:
@@ -934,9 +1067,12 @@ def _job(job, settings: dict, video_ids: list, seed: int, render: bool, token, r
     return out
 
 
-def _start(video_ids: list, render: bool, new_seed: bool = True, res: dict = None) -> None:
+def _start(video_ids: list, render: bool, new_seed: bool = True, res: dict = None, playlist: list = None,
+           draw: bool = True, pool: list = None) -> None:
     """Start the compile / render on the server (on_click: the session is still at hand for the setup and the Drive
-    connection)."""
+    connection). playlist: songs to use instead of the setup's (🎲 Re-draw videos keeps the drawn songs; [SURPRISE]
+    draws new ones). draw: draw the 🎲 random videos (off when video_ids already are the drawn ones; pool: the videos
+    they were drawn from, kept for 🎲 Re-draw videos)."""
     import mix_jobs as J
     from page_setup import drive_token
     if res is None and not video_ids:
@@ -950,7 +1086,19 @@ def _start(video_ids: list, render: bool, new_seed: bool = True, res: dict = Non
         return
     J.forget(JOB_KEY)
     label = "🎬 Rendering" if res is not None else ("⏱️ Compiling and rendering" if render else "⏱️ Compiling")
-    J.start(JOB_KEY, label, _job, _settings(), list(video_ids), int(st.session_state["edge_seed"]), render,
+    settings = _settings()
+    if playlist is not None:
+        settings["playlist"] = list(playlist)
+    if res is None:                                        # 🎲 Surprise me / random videos: drawn now, for this compile
+        asked = list(settings["playlist"])
+        settings, video_ids, drawn = _draw(settings, list(video_ids), int(st.session_state["edge_seed"]), draw)
+        if pool and not drawn.get("pool"):
+            drawn.update(pool=list(pool), videos=list(video_ids))
+        settings["playlist_asked"], settings["drawn"] = asked, drawn
+        if not video_ids:
+            st.session_state["edge_msg"] = ("warning", "No videos to match — widen the video filters.")
+            return
+    J.start(JOB_KEY, label, _job, settings, list(video_ids), int(st.session_state["edge_seed"]), render,
             drive_token(), res)
     st.session_state["edge_job_seen"] = None
 
@@ -977,7 +1125,7 @@ def _render(res: dict, settings: dict, token, prog) -> tuple:
                      extra_meta={"project_name": f"⏱️ Edge · {E.DIFFICULTIES[e['difficulty']]} · {e['rounds']} rounds",
                                  "compile_note": _used_line(res) + (" · " + took_line(res) if res.get("took") else ""),
                                  # ↩️ so 📁 Media Library → Renders can reopen it in ⏱️ Edge Mode as it was set
-                                 "edge_setup": {k: v for k, v in settings.items() if k != "label"}})
+                                 "edge_setup": {k: v for k, v in settings.items() if k not in ("label", "drawn", "playlist_asked")}})
 
 
 def took_line(res: dict) -> str:

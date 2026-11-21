@@ -93,11 +93,14 @@ def audio_summaries(signature: tuple) -> dict:
         var = (sum((x - mean) ** 2 for x in rms) / len(rms)) ** 0.5 if rms else 0.0
         tid = t.get("track_id", Path(name).stem)
         out[tid] = {"track_id": tid, "duration": float(t["duration_sec"]), "bpm": float(t["bpm"]) if t.get("bpm") else None,
-                    "key": t.get("key"), "variance": var, "analysed": bool((t.get("analysis") or {}).get("sections"))}
+                    "key": t.get("key"), "variance": var, "level": mean,
+                    "analysed": bool((t.get("analysis") or {}).get("sections"))}
     if out:
         vs = sorted(v["variance"] for v in out.values())
+        ls = sorted(v["level"] for v in out.values())
         for v in out.values():
             v["energy_rank"] = vs.index(v["variance"]) / max(len(vs) - 1, 1)
+            v["level_rank"] = ls.index(v["level"]) / max(len(ls) - 1, 1)      # 🎲 Surprise me: how loud / driving
     return out
 
 
