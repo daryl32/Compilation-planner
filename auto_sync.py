@@ -48,6 +48,18 @@ def _write_status(status: dict) -> None:
     os.replace(tmp, STATUS_FILE)
 
 
+def sync_edge_lines(progress_callback=None) -> dict:
+    """⏱️ Edge Mode's lines and avatar clips: only new or changed files. {"lines", "clips", "skipped", "errors"}."""
+    from planner.edge import fetch_lines, load_cue_map
+    cm = load_cue_map()
+    stats = {"lines": 0, "clips": 0, "skipped": 0}
+    if not cm.get("lines"):
+        return dict(stats, errors=[])
+    prog = (lambda k, n, name: progress_callback(k, n, f"Edge: {name}")) if progress_callback else None
+    errors = fetch_lines(cm, prog, avatar=True, changed_only=True, stats=stats)
+    return dict(stats, errors=[f"Edge: {e}" for e in errors])
+
+
 def run_sync(progress_callback=None) -> dict:
     """Pull from Drive and record the result. If another sync is already running
     (timer and button at the same moment), returns {"busy": True} instead."""
@@ -79,6 +91,18 @@ def run_sync(progress_callback=None) -> dict:
         except Exception as e:
             result["errors"].append(f"Renders: {e}")
 
+        # ⏱️ Edge Mode's voiceover lines (🎲 takes too) and the avatar's clips from every look folder — new ones and
+        # re-recordings (a different size on Drive); unchanged ones are skipped (Daryl, 21 Nov: one sync for it all,
+        # instead of Edge's own ⬇️ button).
+        edge = None
+        try:
+            edge = sync_edge_lines(progress_callback)
+            result["synced"] += edge["lines"] + edge["clips"]
+            result["skipped"] += edge["skipped"]
+            result["errors"] += edge["errors"]
+        except Exception as e:
+            result["errors"].append(f"Edge lines: {e}")
+
         # Downloaded originals unused for a few days, stale temp files (storage.py).
         cleanup = None
         try:
@@ -95,6 +119,7 @@ def run_sync(progress_callback=None) -> dict:
             "errors": result["errors"][:10],
             "changed_at": finished if result["synced"] else previous.get("changed_at"),
             "cleanup": cleanup,
+            "edge": {k: edge[k] for k in ("lines", "clips")} if edge else None,
         })
         return result
     finally:

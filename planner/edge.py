@@ -228,10 +228,28 @@ def voice_folders(folder: str, cue_map: dict) -> list:
     return out
 
 
-def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing: bool = False) -> list:
+def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing: bool = False,
+                changed_only: bool = False, stats: dict = None) -> list:
     """Download the cue map's lines from Google Drive (its "drive_folder") to lines_dir(), and — avatar — her clips
     from its avatar_clips folder (same names, .mp4) to <data>/edge_avatar/lines/. only_missing: leave what is here
-    alone. Returns error strings."""
+    alone. changed_only (🔄 Sync now, Daryl 21 Nov): fetch only files that are new here or whose size on Drive differs
+    (a re-recording under the same name). stats: filled with {"lines", "clips", "skipped"} counts. Returns error
+    strings."""
+    if stats is not None:
+        stats.update(lines=0, clips=0, skipped=0)
+
+    def keep(dest: Path, drive_size) -> bool:
+        """True = the copy here can stay (nothing to download)."""
+        if not (dest.exists() and dest.stat().st_size > 0):
+            return False
+        if only_missing:
+            return True
+        if changed_only:
+            try:
+                return drive_size is not None and dest.stat().st_size == int(drive_size)
+            except (TypeError, ValueError):
+                return False
+        return False
     try:
         from drive_sync import credentials_available, download_source_video
         if not credentials_available():
@@ -264,20 +282,28 @@ def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing:
     # first, then each of VOICE_SUBFOLDERS (and any the map lists under "subfolders"), then every other look folder
     # ("Nude - Lying Back"…), so a renamed or new folder never hides a line (Daryl, 18 Nov)
     where = {f["name"]: folder for f in on_drive}
+    sizes = {f["name"]: f.get("size") for f in on_drive}
     for sub in voice_folders(folder, cue_map):
         got, err_ = list_drive_folder(f"{folder}/{sub}")
         for f in ([] if err_ else got):
             where.setdefault(f["name"], f"{folder}/{sub}")
+            sizes.setdefault(f["name"], f.get("size"))
     takes = [n for n in where if Path(n).suffix.lower() in E.VOICE_EXT and is_take(n)]
     for k, name in enumerate(names + takes, 1):            # the lines, then 🎲 their other takes
         dest = lines_dir() / name
-        if only_missing and dest.exists() and dest.stat().st_size > 0:
+        if keep(dest, sizes.get(name)):
+            if stats is not None:
+                stats["skipped"] += 1
+            continue
+        if changed_only and name not in where:             # not on Drive (yet): nothing to bring
             continue
         if progress:
             progress(k, len(names) + len(takes), name)
         err = download_source_video(f"{where.get(name, folder)}/{name}", dest)
         if err:
             errors.append(f"{name}: {err}")
+        elif stats is not None:
+            stats["lines"] += 1
     if avatar:                                             # 👩 her clips: whichever of the lines (and takes) have one on Drive so far
         want = {st_.lower(): st_ for st_ in stems}
         have, seen = [], set()
@@ -299,7 +325,9 @@ def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing:
                         have.append(dict(f, folder=sub, dest=looks_root() / look / (want.get(stem.lower(), stem) + ".mp4")))
         for k, f in enumerate(have, 1):
             dest = f["dest"]
-            if only_missing and dest.exists() and dest.stat().st_size > 0:
+            if keep(dest, f.get("size")):
+                if stats is not None:
+                    stats["skipped"] += 1
                 continue
             if progress:
                 progress(k, len(have), f["name"])
@@ -307,6 +335,8 @@ def fetch_lines(cue_map: dict, progress=None, avatar: bool = True, only_missing:
             err = download_source_video(f"{folder}/{f['folder']}/{f['name']}", dest)
             if err:
                 errors.append(f"{f['name']}: {err}")
+            elif stats is not None:
+                stats["clips"] += 1
     return errors
 
 

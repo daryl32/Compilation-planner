@@ -304,7 +304,7 @@ def editor(names: list) -> None:
         if abs(float(draft.get("speed") or 1) - 1) > 0.005:
             st.caption("▶ plays the cut at normal speed here; the compile plays it at the set speed.")
     else:
-        st.warning(f"“{draft.get('file')}” isn't on the server yet — ⬇️ Get the lines from Google Drive on the Edge page.")
+        st.warning(f"“{draft.get('file')}” isn't on the server yet — press 🔄 Sync now in the sidebar.")
     c = st.columns(4)
     draft["trim_in"] = c[0].number_input("Starts at (s)", 0.0, max(full, 0.1), float(draft.get("trim_in") or 0), 0.05,
                                          key=f"cm_ti_{k}")

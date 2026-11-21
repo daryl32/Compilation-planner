@@ -37,6 +37,57 @@ if top[1].button("🔄 Read Drive", use_container_width=True, help="List every c
 if not cache["clips"]:
     st.info("Press 🔄 Read Drive to list her clips.")
 
+# ---------------------------------------------------------------------------
+# 🎞️ Previews (moved here from Edge's settings, Daryl 21 Nov): a small copy + first | middle | last strip of every clip
+# ---------------------------------------------------------------------------
+import render_jobs as RJ  # noqa: E402
+
+STUDIO_JOB = "studio:previews"
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _preview_ids(_stamp) -> set:
+    import studio_previews as SP
+    return SP.done_ids()
+
+
+def _previews_bar() -> None:
+    j, running = RJ.take_finished(STUDIO_JOB, "studio_job_seen")
+    if running:
+        RJ.watch(STUDIO_JOB)
+        return
+    if j is not None:
+        _preview_ids.clear()
+        if j.state == "error":
+            st.error(f"Previews failed: {j.error}")
+        else:
+            r = j.result or {}
+            st.success(f"Made {r.get('made', 0)} preview(s); {r.get('skipped', 0)} clip(s) already had one.")
+            if r.get("errors"):
+                st.warning(f"{len(r['errors'])} couldn't be made: " + " · ".join(r["errors"][:4]))
+    ids = [x.get("id") for x in cache["clips"] if x.get("id")]
+    have = _preview_ids(cache["at"]) if ids else set()
+    without = [x for x in cache["clips"] if x.get("id") and x["id"] not in have]
+    from page_setup import drive_token
+    token = drive_token()
+    c = st.columns([4, 1.6, 1.2])
+    c[0].caption(f"🎞️ Previews: **{len(ids) - len(without)} of {len(ids)}** clips have one — a small copy and a "
+                 "first | middle | last thumbnail strip in Edge_voiceover/_studio_previews (clips that already have "
+                 "one are skipped)." + ("" if token else " Connect Google Drive (sidebar) to make them."))
+    redo = c[2].toggle("Redo all", key="studio_redo", help="Make them again even where they exist.")
+    if c[1].button("🎞️ Make previews", key="studio_make", disabled=not token, use_container_width=True,
+                   type="primary" if without else "secondary"):
+        import studio_previews as SP
+        RJ.start(STUDIO_JOB, "Making Studio previews", SP.run, token, redo)
+        st.rerun()
+    if without:
+        with st.expander(f"🎞️ {len(without)} clip(s) with no preview yet"):
+            st.caption(" · ".join(f"{x['folder']}/{x['name']}" for x in without))
+
+
+if cache["clips"]:
+    _previews_bar()
+
 cm = CS.load()
 looks = load_looks(cm)
 rows = SD.tracker(cm, looks, cache["clips"])
@@ -140,7 +191,7 @@ with tabs[3]:
                    "F/S ≈ units": round(s["extra_units"], 1), "of them 🟡 stand-ins": s["stand_ins"]} for s in sess],
                  hide_index=True, use_container_width=True)
     st.markdown("**to_record.txt** — the list the notebook's copy cell reads (main lines shortest first; fillers and "
-                "surprises after, with a # in front — take it off to record them).")
+                "surprises after — all recorded; put a # in front of any line to skip it).")
     pick = st.selectbox("Look", [s["look"] for s in sess], key="sd_sess")
     s = next((x for x in sess if x["look"] == pick), None)
     if s:
@@ -163,8 +214,16 @@ with tabs[3]:
 
 # ---------------------------------------------------------------------------
 with tabs[4]:
-    st.caption("Her look for each part — the same plan Edge compiles use (and the Edge page's 👗 panel). \"Last round\" is "
-               "the final round whatever its number.")
+    st.caption("Her look for each part — the plan Edge compiles use. Each line plays in the look planned for the round "
+               "it lands in: that look's clip when the server has it, otherwise any other recording of the line stands "
+               "in, otherwise her voice only. \"Last round\" is the final round whatever its number.")
+    from planner.edge import local_looks
+    here = local_looks()
+    st.caption(("On the server: " + " · ".join(f"{k} ({n})" for k, n in here.items())) if here
+               else "No look's clips are on the server yet — press 🔄 Sync now in the sidebar.")
+    gone = sorted({v for v in looks.values() if v} - set(here))
+    if gone:
+        st.warning("No clips on the server for: " + " · ".join(gone) + " — lines there use stand-ins (🔄 Sync now brings them).")
     options = [""] + sorted(set(SD.drive_looks(cache["clips"])) | {v for v in looks.values() if v})
     cols = st.columns(3)
     new = {}

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
 from tests.support import DATA  # noqa: F401  (installs the test config first)
 
@@ -52,7 +53,7 @@ def test_where_lines_play_and_what_is_recorded():
     assert SD.sessions(list(rows.values()), LOOKS, with_stand_in=False)[0]["stand_ins"] == 0
     txt = SD.to_record_text(d)
     body = [ln for ln in txt.splitlines() if ln and not ln.startswith("# ")]
-    assert body == ["Again.mp3", "Welcome.mp3", "Get hard for me.mp3", "#Keep going.mp3", "#Hands off 5 A.mp3"]
+    assert body == ["Again.mp3", "Welcome.mp3", "Get hard for me.mp3", "Keep going.mp3", "Hands off 5 A.mp3"]
     assert SD.units(7.9) == pytest.approx(0.52) and SD.units(8.1) == pytest.approx(1.04)
     assert SD.drive_looks(CLIPS) == ["Default - Lying on bed 1", "Nude - Lying Back"]
 
@@ -70,3 +71,38 @@ def test_the_page_opens(tmp_path, monkeypatch):
     at = page_app("pages/9_Avatar_Studio.py").run()
     assert not errors(at)
     assert any("Default - Lying on bed 1" in e.label for e in at.expander)
+    # 🎞️ previews (moved from Edge's settings, 21 Nov): the count, and the button needs the Drive connection
+    assert at.button(key="studio_make").disabled
+    assert any("Previews:" in c.value for c in at.caption)
+    # 🗓️ the round plan shows which looks are on the server (moved from Edge's 👗 panel)
+    assert any("Sync now" in c.value for c in at.caption) or any("Sync now" in w.value for w in at.warning)
+
+
+def test_sync_brings_only_new_and_changed_lines(tmp_path, monkeypatch):
+    """🔄 Sync now (21 Nov): Edge's lines and her clips — new files and re-recordings (a different size) only."""
+    import drive_sync
+    import planner.edge as PE
+    monkeypatch.setattr(PE, "voice_dir", lambda: tmp_path / "v")
+    monkeypatch.setattr(PE, "avatar_dir", lambda: tmp_path / "a")
+    monkeypatch.setattr(PE, "looks_root", lambda: tmp_path / "looks")
+    PE.lines_dir().mkdir(parents=True, exist_ok=True)
+    (PE.lines_dir() / "Same.mp3").write_bytes(b"x" * 10)
+    (PE.lines_dir() / "Changed.mp3").write_bytes(b"x" * 10)
+    folder = "scene-labeling/Edge_voiceover"
+    listing = {folder: [{"name": n, "size": str(sz)} for n, sz in (("Same.mp3", 10), ("Changed.mp3", 12), ("New.mp3", 5))],
+               f"{folder}/avatar_clips": [{"name": "New.mp4", "size": "7"}]}
+    got = []
+    monkeypatch.setattr(drive_sync, "credentials_available", lambda: True)
+    monkeypatch.setattr(drive_sync, "list_drive_folder", lambda p: (listing.get(p, []), None))
+
+    def fake_download(src, dest):
+        got.append(Path(src).name)
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(b"y")
+    monkeypatch.setattr(drive_sync, "download_source_video", fake_download)
+    cm = {"lines": [{"name": n, "cues": []} for n in ("Same", "Changed", "New", "Not recorded")]}
+    stats = {}
+    errs = PE.fetch_lines(cm, avatar=True, changed_only=True, stats=stats)
+    assert not errs, errs
+    assert sorted(got) == ["Changed.mp3", "New.mp3", "New.mp4"]
+    assert stats == {"lines": 2, "clips": 1, "skipped": 1}

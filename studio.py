@@ -211,13 +211,13 @@ def sessions(rows: list, looks: dict, unit_per_chunk: float = UNIT_PER_CHUNK, ch
 
 def to_record_text(session: dict) -> str:
     """The look's to_record.txt, as the notebook's copy cell reads it: one MP3 per line, main lines shortest first;
-    fillers and surprises after, commented out with # (take the # off to record them)."""
+    then the fillers and surprises — recorded too (Daryl, 20 Nov: no # in front of them any more)."""
     lines = [f"# {session['look']} — written by the app's Avatar Studio {time.strftime('%d %b %H:%M')}",
              f"# {len(session['main'])} main lines ({session['main_sec']:.0f} s), shortest first"]
     lines += [r["file"] for r in session["main"]]
     if session["extra"]:
-        lines.append(f"# fillers / surprises ({len(session['extra'])}, {session['extra_sec']:.0f} s) — take the # off to record them")
-        lines += ["#" + r["file"] for r in session["extra"]]
+        lines.append(f"# fillers / surprises ({len(session['extra'])}, {session['extra_sec']:.0f} s) — recorded too; put a # in front of any to skip it")
+        lines += [r["file"] for r in session["extra"]]
     return "\n".join(lines) + "\n"
 
 

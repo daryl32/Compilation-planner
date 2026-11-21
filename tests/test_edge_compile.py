@@ -116,7 +116,8 @@ def test_compile_carries_the_avatar_and_the_intro(monkeypatch, tmp_path):
         at.toggle(key="edge_intro").set_value(True)
         at.run()
         assert not errors(at), errors(at)
-        assert at.button(key="studio_make").disabled          # 🧍 Studio previews: needs the Drive connection
+        # 🧍 Studio previews and 👗 round looks moved to the Avatar Studio page; ⬇️ line fetching to 🔄 Sync now (21 Nov)
+        assert not any(b.key in ("studio_make", "edge_lines_fetch", "edge_looks_save") for b in at.button)
         at.button(key="edge_loudness").click().run()        # 🔊 the loudness check
         assert not errors(at), errors(at)
         shown = " ".join(x.value for x in at.info) + " ".join(str(x.value) for x in at.markdown)

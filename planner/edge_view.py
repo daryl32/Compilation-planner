@@ -48,19 +48,11 @@ def _lines_panel(cue_map: dict) -> None:
     mapped = sum(1 for ln in lines if ln.get("cues"))
     with st.expander(f"🎙️ Voiceover lines — {mapped} of {len(lines)} have a cue · {here} of {len(lines)} are on the server",
                      expanded=here < len(lines)):
+        clips = sum(1 for ln in lines if avatar_line_clip(ln, cut=False) is not None)
         st.caption("Which line plays when comes from your cue map; no two lines ever play at once. A line whose file "
-                   "isn't here yet plays as a placeholder tone. The button also brings the avatar's clips made so far "
-                   f"({sum(1 for ln in lines if avatar_line_clip(ln, cut=False) is not None)} here); Compile fetches whatever is missing by itself.")
-        if st.button("⬇️ Get the lines from Google Drive", key="edge_lines_fetch", type="primary" if here < len(lines) else "secondary"):
-            bar = st.progress(0.0, text="Fetching the lines…")
-            errs = fetch_lines(cue_map, lambda k, n, name: bar.progress(k / max(n, 1), text=f"Fetching {name} ({k}/{n})…"))
-            bar.empty()
-            if errs:
-                st.session_state["edge_msg"] = ("warning", f"{len(errs)} line(s) couldn't be fetched: " + " · ".join(errs[:4])
-                                                + (" …" if len(errs) > 4 else ""))
-            else:
-                st.session_state["edge_msg"] = ("success", f"All {len(lines)} lines are on the server.")
-            st.rerun()
+                   f"isn't here yet plays as a placeholder tone. 👩 {clips} of her clips are here. New lines and clips "
+                   "come across with **🔄 Sync now** in the sidebar (only new and re-recorded files are fetched); "
+                   "Compile also fetches whatever is still missing by itself.")
         missing = [ln["name"] for ln in lines if line_file(ln, cut=False) is None]
         if missing and here:
             st.caption("Not here yet: " + " · ".join(missing))
@@ -101,7 +93,7 @@ def _loudness(lines: list) -> None:
         got = R.voice_levels(files)
         target = R.voice_target()
     if not got:
-        st.info("No line is on the server yet — ⬇️ get them from Google Drive first.")
+        st.info("No line is on the server yet — press 🔄 Sync now in the sidebar first.")
         return
     gains = {ln["name"]: float(ln.get("gain") or 0) for ln in lines}
     up = [g for g in got if g[2] >= 3]
@@ -113,70 +105,16 @@ def _loudness(lines: list) -> None:
                  hide_index=True, use_container_width=True)
 
 
-def _looks_panel() -> None:
-    """👗 Her look per round: the Studio's round plan. A line plays in the round's planned look when that recording is
-    on the server, otherwise any recording of it stands in (old transparent clips, another look), otherwise voice only."""
+def _looks_summary() -> None:
+    """👗 Her look per round — one line; the plan itself is set on the 🧍 Avatar Studio page (🗓️ Round plan)."""
     looks = load_looks(load_cue_map())
-    here = local_looks()
-    planned = {v for v in looks.values() if v}
-    with st.expander("👗 Her look per round — " + " · ".join(f"{LOOK_PART_LABELS[p]}: {looks[p] or '—'}"
-                                                            for p in ("intro", "1", "3", "last")) + " …"):
-        st.caption("Each line plays in the look planned for the round it lands in: the clip from that look's "
-                   "Drive folder (\"<Outfit> - <Pose>/avatar_clips\") when there is one, otherwise any other recording "
-                   "of the line stands in, otherwise her voice only. \"Last round\" is used for the final round "
-                   "whatever its number. ⬇️ Get the lines from Google Drive (above) brings every look's clips.")
-        if here:
-            st.caption("On the server: " + " · ".join(f"{k} ({n})" for k, n in here.items()))
-        else:
-            st.caption("No look's clips are on the server yet — press ⬇️ Get the lines from Google Drive.")
-        missing = sorted(p for p in planned if p not in here)
-        if missing:
-            st.warning("No clips on the server for: " + " · ".join(missing) + " — lines there use stand-ins.")
-        options = [""] + sorted(set(here) | planned)
-        cols = st.columns(3)
-        new = {}
-        for k, part in enumerate(LOOK_PARTS):
-            cur = looks.get(part) or ""
-            new[part] = cols[k % 3].selectbox(LOOK_PART_LABELS[part], options, index=options.index(cur),
-                                              key=f"edge_look_{part}", format_func=lambda v: v or "— stand-ins only —")
-        if new != looks and st.button("💾 Save the round looks", key="edge_looks_save", type="primary"):
-            save_looks(new)
-            st.session_state["edge_msg"] = ("success", "Round looks saved — the next compile uses them.")
-            st.rerun()
-
-
-STUDIO_JOB = "studio:previews"
-
-
-def _studio_panel() -> None:
-    """🧍 Previews for the Avatar Studio: a small copy and a 3-frame thumbnail strip of every avatar clip, on Drive."""
-    j, running = RJ.take_finished(STUDIO_JOB, "studio_job_seen")
-    with st.expander("🧍 Avatar Studio previews", expanded=running or j is not None):
-        if running:
-            RJ.watch(STUDIO_JOB)
-            return
-        if j is not None:
-            if j.state == "error":
-                st.error(f"Previews failed: {j.error}")
-            else:
-                r = j.result or {}
-                st.success(f"Made {r.get('made', 0)} preview(s); {r.get('skipped', 0)} clip(s) already had one.")
-                if r.get("errors"):
-                    st.warning(f"{len(r['errors'])} couldn't be made: " + " · ".join(r["errors"][:4]))
-        st.caption("The Studio can't open clips over 10 MB, or the old transparent .webm clips on a phone, and Drive "
-                   "gives it no thumbnails. This makes a small copy and a first | middle | last thumbnail strip of "
-                   "every avatar clip into Edge_voiceover/_studio_previews. Run it again after adding clips — clips "
-                   "that already have one are skipped.")
-        from page_setup import drive_token
-        token = drive_token()
-        if not token:
-            st.info("Connect Google Drive (sidebar) first — the previews are saved to your Drive.")
-        c = st.columns(2)
-        redo = c[1].toggle("Redo all", key="studio_redo", help="Make them again even where they exist.")
-        if c[0].button("🎞️ Make Studio previews", key="studio_make", disabled=not token, type="primary"):
-            import studio_previews as SP
-            RJ.start(STUDIO_JOB, "Making Studio previews", SP.run, token, redo)
-            st.rerun()
+    c = st.columns([5, 2])
+    c[0].caption("👗 Her looks: " + " · ".join(f"{LOOK_PART_LABELS[p]}: {looks.get(p) or '—'}"
+                                              for p in ("intro", "1", "2", "3", "last", "outro")))
+    try:
+        c[1].page_link("pages/9_Avatar_Studio.py", label="🧍 Set in the Studio →")
+    except Exception:                                      # noqa: BLE001 — (headless tests run the page on its own)
+        pass
 
 
 def _phase_tags_panel(rows: dict, vids: list) -> None:
@@ -286,8 +224,7 @@ def _setup(rows: dict, have_tl: set) -> None:
                 help="Before the compilation: the avatar giving her intro, beside the difficulty, rounds, total time "
                      "and thumbnails of the videos used. It lasts as long as her intro clip (8 s with the stand-in).")
     if st.session_state.get("edge_avatar"):
-        _looks_panel()
-        _studio_panel()
+        _looks_summary()
         m = st.columns(2)
         mode = m[0].radio("She appears", list(E.AVATAR_MODES), key="edge_avatar_mode", horizontal=True,
                           format_func=lambda k: E.AVATAR_MODES[k],

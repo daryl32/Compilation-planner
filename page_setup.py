@@ -453,8 +453,9 @@ def _sync_now() -> None:
     if not available:
         st.caption("Drive sync unavailable — no service account credentials on this machine.")
         return
-    st.caption("Catalogues, audio, thumbnails, sprites and preview copies sync from Drive when you press "
-               "Sync now (there's no automatic sync) — e.g. after processing new videos or tracks.")
+    st.caption("Catalogues, audio, thumbnails, sprites, preview copies and ⏱️ Edge's voice lines and avatar clips "
+               "sync from Drive when you press Sync now (there's no automatic sync) — e.g. after processing new "
+               "videos or tracks, or recording new lines.")
     _last_sync_line()
     _old_timer_notice()
     if st.button("🔄 Sync now", key="drive_sync_btn", width="stretch"):
@@ -491,6 +492,9 @@ def _last_sync_line() -> None:
                f"updated"
         if status.get("errors"):
             line += f", {len(status['errors'])} error(s)"
+        edge = status.get("edge") or {}
+        if edge.get("lines") or edge.get("clips"):
+            line += f" · 🎙️ {edge.get('lines', 0)} voice line(s) · 👩 {edge.get('clips', 0)} avatar clip(s) new or updated"
         st.caption(line + ".")
     except Exception:
         pass  # informational only
