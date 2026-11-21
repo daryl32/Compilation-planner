@@ -1178,6 +1178,23 @@ def _silence_around(plays, a, b, total) -> float:
 # ---------------------------------------------------------------------------
 
 INSTRUCTION_DELAY_MAX = 5.0
+# 🎯 how far along the stroke bar the marker runs while an instruction is up (Daryl, 21 Nov: "just the base" = the
+# left third, "just the tip" = the right third, a full stroke the whole bar)
+STROKE_RANGES = {"full": ("↔ Full stroke", (0.0, 1.0)), "base": ("◀ Base third", (0.0, 1 / 3)),
+                 "middle": ("▣ Middle third", (1 / 3, 2 / 3)), "tip": ("▶ Tip third", (2 / 3, 1.0)),
+                 "base_half": ("◀ Base half", (0.0, 0.5)), "tip_half": ("▶ Tip half", (0.5, 1.0))}
+
+
+def stroke_range(cue_map: dict, text: str) -> tuple:
+    """(from, to) along the stroke bar (0 = base / left, 1 = tip / right) for an instruction — the whole bar unless
+    set on the 🗒️ Instructions page."""
+    got = ((cue_map or {}).get("instruction_ranges") or {}).get(text)
+    try:
+        a, b = float(got[0]), float(got[1])
+        a, b = min(max(a, 0.0), 1.0), min(max(b, 0.0), 1.0)
+        return (a, b) if b - a >= 0.05 else (0.0, 1.0)
+    except (TypeError, ValueError, IndexError):
+        return 0.0, 1.0
 
 
 def instruction_track(plays: list, cue_map: dict) -> list:
@@ -1196,9 +1213,16 @@ def instruction_track(plays: list, cue_map: dict) -> list:
         t = round(float(p["time"]) + delay, 3)
         if out and t <= out[-1]["time"]:                   # (a later line's text never lands before an earlier one)
             t = round(out[-1]["time"] + 0.04, 3)
-        out.append({"time": t, "text": text})
+        a, b = stroke_range(cue_map, text)
+        out.append({"time": t, "text": text, "range": [round(a, 4), round(b, 4)]})
         now = text
     return out
+
+
+def instruction_item_at(track: list, t: float) -> dict | None:
+    import bisect
+    k = bisect.bisect_right([x["time"] for x in track], t) - 1
+    return track[k] if k >= 0 else None
 
 
 def instruction_at(track: list, t: float) -> str | None:

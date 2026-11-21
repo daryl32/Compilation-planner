@@ -874,7 +874,17 @@ def _lay_strip(pic, strip: dict, ph: dict, i: int, a: float, c_left: float, movi
         m = bar["markers"][ph["profile"]] if pos is not None else bar["dim"]
         mw, mh = m[0].shape[1], m[0].shape[0]
         pos = 0.5 if pos is None else pos
-        x = int(round(bar["x0"] + pos * (bar["x1"] - bar["x0"] - mw)))
+        lo, hi = 0.0, 1.0
+        if strip.get("instr") is not None:               # 🎯 the instruction on screen limits the stroke (21 Nov)
+            item = E.instruction_item_at(strip["instr"]["track"], a + t)
+            if item and item.get("range"):
+                lo, hi = float(item["range"][0]), float(item["range"][1])
+                span = bar["x1"] - bar["x0"]
+                seg = strip["instr"]["segments"].get((round(lo, 4), round(hi, 4)))
+                if seg is not None:
+                    _lay(pic, int(round(bar["x0"] + lo * span)), bar["y"] + (bar["h"] - seg[0].shape[0]) // 2, *seg)
+        run = (bar["x1"] - bar["x0"]) * (hi - lo) - mw
+        x = int(round(bar["x0"] + (bar["x1"] - bar["x0"]) * lo + pos * max(run, 0)))
         _lay(pic, x, bar["y"] + (bar["h"] - mh) // 2, *m)
 
 
@@ -938,6 +948,13 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
     instr = _instruction_layers(edge, (W, H))
     if (edge.get("overlay") or {}).get("style") == "strip":          # ⏱️ the strip style: no ring pictures
         strip = _strip_layers(edge, sched, (W, H), bool(signals.get("timer")), instr["band"] if instr else None)
+        if instr is not None and strip.get("bar"):        # 🎯 a highlight over the part of the bar an instruction allows
+            import edge_strip as ES
+            strip["instr"] = instr
+            span = strip["bar"]["x1"] - strip["bar"]["x0"]
+            instr["segments"] = {(round(float(x["range"][0]), 4), round(float(x["range"][1]), 4)):
+                                 _rgba(ES.bar_segment(max(int(span * (float(x["range"][1]) - float(x["range"][0]))), 4), H))
+                                 for x in instr["track"] if x.get("range")}
         timers = {}
     else:
         E.write_overlay(sched, timer_dir, H, signals=bool(signals.get("timer")))

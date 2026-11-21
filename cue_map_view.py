@@ -701,12 +701,26 @@ def timeline(cm: dict) -> None:
 # 🗒️ Instructions (Daryl, 21 Nov): text commands linked to lines, shown in her half of a split screen
 # ---------------------------------------------------------------------------
 
-def set_instructions(texts: list, rename: dict = None, drop: str = None, link: tuple = None) -> None:
+def set_instructions(texts: list, rename: dict = None, drop: str = None, link: tuple = None,
+                     ranges: dict = None) -> None:
     """Change the 🗒️ instructions in the unsaved changes: the list, a rename (every line using it follows), a delete
-    (lines using it get none) or a link (text, [line names]: those lines get it, others using it lose it)."""
+    (lines using it get none), a link (text, [line names]: those lines get it, others using it lose it) or 🎯 stroke
+    ranges ({text: (from, to)} along the bar, 0 = base … 1 = tip; the whole bar = none kept)."""
     _remember()
     work = _disk_work()
     work["instructions"] = list(dict.fromkeys(t for t in texts if t))
+    rng = dict(work.get("instruction_ranges") or {})       # 🎯 each instruction's stretch of the stroke bar
+    for old, new in (rename or {}).items():
+        if old in rng:
+            rng[new] = rng.pop(old)
+    if drop:
+        rng.pop(drop, None)
+    for t, r in (ranges or {}).items():
+        if r is None or (float(r[0]) <= 0.0 and float(r[1]) >= 1.0):
+            rng.pop(t, None)
+        else:
+            rng[t] = [round(float(r[0]), 4), round(float(r[1]), 4)]
+    work["instruction_ranges"] = {t: r for t, r in rng.items() if t in work["instructions"]}
     for ln in work["lines"]:
         cur = ln.get("instruction") or ""
         if rename and cur in rename:
@@ -726,13 +740,20 @@ def set_instructions(texts: list, rename: dict = None, drop: str = None, link: t
         select(st.session_state[SS_SEL])
 
 
+def _stroke_picture(r: tuple) -> str:
+    """The bar as text: ▬ where the marker runs, ┄ where it doesn't (base on the left, tip on the right)."""
+    n = 12
+    return "base " + "".join("▬" if r[0] - 1e-6 <= (k + 0.5) / n <= r[1] + 1e-6 else "┄" for k in range(n)) + " tip"
+
+
 def instructions_tab(cm: dict) -> None:
     ins = CS.instructions(cm)
     gen = st.session_state.get("cm_gen", 0)
     lines = cm.get("lines") or []
     st.caption("🗒️ Text commands shown in her half of the bottom strip on a ◧ split-screen render (switch 🗒️ "
                "Instructions on in Edge's setup). A line linked to one puts it up — after its own delay — and it stays "
-               "until a line with another one plays; give Stop and Wait lines their own (STOP, RELAX…). Changes are "
+               "until a line with another one plays; give Stop and Wait lines their own (STOP, RELAX…). 🎯 Each one can "
+               "limit the stroke bar to part of its length (base = left, tip = right) while it's up. Changes are "
                "unsaved until 💾 Save.")
     a = st.columns([4, 1])
     new = a[0].text_input("➕ New instruction", key=f"cm_ins_new_{gen}", placeholder="e.g. JUST THE TIP")
@@ -744,7 +765,9 @@ def instructions_tab(cm: dict) -> None:
         st.info("No instructions yet — add one above.")
         return
     use = {t: [ln["name"] for ln in lines if ln.get("instruction") == t] for t in ins}
+    presets_ = {k: v for k, v in E.STROKE_RANGES.items()}
     for j, t in enumerate(ins):
+        cur = E.stroke_range(cm, t)
         r = st.columns([3, 1, 1, 1])
         val = r[0].text_input(f"Instruction {j + 1}", t, key=f"cm_ins_t_{j}_{gen}", label_visibility="collapsed")
         r[1].caption(f"{len(use[t])} line(s)")
@@ -756,6 +779,24 @@ def instructions_tab(cm: dict) -> None:
         if r[3].button("🗑", key=f"cm_ins_del_{j}", use_container_width=True,
                        help="Delete it — the lines using it get none."):
             set_instructions([x for x in ins if x != t], drop=t)
+            st.rerun()
+        # 🎯 how far along the stroke bar the marker runs while it's up (0 = base, left … 1 = tip, right)
+        match = next((k for k, (_lab, v) in presets_.items() if abs(v[0] - cur[0]) < 0.01 and abs(v[1] - cur[1]) < 0.01),
+                     "custom")
+        q = st.columns([2, 3])
+        opts = list(presets_) + ["custom"]
+        pick = q[0].selectbox(f"🎯 Stroke for {t}", opts, index=opts.index(match), key=f"cm_ins_rg_{j}_{gen}",
+                              format_func=lambda k: presets_[k][0] if k in presets_ else "✎ Custom",
+                              label_visibility="collapsed")
+        if pick == "custom":
+            lo, hi = q[1].slider(f"Stroke range for {t}", 0, 100, (int(round(cur[0] * 100)), int(round(cur[1] * 100))), 5,
+                                 key=f"cm_ins_sl_{j}_{gen}", label_visibility="collapsed", format="%d%%")
+            want = (lo / 100, hi / 100)
+        else:
+            want = presets_[pick][1]
+            q[1].caption("🎯 " + _stroke_picture(want))
+        if (abs(want[0] - cur[0]) > 0.004 or abs(want[1] - cur[1]) > 0.004) and want[1] - want[0] >= 0.05:
+            set_instructions(ins, ranges={t: want})
             st.rerun()
     st.markdown("**🔗 Link lines**")
     c = st.columns([2, 4])
@@ -769,7 +810,8 @@ def instructions_tab(cm: dict) -> None:
     linked = [ln for ln in lines if ln.get("instruction")]
     if linked:
         st.dataframe([{"Line": ln["name"], "Instruction": ln["instruction"],
-                       "Delay (s)": float(ln.get("instruction_delay") or 0.0)} for ln in
+                       "Delay (s)": float(ln.get("instruction_delay") or 0.0),
+                       "🎯 Stroke": _stroke_picture(E.stroke_range(cm, ln["instruction"]))} for ln in
                       sorted(linked, key=lambda x: (x["instruction"], x["name"].lower()))],
                      hide_index=True, use_container_width=True)
         st.caption("Set a line's delay in its editor (tap it on a timeline or in 🎙️ Lines).")

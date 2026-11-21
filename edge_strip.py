@@ -38,7 +38,7 @@ def bar_height(frame_h: int) -> int:
 
 def _fonts(k: float) -> dict:
     return {"num": E._font(int(44 * k * S), bold=True), "num_pulse": E._font(int(50 * k * S), bold=True),
-            "label": E._font(int(26 * k * S), bold=True), "next": E._font(int(11 * k * S), bold=True),
+            "label": E._font(int(38 * k * S), bold=True), "next": E._font(int(11 * k * S), bold=True),
             "round": E._font(int(14 * k * S), bold=True)}
 
 
@@ -55,10 +55,10 @@ def layout(frame: tuple, labels, nexts, rounds: int) -> dict:
     k = scale(H)
     f = _fonts(k)
     d = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
-    pad, gap, div = 28 * k, 20 * k, 1 * k
+    pad, gap, div = 24 * k, 18 * k, 1 * k
     slot = max(_w(d, t, f["num_pulse"]) for t in ("88", "+15")) / S + 6 * k
-    mid = max([_w(d, lab, f["label"]) for lab in labels] + [_w(d, f"NEXT ▸ {n}", f["next"]) for n in nexts]) / S
-    rnd = _w(d, f"ROUND {rounds}/{rounds}", f["round"]) / S
+    mid = max(_w(d, lab, f["label"]) for lab in labels) / S          # the phase's name fills its column
+    rnd = max([_w(d, f"ROUND {rounds}/{rounds}", f["round"])] + [_w(d, f"NEXT ▸ {n}", f["next"]) for n in nexts]) / S
     w = int(math.ceil(pad + slot + gap + div + gap + mid + gap + div + gap + rnd + pad)) // 2 * 2
     h = max(int(round(BOX_H * k)) // 2 * 2, 16)
     x = (W - w) // 2
@@ -87,16 +87,25 @@ def box_image(lay: dict, label: str, colour, next_label: str, r: int, n: int, mo
     dv = (DARK + (110,)) if mode == "flash" else (255, 255, 255, 56)
     for xx in (lay["div1"], lay["div2"]):
         d.rectangle((xx * S, cy - 17 * k * S, xx * S + max(int(k * S), 1), cy + 17 * k * S), fill=dv)
-    lb = d.textbbox((0, 0), label, font=f["label"])
-    nb = d.textbbox((0, 0), "NEXT ▸ " + next_label, font=f["next"])
-    lh, nh, g = lb[3] - lb[1], nb[3] - nb[1], 5 * k * S
-    top = cy - (lh + g + nh) / 2
-    d.text((lay["mid_x"] * S - lb[0], top - lb[1]), label, font=f["label"], fill=text or (tuple(colour) + (255,)))
-    d.text((lay["mid_x"] * S - nb[0], top + lh + g - nb[1]), "NEXT ▸ " + next_label, font=f["next"],
-           fill=text or (GREY + (255,)))
+    # the phase's name, as large as the box allows, centred in its column (Daryl, 21 Nov: fill the space)
+    fl = f["label"]
+    lb = d.textbbox((0, 0), label, font=fl)
+    size = fl.size
+    while lb[2] - lb[0] > lay["mid_w"] * S and size > 8:
+        size = int(size * 0.94)
+        fl = E._font(size, bold=True)
+        lb = d.textbbox((0, 0), label, font=fl)
+    d.text((lay["mid_x"] * S + (lay["mid_w"] * S - (lb[2] - lb[0])) / 2 - lb[0], cy - (lb[3] + lb[1]) / 2), label, font=fl,
+           fill=text or (tuple(colour) + (255,)))
+    # the round, with the next phase small and grey under it
     rt = f"ROUND {int(r)}/{int(n)}"
     rb = d.textbbox((0, 0), rt, font=f["round"])
-    d.text((lay["round_x"] * S - rb[0], cy - (rb[3] + rb[1]) / 2), rt, font=f["round"], fill=text or (228, 228, 234, 255))
+    nt = "NEXT ▸ " + next_label
+    nb = d.textbbox((0, 0), nt, font=f["next"])
+    rh, nh, g = rb[3] - rb[1], nb[3] - nb[1], 5 * k * S
+    top = cy - (rh + g + nh) / 2
+    d.text((lay["round_x"] * S - rb[0], top - rb[1]), rt, font=f["round"], fill=text or (228, 228, 234, 255))
+    d.text((lay["round_x"] * S - nb[0], top + rh + g - nb[1]), nt, font=f["next"], fill=text or (GREY + (255,)))
     return img.resize((w, h), Image.LANCZOS)
 
 
@@ -173,3 +182,14 @@ def instruction_panel(text: str, colour, width: int, frame_h: int, alpha: float 
         d.rounded_rectangle((x, cy - ah / 2, x + acc_w, cy + ah / 2), radius=acc_w / 2, fill=tuple(colour) + (255,))
         d.text((x + acc_w + gap - b[0], cy - (b[3] + b[1]) / 2), text, font=f, fill=(255, 255, 255, 255))
     return img.resize((width, h), Image.LANCZOS)
+
+
+def bar_segment(width: int, frame_h: int):
+    """🎯 The part of the stroke track an instruction allows: the track drawn brighter over that stretch."""
+    from PIL import Image, ImageDraw
+    k = scale(frame_h)
+    th = max(int(6 * k), 2)
+    img = Image.new("RGBA", (width * S, th * S), (0, 0, 0, 0))
+    ImageDraw.Draw(img).rounded_rectangle((0, 0, width * S - 1, th * S - 1), radius=th * S // 2,
+                                          fill=(255, 255, 255, 150))
+    return img.resize((width, th), Image.LANCZOS)

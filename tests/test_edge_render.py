@@ -538,7 +538,8 @@ def test_the_strip_timer_style_shows_the_box_the_number_and_the_stroke_strip(tmp
     r, g, b = _pixel(out, 20.12, bx, by)
     assert r > 150 and g < 90
     # the round sits in the box: something light right of the second divider
-    light = [_pixel(out, 10.0, x, by) for x in range(lay["x"] + lay["round_x"], lay["x"] + lay["w"] - 30, 2)]
+    light = [_pixel(out, 10.0, x, yy) for x in range(lay["x"] + lay["round_x"], lay["x"] + lay["w"] - 30, 2)
+             for yy in range(4, lay["h"] - 4, 2)]
     assert any(min(px) > 150 for px in light)
     # the stroke marker slides along the bottom strip: at one end on a beat, the other end on the next
     my = bar["y"] + bar["h"] // 2
@@ -562,7 +563,10 @@ def test_instructions_stay_until_replaced_and_show_in_her_half_of_the_band(tmp_p
     plays = [{"time": 2.0, "line": "Tip"}, {"time": 5.0, "line": "Filler"}, {"time": 8.0, "line": "Same"},
              {"time": 12.0, "line": "Stroke"}]
     track = E.instruction_track(plays, cm)
-    assert track == [{"time": 2.5, "text": "JUST THE TIP"}, {"time": 12.0, "text": "stroke it"}]
+    assert track == [{"time": 2.5, "text": "JUST THE TIP", "range": [0.0, 1.0]},
+                     {"time": 12.0, "text": "stroke it", "range": [0.0, 1.0]}]
+    cm["instruction_ranges"] = {"JUST THE TIP": [2 / 3, 1.0]}
+    assert E.instruction_track(plays, cm)[0]["range"] == [round(2 / 3, 4), 1.0]
     assert E.instruction_at(track, 1.0) is None and E.instruction_at(track, 9.0) == "JUST THE TIP"
     assert E.instruction_at(track, 30.0) == "stroke it"
     # the render
@@ -576,7 +580,7 @@ def test_instructions_stay_until_replaced_and_show_in_her_half_of_the_band(tmp_p
             "overlay": {"corner": "top-left", "style": "strip"}, "avatar": {"on": True, "mode": "split", "cues": []},
             "intro": {"on": False}, "outro": {"on": False}, "signals": {"sound": False, "timer": True, "flash": False},
             "round_badge": {"on": True}, "pace": {"on": True, "beats": guide["beats"]}, "next_up": {"on": True},
-            "instructions": {"on": True, "items": [{"time": 4.0, "text": "JUST THE TIP"}]}}
+            "instructions": {"on": True, "items": [{"time": 4.0, "text": "JUST THE TIP", "range": [2 / 3, 1.0]}]}}
 
     def run(cmd):
         subprocess.run(cmd, capture_output=True, check=True)
@@ -593,3 +597,12 @@ def test_instructions_stay_until_replaced_and_show_in_her_half_of_the_band(tmp_p
     after = [_pixel(out, 8.0, x, y) for x in range(340, 630, 3)]
     assert not any(white(px) for px in before) and any(white(px) for px in after)     # the text from 4 s, kept on
     assert any(white(px) for px in [_pixel(out, 18.0, x, y) for x in range(340, 630, 3)])
+    # 🎯 "just the tip" keeps the marker to the right third of the bar; before it, the whole bar
+    bar = st_["bar"]
+    green = lambda px: px[1] > 140 and px[1] > px[0] + 40              # noqa: E731
+    xs = range(bar["x0"], bar["x1"], 2)
+    for t in (8.0, 9.0, 10.0, 11.0, 12.5):
+        hit = [x for x in xs if green(_pixel(out, t, x, y))]
+        assert hit and min(hit) >= bar["x0"] + (bar["x1"] - bar["x0"]) * 2 / 3 - 4, (t, hit[:3])
+    early = [x for t in (1.0, 2.0) for x in xs if green(_pixel(out, t, x, y))]
+    assert early and min(early) < bar["x0"] + (bar["x1"] - bar["x0"]) / 3

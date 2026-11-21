@@ -431,7 +431,7 @@ def test_compile_carries_the_instructions_only_on_a_split_screen(monkeypatch):
         res = PE.compile_edge([], VIDS, "chill", 3, avatar=True, avatar_mode="split", instructions=True)
         ins = res["plan"]["edge"]["instructions"]
         start = next(c["time"] for c in res["plan"]["edge"]["voiceover"]["cues"] if c["line"] == "Start-Round 1")
-        assert ins["on"] and ins["items"][0] == {"time": round(start + 0.5, 3), "text": "JUST THE TIP"}
+        assert ins["on"] and ins["items"][0] == {"time": round(start + 0.5, 3), "text": "JUST THE TIP", "range": [0.0, 1.0]}
         corner = PE.compile_edge([], VIDS, "chill", 3, avatar=True, avatar_mode="corner", instructions=True)
         assert not corner["plan"]["edge"]["instructions"]["on"]
     finally:
