@@ -531,21 +531,27 @@ def test_the_strip_timer_style_shows_the_box_the_number_and_the_stroke_strip(tmp
     st_ = R._strip_layers(edge, sched, (640, 360), True)
     lay, bar = st_["lay"], st_["bar"]
     assert lay["w"] < 640 and lay["h"] == 30 and bar["h"] == ES.bar_height(360) and bar["y"] == 360 - bar["h"]
-    # the box is dark; as Extra starts it drops down in Extra's red and a red frame pulses round the picture
-    bx, by = lay["x"] + lay["w"] - 6, lay["h"] // 2
-    assert max(_pixel(out, 10.0, bx, by)) < 40
     red = lambda px: px[0] > 150 and px[1] < 90                     # noqa: E731
+    green = lambda px: px[1] > 140 and px[1] > px[0] + 40            # noqa: E731  (Slow's ring colour)
+    # the box: the number's block in Slow's green, the rest dark
+    assert green(_pixel(out, 10.0, lay["x"] + lay["block_w"] - 4, 4))
+    assert max(_pixel(out, 10.0, lay["x"] + lay["w"] - 8, lay["h"] // 2)) < 45
+    # ⚠️ the last 3 s: it flashes green as each number comes up (3, 2, 1), dark in between
+    flash = lambda t: _pixel(out, t, lay["x"] + lay["w"] - 8, 4)    # noqa: E731
+    assert green(flash(17.1)) and green(flash(18.1)) and not green(flash(17.7)) and not green(flash(15.1))
+    # ⏭️ the NEXT tab: out under the box over the last 3 s, with Extra's name in red
+    row = lambda t: [_pixel(out, t, x, lay["h"] + lay["tab_h"] // 2 - 2) for x in range(260, 380, 2)]       # noqa: E731
+    assert any(red(px) for px in row(18.5)) and not any(red(px) for px in row(10.0))
+    # ▸ ROUND 1, centre screen, once as the round starts
+    card = lambda t: [_pixel(out, t, x, y) for x in range(290, 350, 4) for y in range(150, 220, 4)]          # noqa: E731
+    assert any(min(px) > 200 for px in card(1.2)) and not any(min(px) > 200 for px in card(6.0))
+    # 🔔 as Extra starts the box drops down in Extra's red and a red frame pulses round the picture
     assert red(_pixel(out, 20.6, 320, 80)) and not red(_pixel(out, 10.0, 320, 80))      # the dropped box, below the bar
     assert not red(_pixel(out, 22.0, 320, 80))                                          # tucked back up
     assert red(_pixel(out, 20.05, 3, 180)) and not red(_pixel(out, 10.0, 3, 180)) and not red(_pixel(out, 22.0, 3, 180))
     assert not red(_pixel(out, 0.1, 3, 180))                                            # (not as the run starts)
-    # the round sits in the box: something light right of the second divider
-    light = [_pixel(out, 10.0, x, yy) for x in range(lay["x"] + lay["round_x"], lay["x"] + lay["w"] - 30, 2)
-             for yy in range(4, lay["h"] - 4, 2)]
-    assert any(min(px) > 150 for px in light)
     # the stroke marker slides along the bottom strip: at one end on a beat, the other end on the next
     my = bar["y"] + bar["h"] // 2
-    green = lambda px: px[1] > 140 and px[1] > px[0] + 40            # noqa: E731  (Slow's ring colour)
     left_x, right_x = bar["x0"] + 4, bar["x1"] - 4
     assert green(_pixel(out, 4.0, left_x, my)) and not green(_pixel(out, 4.0, right_x, my))
     assert green(_pixel(out, 5.0, right_x, my)) and not green(_pixel(out, 5.0, left_x, my))
@@ -608,3 +614,58 @@ def test_instructions_stay_until_replaced_and_show_in_her_half_of_the_band(tmp_p
         assert hit and min(hit) >= bar["x0"] + (bar["x1"] - bar["x0"]) * 2 / 3 - 4, (t, hit[:3])
     early = [x for t in (1.0, 2.0) for x in xs if green(_pixel(out, t, x, y))]
     assert early and min(early) < bar["x0"] + (bar["x1"] - bar["x0"]) / 3
+
+
+def test_hold_at_the_end_and_the_surprise_looks_on_the_strip(tmp_path, monkeypatch):
+    """✋ hold at the end of each stroke (an instruction's setting), and the strip's ✋ hands off / ⏩ override looks."""
+    import sys
+    import types
+    import edge_mode as E
+    import edge_render as R
+    beats = [float(b) for b in range(0, 20)]
+    seen = [E.guide_position_hold(beats, b + 0.5, "tip", 1) for b in range(0, 6)]
+    # beat 0→1 up, 1→2 held at the tip, 2→3 back down, 3→4 up again…
+    assert seen[0][0] == pytest.approx(0.5, abs=0.01) and seen[1] == (1.0, True) and not seen[2][1]
+    assert seen[3][0] == pytest.approx(0.5, abs=0.01) and seen[4] == (1.0, True)
+    assert E.guide_position_hold(beats, 1.5, "base", 2) == (0.0, True)
+    cm = {"instruction_holds": {"HOLD IT": {"at": "tip", "beats": 9}}}
+    assert E.stroke_hold(cm, "HOLD IT") == {"at": "tip", "beats": 4} and E.stroke_hold(cm, "OTHER") is None
+    assert E.instruction_track([{"time": 1.0, "line": "L"}], {**cm, "lines": [{"name": "L", "instruction": "HOLD IT"}]})[0]["hold"]
+    monkeypatch.setitem(sys.modules, "render_preview", types.SimpleNamespace(get_track_raw_source=lambda t: t))
+    comb = tmp_path / "comb.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x202020:s=640x360:r=25:d=30",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(comb)], check=True)
+    sched = [{"index": 0, "round": 1, "profile": "fast", "start": 0.0, "end": 12.0, "bpm": 140.0, "kind": "phase",
+              "clock": {"total": 20.0, "left": 20.0}},
+             {"index": 1, "round": 1, "profile": "fast", "start": 12.0, "end": 17.0, "kind": "handsoff",
+              "surprise": "handsoff", "clock": {"total": 5.0, "left": 5.0}},
+             {"index": 2, "round": 1, "profile": "fast", "start": 17.0, "end": 25.0, "bpm": 140.0, "kind": "phase",
+              "clock": {"total": 20.0, "left": 8.0}},
+             {"index": 3, "round": 1, "profile": "fast", "start": 25.0, "end": 30.0, "kind": "override",
+              "label": "OVERRIDE", "surprise": "override", "clock": {"total": 5.0, "left": 5.0}}]
+    guide = E.pace_guide(sched)
+    edge = {"schedule": sched, "playlist": [], "beat": {"on": True, "volume": 1.0}, "voiceover": {"on": False, "cues": []},
+            "overlay": {"corner": "top-left", "style": "strip"}, "avatar": {"on": False}, "intro": {"on": False},
+            "outro": {"on": False}, "signals": {"sound": False, "timer": True, "flash": False},
+            "round_badge": {"on": True}, "pace": {"on": True, "beats": guide["beats"]}, "next_up": {"on": True}}
+
+    def run(cmd):
+        subprocess.run(cmd, capture_output=True, check=True)
+    out = tmp_path / "out.mp4"
+    took = R.finish({"edge": edge}, comb, str(out), types.SimpleNamespace(input_args=lambda raw: ["-i", raw]),
+                    tmp_path / "w", run, 360, 640)
+    assert took["edge_check"] == "ok"
+    st_ = R._strip_layers(edge, sched, (640, 360), True)
+    lay, bar = st_["lay"], st_["bar"]
+    assert st_["frozen"][1] == "08"                                    # ✋ the clock held where the phase carries on
+    block = lambda t: _pixel(out, t, lay["x"] + lay["block_w"] - 4, 4)  # noqa: E731
+    r, g, b = block(14.0)
+    assert abs(r - g) < 25 and 110 < r < 180                           # ✋ the block goes grey
+    r, g, b = block(27.0)
+    assert r > 180 and g < 100                                         # ⏩ red
+    # ✋ the marker stops in the middle of a dimmed bar; ⏩ the bar turns red
+    mid = bar["x0"] + (bar["x1"] - bar["x0"]) // 2
+    grey = [_pixel(out, t, mid, bar["y"] + bar["h"] // 2) for t in (13.0, 14.0, 15.0)]
+    assert all(abs(px[0] - px[1]) < 20 and max(px) > 80 for px in grey)
+    reds = [_pixel(out, 27.0, x, bar["y"] + bar["h"] // 2) for x in range(bar["x0"] + 20, bar["x1"] - 20, 40)]
+    assert sum(1 for px in reds if px[0] > px[1] + 40) > len(reds) // 2

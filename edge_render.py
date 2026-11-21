@@ -672,33 +672,51 @@ def _guide_layers(edge: dict, sched: list, corner: str, frame: tuple, badges: di
 
 
 def _strip_layers(edge: dict, sched: list, frame: tuple, signals: bool, band: int = None) -> dict:
-    """⏱️ The "strip" timer style (edge_strip.py): the top box for every stretch (as it is, filled for 🔔 the flash,
-    edged for the pulse), the numbers it shows, and the bottom stroke strip with its markers."""
+    """⏱️ The "strip" timer style (edge_strip.py — design B, 21 Nov): the top box for every look (as it is, edged, and
+    ⚠️ flashing), the numbers, the ⏭️ NEXT tab, ▸ the round cards, 🔔 the phase change, ✋ / ⏩ the surprise tags, and
+    the bottom stroke strip with its markers."""
     import edge_strip as ES
     W, H = frame
-    n_rounds = max((ph["round"] for ph in sched), default=1)
+    lay = ES.layout(frame)
     looks = {ph["index"]: E.timer_style(ph) for ph in sched}
-    nexts = {ph["index"]: (E.PROFILES[nx]["label"] if (nx := E.next_real(sched, k)) else "END")
-             for k, ph in enumerate(sched)}
-    lay = ES.layout(frame, sorted({E.style(lk)["label"] for lk in looks.values()}), sorted(set(nexts.values())), n_rounds)
+    block = {"handsoff": (142, 142, 152)}
     boxes = {}
-    for ph in sched:
-        st_ = E.style(looks[ph["index"]])
-        boxes[ph["index"]] = {m: _rgba(ES.box_image(lay, st_["label"], st_["colour"] if m == "flash" else st_["ring"],
-                                                    nexts[ph["index"]], ph["round"], n_rounds, m))
-                              for m in (("normal", "pulse") if signals else ("normal",))}
+    for lk in sorted(set(looks.values())):
+        st_ = E.style(lk)
+        modes = ("normal", "edge", "warn") if signals else ("normal",)
+        boxes[lk] = {}
+        for m in modes:
+            img, glow = ES.box_image(lay, st_["label"], st_["ring"], block.get(lk, st_["ring"]), m)
+            boxes[lk][m] = (*_rgba(img), glow)
     digits = {}
     for ph in sched:
-        look = looks[ph["index"]]
-        c_total, c_left = E.clock(ph)
-        ring = tuple(E.style(look)["ring"])
-        for secs in range(0, int(math.ceil(c_left)) + 1):
-            text = ES.number_text(look, float(secs))
-            for kind, colour, pulse in (("normal", (255, 255, 255), False), ("dark", ES.DARK, False),
-                                        ("pulse", ring, True)):
-                if (text, kind, ring) not in digits and (kind == "normal" or signals):
-                    digits[(text, kind, ring)] = _rgba(ES.digits_image(lay, text, colour, pulse))
-    out = {"lay": lay, "boxes": boxes, "digits": digits, "signals": signals, "bar": None, "change": {}}
+        _tot, c_left = E.clock(ph)
+        for secs in range(0, int(math.ceil(c_left)) + 2):
+            for big in (False, True):
+                text = ES.number_text(looks[ph["index"]], float(secs))
+                if (text, big) not in digits:
+                    digits[(text, big)] = _rgba(ES.digits_image(lay, text, big))
+    # ✋ the clock frozen during a hands off: where the phase stands when it carries on
+    frozen = {}
+    for k, ph in enumerate(sched):
+        if ph.get("kind") == "handsoff" and k + 1 < len(sched):
+            frozen[ph["index"]] = ES.number_text(sched[k + 1]["profile"], E.clock(sched[k + 1])[1])
+            digits.setdefault((frozen[ph["index"]], False), _rgba(ES.digits_image(lay, frozen[ph["index"]], False)))
+    tabs, tab_for = {}, {}
+    for k, ph in enumerate(sched):
+        nx = E.next_real(sched, k)
+        key = nx or "END"
+        if key not in tabs:
+            tabs[key] = _rgba(ES.tab_image(lay, E.PROFILES[nx]["label"] if nx else "END",
+                                           E.PROFILES[nx]["ring"] if nx else (175, 175, 185)))
+        tab_for[ph["index"]] = tabs[key]
+    n_rounds = max((ph["round"] for ph in sched), default=1)
+    starts = {}
+    for ph in sched:
+        starts.setdefault(ph["round"], float(ph["start"]))
+    cards = {r: _rgba(ES.round_card(r, E.PROFILES["wait"]["ring"], frame)) for r in range(1, n_rounds + 1)} if signals else {}
+    out = {"lay": lay, "boxes": boxes, "digits": digits, "frozen": frozen, "tab_for": tab_for, "cards": cards,
+           "round_starts": starts, "signals": signals, "bar": None, "change": {}, "tags": {}}
     if signals:                                            # 🔔 the phase change: the box drops + the frame pulses
         for lk in sorted(set(looks.values())):
             st_ = E.style(lk)
@@ -707,10 +725,25 @@ def _strip_layers(edge: dict, sched: list, frame: tuple, signals: bool, band: in
     pace = edge.get("pace") or {}
     if pace.get("on") and pace.get("beats"):
         # 🗒️ with instructions the strip is the taller band, the stroke meter in its left (footage) half
-        track, x0, x1 = ES.bar_track(W // 2, H, height=band) if band else ES.bar_track(W, H)
-        mk = {p: _rgba(ES.bar_marker(H, E.PROFILES[p]["ring"])) for p in E.ORDER}
-        out["bar"] = {"beats": [float(t) for t in pace["beats"]], "track": _rgba(track), "y": H - track.size[1],
-                      "x0": x0, "x1": x1, "h": track.size[1], "markers": mk, "dim": _rgba(ES.bar_marker(H, (0, 0, 0), True))}
+        mk_w = W // 2 if band else W
+        track, x0, x1 = ES.bar_track(mk_w, H, height=band) if band else ES.bar_track(W, H)
+        dim_track, _a, _b = ES.bar_track(mk_w, H, alpha=0.3, height=band) if band else ES.bar_track(W, H, alpha=0.3)
+        mk = {lk: _rgba(ES.bar_marker(H, E.style(lk)["ring"])) for lk in set(looks.values()) | set(E.ORDER)}
+        held = {lk: _rgba(ES.bar_marker(H, E.style(lk)["ring"], ring=True)) for lk in E.ORDER}
+        out["bar"] = {"beats": [float(t) for t in pace["beats"]], "track": _rgba(track), "dim_track": _rgba(dim_track),
+                      "y": H - track.size[1], "x0": x0, "x1": x1, "h": track.size[1], "markers": mk, "held": held,
+                      "dim": _rgba(ES.bar_marker(H, (0, 0, 0), True)), "grey": _rgba(ES.bar_marker(H, (110, 110, 118))),
+                      "hold_label": _rgba(ES.hold_label(H)),
+                      "red_seg": _rgba(ES.bar_segment(max(int(x1 - x0), 4), H, (245, 70, 75, 150)))}
+        for ph in sched:                                   # ✋ HOLD n / ⏩ +n S — one per second left
+            kind = ph.get("kind")
+            if kind not in ("handsoff", "override"):
+                continue
+            for n in range(1, int(math.ceil(float(ph["end"]) - float(ph["start"]))) + 1):
+                if kind == "handsoff" and ("hold", n) not in out["tags"]:
+                    out["tags"][("hold", n)] = _rgba(ES.tag_image(f"HOLD {n}", (0, 0, 0, 190), (212, 212, 218, 255), H, lock=True))
+                if kind == "override" and ("over", n) not in out["tags"]:
+                    out["tags"][("over", n)] = _rgba(ES.tag_image(f"+{n} S", (245, 70, 75, 255), ES.DARK + (255,), H))
     return out
 
 
@@ -856,22 +889,46 @@ def _instruction_layers(edge: dict, frame: tuple) -> dict | None:
 
 
 def _lay_strip(pic, strip: dict, ph: dict, i: int, a: float, c_left: float, moving: bool) -> None:
-    """⏱️ One frame of the strip style: the top box with its number, 🔔 the phase change, the bottom stroke strip with
-    its marker."""
+    """⏱️ One frame of the strip style: the NEXT tab and the top box (⚠️ flashing as the last numbers come up), the
+    number, ▸ the round card, 🔔 the phase change, then the bottom stroke strip with its marker (✋ / ⏩ tags)."""
     import numpy as np
     import edge_strip as ES
     lay, t = strip["lay"], i / FPS
     left = c_left - t
     look = E.timer_style(ph)
-    ring = tuple(E.style(look)["ring"])
+    kind = ph.get("kind") or "phase"
     sig = strip["signals"]
-    pulse = sig and 0 < left <= E.PULSE_SEC
-    box = strip["boxes"][ph["index"]].get("pulse" if pulse else "normal") or strip["boxes"][ph["index"]]["normal"]
-    _lay(pic, lay["x"], 0, *box)
-    dg = strip["digits"].get((ES.number_text(look, max(left, 0.0)), "pulse" if pulse else "normal", ring))
+    length = float(ph["end"]) - float(ph["start"])
+    c_total, _cl = E.clock(ph)
+    fresh = kind != "phase" or c_left >= c_total - 1e-3      # (a phase carrying on after a hands off isn't new)
+    to_zero = kind == "phase" and abs(c_left - length) < 0.05  # its clock runs out at its end
+    ending = to_zero and 0 < left <= ES.WARN_SEC
+    warn = sig and ending and (math.ceil(left - 1e-6) - left) < 0.5      # ⚠️ on as each number comes up
+    box = strip["boxes"][look].get("warn" if warn else "edge" if (sig and ending) else "normal") or strip["boxes"][look]["normal"]
+    # ⏭️ the NEXT tab slides out from under the box over the last seconds
+    if ending and sig:
+        tab = strip["tab_for"].get(ph["index"])
+        if tab is not None:
+            share = min((ES.WARN_SEC - left) / ES.TAB_SEC, 1.0)
+            th = tab[0].shape[0]
+            y = int(round(lay["h"] - th + share * (th - 2)))
+            _lay(pic, (pic.shape[1] - tab[0].shape[1]) // 2, y, tab[0], (tab[1].astype(np.float32) * share).astype(np.uint16))
+    _lay(pic, lay["x"] - box[2], 0, box[0], box[1])
+    if kind == "handsoff":
+        text = strip["frozen"].get(ph["index"], "")
+    else:
+        text = ES.number_text(look, max(left, 0.0))
+    dg = strip["digits"].get((text, bool(ending)))
     if dg is not None:
-        _lay(pic, lay["x"] + lay["slot_x"], 0, *dg)
-    ch = strip["change"].get(look) if sig and int(ph.get("index", 0)) > 0 else None
+        _lay(pic, lay["x"], 0, *dg)
+    # ▸ the round card, once as each round starts
+    card = strip["cards"].get(ph["round"])
+    if card is not None:
+        al = ES.round_alpha(a + t - strip["round_starts"][ph["round"]], ph["round"] == 1)
+        if al > 0.01:
+            _lay(pic, (pic.shape[1] - card[0].shape[1]) // 2, int(pic.shape[0] * 0.33), card[0],
+                 (card[1].astype(np.float32) * al).astype(np.uint16))
+    ch = strip["change"].get(look) if sig and int(ph.get("index", 0)) > 0 and fresh else None
     if ch is not None and t < ES.CHANGE_SEC:               # 🔔 a new phase: the frame pulses, the box drops down
         lvl = ES.border_level(t)
         if lvl > 0.01:
@@ -883,24 +940,53 @@ def _lay_strip(pic, strip: dict, ph: dict, i: int, a: float, c_left: float, movi
             hh = max(int(rgb.shape[0] * share), 1)
             _lay(pic, (pic.shape[1] - rgb.shape[1]) // 2, 0, rgb[-hh:], solid[-hh:])
     bar = strip.get("bar")
-    if bar is not None:
-        _lay(pic, 0, bar["y"], *bar["track"])
+    if bar is None:
+        return
+    span = bar["x1"] - bar["x0"]
+    if kind == "handsoff":                                 # ✋ the bar dims and locks, the marker stops in the middle
+        _lay(pic, 0, bar["y"], *bar["dim_track"])
+        m = bar["grey"]
+        _lay(pic, int(round(bar["x0"] + 0.5 * (span - m[0].shape[1]))), bar["y"] + (bar["h"] - m[0].shape[0]) // 2, *m)
+        tag = strip["tags"].get(("hold", max(int(math.ceil(length - t - 1e-6)), 1)))
+        if tag is not None:
+            _lay(pic, int(bar["x0"] + span / 2 - tag[0].shape[1] / 2), bar["y"] - tag[0].shape[0] - int(10 * lay["k"]), *tag)
+        return
+    _lay(pic, 0, bar["y"], *bar["track"])
+    if kind == "override":                                 # ⏩ the track turns red
+        seg = bar["red_seg"]
+        _lay(pic, bar["x0"], bar["y"] + (bar["h"] - seg[0].shape[0]) // 2, *seg)
+    lo, hi, hold = 0.0, 1.0, None
+    if strip.get("instr") is not None:                   # 🎯 the instruction on screen limits the stroke (21 Nov)
+        item = E.instruction_item_at(strip["instr"]["track"], a + t)
+        if item and item.get("range"):
+            lo, hi = float(item["range"][0]), float(item["range"][1])
+            seg = strip["instr"]["segments"].get((round(lo, 4), round(hi, 4)))
+            if seg is not None and kind != "override":
+                _lay(pic, int(round(bar["x0"] + lo * span)), bar["y"] + (bar["h"] - seg[0].shape[0]) // 2, *seg)
+        hold = (item or {}).get("hold") if kind == "phase" else None
+    holding = False
+    if moving and hold:
+        pos, holding = E.guide_position_hold(bar["beats"], a + t, hold["at"], hold["beats"])
+    else:
         pos = E.guide_position(bar["beats"], a + t) if moving else None
-        m = bar["markers"][ph["profile"]] if pos is not None else bar["dim"]
-        mw, mh = m[0].shape[1], m[0].shape[0]
-        pos = 0.5 if pos is None else pos
-        lo, hi = 0.0, 1.0
-        if strip.get("instr") is not None:               # 🎯 the instruction on screen limits the stroke (21 Nov)
-            item = E.instruction_item_at(strip["instr"]["track"], a + t)
-            if item and item.get("range"):
-                lo, hi = float(item["range"][0]), float(item["range"][1])
-                span = bar["x1"] - bar["x0"]
-                seg = strip["instr"]["segments"].get((round(lo, 4), round(hi, 4)))
-                if seg is not None:
-                    _lay(pic, int(round(bar["x0"] + lo * span)), bar["y"] + (bar["h"] - seg[0].shape[0]) // 2, *seg)
-        run = (bar["x1"] - bar["x0"]) * (hi - lo) - mw
-        x = int(round(bar["x0"] + (bar["x1"] - bar["x0"]) * lo + pos * max(run, 0)))
-        _lay(pic, x, bar["y"] + (bar["h"] - mh) // 2, *m)
+    if pos is None:
+        m = bar["dim"]
+    elif holding:
+        m = bar["held"].get(ph["profile"]) or bar["markers"][look]
+    else:
+        m = bar["markers"].get(look) or bar["markers"][ph["profile"]]
+    mw, mh = m[0].shape[1], m[0].shape[0]
+    pos = 0.5 if pos is None else pos
+    run = span * (hi - lo) - mw
+    x = int(round(bar["x0"] + span * lo + pos * max(run, 0)))
+    _lay(pic, x, bar["y"] + (bar["h"] - mh) // 2, *m)
+    if holding:
+        hl = bar["hold_label"]
+        _lay(pic, x + mw // 2 - hl[0].shape[1] // 2, bar["y"] + (bar["h"] - mh) // 2 - hl[0].shape[0] - 2, *hl)
+    if kind == "override":
+        tag = strip["tags"].get(("over", max(int(math.ceil(length - t - 1e-6)), 1)))
+        if tag is not None:
+            _lay(pic, int(bar["x1"] - tag[0].shape[1]), bar["y"] - tag[0].shape[0] - int(10 * lay["k"]), *tag)
 
 
 def _lengths(path) -> dict:

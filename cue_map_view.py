@@ -702,7 +702,7 @@ def timeline(cm: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def set_instructions(texts: list, rename: dict = None, drop: str = None, link: tuple = None,
-                     ranges: dict = None) -> None:
+                     ranges: dict = None, holds: dict = None) -> None:
     """Change the 🗒️ instructions in the unsaved changes: the list, a rename (every line using it follows), a delete
     (lines using it get none), a link (text, [line names]: those lines get it, others using it lose it) or 🎯 stroke
     ranges ({text: (from, to)} along the bar, 0 = base … 1 = tip; the whole bar = none kept)."""
@@ -721,6 +721,18 @@ def set_instructions(texts: list, rename: dict = None, drop: str = None, link: t
         else:
             rng[t] = [round(float(r[0]), 4), round(float(r[1]), 4)]
     work["instruction_ranges"] = {t: r for t, r in rng.items() if t in work["instructions"]}
+    hd = dict(work.get("instruction_holds") or {})         # ✋ each instruction's hold at the end of the stroke
+    for old, new in (rename or {}).items():
+        if old in hd:
+            hd[new] = hd.pop(old)
+    if drop:
+        hd.pop(drop, None)
+    for t, h in (holds or {}).items():
+        if h:
+            hd[t] = dict(h)
+        else:
+            hd.pop(t, None)
+    work["instruction_holds"] = {t: h for t, h in hd.items() if t in work["instructions"]}
     for ln in work["lines"]:
         cur = ln.get("instruction") or ""
         if rename and cur in rename:
@@ -797,6 +809,19 @@ def instructions_tab(cm: dict) -> None:
             q[1].caption("🎯 " + _stroke_picture(want))
         if (abs(want[0] - cur[0]) > 0.004 or abs(want[1] - cur[1]) > 0.004) and want[1] - want[0] >= 0.05:
             set_instructions(ins, ranges={t: want})
+            st.rerun()
+        # ✋ hold at one end of each stroke for a beat or more while it's up
+        hcur = E.stroke_hold(cm, t) or {}
+        hq = st.columns([2, 1, 2])
+        at = hq[0].selectbox(f"✋ Hold for {t}", ["", "tip", "base"], index=["", "tip", "base"].index(hcur.get("at", "")),
+                             key=f"cm_ins_ho_{j}_{gen}", label_visibility="collapsed",
+                             format_func=lambda v: {"": "✋ No hold", "tip": "✋ Hold at the tip", "base": "✋ Hold at the base"}[v])
+        beats = hq[1].selectbox(f"Beats held for {t}", [1, 2, 3, 4], index=int(hcur.get("beats", 1)) - 1,
+                                key=f"cm_ins_hb_{j}_{gen}", label_visibility="collapsed", disabled=not at,
+                                format_func=lambda n: f"{n} beat" + ("s" if n > 1 else ""))
+        want_h = {"at": at, "beats": int(beats)} if at else None
+        if want_h != (hcur or None):
+            set_instructions(ins, holds={t: want_h})
             st.rerun()
     st.markdown("**🔗 Link lines**")
     c = st.columns([2, 4])

@@ -2,8 +2,9 @@
 
 An extra Timer style beside the ring:
 
-  top     a box snapped to the top edge, centred, only its bottom corners rounded:
-          2-digit countdown | the current phase (large, in its colour) with a small grey "NEXT ▸ …" under it | ROUND 2/4
+  top     a box snapped to the top edge, centred, only its bottom corners rounded: the 2-digit countdown in a block
+          of the phase's colour | the phase's name large. Over the last 3 s a "NEXT ▸ …" tab slides out under it and the
+          box flashes as each number comes up. ▸ "ROUND n" once, centre screen, as each round starts.
   bottom  a thin full-width strip holding only the horizontal stroke meter — the marker slides left ↔ right on the beats
 
 🔔 signals: as a phase starts the box fills with the phase's colour (dark text) for a moment; over the last PULSE_SEC
@@ -37,9 +38,9 @@ def bar_height(frame_h: int) -> int:
 
 
 def _fonts(k: float) -> dict:
-    return {"num": E._font(int(44 * k * S), bold=True), "num_pulse": E._font(int(50 * k * S), bold=True),
-            "label": E._font(int(38 * k * S), bold=True), "next": E._font(int(11 * k * S), bold=True),
-            "round": E._font(int(14 * k * S), bold=True)}
+    return {"num": E._font(int(44 * k * S), bold=True), "num_big": E._font(int(50 * k * S), bold=True),
+            "label": E._font(int(44 * k * S), bold=True), "label_long": E._font(int(34 * k * S), bold=True),
+            "tab_head": E._font(int(12 * k * S), bold=True), "tab_name": E._font(int(19 * k * S), bold=True)}
 
 
 def _w(d, text, font) -> int:
@@ -47,78 +48,171 @@ def _w(d, text, font) -> int:
     return b[2] - b[0]
 
 
-def layout(frame: tuple, labels, nexts, rounds: int) -> dict:
-    """The box's fixed layout (it never changes width mid-run): {"w", "h", "x", "slot" (digit area: x, w), "mid_x",
-    "mid_w", "round_x"} in final pixels, sized for the widest label / next / round in use."""
-    from PIL import Image, ImageDraw
+BOX_W, BLOCK_W = 460, 110               # the top box and its colour block (the number), at 720 p
+TAB_W, TAB_H = 240, 38                  # ⏭️ the NEXT ▸ tab under the box
+TAB_SEC = 0.35                          # how long the tab takes to slide out
+WARN_SEC = 3.0                          # ⚠️ the last seconds: tab out, the box flashes as each number comes up
+
+
+def layout(frame: tuple, *_unused) -> dict:
+    """The top box's place and size (fixed for the run): {"w", "h", "x", "k", "block_w", "tab_w", "tab_h"}."""
     W, H = frame
     k = scale(H)
-    f = _fonts(k)
-    d = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
-    pad, gap, div = 24 * k, 18 * k, 1 * k
-    slot = max(_w(d, t, f["num_pulse"]) for t in ("88", "+15")) / S + 6 * k
-    mid = max(_w(d, lab, f["label"]) for lab in labels) / S          # the phase's name fills its column
-    rnd = max([_w(d, f"ROUND {rounds}/{rounds}", f["next"])] + [_w(d, f"NEXT ▸ {n}", f["round"]) for n in nexts]) / S
-    w = int(math.ceil(pad + slot + gap + div + gap + mid + gap + div + gap + rnd + pad)) // 2 * 2
-    h = max(int(round(BOX_H * k)) // 2 * 2, 16)
-    x = (W - w) // 2
-    return {"w": w, "h": h, "x": x, "k": k, "slot_x": int(pad), "slot_w": int(math.ceil(slot)),
-            "div1": int(pad + slot + gap), "mid_x": int(pad + slot + gap + div + gap), "mid_w": int(math.ceil(mid)),
-            "div2": int(pad + slot + gap + div + gap + mid + gap), "round_x": int(pad + slot + gap + div + gap + mid + gap + div + gap)}
+    w = int(BOX_W * k) // 2 * 2
+    return {"w": w, "h": max(int(round(BOX_H * k)) // 2 * 2, 16), "x": (W - w) // 2, "k": k,
+            "block_w": int(BLOCK_W * k), "tab_w": int(TAB_W * k) // 2 * 2, "tab_h": int(TAB_H * k) // 2 * 2}
 
 
-def box_image(lay: dict, label: str, colour, next_label: str, r: int, n: int, mode: str = "normal"):
-    """The top box for one stretch, without the number (drawn in its slot every second). mode: "normal", "flash"
-    (filled with the phase's colour, dark text) or "pulse" (its edge in the phase's colour)."""
-    from PIL import Image, ImageDraw
+def box_image(lay: dict, label: str, ring, block, mode: str = "normal"):
+    """The top box (Daryl, 21 Nov — design B): the number's colour block on the left (drawn without the number),
+    the phase's name large on the right. mode: "normal" · "edge" (the edge in the phase's colour: the last seconds)
+    · "warn" (⚠️ the flash: filled with the phase's colour and glowing round, the block white, the name white)."""
+    from PIL import Image, ImageDraw, ImageFilter
     k, w, h = lay["k"], lay["w"], lay["h"]
     f = _fonts(k)
-    img = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+    glow = int(26 * k) if mode == "warn" else 0
+    img = Image.new("RGBA", ((w + 2 * glow) * S, (h + glow) * S), (0, 0, 0, 0))
+    if glow:                                               # the glow round the box while it flashes
+        g = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        ImageDraw.Draw(g).rounded_rectangle((glow * S, -40 * S, (w + glow) * S, h * S), radius=int(18 * k * S),
+                                            fill=tuple(ring) + (200,))
+        img = Image.alpha_composite(img, g.filter(ImageFilter.GaussianBlur(glow * S / 2)))
     d = ImageDraw.Draw(img)
+    ox = glow * S
     rad = int(18 * k * S)
-    fill = tuple(colour) + (255,) if mode == "flash" else (10, 10, 12, 184)
-    edge = tuple(colour) + (255,) if mode in ("flash", "pulse") else (255, 255, 255, 31)
+    fill = tuple(ring) + (160,) if mode == "warn" else (10, 10, 12, 189)
+    edge = tuple(ring) + (255,) if mode in ("edge", "warn") else (255, 255, 255, 31)
     bw = max(int(2 * k * S), S)
-    # only the bottom corners rounded: a rounded box drawn taller than the picture, its top cut off
-    d.rounded_rectangle((0, -rad * 2, w * S - 1, h * S - 1), radius=rad, fill=edge)
-    d.rounded_rectangle((bw, -rad * 2, w * S - 1 - bw, h * S - 1 - bw), radius=max(rad - bw, 1), fill=fill)
-    text = DARK + (255,) if mode == "flash" else None
-    cy = h * S / 2
-    dv = (DARK + (110,)) if mode == "flash" else (255, 255, 255, 56)
-    for xx in (lay["div1"], lay["div2"]):
-        d.rectangle((xx * S, cy - 17 * k * S, xx * S + max(int(k * S), 1), cy + 17 * k * S), fill=dv)
-    # the phase's name, as large as the box allows, centred in its column (Daryl, 21 Nov: fill the space)
-    fl = f["label"]
-    lb = d.textbbox((0, 0), label, font=fl)
+    d.rounded_rectangle((ox, -rad * 2, ox + w * S - 1, h * S - 1), radius=rad, fill=edge)
+    d.rounded_rectangle((ox + bw, -rad * 2, ox + w * S - 1 - bw, h * S - 1 - bw), radius=max(rad - bw, 1), fill=fill)
+    bwid = lay["block_w"] * S
+    d.rounded_rectangle((ox + bw, -rad * 2, ox + bwid, h * S - 1 - bw), radius=max(rad - bw, 1),
+                        fill=((255, 255, 255, 255) if mode == "warn" else tuple(block) + (255,)))
+    d.rectangle((ox + bwid - rad, -2, ox + bwid, h * S - 1 - bw), fill=((255, 255, 255, 255) if mode == "warn"
+                                                                          else tuple(block) + (255,)))
+    fl = f["label"] if len(label) <= 7 else f["label_long"]
+    room = (w - lay["block_w"]) * S * 0.88
     size = fl.size
-    while lb[2] - lb[0] > lay["mid_w"] * S and size > 8:
-        size = int(size * 0.94)
+    lb = d.textbbox((0, 0), label, font=fl)
+    while lb[2] - lb[0] > room and size > 8:
+        size = int(size * 0.93)
         fl = E._font(size, bold=True)
         lb = d.textbbox((0, 0), label, font=fl)
-    d.text((lay["mid_x"] * S + (lay["mid_w"] * S - (lb[2] - lb[0])) / 2 - lb[0], cy - (lb[3] + lb[1]) / 2), label, font=fl,
-           fill=text or (tuple(colour) + (255,)))
-    # the next phase on top, the round small and grey under it (Daryl, 21 Nov: swapped, so the next phase stands out)
-    nt = "NEXT ▸ " + next_label
-    nb = d.textbbox((0, 0), nt, font=f["round"])
-    rt = f"ROUND {int(r)}/{int(n)}"
-    rb = d.textbbox((0, 0), rt, font=f["next"])
-    nh, rh, g = nb[3] - nb[1], rb[3] - rb[1], 5 * k * S
-    top = cy - (nh + g + rh) / 2
-    d.text((lay["round_x"] * S - nb[0], top - nb[1]), nt, font=f["round"], fill=text or (228, 228, 234, 255))
-    d.text((lay["round_x"] * S - rb[0], top + nh + g - rb[1]), rt, font=f["next"], fill=text or (GREY + (255,)))
-    return img.resize((w, h), Image.LANCZOS)
+    cx = ox + (bwid + w * S) / 2
+    d.text((cx - (lb[2] + lb[0]) / 2, h * S / 2 - (lb[3] + lb[1]) / 2), label, font=fl,
+           fill=(255, 255, 255, 255) if mode == "warn" else tuple(ring) + (255,))
+    return img.resize((w + 2 * glow, h + glow), Image.LANCZOS), glow
 
 
-def digits_image(lay: dict, text: str, colour=(255, 255, 255), pulse: bool = False):
-    """The number for the box's slot (slot-wide, box-tall, see-through)."""
+def digits_image(lay: dict, text: str, big: bool = False):
+    """The number for the colour block (block-wide, box-tall, see-through), in dark type."""
     from PIL import Image, ImageDraw
-    k, w, h = lay["k"], lay["slot_w"], lay["h"]
-    f = _fonts(k)["num_pulse" if pulse else "num"]
+    k, w, h = lay["k"], lay["block_w"], lay["h"]
+    f = _fonts(k)["num_big" if big else "num"]
     img = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     b = d.textbbox((0, 0), text, font=f)
-    d.text((w * S / 2 - (b[2] + b[0]) / 2, h * S / 2 - (b[3] + b[1]) / 2), text, font=f, fill=tuple(colour) + (255,))
+    d.text((w * S / 2 - (b[2] + b[0]) / 2, h * S / 2 - (b[3] + b[1]) / 2), text, font=f, fill=DARK + (255,))
     return img.resize((w, h), Image.LANCZOS)
+
+
+def tab_image(lay: dict, next_label: str, colour):
+    """⏭️ "NEXT ▸ EXTRA" on a slim tab that slides out from under the box (the name in its own colour)."""
+    from PIL import Image, ImageDraw
+    k, w, h = lay["k"], lay["tab_w"], lay["tab_h"]
+    f = _fonts(k)
+    img = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    rad = int(14 * k * S)
+    bw = max(int(2 * k * S), S)
+    d.rounded_rectangle((0, -rad * 2, w * S - 1, h * S - 1), radius=rad, fill=(255, 255, 255, 31))
+    d.rounded_rectangle((bw, -rad * 2, w * S - 1 - bw, h * S - 1 - bw), radius=rad, fill=(10, 10, 12, 199))
+    a, b = "NEXT ▸", next_label
+    ab, bb = d.textbbox((0, 0), a, font=f["tab_head"]), d.textbbox((0, 0), b, font=f["tab_name"])
+    gap = 10 * k * S
+    tw = (ab[2] - ab[0]) + gap + (bb[2] - bb[0])
+    x = (w * S - tw) / 2
+    cy = h * S / 2
+    d.text((x - ab[0], cy - (ab[3] + ab[1]) / 2), a, font=f["tab_head"], fill=GREY + (255,))
+    d.text((x + (ab[2] - ab[0]) + gap - bb[0], cy - (bb[3] + bb[1]) / 2), b, font=f["tab_name"],
+           fill=tuple(colour) + (255,))
+    return img.resize((w, h), Image.LANCZOS)
+
+
+ROUND_SEC = 2.4                         # ▸ the round card: on screen this long, once as each round starts
+
+
+def round_card(r: int, colour, frame: tuple):
+    """▸ "ROUND" between two thin lines, the number large under it, a short bar in Wait's colour — centre screen."""
+    from PIL import Image, ImageDraw, ImageFilter
+    W, H = frame
+    k = scale(H)
+    w, h = int(420 * k), int(260 * k)
+    img = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    fh, fn = E._font(int(22 * k * S), bold=True), E._font(int(170 * k * S), bold=True)
+    head = "R O U N D"
+    hb = d.textbbox((0, 0), head, font=fh)
+    cy = int(18 * k * S)
+    d.text((w * S / 2 - (hb[2] + hb[0]) / 2, cy - (hb[3] + hb[1]) / 2), head, font=fh, fill=(236, 236, 241, 255))
+    lw = int(90 * k * S)
+    for x0 in (w * S / 2 - (hb[2] - hb[0]) / 2 - 18 * k * S - lw, w * S / 2 + (hb[2] - hb[0]) / 2 + 18 * k * S):
+        d.rectangle((x0, cy - S, x0 + lw, cy + S), fill=(255, 255, 255, 140))
+    num = str(int(r))
+    nb = d.textbbox((0, 0), num, font=fn)
+    ny = int(40 * k * S) - nb[1]
+    shadow = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).text((w * S / 2 - (nb[2] + nb[0]) / 2, ny + 6 * k * S), num, font=fn, fill=(0, 0, 0, 150))
+    img = Image.alpha_composite(img, shadow.filter(ImageFilter.GaussianBlur(14 * k * S)))
+    d = ImageDraw.Draw(img)
+    d.text((w * S / 2 - (nb[2] + nb[0]) / 2, ny), num, font=fn, fill=(255, 255, 255, 255))
+    by = ny + nb[3] + int(14 * k * S)
+    d.rounded_rectangle((w * S / 2 - 60 * k * S, by, w * S / 2 + 60 * k * S, by + 6 * k * S), radius=int(3 * k * S),
+                        fill=tuple(colour) + (255,))
+    return img.resize((w, h), Image.LANCZOS)
+
+
+def round_alpha(t: float, first: bool) -> float:
+    """How strong the round card is t seconds after its round starts (after the box's drop; 0.3 s on the first)."""
+    x = t - (0.3 if first else 1.3)
+    if x < 0 or x >= ROUND_SEC:
+        return 0.0
+    return min(x / 0.25, 1.0) if x < 0.25 else (ROUND_SEC - x) / 0.4 if x > ROUND_SEC - 0.4 else 1.0
+
+
+def tag_image(text: str, bg, fg, frame_h: int, lock: bool = False):
+    """✋ / ⏩ a pill above the stroke bar: "🔒 HOLD 3" (hands off), "+5 S" (override)."""
+    from PIL import Image, ImageDraw
+    k = scale(frame_h)
+    f = E._font(int(16 * k * S), bold=True)
+    d0 = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
+    tw = _w(d0, text, f)
+    lk = int(16 * k * S) if lock else 0
+    pad, gap = int(14 * k * S), int(8 * k * S) if lock else 0
+    w, h = tw + lk + gap + 2 * pad, int(32 * k * S)
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((0, 0, w - 1, h - 1), radius=h // 2, fill=tuple(bg))
+    if lock:                                               # a small padlock
+        x0, y0 = pad, (h - lk) / 2
+        sw = max(int(2.4 * k * S), 2)
+        d.rounded_rectangle((x0, y0 + lk * 0.42, x0 + lk, y0 + lk), radius=int(lk * 0.12), outline=tuple(fg), width=sw)
+        d.arc((x0 + lk * 0.2, y0, x0 + lk * 0.8, y0 + lk * 0.75), 180, 360, fill=tuple(fg), width=sw)
+    b = d.textbbox((0, 0), text, font=f)
+    d.text((pad + lk + gap - b[0], h / 2 - (b[3] + b[1]) / 2), text, font=f, fill=tuple(fg))
+    return img.resize((max(w // S, 2), max(h // S, 2)), Image.LANCZOS)
+
+
+def hold_label(frame_h: int):
+    """✋ "HOLD" over the marker while it holds at the end of the stroke."""
+    from PIL import Image, ImageDraw
+    k = scale(frame_h)
+    f = E._font(int(11 * k * S), bold=True)
+    d0 = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
+    w, h = _w(d0, "HOLD", f) + 4 * S, int(14 * k * S)
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ImageDraw.Draw(img).text((2 * S, 0), "HOLD", font=f, fill=(255, 255, 255, 255))
+    return img.resize((max(w // S, 2), max(h // S, 2)), Image.LANCZOS)
 
 
 def number_text(look: str, left: float) -> str:
@@ -145,13 +239,20 @@ def bar_track(width: int, frame_h: int, alpha: float = 0.45, height: int = None)
     return img.resize((width, h), Image.LANCZOS), pad, width - pad
 
 
-def bar_marker(frame_h: int, colour, dim: bool = False):
+def bar_marker(frame_h: int, colour, dim: bool = False, ring: bool = False):
     """The stroke meter's marker: an upright pill in the phase's colour (grey and faint: no beat)."""
     from PIL import Image, ImageDraw
     k = scale(frame_h)
     w, h = max(int(14 * k) // 2 * 2, 4), max(int(22 * k) // 2 * 2, 6)
     img = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
     fill = (150, 150, 155, 110) if dim else tuple(colour) + (255,)
+    if ring:                                               # ✋ holding at the end: a white ring round it
+        pad = int(4 * k * S)
+        big = Image.new("RGBA", (w * S + 2 * pad, h * S + 2 * pad), (0, 0, 0, 0))
+        dd = ImageDraw.Draw(big)
+        dd.rounded_rectangle((0, 0, big.size[0] - 1, big.size[1] - 1), radius=big.size[0] // 2, fill=(255, 255, 255, 255))
+        dd.rounded_rectangle((pad, pad, pad + w * S - 1, pad + h * S - 1), radius=w * S // 2, fill=fill)
+        return big.resize((big.size[0] // S, big.size[1] // S), Image.LANCZOS)
     ImageDraw.Draw(img).rounded_rectangle((0, 0, w * S - 1, h * S - 1), radius=w * S // 2, fill=fill)
     return img.resize((w, h), Image.LANCZOS)
 
@@ -184,14 +285,14 @@ def instruction_panel(text: str, colour, width: int, frame_h: int, alpha: float 
     return img.resize((width, h), Image.LANCZOS)
 
 
-def bar_segment(width: int, frame_h: int):
+def bar_segment(width: int, frame_h: int, fill=(255, 255, 255, 150)):
     """🎯 The part of the stroke track an instruction allows: the track drawn brighter over that stretch."""
     from PIL import Image, ImageDraw
     k = scale(frame_h)
     th = max(int(6 * k), 2)
     img = Image.new("RGBA", (width * S, th * S), (0, 0, 0, 0))
     ImageDraw.Draw(img).rounded_rectangle((0, 0, width * S - 1, th * S - 1), radius=th * S // 2,
-                                          fill=(255, 255, 255, 150))
+                                          fill=tuple(fill))
     return img.resize((width, th), Image.LANCZOS)
 
 

@@ -1214,9 +1214,41 @@ def instruction_track(plays: list, cue_map: dict) -> list:
         if out and t <= out[-1]["time"]:                   # (a later line's text never lands before an earlier one)
             t = round(out[-1]["time"] + 0.04, 3)
         a, b = stroke_range(cue_map, text)
-        out.append({"time": t, "text": text, "range": [round(a, 4), round(b, 4)]})
+        item = {"time": t, "text": text, "range": [round(a, 4), round(b, 4)]}
+        hold = stroke_hold(cue_map, text)
+        if hold:
+            item["hold"] = hold
+        out.append(item)
         now = text
     return out
+
+
+def stroke_hold(cue_map: dict, text: str) -> dict | None:
+    """✋ {"at": "tip" | "base", "beats": n} — the marker holds at that end of each stroke for n beats while the
+    instruction is up (Daryl, 21 Nov: "hold at the end"), or None."""
+    got = ((cue_map or {}).get("instruction_holds") or {}).get(text) or {}
+    if got.get("at") not in ("tip", "base"):
+        return None
+    return {"at": got["at"], "beats": int(min(max(int(got.get("beats") or 1), 1), 4))}
+
+
+def guide_position_hold(beats, t: float, at: str, hold: int) -> tuple:
+    """(where the marker is, holding?) with ✋ a hold at one end: a stroke there over a beat, held `hold` beats, back
+    over a beat, again. 0 = base (left) … 1 = tip (right). (None, False) outside the beats."""
+    import bisect
+    k = bisect.bisect_right(beats, t) - 1
+    if k < 0 or k + 1 >= len(beats):
+        return None, False
+    frac = (t - beats[k]) / max(beats[k + 1] - beats[k], 1e-6)
+    cyc = 2 + int(hold)
+    c = (k % cyc) + frac
+    toward = 1.0 if at == "tip" else 0.0
+    ease = lambda x: 0.5 - 0.5 * math.cos(math.pi * x)                     # noqa: E731
+    if c < 1:
+        return abs((1 - toward) - ease(c)), False
+    if c < 1 + hold:
+        return toward, True
+    return abs(toward - ease(c - 1 - hold)), False
 
 
 def instruction_item_at(track: list, t: float) -> dict | None:

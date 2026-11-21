@@ -185,7 +185,8 @@ def changes(saved: dict, work: dict) -> dict:
     out = {"changed": sorted((n for n in a.keys() & b.keys() if norm(a[n]) != norm(b[n])), key=str.lower),
            "added": sorted(b.keys() - a.keys(), key=str.lower), "deleted": sorted(a.keys() - b.keys(), key=str.lower)}
     if (list(saved.get("instructions") or []) != list(work.get("instructions") or [])
-            or norm(saved.get("instruction_ranges") or {}) != norm(work.get("instruction_ranges") or {})):
+            or norm(saved.get("instruction_ranges") or {}) != norm(work.get("instruction_ranges") or {})
+            or norm(saved.get("instruction_holds") or {}) != norm(work.get("instruction_holds") or {})):
         out["changed"].insert(0, INSTRUCTIONS_ITEM)         # 🗒️ the instructions list itself
     return out
 

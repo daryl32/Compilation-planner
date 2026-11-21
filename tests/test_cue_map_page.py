@@ -461,7 +461,11 @@ def test_instructions_tab_adds_renames_links_and_saves(voice):
     gen = at.session_state["cm_gen"]
     at.selectbox(key=f"cm_ins_rg_0_{gen}").set_value("tip").run()          # 🎯 the stroke: the right third
     assert at.session_state["cm_map"]["instruction_ranges"] == {"TIP ONLY": [round(2 / 3, 4), 1.0]}
+    gen = at.session_state["cm_gen"]
+    at.selectbox(key=f"cm_ins_ho_0_{gen}").set_value("tip").run()          # ✋ hold at the tip, 1 beat
+    assert at.session_state["cm_map"]["instruction_holds"] == {"TIP ONLY": {"at": "tip", "beats": 1}}
     at.button(key="cm_save_all").click().run()
     saved = CS.load()
     assert saved["instructions"] == ["TIP ONLY"] and saved["instruction_ranges"]["TIP ONLY"][0] > 0.6
+    assert saved["instruction_holds"]["TIP ONLY"]["at"] == "tip"
     assert sorted(ln["name"] for ln in saved["lines"] if ln.get("instruction") == "TIP ONLY") == sorted(names)
