@@ -686,7 +686,7 @@ def _strip_layers(edge: dict, sched: list, frame: tuple, signals: bool, band: in
         st_ = E.style(looks[ph["index"]])
         boxes[ph["index"]] = {m: _rgba(ES.box_image(lay, st_["label"], st_["colour"] if m == "flash" else st_["ring"],
                                                     nexts[ph["index"]], ph["round"], n_rounds, m))
-                              for m in (("normal", "flash", "pulse") if signals else ("normal",))}
+                              for m in (("normal", "pulse") if signals else ("normal",))}
     digits = {}
     for ph in sched:
         look = looks[ph["index"]]
@@ -698,7 +698,12 @@ def _strip_layers(edge: dict, sched: list, frame: tuple, signals: bool, band: in
                                         ("pulse", ring, True)):
                 if (text, kind, ring) not in digits and (kind == "normal" or signals):
                     digits[(text, kind, ring)] = _rgba(ES.digits_image(lay, text, colour, pulse))
-    out = {"lay": lay, "boxes": boxes, "digits": digits, "signals": signals, "bar": None}
+    out = {"lay": lay, "boxes": boxes, "digits": digits, "signals": signals, "bar": None, "change": {}}
+    if signals:                                            # 🔔 the phase change: the box drops + the frame pulses
+        for lk in sorted(set(looks.values())):
+            st_ = E.style(lk)
+            out["change"][lk] = {"drop": _rgba(ES.drop_panel(st_["label"], st_["ring"], frame)),
+                                 "border": [(*_rgba(img), x, y) for img, x, y in ES.border_strips(st_["ring"], frame)]}
     pace = edge.get("pace") or {}
     if pace.get("on") and pace.get("beats"):
         # 🗒️ with instructions the strip is the taller band, the stroke meter in its left (footage) half
@@ -851,22 +856,32 @@ def _instruction_layers(edge: dict, frame: tuple) -> dict | None:
 
 
 def _lay_strip(pic, strip: dict, ph: dict, i: int, a: float, c_left: float, moving: bool) -> None:
-    """⏱️ One frame of the strip style: the top box with its number, the bottom stroke strip with its marker."""
+    """⏱️ One frame of the strip style: the top box with its number, 🔔 the phase change, the bottom stroke strip with
+    its marker."""
+    import numpy as np
     import edge_strip as ES
     lay, t = strip["lay"], i / FPS
     left = c_left - t
     look = E.timer_style(ph)
     ring = tuple(E.style(look)["ring"])
     sig = strip["signals"]
-    flash = sig and int(ph.get("index", 0)) > 0 and t < ES.FLASH_SEC
-    pulse = sig and not flash and 0 < left <= E.PULSE_SEC
-    mode = "flash" if flash else "pulse" if pulse else "normal"
-    box = strip["boxes"][ph["index"]].get(mode) or strip["boxes"][ph["index"]]["normal"]
+    pulse = sig and 0 < left <= E.PULSE_SEC
+    box = strip["boxes"][ph["index"]].get("pulse" if pulse else "normal") or strip["boxes"][ph["index"]]["normal"]
     _lay(pic, lay["x"], 0, *box)
-    kind = "dark" if flash else "pulse" if pulse else "normal"
-    dg = strip["digits"].get((ES.number_text(look, max(left, 0.0)), kind, ring))
+    dg = strip["digits"].get((ES.number_text(look, max(left, 0.0)), "pulse" if pulse else "normal", ring))
     if dg is not None:
         _lay(pic, lay["x"] + lay["slot_x"], 0, *dg)
+    ch = strip["change"].get(look) if sig and int(ph.get("index", 0)) > 0 else None
+    if ch is not None and t < ES.CHANGE_SEC:               # 🔔 a new phase: the frame pulses, the box drops down
+        lvl = ES.border_level(t)
+        if lvl > 0.01:
+            for rgb, solid, x, y in ch["border"]:
+                _lay(pic, x, y, rgb, (solid.astype(np.float32) * lvl).astype(np.uint16))
+        share = ES.drop_share(t)
+        if share > 0.01:
+            rgb, solid = ch["drop"]
+            hh = max(int(rgb.shape[0] * share), 1)
+            _lay(pic, (pic.shape[1] - rgb.shape[1]) // 2, 0, rgb[-hh:], solid[-hh:])
     bar = strip.get("bar")
     if bar is not None:
         _lay(pic, 0, bar["y"], *bar["track"])
@@ -975,7 +990,7 @@ def finish(plan: dict, combined_video, output_path: str, sources, tmp_dir, run, 
     n = max(1, min(int(workers or min(4, os.cpu_count() or 2)), len(sched) or 1))
     with ThreadPoolExecutor(max_workers=n) as pool:
         jobs = [pool.submit(_piece, combined_video, ph, timers, corner, shows, av, (W, H), piece, footage,
-                            {"flash": bool(signals.get("flash")), "badge": badges.get(ph["round"]),
+                            {"flash": bool(signals.get("flash")) and strip is None, "badge": badges.get(ph["round"]),
                              "guide": guide.get("bar"), "next": guide.get("next", {}).get(ph["index"]),
                              "strip": strip, "instr": instr})
                 for ph, piece in zip(sched, pieces)]

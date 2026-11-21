@@ -531,12 +531,14 @@ def test_the_strip_timer_style_shows_the_box_the_number_and_the_stroke_strip(tmp
     st_ = R._strip_layers(edge, sched, (640, 360), True)
     lay, bar = st_["lay"], st_["bar"]
     assert lay["w"] < 640 and lay["h"] == 30 and bar["h"] == ES.bar_height(360) and bar["y"] == 360 - bar["h"]
-    # the box is dark at the top centre; on Extra's first moments it is filled with Extra's red
+    # the box is dark; as Extra starts it drops down in Extra's red and a red frame pulses round the picture
     bx, by = lay["x"] + lay["w"] - 6, lay["h"] // 2
-    r, g, b = _pixel(out, 10.0, bx, by)
-    assert max(r, g, b) < 40
-    r, g, b = _pixel(out, 20.12, bx, by)
-    assert r > 150 and g < 90
+    assert max(_pixel(out, 10.0, bx, by)) < 40
+    red = lambda px: px[0] > 150 and px[1] < 90                     # noqa: E731
+    assert red(_pixel(out, 20.6, 320, 80)) and not red(_pixel(out, 10.0, 320, 80))      # the dropped box, below the bar
+    assert not red(_pixel(out, 22.0, 320, 80))                                          # tucked back up
+    assert red(_pixel(out, 20.05, 3, 180)) and not red(_pixel(out, 10.0, 3, 180)) and not red(_pixel(out, 22.0, 3, 180))
+    assert not red(_pixel(out, 0.1, 3, 180))                                            # (not as the run starts)
     # the round sits in the box: something light right of the second divider
     light = [_pixel(out, 10.0, x, yy) for x in range(lay["x"] + lay["round_x"], lay["x"] + lay["w"] - 30, 2)
              for yy in range(4, lay["h"] - 4, 2)]

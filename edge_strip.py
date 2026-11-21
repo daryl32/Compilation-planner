@@ -58,7 +58,7 @@ def layout(frame: tuple, labels, nexts, rounds: int) -> dict:
     pad, gap, div = 24 * k, 18 * k, 1 * k
     slot = max(_w(d, t, f["num_pulse"]) for t in ("88", "+15")) / S + 6 * k
     mid = max(_w(d, lab, f["label"]) for lab in labels) / S          # the phase's name fills its column
-    rnd = max([_w(d, f"ROUND {rounds}/{rounds}", f["round"])] + [_w(d, f"NEXT ▸ {n}", f["next"]) for n in nexts]) / S
+    rnd = max([_w(d, f"ROUND {rounds}/{rounds}", f["next"])] + [_w(d, f"NEXT ▸ {n}", f["round"]) for n in nexts]) / S
     w = int(math.ceil(pad + slot + gap + div + gap + mid + gap + div + gap + rnd + pad)) // 2 * 2
     h = max(int(round(BOX_H * k)) // 2 * 2, 16)
     x = (W - w) // 2
@@ -97,15 +97,15 @@ def box_image(lay: dict, label: str, colour, next_label: str, r: int, n: int, mo
         lb = d.textbbox((0, 0), label, font=fl)
     d.text((lay["mid_x"] * S + (lay["mid_w"] * S - (lb[2] - lb[0])) / 2 - lb[0], cy - (lb[3] + lb[1]) / 2), label, font=fl,
            fill=text or (tuple(colour) + (255,)))
-    # the round, with the next phase small and grey under it
-    rt = f"ROUND {int(r)}/{int(n)}"
-    rb = d.textbbox((0, 0), rt, font=f["round"])
+    # the next phase on top, the round small and grey under it (Daryl, 21 Nov: swapped, so the next phase stands out)
     nt = "NEXT ▸ " + next_label
-    nb = d.textbbox((0, 0), nt, font=f["next"])
-    rh, nh, g = rb[3] - rb[1], nb[3] - nb[1], 5 * k * S
-    top = cy - (rh + g + nh) / 2
-    d.text((lay["round_x"] * S - rb[0], top - rb[1]), rt, font=f["round"], fill=text or (228, 228, 234, 255))
-    d.text((lay["round_x"] * S - nb[0], top + rh + g - nb[1]), nt, font=f["next"], fill=text or (GREY + (255,)))
+    nb = d.textbbox((0, 0), nt, font=f["round"])
+    rt = f"ROUND {int(r)}/{int(n)}"
+    rb = d.textbbox((0, 0), rt, font=f["next"])
+    nh, rh, g = nb[3] - nb[1], rb[3] - rb[1], 5 * k * S
+    top = cy - (nh + g + rh) / 2
+    d.text((lay["round_x"] * S - nb[0], top - nb[1]), nt, font=f["round"], fill=text or (228, 228, 234, 255))
+    d.text((lay["round_x"] * S - rb[0], top + nh + g - rb[1]), rt, font=f["next"], fill=text or (GREY + (255,)))
     return img.resize((w, h), Image.LANCZOS)
 
 
@@ -193,3 +193,88 @@ def bar_segment(width: int, frame_h: int):
     ImageDraw.Draw(img).rounded_rectangle((0, 0, width * S - 1, th * S - 1), radius=th * S // 2,
                                           fill=(255, 255, 255, 150))
     return img.resize((width, th), Image.LANCZOS)
+
+
+# ---------------------------------------------------------------------------
+# 🔔 The phase change (Daryl, 21 Nov: "too subtle" → options 3 + 4): the box drops down with the new phase in it while
+# a thick frame in its colour pulses round the picture
+# ---------------------------------------------------------------------------
+
+CHANGE_SEC = 1.45                       # how long the change shows
+DROP_IN, DROP_HOLD, DROP_OUT = 0.2, 1.05, 1.3     # the box: down by, held until, back up by (seconds)
+BORDER = 18                             # the frame's width at 720 p (plus a soft glow inside it)
+
+
+def drop_panel(label: str, colour, frame: tuple):
+    """The dropped-down box: the phase's colour, "NOW" and the phase's name huge in dark text, bottom corners round."""
+    from PIL import Image, ImageDraw
+    W, H = frame
+    k = scale(H)
+    w, h = int(560 * k) // 2 * 2, int(200 * k) // 2 * 2
+    img = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    rad = int(28 * k * S)
+    d.rounded_rectangle((0, -rad * 2, w * S - 1, h * S - 1), radius=rad, fill=tuple(colour) + (255,))
+    fn = E._font(int(16 * k * S), bold=True)
+    size = int(110 * k * S)
+    fl = E._font(size, bold=True)
+    lb = d.textbbox((0, 0), label, font=fl)
+    while lb[2] - lb[0] > w * S * 0.9 and size > 8:
+        size = int(size * 0.93)
+        fl = E._font(size, bold=True)
+        lb = d.textbbox((0, 0), label, font=fl)
+    nb = d.textbbox((0, 0), "N O W", font=fn)
+    g = 8 * k * S
+    total = (nb[3] - nb[1]) + g + (lb[3] - lb[1])
+    top = (h * S - total) / 2
+    d.text((w * S / 2 - (nb[2] + nb[0]) / 2, top - nb[1]), "N O W", font=fn, fill=DARK + (255,))
+    d.text((w * S / 2 - (lb[2] + lb[0]) / 2, top + (nb[3] - nb[1]) + g - lb[1]), label, font=fl, fill=DARK + (255,))
+    return img.resize((w, h), Image.LANCZOS)
+
+
+def drop_share(t: float) -> float:
+    """How much of the dropped box shows t seconds into the phase (0 … 1)."""
+    if t < 0 or t >= DROP_OUT:
+        return 0.0
+    if t < DROP_IN:
+        x = t / DROP_IN
+        return 1 - (1 - x) ** 3
+    if t <= DROP_HOLD:
+        return 1.0
+    x = (t - DROP_HOLD) / (DROP_OUT - DROP_HOLD)
+    return 1 - x * x
+
+
+def border_level(t: float) -> float:
+    """The frame's strength t seconds into the phase: three pulses, then gone by CHANGE_SEC."""
+    marks = [(0.0, 1.0), (0.24, 0.15), (0.48, 1.0), (0.72, 0.15), (0.96, 1.0), (CHANGE_SEC, 0.0)]
+    if t < 0 or t >= CHANGE_SEC:
+        return 0.0
+    for (t0, a0), (t1, a1) in zip(marks, marks[1:]):
+        if t0 <= t <= t1:
+            return a0 + (a1 - a0) * (t - t0) / (t1 - t0)
+    return 0.0
+
+
+def border_strips(colour, frame: tuple) -> list:
+    """The frame as four edge pictures [(picture, x, y)]: a solid band in the phase's colour fading inwards."""
+    import numpy as np
+    from PIL import Image
+    W, H = frame
+    k = scale(H)
+    solid, glow = max(int(BORDER * k), 3), max(int(60 * k), 6)
+    depth = solid + glow
+    ramp = np.concatenate([np.full(solid, 255.0), np.linspace(140.0, 0.0, glow)]).astype(np.uint8)
+    out = []
+    for side in ("top", "bottom", "left", "right"):
+        if side in ("top", "bottom"):
+            a = np.repeat((ramp if side == "top" else ramp[::-1])[:, None], W, axis=1)
+            x, y = 0, 0 if side == "top" else H - depth
+        else:
+            a = np.repeat((ramp if side == "left" else ramp[::-1])[None, :], H, axis=0)
+            x, y = (0 if side == "left" else W - depth), 0
+        rgba = np.zeros(a.shape + (4,), dtype=np.uint8)
+        rgba[..., :3] = tuple(colour)
+        rgba[..., 3] = a
+        out.append((Image.fromarray(rgba, "RGBA"), x, y))
+    return out
